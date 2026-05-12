@@ -73,9 +73,16 @@ class QobuzSpoofer:
         # Since this is just fetching public JS files to scrape the app secret,
         # it's safe to disable SSL verification to prevent crashes on Android.
         connector = aiohttp.TCPConnector(verify_ssl=False)
-        async with aiohttp.ClientSession(connector=connector) as session:
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:83.0) Gecko/20100101 Firefox/83.0"}
+        async with aiohttp.ClientSession(connector=connector, headers=headers) as session:
             async with session.get("https://play.qobuz.com/login", timeout=30) as req:
-                login_page = await req.text()
+                chunks = []
+                try:
+                    async for chunk in req.content.iter_chunked(8192):
+                        chunks.append(chunk)
+                except aiohttp.ClientPayloadError:
+                    pass
+                login_page = b"".join(chunks).decode("utf-8", errors="ignore")
 
             bundle_url_match = re.search(
                 r'<script src="(/resources/\d+\.\d+\.\d+-[a-z]\d{3}/bundle\.js)"></script>',
@@ -86,13 +93,18 @@ class QobuzSpoofer:
                 
             bundle_url = bundle_url_match.group(1)
 
-            # We don't need a crazy retry loop if aiohttp handles chunked reading natively better
             async with session.get("https://play.qobuz.com" + bundle_url, timeout=60) as req:
-                self.bundle = await req.text()
+                chunks = []
+                try:
+                    async for chunk in req.content.iter_chunked(8192):
+                        chunks.append(chunk)
+                except aiohttp.ClientPayloadError:
+                    pass
+                self.bundle = b"".join(chunks).decode("utf-8", errors="ignore")
 
         match = re.search(self.app_id_regex, self.bundle)
         if match is None:
-            raise Exception("Could not find app id.")
+            raise Exception(f"Could not find app id in bundle (length: {len(self.bundle)}).")
 
         app_id = str(match.group("app_id"))
 
@@ -197,6 +209,8 @@ class QobuzClient(Client):
                     logger.warning("Cached App ID seems invalid, forcing refresh...")
                     return False, None
                 raise InvalidAppIdError(f"Invalid app id from params {params}")
+            elif status != 200 or not resp.get("user"):
+                raise Exception(f"Login failed with status {status}. Response: {resp}")
 
             if not resp["user"]["credential"]["parameters"]:
                 raise IneligibleError("Free accounts are not eligible to download tracks.")
@@ -221,7 +235,7 @@ class QobuzClient(Client):
         logger.debug("Logged in to Qobuz")
         self.logged_in = True
 
-    async def get_metadata(self, item: str, media_type: str):
+    async def get_metadata(self, item: str, media_type: str, limit: int = 500, offset: int = 0):
         if media_type == "label":
             return await self.get_label(item)
 
@@ -229,9 +243,8 @@ class QobuzClient(Client):
         params = {
             "app_id": str(c.app_id),
             f"{media_type}_id": item,
-            # Do these matter?
-            "limit": 500,
-            "offset": 0,
+            "limit": limit,
+            "offset": offset,
         }
 
         extras = {
@@ -468,15 +481,31 @@ class QobuzClient(Client):
         }
         return await self._api_request("track/getFileUrl", params)
 
-    async def _api_request(self, epoint: str, params: dict) -> tuple[int, dict]:
+    async def _api_request(self, epoint: str, params: dict, retries: int = 3) -> tuple[int, dict]:
         """Make a request to the API.
         returns: status code, json parsed response
         """
         url = f"{QOBUZ_BASE_URL}/{epoint}"
         logger.debug("api_request: endpoint=%s, params=%s", epoint, params)
-        async with self.rate_limiter:
-            async with self.session.get(url, params=params) as response:
-                return response.status, await response.json()
+        
+        for attempt in range(retries):
+            try:
+                async with self.rate_limiter:
+                    async with self.session.get(url, params=params) as response:
+                        try:
+                            resp_json = await response.json()
+                            return response.status, resp_json
+                        except aiohttp.ClientPayloadError as e:
+                            logger.error(f"Payload error. Status {response.status}. Returning empty dict.")
+                            return response.status, {}
+                        except aiohttp.ContentTypeError as e:
+                            logger.error(f"Content type error (likely HTML error page). Status {response.status}. Returning empty dict.")
+                            return response.status, {}
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                logger.warning(f"Network error on attempt {attempt + 1}/{retries} for {url}: {e}")
+                if attempt == retries - 1:
+                    raise
+                await asyncio.sleep(1.0 * (attempt + 1))
 
     @staticmethod
     def get_quality(quality: int):

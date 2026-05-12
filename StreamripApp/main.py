@@ -99,7 +99,11 @@ from utils.streamrip_search import StreamripSearcher
 from utils.db_manager import DatabaseManager
 from utils.library_scanner import LibraryScanner
 from utils.metadata_editor import update_physical_metadata, extract_artwork
-from utils.audio_engine import audio_engine
+import sys
+if sys.platform == "darwin":
+    from utils.audio_engine_macos import audio_engine
+else:
+    from utils.audio_engine import audio_engine
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -108,7 +112,14 @@ logger = logging.getLogger(__name__)
 BG       = "#08080A"
 SURFACE  = "#0D0D12"
 SURFACE2 = "#111116"
-CYAN     = "#00BFFF"
+
+try:
+    _cfg = load_config()
+    _accent_hex = _cfg.get("appearance", {}).get("accent_color", "#00BFFF")
+except Exception:
+    _accent_hex = "#00BFFF"
+
+CYAN     = _accent_hex
 TEXT     = "#FFFFFF"
 DIM      = "#A0A0A0"
 BORDER   = "#262626"
@@ -1662,7 +1673,7 @@ class SearchView:
 
     def _load_more_widget(self):
         return ft.Container(
-            content=ft.ElevatedButton(
+            content=ft.Button(
                 "Load More Results",
                 icon=ft.Icons.ADD_ROUNDED,
                 on_click=self._load_more_click,
@@ -1753,6 +1764,17 @@ class SearchView:
 
     def _result_card(self, index: int, r: dict, depth: int = 0) -> ft.Control:
         m_type = r.get("media_type", "track")
+        
+        if m_type == "load_more_artist":
+            return self._build_load_more_button(r, depth)
+        
+        if m_type == "search_exhausted":
+            return ft.Container(
+                content=ft.Text("— End of Discography —", color=DIM, size=11, weight=ft.FontWeight.W_500),
+                alignment=ft.alignment.center,
+                padding=ft.padding.only(left=20 * depth, top=16, bottom=16),
+            )
+            
         node_id = f"{m_type}_{r.get('id')}"
         is_expanded = node_id in self.expanded_nodes
         
@@ -1852,6 +1874,62 @@ class SearchView:
 
         return AnimatedEntry(tile, target_height=64, data=r)
 
+    def _build_load_more_button(self, r: dict, depth: int) -> ft.Control:
+        artist_id = r.get("id")
+        offset = r.get("offset", 30)
+        limit = r.get("limit", 30)
+        
+        btn = ft.Container(
+            content=ft.Row([
+                ft.Icon(ft.Icons.ADD_CIRCLE_OUTLINE, color=CYAN, size=20),
+                ft.Text("Load More Albums", color=CYAN, size=13, weight=ft.FontWeight.W_600),
+            ], alignment=ft.MainAxisAlignment.CENTER, spacing=10),
+            bgcolor=apply_opacity(0.1, CYAN),
+            border=ft.Border.all(1, apply_opacity(0.3, CYAN)),
+            border_radius=12,
+            padding=ft.padding.symmetric(horizontal=16, vertical=10),
+            on_click=lambda e: on_click_handler(e),
+        )
+        
+        def on_click_handler(e):
+            btn.content = ft.Row([
+                ft.ProgressRing(width=16, height=16, color=CYAN, stroke_width=2),
+                ft.Text("Loading...", color=CYAN, size=13)
+            ], alignment=ft.MainAxisAlignment.CENTER, spacing=10)
+            btn.update()
+            
+            def callback(results):
+                def _insert():
+                    try:
+                        parent_list = self._results_list.controls
+                        curr_idx = -1
+                        for i, entry in enumerate(parent_list):
+                            if getattr(entry, "data", None) == r:
+                                curr_idx = i
+                                break
+                        if curr_idx == -1: return
+                        
+                        parent_list.pop(curr_idx)
+                        
+                        if results and isinstance(results, list) and len(results) > 0:
+                            for k, child in enumerate(results):
+                                card = self._result_card(k, child, depth=depth)
+                                parent_list.insert(curr_idx + k, card)
+                                
+                        self._results_list.update()
+                    except:
+                        pass
+                self.app.safe_update(_insert)
+                
+            self.searcher.get_artist_albums(str(artist_id), callback, limit=limit, offset=offset)
+        
+        container = ft.Container(
+            content=btn,
+            padding=ft.Padding.only(left=20 * depth + 16, right=16, top=8, bottom=8),
+        )
+        
+        return container 
+
     async def _toggle_search_node(self, node_data: dict, tile_ctrl: ft.ListTile):
         m_type = node_data.get("media_type")
         node_id = f"{m_type}_{node_data.get('id')}"
@@ -1932,8 +2010,8 @@ class SearchView:
             self.expanded_nodes.discard(node_id)
             tile_ctrl.bgcolor = "transparent"
             if isinstance(tile_ctrl.trailing, ft.Row):
-                tile_ctrl.trailing.controls[2].name = ft.Icons.KEYBOARD_ARROW_RIGHT
-                tile_ctrl.trailing.controls[2].color = DIM
+                # Ensure we replace the control entirely to avoid type mismatch (Container vs Icon)
+                tile_ctrl.trailing.controls[2] = ft.Icon(ft.Icons.KEYBOARD_ARROW_RIGHT, color=DIM, size=20)
             
             # Remove children with greater depth
             depth = 0
@@ -3390,7 +3468,7 @@ class LibraryView:
                 content=name_field,
                 actions=[
                     ft.TextButton("Cancel", on_click=lambda _: setattr(dlg_holder[0], 'open', False) or dlg_holder[0].update()),
-                    ft.ElevatedButton("Create", on_click=_submit, bgcolor=CYAN, color=BG),
+                    ft.Button("Create", on_click=_submit, bgcolor=CYAN, color=BG),
                 ],
             )
             dlg_holder[0] = dlg
@@ -3829,14 +3907,20 @@ class SettingsView:
 
     def _build_color_selector(self, mode="accent"):
         colors = {
-            "Deep Blue": "#2979FF",
             "Cyan": "#00BFFF",
+            "Deep Blue": "#2979FF",
             "Purple": "#9B59B6",
-            "Green": "#2ECC71",
-            "Yellow": "#FFD600",
-            "Orange": "#E67E22",
+            "Lavender": "#B39DDB",
             "Pink": "#E91E63",
             "Red": "#E74C3C",
+            "Crimson": "#DC143C",
+            "Orange": "#E67E22",
+            "Gold": "#FFD700",
+            "Yellow": "#FFD600",
+            "Green": "#2ECC71",
+            "Emerald": "#00FF7F",
+            "Mint": "#69F0AE",
+            "Slate": "#78909C",
         }
         
         target_color_base = self._selected_accent_color
@@ -3854,7 +3938,7 @@ class SettingsView:
             )
             circles.append(circle)
             
-        return ft.Row(circles, spacing=12, alignment=ft.MainAxisAlignment.START)
+        return ft.Row(circles, spacing=12, alignment=ft.MainAxisAlignment.START, wrap=True)
 
     def _on_color_click(self, hex, mode):
         self._selected_accent_color = hex
@@ -4001,7 +4085,7 @@ class SettingsView:
                 # "Use this folder" button
                 dir_list.controls.append(
                     ft.Container(
-                        content=ft.ElevatedButton(
+                        content=ft.Button(
                             f"Use \"{os.path.basename(directory) or directory}\"",
                             icon=ft.Icons.CHECK_ROUNDED,
                             on_click=lambda _: _confirm(directory),
@@ -4191,7 +4275,6 @@ class MiniPlayerBar:
         )
         self._music_icon = ft.Icon(ft.Icons.MUSIC_NOTE, color=CYAN, size=24)
         self._progress   = ft.ProgressBar(value=0, color=CYAN, bgcolor=None, height=2)
-        self._eq = ft.Icon(ft.Icons.MUSIC_NOTE_ROUNDED, color=CYAN, size=16, visible=False)
 
         self._ever_shown  = False   # True once a title has been set at least once
         self._last_title  = ""
@@ -4219,7 +4302,7 @@ class MiniPlayerBar:
                                     ),
                                     ft.Column(
                                         [
-                                            ft.Row([self._title, self._eq], spacing=8, alignment=ft.MainAxisAlignment.START),
+                                            ft.Row([self._title], spacing=8, alignment=ft.MainAxisAlignment.START),
                                             self._artist
                                         ],
                                         spacing=2, expand=True,
@@ -4298,9 +4381,10 @@ class MiniPlayerBar:
         self._play_btn.icon = ft.Icons.PAUSE if is_playing else ft.Icons.PLAY_ARROW
         if self._play_btn.page:
             self._play_btn.update()
-        self._eq.visible = is_playing
-        if self._eq.page:
-            self._eq.update()
+        
+        self.container.border = ft.Border.all(1, apply_opacity(0.7, "#FFFFFF")) if is_playing else ft.Border.all(1, BORDER)
+        if self.container.page:
+            self.container.update()
 
     def update_progress(self, pct: float):
         self._progress.value = pct / 100
@@ -4374,8 +4458,6 @@ class NowPlayingSheet:
         )
         self._time_cur = ft.Text("0:00", color=DIM, size=12)
         self._time_tot = ft.Text("0:00", color=DIM, size=12)
-        self._eq = ft.Icon(ft.Icons.MUSIC_NOTE_ROUNDED, color=CYAN, size=18, visible=False)
-
         self._play_btn = ft.IconButton(
             icon=ft.Icons.PLAY_ARROW,
             icon_color=TEXT,
@@ -4414,7 +4496,6 @@ class NowPlayingSheet:
                                 on_click=lambda e: self.collapse(),
                             ),
                             ft.Container(expand=True),
-                            ft.Container(self._eq, margin=ft.Margin.only(right=16)),
                             ft.IconButton(
                                 icon=ft.Icons.PLAYLIST_PLAY,
                                 icon_color=DIM, icon_size=26,
@@ -4589,9 +4670,6 @@ class NowPlayingSheet:
         self._play_btn.icon = ft.Icons.PAUSE if is_playing else ft.Icons.PLAY_ARROW
         if self._play_btn.page:
             self._play_btn.update()
-        self._eq.visible = is_playing
-        if self._eq.page:
-            self._eq.update()
 
     def update_progress(self, position: float, duration: float):
         if self.app.is_scrubbing:
@@ -4770,7 +4848,7 @@ class QueueSheet:
                         ft.Row(
                             [
                                 ft.IconButton(icon=ft.Icons.ARROW_UPWARD, icon_color=DIM, icon_size=16,
-                                              visible=not is_active,
+                                              visible=not is_active and i > cur_idx + 1,
                                               on_click=lambda e, idx=i: self._move(idx, idx - 1)),
                                 ft.IconButton(icon=ft.Icons.ARROW_DOWNWARD, icon_color=DIM, icon_size=16,
                                               visible=not is_active,

@@ -18,37 +18,64 @@ class StreamripSearcher:
         from .streamrip_api import get_config_path
         self.config_path = config_path or get_config_path()
 
-    def get_artist_albums(self, artist_id: str, callback) -> None:
+    def get_artist_albums(self, artist_id: str, callback, limit: int = 30, offset: int = 0) -> None:
         threading.Thread(
             target=self._run_artist_albums,
-            args=(artist_id, callback),
+            args=(artist_id, callback, limit, offset),
             daemon=True,
         ).start()
 
-    def _run_artist_albums(self, artist_id, callback):
+    def _run_artist_albums(self, artist_id, callback, limit, offset):
         try:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            results = loop.run_until_complete(self._get_artist_albums_async(artist_id))
+            results = loop.run_until_complete(self._get_artist_albums_async(artist_id, limit, offset))
             loop.close()
         except Exception as exc:
             logger.error("Get artist albums failed: %s", exc)
             results = []
         callback(results)
 
-    async def _get_artist_albums_async(self, artist_id):
+    async def _get_artist_albums_async(self, artist_id, limit, offset):
         from .config import Config
         from .qobuz import QobuzClient
         config = Config(self.config_path)
         client = QobuzClient(config)
         try:
             await client.login()
-            resp = await client.get_metadata(artist_id, "artist")
-            # Qobuz returns albums in the 'albums' key when 'extra=albums' is used in get_metadata
-            raw_albums = resp.get("albums", {}).get("items", [])
+            resp = await client.get_metadata(artist_id, "artist", limit=limit, offset=offset)
+            
+            albums_data = resp.get("albums", {})
+            raw_albums = albums_data.get("items", [])
+            # Support both nested 'total' and top-level 'albums_count' from Qobuz metadata
+            total_albums = albums_data.get("total", resp.get("albums_count", 0))
+            
+            raw_albums = raw_albums[:limit]
+            
             for a in raw_albums:
                 a["_media_type"] = "album"
-            return self._parse_results(raw_albums, "qobuz")
+                
+            parsed = self._parse_results(raw_albums, "qobuz")
+            
+            if len(raw_albums) > 0:
+                # Always offer load more if we just got results (User preference for reliability)
+                parsed.append({
+                    "media_type": "load_more_artist",
+                    "id": artist_id,
+                    "offset": offset + limit,
+                    "limit": limit,
+                    "ui_title": "Load More",
+                    "name": "Load More"
+                })
+            elif offset > 0:
+                # Only show exhausted if we actually tried to paginate and got nothing back
+                parsed.append({
+                    "media_type": "search_exhausted",
+                    "ui_title": "All albums loaded",
+                    "name": "Exhausted"
+                })
+                
+            return parsed
         finally:
             if hasattr(client, "session") and client.session:
                 await client.session.close()
