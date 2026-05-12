@@ -3,17 +3,8 @@ This file contains code from streamrip (https://github.com/nathom/streamrip).
 Streamrip is the property of nathom and multiple other contributors in the streamrip community.
 Big thanks to nathom and the streamrip community for their incredible work.
 """
-import asyncio
-
-import base64
-import functools
-import hashlib
-import itertools
-import json
 import logging
 import os
-import re
-import shutil
 import tempfile
 import time
 from abc import ABC, abstractmethod
@@ -21,8 +12,6 @@ from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
 import aiohttp
-
-from .exceptions import NonStreamableError
 
 logger = logging.getLogger("streamrip")
 
