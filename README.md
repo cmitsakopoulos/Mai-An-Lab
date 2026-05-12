@@ -1,4 +1,4 @@
-# Mai An: Streamrip on Python, on your phone
+# Mai An Lab: Streamrip on your phone
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Platform: Android](https://img.shields.io/badge/Platform-Android-green.svg)]()
@@ -55,7 +55,7 @@ This application has been strictly tested and verified on the following hardware
 > [!IMPORTANT]
 > **Streamrip on Mobile** — This project is a custom-patched port of `streamrip 2.1.0`. We've stripped the `aiodns` C-extensions and relaxed dependency bounds to make the entire stack survive the Flutter/Android build process. Qobuz is supported natively out of the box.
 
-- **Lightweight, customizable player** — A glassmorphic Flet UI with micro-animations, a live EQ visualizer, and a modular design-token system you can re-skin without touching layout code. Audio playback runs through a custom Python↔Dart bridge backed by **ExoPlayer**.
+- **Lightweight, customizable player** — A glassmorphic Flet UI with micro-animations and a modular design-token system you can re-skin without touching layout code. Audio playback runs through a custom Python↔Dart bridge backed by **ExoPlayer**.
 - **Fast indexing and search** — Recursive library scans use hierarchical in-memory caches and a bulk-import mode that drops triggers during ingest, indexing 10k+ tracks in seconds.
 - **Efficient SQL database** — A single `aiosqlite` connection with WAL journaling and a 64 MB page cache ensures the UI never blocks on heavy indexing tasks.
 
