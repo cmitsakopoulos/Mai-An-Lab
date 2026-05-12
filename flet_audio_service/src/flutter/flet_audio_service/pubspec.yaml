@@ -1,0 +1,28 @@
+name: flet_audio_service
+description: Flet extension for background audio playback on Android and macOS.
+version: 0.2.9
+publish_to: none
+
+environment:
+  sdk: ">=3.0.0 <4.0.0"
+  flutter: ">=3.10.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flet: ^0.84.0
+  audio_service: ^0.18.18
+  just_audio: ^0.10.5
+  audio_session: ^0.1.21
+  permission_handler: ^11.3.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+flutter:
+  plugin:
+    platforms:
+      android:
+        package: com.flet.flet_audio_service
+        pluginClass: FletAudioServicePlugin

@@ -1,0 +1,53 @@
+<!-- 
+  Add these snippets to your AndroidManifest.xml file located at:
+  build/android/app/src/main/AndroidManifest.xml (after first build)
+  or in your custom template.
+
+  ─────────────────────────────────────────────────────────────────────────
+  STEP 0 — build.gradle (app-level)
+  ─────────────────────────────────────────────────────────────────────────
+  audio_service and just_audio require minSdkVersion 21 (Android 5.0 Lollipop).
+  In your app's build.gradle, set:
+
+    android {
+      defaultConfig {
+        minSdkVersion 21   // Required: audio_service + just_audio minimum
+        targetSdkVersion 34
+      }
+    }
+
+  Without this, the build will fail on devices running Android < 5.0
+  and foreground service APIs will not be available.
+-->
+
+<!-- 1. ADD PERMISSIONS (Inside <manifest> tag) -->
+<!-- WAKE_LOCK: Required to keep the CPU awake during background playback. -->
+<!-- FOREGROUND_SERVICE: Required to start the media foreground service. -->
+<!-- FOREGROUND_SERVICE_MEDIA_PLAYBACK: Required on Android 14+ (API 34+). -->
+<!--   Without FOREGROUND_SERVICE_MEDIA_PLAYBACK, the foreground service    -->
+<!--   will be killed immediately by the system on Android 14+.             -->
+<uses-permission android:name="android.permission.WAKE_LOCK"/>
+<uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+<uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"/>
+<uses-permission android:name="android.permission.INTERNET"/>
+
+<!-- 2. ADD SERVICE AND RECEIVER (Inside <application> tag) -->
+
+<!-- The main AudioService -->
+<service 
+    android:name="com.ryanheise.audioservice.AudioService"
+    android:foregroundServiceType="mediaPlayback"
+    android:export="true">
+    <intent-filter>
+        <action android:name="android.media.browse.MediaBrowserService" />
+    </intent-filter>
+</service>
+
+<!-- Media button receiver for hardware controls -->
+<receiver 
+    android:name="com.ryanheise.audioservice.MediaButtonReceiver"
+    android:export="true">
+    <intent-filter>
+        <action android:name="android.intent.action.MEDIA_BUTTON" />
+    </intent-filter>
+</receiver>

@@ -1,0 +1,118 @@
+group 'com.flet.flet_audio_service'
+version '1.0-SNAPSHOT'
+
+buildscript {
+    ext.kotlin_version = '1.9.0'
+    repositories {
+        google()
+        mavenCentral()
+    }
+
+    dependencies {
+        classpath 'com.android.tools.build:gradle:8.1.0'
+        classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version"
+    }
+}
+
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+apply plugin: 'com.android.library'
+apply plugin: 'kotlin-android'
+
+android {
+    namespace 'com.flet.flet_audio_service'
+    compileSdk 34
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+
+    sourceSets {
+        main.java.srcDirs += 'src/main/kotlin'
+    }
+
+    defaultConfig {
+        minSdk 21
+    }
+}
+
+// audio_service requires the host activity to use audio_service's CACHED
+// FlutterEngine — not just any FlutterFragmentActivity. The audio_service
+// plugin ships an `AudioServiceFragmentActivity` helper that overrides
+// `provideFlutterEngine` to return the cached engine. Without this, the
+// plugin throws "The Activity class declared in your AndroidManifest.xml is
+// wrong or has not provided the correct FlutterEngine."
+//
+// Flet's template generates a vanilla MainActivity extending FlutterActivity
+// and there's no Flet config to customize it — so we patch the file at build
+// time before Kotlin compilation. Idempotent: skips if already patched.
+project.gradle.projectsEvaluated {
+    rootProject.allprojects.each { proj ->
+        if (proj.path == ':app') {
+            proj.tasks.matching { it.name == 'preBuild' }.configureEach {
+                doFirst {
+                    fileTree(proj.projectDir) {
+                        include '**/MainActivity.kt'
+                        include '**/MainActivity.java'
+                    }.each { file ->
+                        def content = file.text
+                        if (content.contains('AudioServiceFragmentActivity')) {
+                            return  // already patched
+                        }
+                        if (content.contains('FlutterActivity') ||
+                            content.contains('FlutterFragmentActivity')) {
+                            println "flet_audio_service: patching ${file.name} → AudioServiceFragmentActivity"
+                            file.text = content
+                                .replace(
+                                    'io.flutter.embedding.android.FlutterFragmentActivity',
+                                    'com.ryanheise.audioservice.AudioServiceFragmentActivity')
+                                .replace(
+                                    'io.flutter.embedding.android.FlutterActivity',
+                                    'com.ryanheise.audioservice.AudioServiceFragmentActivity')
+                                .replace(': FlutterFragmentActivity()',
+                                         ': AudioServiceFragmentActivity()')
+                                .replace(': FlutterActivity()',
+                                         ': AudioServiceFragmentActivity()')
+                                .replace('extends FlutterFragmentActivity',
+                                         'extends AudioServiceFragmentActivity')
+                                .replace('extends FlutterActivity',
+                                         'extends AudioServiceFragmentActivity')
+                        }
+                    }
+
+                    // Patch AndroidManifest's MainActivity windowSoftInputMode
+                    // from `adjustResize` to `adjustNothing`. With adjustResize
+                    // the Flet layout reflows every time the keyboard opens,
+                    // which makes search-bar containers (and any container with
+                    // `animate=Animation`) tween visibly. adjustNothing keeps
+                    // the layout stable and lets the keyboard overlay content
+                    // — fine because the search bar is at the top of the page
+                    // and never hidden by the keyboard.
+                    fileTree(proj.projectDir) {
+                        include '**/AndroidManifest.xml'
+                        exclude '**/build/**'
+                    }.each { file ->
+                        def content = file.text
+                        if (content.contains('android:windowSoftInputMode="adjustResize"')) {
+                            println "flet_audio_service: patching ${file.name} → windowSoftInputMode=adjustNothing"
+                            file.text = content.replace(
+                                'android:windowSoftInputMode="adjustResize"',
+                                'android:windowSoftInputMode="adjustNothing"',
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

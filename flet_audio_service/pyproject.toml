@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "flet_audio_service"
+version = "0.2.9"
+description = "A Flet extension for background audio playback with Android media notifications."
+authors = [{ name = "Expert Developer" }]
+dependencies = [
+    "flet>=0.21.0",
+]
+
+[project.entry-points."flet.extension"]
+flet_audio_service = "flet_audio_service"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"flutter.flet_audio_service" = ["pubspec.yaml", "lib/**/*", "android/**/*"]
+
+[tool.flet.flutter]
+package = "src/flutter/flet_audio_service"

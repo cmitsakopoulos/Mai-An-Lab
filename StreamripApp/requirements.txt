@@ -1,0 +1,12 @@
+flet
+flet-audio
+mutagen
+aiohttp
+aiofiles
+aiosqlite
+tomlkit
+certifi
+tinytag
+aiofiles
+serious-python
+-e ../flet_audio_service

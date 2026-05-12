@@ -1,0 +1,66 @@
+*__pycache__
+*dummy_library
+.buildozer
+
+# Explicitly track build configuration
+!**/build.gradle
+!**/settings.gradle
+!**/*.gradle
+!**/gradle.properties
+!**/gradle-wrapper.properties
+!**/gradlew
+!**/gradlew.bat
+
+# Assets and binaries (localized to directories)
+**/previews/
+**/bin/
+StreamripApp/binaries/
+*.DS_Store
+
+# Runtime Data and Sensitive Config
+StreamripApp/history.json
+StreamripApp/recent_searches.json
+StreamripApp/storage/
+StreamripApp/requirements.txt.bak
+*.log
+
+# Build Artifacts and Tooling
+**/dist/
+**/build/
+**/*.egg-info/
+.claude/
+.gemini/
+.idea/
+.vscode/
+
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Android/Kivy
+.buildozer/
+.cpython-312-aarch64-linux-gnu/  # Specific cache for your target
+
+# Dependencies
+venv/                 # If using a virtual environment
+.env
+.env.*                # Ignore environment variables
+
+# Compiled files
+*.pyo
+*.pyd
+
+# Build artifacts
+**/build/
+.gradle/
+local.properties
+*.apk
+*.aar
+*.jks
+
+
+# OS generated
+Thumbs.db
+.DS_Store

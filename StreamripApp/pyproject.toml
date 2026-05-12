@@ -1,0 +1,48 @@
+[project]
+name = "mai-an-lab"
+version = "1.0.0"
+description = "High-fidelity music player and downloader built with Python and Flet."
+authors = [
+    { name = "Christophoros Mitsakopoulos", email = "mitsacopoulos@gmail.com" }
+]
+dependencies = [
+    "flet",
+    "flet-audio",
+    "mutagen",
+    "aiosqlite",
+    "aiohttp",
+    "aiofiles",
+    "tomlkit",
+    "certifi",
+    "numpy",
+    "tinytag",
+    "flet_audio_service @ {LOCAL_EXTENSION_PATH}"
+]
+
+[tool.setuptools]
+py-modules = ["main"]
+packages = ["utils"]
+
+[tool.flet]
+org = "com.mitsakopoulos.maianlab"
+product = "Mai An Lab"
+company = "Mai An Lab"
+copyright = "Copyright (C) 2026 by Christophoros Mitsakopoulos"
+assets_dir = "assets"
+
+
+[tool.flet.android.permission]
+"android.permission.INTERNET" = true
+"android.permission.READ_EXTERNAL_STORAGE" = true
+"android.permission.WRITE_EXTERNAL_STORAGE" = true
+"android.permission.MANAGE_EXTERNAL_STORAGE" = true
+"android.permission.READ_MEDIA_AUDIO" = true
+"android.permission.FOREGROUND_SERVICE" = true
+"android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" = true
+"android.permission.POST_NOTIFICATIONS" = true
+"android.permission.WAKE_LOCK" = true
+
+[tool.flet.flutter.pubspec.dependency_overrides]
+serious_python = "^0.9.0"
+serious_python_android = "^0.9.0"
+
