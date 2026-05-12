@@ -1,4 +1,4 @@
-# Mai An: Streamrip on Python, on your phone
+# Mai An Lab: Streamrip on your phone
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Platform: Android](https://img.shields.io/badge/Platform-Android-green.svg)]()
