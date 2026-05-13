@@ -330,12 +330,11 @@ class NotificationSystem:
 
         def _add():
             self.container.controls.insert(0, dismissible)
-            self.page.update()
-            
-            # Trigger animations
+            # Trigger slide-in animation in the same update as the insertion.
+            # Do NOT call page.update() twice — the second bare call was the
+            # source of spurious 120 Hz updates during notification display.
             notification.opacity = 1
             notification.offset = ft.Offset(0, 0)
-            self.page.update()
 
         self.app.safe_update(_add)
 
@@ -1066,11 +1065,13 @@ class SearchView:
         self.searcher        = StreamripSearcher()
         self.current_search_id = 0
         self.selected_source = "qobuz"
-        self.all_results: list[dict] = [] # Flat list for current view_mode
+        # Unified pre-fetch cache: all three types are fetched in one search call.
+        # Keyed by media_type singular ("track", "album", "artist").
+        self.cached_results: dict[str, list[dict]] = {"track": [], "album": [], "artist": []}
         self._active_preview_data: dict | None = None
         self.expanded_nodes: set[str] = set() # Track IDs/Artist IDs of expanded items
         self.node_cache: dict[str, list[dict]] = {} # Cache for expanded node children
-        self.view_mode = "tracks" # artist, album, track
+        self.view_mode = "tracks" # artist, album, track (plural, matches tab labels)
 
         self.current_offset = 0
         self._is_loading_more = False
@@ -1547,7 +1548,7 @@ class SearchView:
             self._clear_btn.visible  = False
             self._results_list.controls.clear()
             self._empty_label.visible = False
-            self.all_results.clear()
+            self.cached_results = {"track": [], "album": [], "artist": []}
             self.expanded_nodes.clear()
             self.node_cache.clear()
             self._landing_container.visible = True
@@ -1603,11 +1604,13 @@ class SearchView:
             if self.current_search_id == search_id:
                 self._on_results(results, append=False)
 
+        # Always fetch all three types at once. The concurrent gather in the
+        # searcher means this costs no more latency than fetching a single type.
         asyncio.create_task(asyncio.to_thread(
             self.searcher.search,
             query, self.selected_source, results_callback,
-            media_types=[self.view_mode[:-1]],
-            limit=50, offset=self.current_offset
+            media_types=["track", "album", "artist"],
+            limit=50, offset=0
         ))
 
     def _on_results(self, results, append: bool = False):
@@ -1644,23 +1647,38 @@ class SearchView:
                 r["is_in_library"] = bool(exists)
 
             if append:
-                self.all_results.extend(results)
+                # Pagination: append only to the currently active tab's bucket
+                active_type = self.view_mode[:-1]  # "tracks" -> "track"
+                for r in results:
+                    if r.get("media_type") == active_type:
+                        self.cached_results[active_type].append(r)
             else:
-                self.all_results = results
+                # Full search: route every result into its typed bucket
+                self.cached_results = {"track": [], "album": [], "artist": []}
+                for r in results:
+                    m_type = r.get("media_type", "track")
+                    if m_type in self.cached_results:
+                        self.cached_results[m_type].append(r)
             
             self._rebuild_results(append=append)
 
         self.page.run_task(_update_ui)
 
     def _rebuild_results(self, append: bool = False):
+        # Always render from the local typed cache for the active tab
+        active_type = self.view_mode[:-1]  # "tracks" -> "track"
+        source = self.cached_results.get(active_type, [])
+
         if not append:
             self._results_list.controls.clear()
         else:
             if self._results_list.controls and isinstance(self._results_list.controls[-1], ft.Container):
                 self._results_list.controls.pop()
-        
+
         count_already = len(self._results_list.controls)
-        new_items = self.all_results[count_already:] if append else self.all_results
+        new_items = source[count_already:] if append else source
+
+        self._empty_label.visible = not source and not append
 
         for i, r in enumerate(new_items):
             card = self._result_card(count_already + i, r, depth=0)
@@ -1719,7 +1737,14 @@ class SearchView:
         self._update_view_tabs()
         query = (self._search_field.value or "").strip()
         if query:
-            asyncio.create_task(self.start_search())
+            # Re-render instantly from the local pre-fetched cache — zero network.
+            # Only trigger a fresh search if the cache is entirely empty (first load
+            # for this query somehow missed all types, which should not happen).
+            cache_populated = any(v for v in self.cached_results.values())
+            if cache_populated:
+                self._rebuild_results(append=False)
+            else:
+                asyncio.create_task(self.start_search())
         else:
             self.app.page.update()
 
@@ -2348,6 +2373,7 @@ class LibraryView:
         self._load_token    = 0      # incremented each load to cancel stale workers
         self._is_loading_chunk = False
         self._is_scanning   = False
+        self._path_to_controls: dict[str, list[ft.Control]] = {}
         self._scan_timer    = None
         self._search_token  = 0
         self._lib_clear_btn = None  # assigned after TextField is built
@@ -2362,29 +2388,52 @@ class LibraryView:
         self._tracks_cache_key: tuple | None = None
 
         # ── Controls ───────────────────────────────────────────────────────
+        # ── Library Search Bar (matches SearchView unified design) ───────────
+        # The TextField is intentionally borderless; the outer container owns
+        # the visual border so it never resizes when the user types or focuses.
         self._search_field = ft.TextField(
             hint_text="Search artists, albums, tracks…",
-            hint_style=ft.TextStyle(color=DIM),
-            border_color=BORDER,
-            focused_border_color=CYAN,
-            text_style=ft.TextStyle(color=TEXT),
-            bgcolor=SURFACE,
-            border_radius=12,
-            content_padding=ft.Padding.symmetric(horizontal=16, vertical=10),
-            prefix_icon=ft.Icons.SEARCH,
-            suffix=ft.IconButton(
-                icon=ft.Icons.CLOSE, icon_color=DIM, icon_size=16,
-                on_click=self._clear_search, visible=False,
-            ),
+            hint_style=ft.TextStyle(color=DIM, size=14),
+            bgcolor="transparent",
+            border=ft.InputBorder.NONE,
+            text_style=ft.TextStyle(color=TEXT, size=14),
+            content_padding=ft.Padding.only(left=4, right=4, top=14, bottom=14),
             expand=True,
-            # Lock to a single line so long queries scroll horizontally
-            # inside the field instead of growing the bar vertically. Without
-            # max_lines=1 Flutter's TextField auto-grows once text wraps.
+            cursor_color=CYAN,
             multiline=False,
             max_lines=1,
             on_change=self._on_search_change,
+            on_focus=self._on_search_focus,
+            on_blur=self._on_search_blur,
         )
-        self._lib_clear_btn = self._search_field.suffix
+        self._lib_clear_btn = ft.IconButton(
+            icon=ft.Icons.CLOSE,
+            icon_color=DIM,
+            icon_size=16,
+            visible=False,
+            on_click=self._clear_search,
+        )
+        self._search_spinner = ft.ProgressRing(
+            width=16, height=16, stroke_width=2, color=CYAN, visible=False,
+        )
+        self._search_bar_container = ft.Container(
+            content=ft.Row(
+                [
+                    ft.Icon(ft.Icons.SEARCH_ROUNDED, color=CYAN, size=18),
+                    self._search_field,
+                    self._search_spinner,
+                    self._lib_clear_btn,
+                ],
+                spacing=4,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            bgcolor=SURFACE2,
+            border=ft.Border.all(1.5, BORDER),
+            border_radius=14,
+            padding=ft.Padding.only(left=12, right=6, top=0, bottom=0),
+            expand=True,
+            animate=ft.Animation(150, ft.AnimationCurve.EASE_OUT),
+        )
 
 
 
@@ -2418,10 +2467,6 @@ class LibraryView:
             border=ft.Border.all(1, apply_opacity(0.3, CYAN)),
         )
 
-        # Shown briefly during DB query/indexing
-        self._search_spinner = ft.ProgressRing(
-            width=16, height=16, stroke_width=2, color=CYAN, visible=False,
-        )
         self._search_token = 0  # Incremented each keystroke to cancel stale queries
 
         self._library_list = ft.ListView(
@@ -2482,7 +2527,7 @@ class LibraryView:
                                 ],
                                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
                             ),
-                            ft.Row([self._search_field, self._search_spinner], spacing=8),
+                            ft.Row([self._search_bar_container], spacing=0),
                             self._view_tabs_row,
                             self._scan_progress_container,
                         ],
@@ -2517,6 +2562,19 @@ class LibraryView:
             await self.load_library()
         
         self._search_debounce_task = asyncio.create_task(_delayed_load())
+
+    def _on_search_focus(self, _e):
+        def _mutate():
+            self._search_bar_container.border = ft.Border.all(1.5, CYAN + "99")
+            self._search_bar_container.bgcolor = SURFACE
+        self.app.safe_update(_mutate)
+
+    def _on_search_blur(self, _e):
+        def _mutate():
+            self._search_bar_container.border = ft.Border.all(1.5, BORDER)
+            self._search_bar_container.bgcolor = SURFACE2
+        self.app.safe_update(_mutate)
+
 
     def _set_view_mode(self, mode: str):
         self.view_mode = mode
@@ -2773,6 +2831,7 @@ class LibraryView:
         self.app.safe_update(lambda: (
             setattr(self._search_spinner, "visible", True),
             self._library_list.controls.clear(),
+            self._path_to_controls.clear(),
             setattr(self._empty_label, "visible", False)
         ))
 
@@ -2895,8 +2954,11 @@ class LibraryView:
                     icon.name = ft.Icons.KEYBOARD_ARROW_RIGHT
                     icon.color = DIM
                 
-                self._library_list.update()
-
+                # We do NOT call self._library_list.update() here.
+                # safe_update already calls page.update(), and double-updating
+                # a list with thousands of items is the primary cause of
+                # CPU spikes during expansion/collapse.
+                
             self.app.safe_update(_mutate)
         finally:
             self._toggling_nodes.discard(nid)
@@ -3060,62 +3122,61 @@ class LibraryView:
             on_click=toggle,
         )
 
+    def _update_row_highlight(self, ctrl: ft.Control, is_current: bool) -> bool:
+        """Atomic update of a single track row's visual state."""
+        try:
+            # Structure: GestureDetector -> Dismissible -> ListTile
+            tile = ctrl.content.content
+            if not tile.page: return False # Not mounted
+            
+            active_color = apply_opacity(0.1, CYAN)
+            
+            # Update Icon
+            icon = tile.leading.controls[1]
+            icon.name = ft.Icons.EQUALIZER if is_current else ft.Icons.MUSIC_NOTE_ROUNDED
+            icon.color = CYAN if is_current else LIB_TRACK_COLOR
+            
+            # Update Title Text
+            if isinstance(tile.title, ft.Row):
+                tile.title.controls[0].color = CYAN if is_current else TEXT
+                if len(tile.title.controls) > 1:
+                    tile.title.controls[1].bgcolor = CYAN if is_current else DIM
+            else:
+                tile.title.color = CYAN if is_current else TEXT
+
+            tile.subtitle.color = CYAN if is_current else DIM
+            tile.bgcolor = active_color if is_current else "transparent"
+            
+            tile.update()
+            return True
+        except Exception:
+            return False
+
     def refresh_now_playing(self):
-        """Repaint visible track rows so the currently-playing one is
-        highlighted (icon, text colour, bgcolor) without rebuilding the list."""
+        """Optimized highlight update using the path map."""
+        if self.app.is_background:
+            return # UI is suspended
+
         current_path = audio_engine.current_path
         prev_path = getattr(self, "_last_highlighted_path", None)
         if prev_path == current_path:
-            # Nothing to do — avoids walking the entire list on every state
-            # event from the audio engine (state events fire several times
-            # per track during natural playback transitions).
             return
 
-        active_color = apply_opacity(0.1, CYAN)
         any_changed = False
-        for ctrl in self._library_list.controls:
-            if not isinstance(ctrl, ft.GestureDetector):
-                continue
-            data = getattr(ctrl, "data", None)
-            if not isinstance(data, dict) or data.get("type") != "track":
-                continue
-            path = data.get("path", "")
-            if not path:
-                continue
-            # Only touch rows whose state actually changes — skip everything
-            # else so we don't invalidate ~100 controls per refresh.
-            was_current = (path == prev_path)
-            is_current = (path == current_path)
-            if was_current == is_current:
-                continue
-            try:
-                # GestureDetector → Dismissible → ListTile
-                tile = ctrl.content.content
-                icon = tile.leading.controls[1]
-                icon.name = ft.Icons.EQUALIZER if is_current else ft.Icons.MUSIC_NOTE_ROUNDED
-                icon.color = CYAN if is_current else LIB_TRACK_COLOR
-                if isinstance(tile.title, ft.Row):
-                    tile.title.controls[0].color = CYAN if is_current else TEXT
-                    if len(tile.title.controls) > 1:
-                        tile.title.controls[1].bgcolor = CYAN if is_current else DIM
-                else:
-                    tile.title.color = CYAN if is_current else TEXT
-
-                tile.subtitle.color = CYAN if is_current else DIM
-                tile.bgcolor = active_color if is_current else "transparent"
-                any_changed = True
-            except Exception:
-                pass
+        
+        # Clear old highlight
+        if prev_path:
+            for ctrl in self._path_to_controls.get(prev_path, []):
+                if self._update_row_highlight(ctrl, is_current=False):
+                    any_changed = True
+        
+        # Set new highlight
+        if current_path:
+            for ctrl in self._path_to_controls.get(current_path, []):
+                if self._update_row_highlight(ctrl, is_current=True):
+                    any_changed = True
 
         self._last_highlighted_path = current_path
-        # Single ListView patch at the end — calling update() inside the loop
-        # re-uploaded the whole list once per visible row, which is what made
-        # screen switches and queue advances feel sluggish.
-        if any_changed:
-            try:
-                self._library_list.update()
-            except Exception:
-                pass
 
     def _auto_generate_playlist_widget(self, playlist_id, depth) -> ft.Control:
         handler = lambda _: asyncio.create_task(self.app.open_auto_playlist_dialog(playlist_id))
@@ -3360,11 +3421,13 @@ class LibraryView:
             on_confirm_dismiss=_on_swipe_right,
         )
 
-        return ft.GestureDetector(
+        res = ft.GestureDetector(
             content=dismissible,
             data={"path": path, "depth": depth, "type": "track"},
             on_long_press_start=lambda e: self._open_track_context_menu(meta),
         )
+        self._path_to_controls.setdefault(path, []).append(res)
+        return res
 
     def _edit_btn(self, edit_type: str, meta: dict, color: str = DIM) -> ft.Control:
         return ft.IconButton(
@@ -3396,6 +3459,39 @@ class LibraryView:
             _close()
             self.app.open_metadata_editor("track", meta)
 
+        def _redownload(_e):
+            _close()
+            title = meta.get("track_title", "")
+            artist = meta.get("artist_name", "")
+            album = meta.get("album_title", "")
+            
+            # Construct a precise search query using all available metadata
+            query_parts = [title]
+            if artist and artist != "Unknown":
+                query_parts.append(artist)
+            if album and album != "Unknown":
+                query_parts.append(album)
+                
+            query = " ".join(query_parts).strip()
+            if not query: return
+            
+            self.app.show_snackbar(f"Searching for '{query}'...", color=CYAN)
+            
+            def _on_found(results):
+                if not results or isinstance(results, dict):
+                    self.app.safe_update(lambda: self.app.show_snackbar("Track not found on remote source.", color="#F44336"))
+                    return
+                    
+                track_results = [r for r in results if r.get("media_type") == "track"]
+                if not track_results:
+                    self.app.safe_update(lambda: self.app.show_snackbar("Track not found on remote source.", color="#F44336"))
+                    return
+                    
+                # Pass the first search result to the QualitySelectorSheet
+                self.app.safe_update(lambda: self.app.quality_selector_sheet.show(track_results[0]))
+                
+            self.app.search_view.searcher.search(query, "qobuz", _on_found, media_types=["track"], limit=10)
+
         bs = ft.BottomSheet(
             content=ft.Container(
                 content=ft.Column(
@@ -3411,6 +3507,11 @@ class LibraryView:
                             leading=ft.Icon(ft.Icons.PLAYLIST_ADD_ROUNDED, color=LIB_PLAYLIST_COLOR),
                             title=ft.Text("Add to Playlist", color=TEXT),
                             on_click=_add_to_playlist,
+                        ),
+                        ft.ListTile(
+                            leading=ft.Icon(ft.Icons.DOWNLOAD_ROUNDED, color=DIM),
+                            title=ft.Text("Redownload (Different Quality)", color=TEXT),
+                            on_click=_redownload,
                         ),
                         ft.ListTile(
                             leading=ft.Icon(ft.Icons.EDIT_OUTLINED, color=DIM),
@@ -5232,6 +5333,7 @@ class StreamripFletApp:
         self._update_lock  = asyncio.Lock()
         self._flush_pending = False
         self._is_restarting = False
+        self.is_background  = False
         
     def _show_error(self, e=None):
         """Surfaces critical errors to the full-screen ErrorBoundary."""
@@ -5240,9 +5342,29 @@ class StreamripFletApp:
         else:
             self.show_snackbar(f"Critical Error: {e}")
 
+    def _on_lifecycle(self, e):
+        # e.data can be: "resumed", "inactive", "hidden", "detached"
+        # We suspend UI updates when hidden or inactive (background/multitasking)
+        was_bg = self.is_background
+        self.is_background = e.data in ("hidden", "inactive", "detached")
+        
+        if self.is_background != was_bg:
+            if self.is_background:
+                logger.info(f"App lifecycle: {e.data} - Suspending UI updates")
+            else:
+                logger.info(f"App lifecycle: {e.data} - Resuming UI updates")
+                # Force-sync current highlights when returning to foreground
+                if hasattr(self, "library_view"):
+                    self.library_view.refresh_now_playing()
+                if hasattr(self, "search_view"):
+                    self.search_view.refresh_now_playing()
+                # When returning to foreground, force a single update to sync state
+                self.safe_update(lambda: None)
+
     async def initialize(self):
         # PHASE 1: Immediate Splash Render (< 50ms)
         self.page.clean()
+        self.page.on_app_lifecycle_state_change = self._on_lifecycle
         self._splash = self._build_splash()
         self.page.add(self._splash)
         self.page.update()
@@ -5773,10 +5895,15 @@ class StreamripFletApp:
         async with self._update_lock:
             self._pending_fns.append(fn)
             if self._flush_pending:
+                # A flush is already scheduled — just queue the fn and return.
+                # This is the key coalescing step: multiple safe_update() calls
+                # arriving in the same event-loop burst share a single flush.
                 return
             self._flush_pending = True
         
-        # Schedule the flush on the event loop
+        # Yield once to let any other safe_update() calls in this same tick
+        # append their fns before we flush, so they all land in one page.update().
+        await asyncio.sleep(0)
         await self._flush_updates()
 
     async def _flush_updates(self):
@@ -6090,6 +6217,10 @@ class StreamripFletApp:
         self._artwork_task = asyncio.create_task(_delayed_extract())
 
     def _on_position(self, _instance, position: float):
+        # Suspend UI updates in background to save battery/CPU
+        if self.is_background:
+            return
+
         # Throttle updates to ~1 per second to keep UI snappy and CPU low
         now = time.time()
         if not hasattr(self, "_last_pos_update"):
@@ -6115,6 +6246,8 @@ class StreamripFletApp:
                 self.now_playing.container.update()
 
     def _on_is_playing(self, _instance, is_playing: bool):
+        if self.is_background:
+            return
         def _update():
             self.mini_player.update_state(is_playing)
             self.now_playing.update_state(is_playing)
