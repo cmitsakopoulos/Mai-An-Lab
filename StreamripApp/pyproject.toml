@@ -16,7 +16,7 @@ dependencies = [
     "certifi",
     "numpy",
     "tinytag",
-    "flet_audio_service @ {LOCAL_EXTENSION_PATH}"
+    "flet_audio_service @ file:///C:/Users/CHMI/Downloads/Music_Local/flet_audio_service"
 ]
 
 [tool.setuptools]

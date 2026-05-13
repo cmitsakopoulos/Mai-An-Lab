@@ -149,23 +149,27 @@ class StreamripSearcher:
         except Exception as exc:
             raise Exception(f"Connection failed: {exc}")
 
+        async def _fetch_type(m_type: str) -> list:
+            try:
+                pages = await client.search(m_type, query, limit=limit, offset=offset)
+                items_out = []
+                for page in pages:
+                    for item in page.get(f"{m_type}s", {}).get("items", []):
+                        if isinstance(item, dict):
+                            item["_media_type"] = m_type
+                            items_out.append(item)
+                return items_out
+            except Exception as exc:
+                logger.warning("Qobuz search %s: %s", m_type, exc)
+                return []
+
         raw = []
         try:
-            for m_type in media_types:
-                try:
-                    pages = await client.search(m_type, query, limit=limit, offset=offset)
-                    for page in pages:
-                        items = page.get(f"{m_type}s", {}).get("items", [])
-                        for item in items:
-                            if isinstance(item, dict):
-                                item["_media_type"] = m_type
-                                raw.append(item)
-                        # We don't break here if offset is used, because _paginate 
-                        # already handles the requested limit/offset across pages.
-                        # However, for simplicity with Qobuz API, one call to search 
-                        # with limit=50 and offset=X returns exactly what we want.
-                except Exception as exc:
-                    logger.warning("Qobuz search %s: %s", m_type, exc)
+            # Dispatch all media-type requests concurrently; total wait time is now
+            # bounded by the slowest single request rather than the sequential sum.
+            results_per_type = await asyncio.gather(*[_fetch_type(m) for m in media_types])
+            for items in results_per_type:
+                raw.extend(items)
         finally:
             if hasattr(client, "session") and client.session:
                 await client.session.close()

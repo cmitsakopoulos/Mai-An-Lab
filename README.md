@@ -10,7 +10,7 @@ Mai An Lab is a high-fidelity music client that brings the full **[streamrip](ht
 The rest of the app is built around making that catalogue feel native: a fast indexer, a triggers-driven SQLite/FTS5 search layer, a customizable player, and a small experimental auto-playlist engine borrowed from bioinformatics clustering.
 
 > [!NOTE]
-> I am a bioinformatician by training, not a professional software engineer. This project is a passion-driven exploration of audio engineering and DSP. As such, it is a "living" passion project rather than a production-grade product, and it may not always follow standard enterprise coding patterns. It is a work of love, and I am learning as I go!
+> I am a bioinformatician by training, not a professional software engineer. This is a non-professionally driven passion project, please take this into consideration when encountering any issues or bugs. Any advice or willingess to contribute are greatly appreciated.
 
 ---
 
@@ -18,9 +18,9 @@ The rest of the app is built around making that catalogue feel native: a fast in
 
 For detailed information on the internals of Mai An Lab, please refer to the following documentation:
 
-- [🏗️ System Architecture & Database Design](./docs/Architecture.md)
-- [🏝️ Auto-Playlist Engine & DSP Deep-Dive](./docs/Auto_Playlist_Engine.md)
-- [🛠️ Build & Deployment Guide](#build-and-deployment)
+- [System Architecture & Database Design](./docs/Architecture.md)
+- [Auto-Playlist Engine & DSP Deep-Dive](./docs/Auto_Playlist_Engine.md)
+- [Build & Deployment Guide](#build-and-deployment)
 
 ---
 
