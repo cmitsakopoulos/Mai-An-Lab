@@ -1,4 +1,4 @@
-"""Streamrip search — Minimal Qobuz-only implementation."""
+"""Streamrip search; Minimal Qobuz-only implementation."""
 
 import logging
 import threading
@@ -231,7 +231,7 @@ class StreamripSearcher:
 
         # Qobuz returns the same recording wrapped in multiple search hits when
         # the track exists on a single, an album, and a compilation. They share
-        # the same track ID and therefore the same download URL — clicking
+        # the same track ID and therefore the same download URL; clicking
         # "download" on one would queue identical bytes from each duplicate.
         # Dedupe by (media_type, id), preserving order of first occurrence.
         seen: set = set()

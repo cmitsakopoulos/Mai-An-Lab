@@ -21,6 +21,12 @@ class DatabaseManager:
         self._artist_cache: dict[str, int] = {}
         self._album_cache: dict[tuple[int, str], int] = {}
 
+    def clear_caches(self):
+        """Clears the in-memory metadata caches. Call when DB state changes significantly."""
+        self._artist_cache.clear()
+        self._album_cache.clear()
+        logger.debug("Database caches cleared.")
+
     async def get_connection(self):
         """
         Returns the shared persistent connection object.
@@ -37,7 +43,7 @@ class DatabaseManager:
             await self._conn.execute("PRAGMA foreign_keys = ON")
             await self._conn.execute("PRAGMA cache_size = -65536")  # 64 MB page cache
             # Run playlist schema migration every time we open a fresh connection.
-            # CREATE TABLE IF NOT EXISTS is idempotent — safe on existing databases.
+            # CREATE TABLE IF NOT EXISTS is idempotent; safe on existing databases.
             await self._migrate_playlists(self._conn)
         return self._conn
 
@@ -140,8 +146,8 @@ class DatabaseManager:
                             pass # Column already exists
                 # Sound-profile vector: float32 MFCC mean + std + chroma packed
                 # as a single BLOB. `features_version` invalidates cached
-                # values when the extractor's output semantics change — older
-                # versions are simply ignored at read time (no migration).
+                # values when the extractor's output semantics change; older
+                # versions are simply ignored at read time.
                 # rolloff and beat_strength are scalar descriptors stored
                 # alongside bpm/energy/brightness for cheap WHERE filters.
                 for col, ddl in [
@@ -157,11 +163,32 @@ class DatabaseManager:
                     except:
                         pass
 
+                # Track neighbour graph: sparse adjacency for k-NN traversal.
+                # edge_kind ∈ {'acoustic', 'artist', 'album'}. Paths used as
+                # keys to match the rest of the codebase (play_counts,
+                # playlist_tracks). weight is cosine similarity for acoustic
+                # edges, fixed 1.0 for metadata edges.
+                await conn.execute('''
+                    CREATE TABLE IF NOT EXISTS track_neighbors (
+                        track_path    TEXT NOT NULL,
+                        neighbor_path TEXT NOT NULL,
+                        weight        REAL NOT NULL,
+                        edge_kind     TEXT NOT NULL,
+                        PRIMARY KEY (track_path, neighbor_path, edge_kind)
+                    )
+                ''')
+                await conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_neighbors_track "
+                    "ON track_neighbors(track_path, edge_kind, weight DESC)"
+                )
+
                 await conn.commit()
             except Exception as exc:
                 await conn.rollback()
                 logger.exception("Initialization failed: %s", exc)
                 raise
+            finally:
+                self.clear_caches()
 
     async def _create_fts_and_triggers(self, conn):
         """Internal helper: assumes connection is active."""
@@ -490,9 +517,9 @@ class DatabaseManager:
                     placeholders = ",".join("?" * len(chunk))
                     # Drop the playlist memberships first so reordering a
                     # playlist after a deletion never collides with orphan
-                    # order_index slots (the UI's visible list is joined to
+                    # order_index slots: the UI's visible list is joined to
                     # tracks, so orphans would otherwise stay in the DB
-                    # invisibly and corrupt subsequent reorder writes).
+                    # invisibly and corrupt subsequent reorder writes.
                     await conn.execute(
                         f"DELETE FROM playlist_tracks WHERE track_path IN ({placeholders})",
                         chunk,
@@ -503,6 +530,7 @@ class DatabaseManager:
                 await conn.execute("DELETE FROM albums  WHERE track_count <= 0")
                 await conn.execute("DELETE FROM artists WHERE album_count <= 0")
                 await conn.commit()
+                self.clear_caches()
             except Exception:
                 await conn.rollback()
                 raise
@@ -515,6 +543,7 @@ class DatabaseManager:
                 await conn.execute("DELETE FROM albums  WHERE track_count <= 0")
                 await conn.execute("DELETE FROM artists WHERE album_count <= 0")
                 await conn.commit()
+                self.clear_caches()
             except Exception:
                 await conn.rollback()
                 raise
@@ -796,7 +825,7 @@ class DatabaseManager:
         `from_idx`/`to_idx` are positions in the *visible* playlist (the list
         the user sees in the UI). The visible list is the result of an inner
         join with `tracks`, so any playlist_tracks row whose underlying track
-        has been deleted is hidden — but its `order_index` is still occupying
+        has been deleted is hidden; but its `order_index` is still occupying
         a slot in the DB. Without cleanup the rewritten indices would collide
         with these orphan rows and the next reorder would behave erratically.
 
@@ -823,7 +852,7 @@ class DatabaseManager:
                 await conn.commit()
                 return
 
-            # Clamp the indices defensively — UI events can race against a
+            # Clamp the indices defensively; UI events can race against a
             # concurrent removal and arrive with stale positions.
             from_idx = max(0, min(len(paths) - 1, int(from_idx)))
             to_idx = max(0, min(len(paths), int(to_idx)))
@@ -984,7 +1013,7 @@ class DatabaseManager:
         Rule: count >= 1/2 of Q1 (lowest quartile).
 
         Returns all hot-set entries regardless of whether their DSP features
-        are populated — the caller is expected to invoke the DSP analyser
+        are populated; the caller is expected to invoke the DSP analyser
         for any entry whose `features_version` is missing or stale and then
         persist via `update_track_features`.
         """
@@ -1002,22 +1031,32 @@ class DatabaseManager:
         q1 = np.percentile(counts, 25)
         threshold = q1 / 2.0
 
-        # 3. Fetch tracks that meet the 'Hot Set' threshold
+        # 3. Fetch tracks that meet the 'Hot Set' threshold, including
+        #    artist and album names for the string-similarity blending step
+        #    in AutoPlaylistEngine. LEFT JOINs are used defensively so a
+        #    missing tracks row (shouldn't happen) still returns the play_count
+        #    entry with NULL artist/album rather than silently dropping it.
         sql = '''
-            SELECT track_path AS path,
-                   bpm, energy, brightness,
-                   COALESCE(rolloff, 0)         AS rolloff,
-                   COALESCE(beat_strength, 0)   AS beat_strength,
-                   timbre,
-                   COALESCE(features_version, 0) AS features_version,
-                   count
-            FROM play_counts
-            WHERE count >= ?
-            ORDER BY count DESC
+            SELECT pc.track_path AS path,
+                   pc.bpm, pc.energy, pc.brightness,
+                   COALESCE(pc.rolloff, 0)         AS rolloff,
+                   COALESCE(pc.beat_strength, 0)   AS beat_strength,
+                   pc.timbre,
+                   COALESCE(pc.features_version, 0) AS features_version,
+                   pc.count,
+                   ar.name  AS artist,
+                   al.title AS album
+            FROM play_counts pc
+            LEFT JOIN tracks  t  ON t.path       = pc.track_path
+            LEFT JOIN albums  al ON al.id         = t.album_id
+            LEFT JOIN artists ar ON ar.id         = al.artist_id
+            WHERE pc.count >= ?
+            ORDER BY pc.count DESC
         '''
         async with conn.execute(sql, (threshold,)) as cursor:
             rows = await cursor.fetchall()
             return [dict(r) for r in rows]
+
 
     async def update_track_features(
         self,
@@ -1032,7 +1071,7 @@ class DatabaseManager:
     ):
         """Persist DSP features for a hot-set track. Upserts on track_path
         so the row exists even if increment_play_count hasn't fired yet
-        (defensive — in practice analysis only runs for already-hot tracks)."""
+        (defensive: in practice analysis only runs for already-hot tracks)."""
         async with self._write_lock:
             conn = await self.get_connection()
             await conn.execute(
@@ -1055,11 +1094,165 @@ class DatabaseManager:
             )
             await conn.commit()
 
+    # ── Track Graph (k-NN neighbours) ────────────────────────────────────────
+
+    async def get_tracks_with_features(self, features_version: int) -> list[dict]:
+        """Returns every track whose DSP features are present and current.
+        Used by the graph builder to compute acoustic edges."""
+        conn = await self.get_connection()
+        sql = '''
+            SELECT pc.track_path AS path, pc.timbre,
+                   COALESCE(pc.bpm, 0)        AS bpm,
+                   COALESCE(pc.brightness, 0) AS brightness,
+                   COALESCE(pc.energy, 0)     AS energy,
+                   COALESCE(pc.rolloff, 0)    AS rolloff
+            FROM play_counts pc
+            WHERE pc.timbre IS NOT NULL
+              AND COALESCE(pc.features_version, 0) >= ?
+        '''
+        async with conn.execute(sql, (features_version,)) as cursor:
+            return [dict(r) for r in await cursor.fetchall()]
+
+    async def get_tracks_missing_features(self, features_version: int) -> list[str]:
+        """Returns paths whose DSP features are absent or stale — the work
+        queue for the bulk analyser sweep."""
+        conn = await self.get_connection()
+        sql = '''
+            SELECT t.path
+            FROM tracks t
+            LEFT JOIN play_counts pc ON pc.track_path = t.path
+            WHERE pc.timbre IS NULL
+               OR COALESCE(pc.features_version, 0) < ?
+        '''
+        async with conn.execute(sql, (features_version,)) as cursor:
+            return [r[0] for r in await cursor.fetchall()]
+
+    async def replace_neighbors_bulk(self, edges: list[tuple], edge_kind: str):
+        """Mutation: Atomically replaces every edge of `edge_kind` with the
+        provided list. `edges` is a list of (track_path, neighbor_path, weight)
+        tuples. Used to rebuild a whole tier of the graph in one transaction.
+        Self-loops are silently dropped."""
+        clean = [(t, n, float(w)) for (t, n, w) in edges if t != n]
+        async with self._write_lock:
+            conn = await self.get_connection()
+            await conn.execute(
+                "DELETE FROM track_neighbors WHERE edge_kind = ?", (edge_kind,)
+            )
+            if clean:
+                await conn.executemany(
+                    "INSERT OR REPLACE INTO track_neighbors "
+                    "(track_path, neighbor_path, weight, edge_kind) "
+                    "VALUES (?, ?, ?, ?)",
+                    [(t, n, w, edge_kind) for (t, n, w) in clean],
+                )
+            await conn.commit()
+
+    async def get_neighbors(
+        self,
+        track_path: str,
+        k: int = 20,
+        edge_kind: str | None = None,
+    ) -> list[dict]:
+        """Returns up to `k` neighbours of `track_path`, joined with track
+        metadata. Pass edge_kind to restrict to one tier (acoustic / artist /
+        album); None returns the highest-weighted edges across all tiers."""
+        conn = await self.get_connection()
+        if edge_kind:
+            sql = '''
+                SELECT n.neighbor_path AS path, n.weight, n.edge_kind,
+                       t.title, ar.name AS artist, al.title AS album
+                FROM track_neighbors n
+                LEFT JOIN tracks  t  ON t.path     = n.neighbor_path
+                LEFT JOIN albums  al ON al.id      = t.album_id
+                LEFT JOIN artists ar ON ar.id      = al.artist_id
+                WHERE n.track_path = ? AND n.edge_kind = ?
+                ORDER BY n.weight DESC
+                LIMIT ?
+            '''
+            params: tuple = (track_path, edge_kind, k)
+        else:
+            sql = '''
+                SELECT n.neighbor_path AS path, n.weight, n.edge_kind,
+                       t.title, ar.name AS artist, al.title AS album
+                FROM track_neighbors n
+                LEFT JOIN tracks  t  ON t.path     = n.neighbor_path
+                LEFT JOIN albums  al ON al.id      = t.album_id
+                LEFT JOIN artists ar ON ar.id      = al.artist_id
+                WHERE n.track_path = ?
+                ORDER BY n.weight DESC
+                LIMIT ?
+            '''
+            params = (track_path, k)
+        async with conn.execute(sql, params) as cursor:
+            return [dict(r) for r in await cursor.fetchall()]
+
+    async def count_neighbors(self, edge_kind: str | None = None) -> int:
+        """Total edge count, optionally filtered by kind. Used to detect
+        whether the graph has been built yet."""
+        conn = await self.get_connection()
+        if edge_kind:
+            sql = "SELECT COUNT(*) FROM track_neighbors WHERE edge_kind = ?"
+            params: tuple = (edge_kind,)
+        else:
+            sql = "SELECT COUNT(*) FROM track_neighbors"
+            params = ()
+        async with conn.execute(sql, params) as cursor:
+            row = await cursor.fetchone()
+            return row[0] if row else 0
+
+    async def get_track_full(self, path: str) -> dict | None:
+        """Single-row lookup returning title/artist/album/image_url for a path.
+        Used by the assistant when it needs to enqueue or describe a track
+        and only has the path on hand."""
+        conn = await self.get_connection()
+        sql = '''
+            SELECT t.path, t.title, t.duration, t.format,
+                   ar.name AS artist, al.title AS album, al.year, al.genre
+            FROM tracks t
+            LEFT JOIN albums  al ON al.id     = t.album_id
+            LEFT JOIN artists ar ON ar.id     = al.artist_id
+            WHERE t.path = ?
+        '''
+        async with conn.execute(sql, (path,)) as cursor:
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+    async def search_tracks_simple(self, query: str, limit: int = 5) -> list[dict]:
+        """Lightweight title/artist/album LIKE search for the assistant. Falls
+        back to the FTS-aware `get_all_tracks` when available — but this
+        method's return shape is the same `path/title/artist/album` dict the
+        assistant uses everywhere, so callers don't need to remap."""
+        q = (query or "").strip()
+        if not q:
+            return []
+        conn = await self.get_connection()
+        like = f"%{q}%"
+        sql = '''
+            SELECT t.path, t.title, t.duration,
+                   ar.name AS artist, al.title AS album
+            FROM tracks t
+            LEFT JOIN albums  al ON al.id     = t.album_id
+            LEFT JOIN artists ar ON ar.id     = al.artist_id
+            WHERE t.title  LIKE ? COLLATE NOCASE
+               OR ar.name  LIKE ? COLLATE NOCASE
+               OR al.title LIKE ? COLLATE NOCASE
+            ORDER BY
+                CASE
+                    WHEN t.title  LIKE ? COLLATE NOCASE THEN 0
+                    WHEN ar.name  LIKE ? COLLATE NOCASE THEN 1
+                    ELSE 2
+                END,
+                t.added_date DESC
+            LIMIT ?
+        '''
+        async with conn.execute(sql, (like, like, like, like, like, limit)) as cursor:
+            return [dict(r) for r in await cursor.fetchall()]
+
     async def debug_populate_play_counts(self):
         """
         Randomly assigns play counts so the AutoPlaylist UI has data to work
-        with on a fresh install. Does NOT synthesise audio features any more —
-        the random values were poisoning the MCL clusters (every "vibe island"
+        with on a fresh install. Does NOT synthesise audio features any more;
+        the random values were poisoning the MCL clusters (every playlist
         was just a slice of uniform noise). The DSP analyser populates real
         features lazily for the hot set the first time a playlist is generated.
         """

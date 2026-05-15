@@ -1,12 +1,15 @@
-# Auto-Playlist Engine: Technical Deep-Dive
+# Auto-Playlist Engine: Playlist Creation
+
+> [!CAUTION]
+> **EXPERIMENTAL FEATURE**; the metadata-blending clustering pipeline is currently in active development. While it significantly improves genre conciseness, it may produce unexpected clusters on libraries with highly inconsistent tagging.
 
 > [!TIP]
-> **Bioinformatics Origins** — This engine was transplanted from bioinformatics research. Instead of clustering gene-expression profiles, we cluster *songs* in a 42-dimensional feature space using Markov Clustering (MCL). The engine identifies tracks that flow toward the same attractor as your seed, sequencing them into a smooth listening arc.
+> **Bioinformatics Origins**; this engine was transplanted from bioinformatics research. Instead of clustering gene-expression profiles, we cluster *songs* in a 43-dimensional acoustic space, augmented by string-similarity metadata, using Markov Clustering (MCL). The engine identifies tracks that flow toward the same attractor as your seed, sequencing them into a smooth listening arc.
 
-## The DSP Pipeline
+## The Hybrid Pipeline
 
 ```text
-audio file ──► MediaCodec / ffmpeg ──► mono int16 PCM @ 22050 Hz  (middle 90 s)
+audio file ──► MediaCodec (Android) ──► mono int16 PCM @ 22050 Hz (90s)
                                                   │
                                                   ▼
                                        Pure-numpy DSP analyser
@@ -23,14 +26,19 @@ audio file ──► MediaCodec / ffmpeg ──► mono int16 PCM @ 22050 Hz  (m
                                                                               MFCC mean   MFCC std   chroma
                                                                                 (13)        (13)      (12)
                                                                                                        ▲
-                                                                                FFT bins → pitch class ┘
-                                                                                  (mod 12, A=440 ref)
+                                                  │                             FFT bins → pitch class ┘
+                                                  ▼
+                       43-D feature vector per track; z-scored, axis-weighted (sound-profile bias)
                                                   │
                                                   ▼
-                       42-D feature vector per track  ── z-scored, axis-weighted (sound-profile bias)
+                                       Acoustic Similarity Graph (Gaussian Kernel)
                                                   │
                                                   ▼
-                                   Gaussian-kernel similarity graph
+    Artist/Album Tags  ──► Token-Set Jaccard ──► Metadata Similarity Matrix
+                                                  │
+                                                  ▼
+                                       BLENDED SIMILARITY GRAPH
+                       (0.8 × Acoustic + 0.2 × Metadata @ 50/50 Artist/Album)
                                                   │
                                                   ▼
                                    Markov Clustering (MCL: expand → inflate → prune)
@@ -39,12 +47,14 @@ audio file ──► MediaCodec / ffmpeg ──► mono int16 PCM @ 22050 Hz  (m
                              Seed's attractor row → cluster of similar tracks
                                                   │
                                                   ▼
-                       Resize to user-chosen length, sequence by greedy nearest-neighbour
+                        Resize to user-chosen length, sequence by greedy nearest-neighbour
 ```
 
 ## Technical Implementation
 
-- **Pure-numpy DSP** — No `librosa`, no `scipy`. Just pure `numpy` math. This allows the engine to run on Android without complex native C++ wheels.
-- **Timbre (MFCC mean & std)** — Captures both the average "color" of a track and how much that color shifts over time (discriminating a static drone from a swelling pad).
-- **Harmonic profile (Chroma)** — A 12-dimensional signature of which musical notes are present, separating tracks in different keys even if they share the same timbre.
-- **MCL Clustering** — Alternates expansion and inflation until the similarity matrix converges to a set of attractors. This produces "genre-faithful" clusters based on sound profile rather than metadata.
+- **Pure-numpy DSP**; no `librosa`, no `scipy`. Just pure `numpy` math. This allows the engine to run on Android without complex native C++ wheels.
+- **Hybrid Similarity Blending**; the engine computes an independent metadata similarity matrix alongside the acoustic Gaussian kernel. This uses a **Token-Set Jaccard Similarity** algorithm which is robust to metadata inconsistencies between download sources (e.g., "Daft Punk ft. Pharrell" vs "Daft Punk").
+- **Weighted Blending**; by default, the metadata signal contributes 20% to the final similarity graph. This ensures tracks with matching artist/album names are encouraged to co-cluster without allowing metadata to override acoustic similarity entirely.
+- **Timbre & Dynamics**; captures both the average "color" of a track (MFCC mean) and its timbral variance (MFCC std), discriminating between static and dynamic textures.
+- **Harmonic Profile (Chroma)**; a 12-dimensional signature of musical notes, separating tracks by key and harmonic content.
+- **MCL Clustering**; a stochastic process that alternates expansion (simulating random walks) and inflation (sharpening probabilities) until the matrix converges to a set of attractors.

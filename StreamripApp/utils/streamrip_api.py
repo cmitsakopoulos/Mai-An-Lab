@@ -306,6 +306,24 @@ async def download(url, download_dir, progress_callback=None, quality=None, stop
                 if cover_path and os.path.exists(cover_path):
                     os.remove(cover_path)
 
+                # Make file globally visible and editable to other Android apps
+                if get_platform_name() == 'android':
+                    def _fix_perms():
+                        try:
+                            os.chmod(dest_path, 0o666)
+                            # Fix parent directory permissions if we created it
+                            parent = os.path.dirname(dest_path)
+                            if parent and parent != "/":
+                                os.chmod(parent, 0o777)
+                            import subprocess
+                            # Try legacy broadcast scanner
+                            subprocess.run(["am", "broadcast", "-a", "android.intent.action.MEDIA_SCANNER_SCAN_FILE", "-d", f"file://{dest_path}"], capture_output=True)
+                            # Try Android 11+ content provider insertion to force a scan
+                            subprocess.run(["content", "insert", "--uri", "content://media/external/file", "--bind", f"_data:s:{dest_path}"], capture_output=True)
+                        except Exception:
+                            pass
+                    await asyncio.to_thread(_fix_perms)
+
             except Exception as e:
                 logger.error(f"Failed to download track {track_id}: {e}")
                 

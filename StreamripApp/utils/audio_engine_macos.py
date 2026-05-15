@@ -48,6 +48,11 @@ class AudioEngine:
     def setup(self, page: ft.Page):
         self._page = page
 
+    @property
+    def audio_service(self):
+        """macOS fallback: No native MethodChannel bridge available."""
+        return None
+
     def bind(self, **kwargs):
         with self._obs_lock:
             for name, fn in kwargs.items():
@@ -264,10 +269,15 @@ class AudioEngine:
         if not self.queue:
             self.set_queue([track])
             return
-        if len(self.queue) >= 25:
-            return
         insert_at = min(self.current_index + 1, len(self.queue))
         self.queue.insert(insert_at, track)
+        self.dispatch("on_queue_mutated")
+
+    def queue_last(self, track: dict):
+        if not self.queue:
+            self.set_queue([track])
+            return
+        self.queue.append(track)
         self.dispatch("on_queue_mutated")
 
     def play_track_at(self, index: int):

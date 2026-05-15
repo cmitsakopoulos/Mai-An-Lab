@@ -1,6 +1,7 @@
 package com.flet.flet_audio_service
 
 import android.content.Context
+import android.media.AudioFormat
 import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
@@ -22,12 +23,12 @@ class FletAudioServicePlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         private const val TAG = "FletAudioServiceDsp"
         private const val CHANNEL = "com.flet.flet_audio_service/decode"
         // Target rate for the analyser. Keeps tempo/timbre features intact while
-        // cutting PCM size ~2x vs 44.1k. 22050 Hz is also the librosa default,
+        // cutting PCM size: 2x vs 44.1k. 22050 Hz is also the librosa default,
         // so any reference checks line up.
         private const val TARGET_SAMPLE_RATE = 22050
         // Decode at most this many seconds from the middle of the track.
         // 60s was empirically too short on tracks with sparse onsets (slow
-        // ambient, stripped-down acoustic) — autocorrelation tempo estimates
+        // ambient, stripped-down acoustic); autocorrelation tempo estimates
         // got noisy and chroma/MFCC stats jittered across runs. 90s is the
         // sweet spot: tempo and timbre stabilise, decode cost stays bounded
         // (typically 1.5–4 s per track on Android hardware codecs).
@@ -69,7 +70,7 @@ class FletAudioServicePlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                 // MethodChannel results must be returned on the platform thread;
                 // post via the channel's binaryMessenger handler. In practice
                 // Flutter's engine routes the reply correctly from a background
-                // thread for primitive maps — verified across Flutter ≥ 3.0.
+                // thread for primitive maps; verified across Flutter ≥ 3.0.
                 result.success(out)
             } catch (t: Throwable) {
                 Log.e(TAG, "decodePcm failed for $path", t)
@@ -85,7 +86,7 @@ class FletAudioServicePlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
      *
      * Resampling is a plain linear interpolation. That's good enough for the
      * analysis features we extract (RMS, spectral centroid, onset autocorr,
-     * MFCC mean) — none of them are sensitive to the small aliasing artefacts
+     * MFCC mean); none of them are sensitive to the small aliasing artefacts
      * a non-anti-aliased decimator introduces. If we ever add pitch detection
      * we should switch to a proper polyphase filter.
      */
@@ -112,6 +113,11 @@ class FletAudioServicePlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         val durationUs = if (format.containsKey(MediaFormat.KEY_DURATION))
             format.getLong(MediaFormat.KEY_DURATION) else 0L
 
+        Log.d(TAG, "decodePcm: $srcPath ($mime, ${srcSampleRate}Hz, $srcChannels ch, ${durationUs/1_000_000}s)")
+
+        // Force 16-bit PCM output.
+        format.setInteger(MediaFormat.KEY_PCM_ENCODING, AudioFormat.ENCODING_PCM_16BIT)
+
         // Seek to the middle minus MAX_SECONDS/2, clamped to 0. Picking the
         // middle skips intros/outros that are often silent or atypical.
         val maxUs = MAX_SECONDS * 1_000_000L
@@ -119,11 +125,12 @@ class FletAudioServicePlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             (durationUs - maxUs) / 2 else 0L
         val endUs = if (durationUs > maxUs) startUs + maxUs else Long.MAX_VALUE
         if (startUs > 0) {
+            Log.d(TAG, "decodePcm: seeking to ${startUs/1_000_000}s")
             extractor.seekTo(startUs, MediaExtractor.SEEK_TO_CLOSEST_SYNC)
         }
 
         // MediaCodec creation can transiently fail when the foreground
-        // player still holds a hardware codec instance — Android logs
+        // player still holds a hardware codec instance; Android logs
         // `Failed to query component interface for required system
         // resources: 6`. Retry with a small back-off so a brief overlap
         // doesn't kill the whole DSP run. Python pauses playback before
@@ -138,6 +145,7 @@ class FletAudioServicePlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                     try {
                         c.configure(format, null, null, 0)
                         c.start()
+                        Log.d(TAG, "decodePcm: codec started on attempt $attempt")
                         return@run c
                     } catch (t: Throwable) {
                         try { c.release() } catch (_: Throwable) {}
@@ -145,6 +153,7 @@ class FletAudioServicePlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                     }
                 } catch (t: Throwable) {
                     lastErr = t
+                    Log.w(TAG, "decodePcm: codec init attempt $attempt failed: ${t.message}")
                     if (attempt < 3) {
                         // 250 ms, 500 ms, 1000 ms back-off.
                         Thread.sleep(250L * (1L shl attempt))

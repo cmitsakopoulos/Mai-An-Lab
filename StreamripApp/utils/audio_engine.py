@@ -1,12 +1,12 @@
 """
-StreamripApp Audio Engine — flet_audio backend (audioplayers / cross-platform).
+StreamripApp Audio Engine; flet_audio backend (audioplayers; Android native).
 
 A single Audio service is created on first play and kept alive for the session.
 Subsequent tracks update Audio.src in-place; AudioService.update() on the Dart
 side detects the change and calls setSourceDeviceFile() on the still-active
-AudioPlayer, then fires the 'loaded' event.  This avoids the timing window
+AudioPlayer, then fires the 'loaded' event. This avoids the timing window
 ("Calling resume method of inexistent control") that occurs when a new
-AudioService is created per track — the invokeMethod listener registered once
+AudioService is created per track; the invokeMethod listener registered once
 in AudioService.init() stays valid for the entire session.
 
 Creating Audio without a src is still forbidden: AudioService.update() throws
@@ -73,14 +73,14 @@ class AudioEngine:
 
     def setup(self, page: ft.Page):
         """Call from Flet main() after page is ready. Safe to call again on
-        session re-entry — the existing AudioServiceControl is bound to the
+        session re-entry; the existing AudioServiceControl is bound to the
         previous page's session, which becomes invalid when the OS suspends
         the app long enough. We detect a new page object and rebind."""
         logger.warning("ADB_AUDIO: setup() called")
         if self._page is page and self._audio is not None:
             return  # already set up on this page
         if self._audio is not None and self._page is not page:
-            logger.warning("ADB_AUDIO: page changed — discarding stale audio control")
+            logger.warning("ADB_AUDIO: page changed; discarding stale audio control")
             self._audio = None
             self._is_loaded = False
         self._page = page
@@ -179,11 +179,11 @@ class AudioEngine:
             if autoplay:
                 await self._audio.play()
         except RuntimeError as exc:
-            logger.error("ADB_AUDIO: _push_queue_native failed — %s", exc)
+            logger.error("ADB_AUDIO: _push_queue_native failed; %s", exc)
 
     async def _load_src(self, path, title="", artist="", album="", artwork="",
                         autoplay: bool = True):
-        """Compatibility shim — single-track load via the playlist machinery.
+        """Compatibility shim; single-track load via the playlist machinery.
         Used by restore_queue() to seek into a restored playlist. The
         autoplay flag lets restore_queue prepare the source without
         starting playback so the user can press play themselves."""
@@ -273,18 +273,12 @@ class AudioEngine:
         self._set("current_art", art)
 
     def _on_position_change(self, e):
-        # Python-side guard: ignore clumped events faster than 150ms
-        now = time.time()
-        if not hasattr(self, "_last_pos_received"):
-            self._last_pos_received = 0
-        if now - self._last_pos_received < 0.95:
-            return
-        self._last_pos_received = now
-
+        # Dart already throttles position emits (see flet_audio_service.dart);
+        # no second throttle needed here. Quantise to integer seconds so _set's
+        # dirty-check skips dispatch when the slider would not visibly move.
         try:
-            # Position is received as int ms
             pos_ms = int(e.data)
-            self._set("position", pos_ms / 1000.0)
+            self._set("position", float(pos_ms // 1000))
         except:
             pass
 
@@ -413,7 +407,7 @@ class AudioEngine:
                     return
 
                 if not self._is_loaded:
-                    # Source isn't ready yet — store as the queued seek so
+                    # Source isn't ready yet; store as the queued seek so
                     # _on_state_change(processing_state=ready) will apply it.
                     # Now that setPlaylist preloads on the Dart side this
                     # path is rare, but keep it for cold-start robustness.
@@ -470,14 +464,19 @@ class AudioEngine:
         if not self.queue:
             self.set_queue([track])
             return
-        if len(self.queue) >= 25:
-            return
         insert_at = min(self.current_index + 1, len(self.queue))
         self.queue.insert(insert_at, track)
         self.dispatch("on_queue_mutated")
-        # Re-push the playlist without restarting playback. autoplay=False keeps
-        # the current track playing while the new item becomes part of the
-        # native queue.
+        if self._page:
+            self._arm_queue_gate()
+            self._page.run_task(self._push_queue_native, self.current_index, False)
+
+    def queue_last(self, track: dict):
+        if not self.queue:
+            self.set_queue([track])
+            return
+        self.queue.append(track)
+        self.dispatch("on_queue_mutated")
         if self._page:
             self._arm_queue_gate()
             self._page.run_task(self._push_queue_native, self.current_index, False)
@@ -546,7 +545,7 @@ class AudioEngine:
         # mini-player and now-playing screen render where the user left
         # off, instead of snapping from 0:00 to position once the source
         # finishes loading. Duration in particular is needed to give the
-        # slider a sane max value — without it any pre-load scrub computes
+        # slider a sane max value; without it any pre-load scrub computes
         # a target relative to 0 and the seek-on-ready handler can fling
         # the player past end-of-track, triggering an auto-advance.
         self._set("position",       max(0.0, float(position)))
@@ -559,7 +558,7 @@ class AudioEngine:
 
         if path and os.path.exists(path):
             self._restore_position = position
-            # Generous gate on restore — cold-start codec init + source load
+            # Generous gate on restore; cold-start codec init + source load
             # on the first track of a new session routinely runs longer than
             # the standard 1.5s gate. If the gate expires before Dart's
             # first state event, an interim null/zero queue_index could flip
@@ -569,7 +568,7 @@ class AudioEngine:
 
             async def _restore_async():
                 try:
-                    # autoplay=False — we want the previous UI revived, not
+                    # autoplay=False; we want the previous UI revived, not
                     # an unsolicited resume. The source still gets prepared
                     # so the saved-position seek can apply on `ready`, and
                     # the user's first tap on play resumes from that offset.
