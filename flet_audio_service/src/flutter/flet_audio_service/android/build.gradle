@@ -47,14 +47,14 @@ android {
 }
 
 // audio_service requires the host activity to use audio_service's CACHED
-// FlutterEngine — not just any FlutterFragmentActivity. The audio_service
+// FlutterEngine; not just any FlutterFragmentActivity. The audio_service
 // plugin ships an `AudioServiceFragmentActivity` helper that overrides
 // `provideFlutterEngine` to return the cached engine. Without this, the
 // plugin throws "The Activity class declared in your AndroidManifest.xml is
 // wrong or has not provided the correct FlutterEngine."
 //
 // Flet's template generates a vanilla MainActivity extending FlutterActivity
-// and there's no Flet config to customize it — so we patch the file at build
+// and there's no Flet config to customize it; so we patch the file at build
 // time before Kotlin compilation. Idempotent: skips if already patched.
 project.gradle.projectsEvaluated {
     rootProject.allprojects.each { proj ->
@@ -96,7 +96,7 @@ project.gradle.projectsEvaluated {
                     // which makes search-bar containers (and any container with
                     // `animate=Animation`) tween visibly. adjustNothing keeps
                     // the layout stable and lets the keyboard overlay content
-                    // — fine because the search bar is at the top of the page
+                    // ; fine because the search bar is at the top of the page
                     // and never hidden by the keyboard.
                     fileTree(proj.projectDir) {
                         include '**/AndroidManifest.xml'

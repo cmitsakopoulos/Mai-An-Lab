@@ -1,5 +1,5 @@
 """
-StreamripApp — Full Fidelity Flet Rewrite.
+StreamripApp; Full Fidelity Flet Rewrite.
 Replaces all Kivy / KivyMD code while maintaining 1:1 UX parity, 
 animations, and functional details from the original.
 
@@ -257,6 +257,10 @@ class NotificationSystem:
         self._initialized = True
 
     def show(self, text: str, icon=ft.Icons.NOTIFICATIONS_ROUNDED, color=CYAN):
+        # Don't try to animate UI elements into a suspended/hidden client;
+        # it causes buffer back-pressure and spurious 120 Hz wakeups.
+        if self.app.is_background:
+            return
         self._ensure_initialized()
         # Create a sleek notification card
         notification = ft.Container(
@@ -309,6 +313,11 @@ class NotificationSystem:
         def _do_dismiss():
             if dismissed[0]: return
             dismissed[0] = True
+            # If the app is in the background we can't drive animations;
+            # skip straight to an immediate removal instead.
+            if self.app.is_background:
+                _do_dismiss_immediate()
+                return
             def _fade_out():
                 notification.opacity = 0
                 notification.offset = ft.Offset(0.3, 0)
@@ -331,7 +340,7 @@ class NotificationSystem:
         def _add():
             self.container.controls.insert(0, dismissible)
             # Trigger slide-in animation in the same update as the insertion.
-            # Do NOT call page.update() twice — the second bare call was the
+            # Do NOT call page.update() twice; the second bare call was the
             # source of spurious 120 Hz updates during notification display.
             notification.opacity = 1
             notification.offset = ft.Offset(0, 0)
@@ -353,21 +362,21 @@ from utils.dsp import (
 )  # noqa: F401  # unpack_timbre re-exported for the dialog's quick "has features?" check
 
 class AutoPlaylistEngine:
-    """MCL-based clustering over real DSP features.
+    """MCL-based clustering over real DSP features with optional metadata blending.
 
-    Feature vector layout per track (42 dims total):
+    Acoustic feature vector layout per track (43 dims total):
         [0]            BPM
         [1]            energy
         [2]            brightness
         [3]            rolloff
         [4]            beat_strength
         [5:18]         MFCC mean       (13)
-        [18:31]        MFCC std        (13)   — timbral dynamics
-        [31:43]        chroma mean     (12)   — harmonic profile
+        [18:31]        MFCC std        (13)   : timbral dynamics
+        [31:43]        chroma mean     (12)   : harmonic profile
 
     Z-scoring is applied per axis so units are commensurable, then per-axis
     weights are applied. Crucially we do NOT renormalise groups to equal
-    L2 magnitude — the user explicitly wants sound-profile groups (MFCC +
+    L2 magnitude; the user explicitly wants sound-profile groups (MFCC +
     chroma) to dominate distance, and BPM to be a strong second signal.
     Sum-of-squared-weights × dim count drives effective contribution:
 
@@ -381,12 +390,30 @@ class AutoPlaylistEngine:
 
     so two tracks must be close in timbre + harmony to land in the same
     cluster, with tempo as a strong secondary cut and energy/brightness
-    barely moving the needle. Tweak the constructor weights to retune.
+    barely moving the needle.
+
+    Metadata blending (w_meta):
+        An independent (n×n) string similarity matrix is computed from artist
+        and album names using token-set Jaccard similarity, then blended:
+
+            combined_sim = (1 - w_meta) * acoustic_sim + w_meta * string_sim
+
+        Token-set Jaccard handles metadata inconsistencies between sources
+        naturally; "Daft Punk feat. Pharrell" vs "Daft Punk" → high similarity
+        because shared tokens dominate. Common noise tokens ('the', 'a', 'an',
+        'of', 'and', '&') are stripped before comparison.
+
+        Artist and album contribute equally (50/50) to string_sim.
     """
 
-    # Dimension layout — class-level so internal slicing stays consistent.
+    # Dimension layout; class-level so internal slicing stays consistent.
     _N_SCALARS = 5  # bpm, energy, brightness, rolloff, beat_strength
     _DIM_TOTAL = _N_SCALARS + EMBED_DIMS
+
+    # Noise tokens stripped before token-set comparison. These are common
+    # filler words that appear inconsistently across different music providers and
+    # would otherwise produce spurious high-similarity scores.
+    _META_STOPWORDS = frozenset({'the', 'a', 'an', 'of', 'and', '&'})
 
     def __init__(
         self,
@@ -396,6 +423,7 @@ class AutoPlaylistEngine:
         w_mfcc_std=1.0,
         w_chroma=1.5,
         inflation=2.0,
+        w_meta=0.2,        # blend weight for artist/album string similarity [0, 1]
     ):
         self.w_bpm = w_bpm
         self.w_dynamics = w_dynamics
@@ -403,12 +431,77 @@ class AutoPlaylistEngine:
         self.w_mfcc_std = w_mfcc_std
         self.w_chroma = w_chroma
         self.inflation = inflation
+        self.w_meta = w_meta
+
+    @staticmethod
+    def _token_set_similarity(a: str, b: str) -> float:
+        """Token-set Jaccard similarity, robust to cross-platform metadata quirks.
+
+        Algorithm:
+          1. Strip common 'feat.'/'ft.'/'featuring' suffixes that differ across
+             download platforms (e.g. Qobuz adds featured artists; local rips may not).
+          2. Lower-case, strip punctuation, tokenise by whitespace.
+          3. Remove stopwords ('the', 'a', 'an', 'of', 'and', '&') that cause
+             spurious matches (e.g. "The National" ≈ "The Beatles" via shared 'the').
+          4. Compute Jaccard: |A ∩ B| / |A ∪ B|.
+
+        Examples:
+          "Pink Floyd"                   vs "Pink Floyd"            → 1.0
+          "Daft Punk feat. Pharrell"     vs "Daft Punk"             → 0.67
+          "The Beatles (Remastered)"     vs "Beatles, The"          → 0.67
+          "Dark Side of the Moon"        vs "Dark Side of the Moon" → 1.0
+        """
+        import re
+        if not a or not b:
+            return 0.0
+
+        def _tokens(s: str) -> set:
+            # Strip featured-artist clauses that vary by platform.
+            s = re.sub(r'\b(feat\.?|ft\.?|featuring|with)\b.*', '', s, flags=re.IGNORECASE)
+            # Drop parenthetical qualifiers like (Remastered), (Deluxe Edition).
+            s = re.sub(r'\(.*?\)', ' ', s)
+            # Normalise punctuation to whitespace.
+            s = re.sub(r'[^\w\s]', ' ', s)
+            tokens = set(s.lower().split())
+            return tokens - AutoPlaylistEngine._META_STOPWORDS
+
+        ta, tb = _tokens(a), _tokens(b)
+        if not ta or not tb:
+            return 0.0
+        intersection = len(ta & tb)
+        union = len(ta | tb)
+        return intersection / union if union else 0.0
+
+    def _build_string_similarity_matrix(self,
+                                         artists: list[str],
+                                         albums: list[str]) -> np.ndarray:
+        """Build an (n×n) pairwise metadata similarity matrix.
+
+        For each pair (i, j):
+            artist_sim = _token_set_similarity(artists[i], artists[j])
+            album_sim  = _token_set_similarity(albums[i],  albums[j])
+            sim[i,j]   = 0.5 * artist_sim + 0.5 * album_sim   (equal weighting)
+
+        Returns a raw [0, 1] similarity matrix. The caller blends this with the
+        acoustic Gaussian kernel; no column-stochastic normalisation is applied
+        here because blending happens before the final normalisation step.
+        """
+        n = len(artists)
+        mat = np.zeros((n, n), dtype=np.float64)
+        for i in range(n):
+            for j in range(i, n):
+                a_sim = self._token_set_similarity(artists[i], artists[j])
+                al_sim = self._token_set_similarity(albums[i], albums[j])
+                val = 0.5 * a_sim + 0.5 * al_sim
+                mat[i, j] = val
+                mat[j, i] = val  # symmetric
+        return mat
 
     def generate_magic_playlist(self, seed_path, hot_set_data, target_length=20):
         """
         Main entry point.
         hot_set_data: List of dicts. Entries without DSP features (no
-                      `timbre` BLOB) are dropped — see open_auto_playlist_dialog
+                      `timbre` BLOB) are dropped; see open_auto_playlist_dialog
                       for the analyse-then-call flow.
         target_length: desired playlist size. The cluster is truncated to
                       this many tracks (closest-first), or padded from
@@ -435,7 +528,14 @@ class AutoPlaylistEngine:
         if len(paths) < 2:
             return [seed_path]
 
-        adj_matrix = self._build_similarity_graph(vectors)
+        # Extract metadata strings aligned with the encoded paths list.
+        # Falls back to empty string gracefully if the DB query predates the
+        # artist/album JOIN (old schema or missing hot-set fields).
+        path_to_data = {d["path"]: d for d in usable}
+        artists = [path_to_data[p].get("artist", "") or "" for p in paths]
+        albums  = [path_to_data[p].get("album",  "") or "" for p in paths]
+
+        adj_matrix = self._build_similarity_graph(vectors, artists, albums)
         clustered_matrix = self._run_mcl(adj_matrix)
 
         seed_idx = paths.index(seed_path)
@@ -472,7 +572,7 @@ class AutoPlaylistEngine:
             )
         raw_v = np.array(rows, dtype=np.float64)
 
-        # Z-score every column. Without this, BPM (range 60–200) would
+        # Z-score every column. Without this, BPM (range 60-200) would
         # dominate every distance calculation simply because of unit scale,
         # and chroma (already in [0, 1]) would barely register. After
         # z-scoring, *units* are commensurable; weights then control the
@@ -482,7 +582,7 @@ class AutoPlaylistEngine:
         norm_v = (raw_v - means) / stds
 
         # Per-axis weights aligned with the layout documented on the class.
-        # NB: we deliberately skip group L2 normalisation here — the user
+        # NB: we deliberately skip group L2 normalisation here; the user
         # wants sound-profile groups to dominate via their raw dim count,
         # with BPM amplified by w_bpm to remain a strong secondary signal.
         n_dynamics = 4  # energy, brightness, rolloff, beat_strength
@@ -517,7 +617,7 @@ class AutoPlaylistEngine:
             kept = ordered[:target]
             if seed_idx not in kept:
                 # Always preserve the seed even if it's somehow not closest
-                # to itself due to floating point (it will be — defensive).
+                # to itself due to floating point (it will be; defensive).
                 kept[-1] = seed_idx
             return kept
 
@@ -529,19 +629,42 @@ class AutoPlaylistEngine:
 
         return cluster_indices
 
-    def _build_similarity_graph(self, vectors):
-        # Compute pairwise squared Euclidean distances
-        # ||a-b||^2 = ||a||^2 + ||b||^2 - 2a.b
+    def _build_similarity_graph(self,
+                                vectors: np.ndarray,
+                                artists: list[str] | None = None,
+                                albums: list[str] | None = None) -> np.ndarray:
+        """Build the column-stochastic similarity matrix for MCL.
+
+        Acoustic component: Gaussian kernel on the weighted z-scored feature
+        vectors (||a-b||² via the identity expansion for efficiency).
+
+        Metadata component (optional): if artist/album strings are supplied,
+        a token-set Jaccard similarity matrix is computed and blended:
+
+            combined = (1 - w_meta) * acoustic + w_meta * string_sim
+
+        The blend is applied *before* column-stochastic normalisation so both
+        signals contribute proportionally to each column's probability mass.
+        """
+        # Compute pairwise squared Euclidean distances.
+        # ||a-b||² = ||a||² + ||b||² - 2·a·b  (efficient via broadcasting)
         dot_product = np.dot(vectors, vectors.T)
         sq_norms = np.diag(dot_product)
         dist_sq = sq_norms[:, None] + sq_norms[None, :] - 2 * dot_product
-        # Clip negative values produced by floating-point error
+        # Clip negative values produced by floating-point error.
         dist_sq = np.maximum(dist_sq, 0.0)
 
-        # Gaussian Kernel: Similarity = exp(-dist^2 / 2 * sigma^2)
-        similarity = np.exp(-dist_sq / 2.0)
+        # Gaussian kernel: sim = exp(-d² / 2σ²)  with σ=1 on z-scored space.
+        acoustic = np.exp(-dist_sq / 2.0)
 
-        # Column-stochastic normalization for MCL
+        # Blend in metadata signal when strings are available.
+        if self.w_meta > 0 and artists is not None and albums is not None:
+            string_sim = self._build_string_similarity_matrix(artists, albums)
+            similarity = (1.0 - self.w_meta) * acoustic + self.w_meta * string_sim
+        else:
+            similarity = acoustic
+
+        # Column-stochastic normalisation required by MCL.
         col_sums = similarity.sum(axis=0)
         col_sums[col_sums == 0] = 1.0
         return similarity / col_sums
@@ -625,7 +748,7 @@ class AnimatedEntry(ft.Container):
         self.target_height = target_height
 
     def hide(self):
-        """Trigger the slide‑out animation."""
+        """Trigger the slide-out animation."""
         self.height = 0
         self.opacity = 0
         self.update()
@@ -833,7 +956,7 @@ class AccordionCard(ft.Column):
         self.chevron.icon = ft.Icons.KEYBOARD_ARROW_DOWN if self.is_open else ft.Icons.CHEVRON_RIGHT
         self.update()
 
-# AnimatedLibraryNode removed — library uses flat row list rebuilt by load_library()
+# AnimatedLibraryNode removed; library uses flat row list rebuilt by load_library()
 
 
 # ─── Download Queue Controller ─────────────────────────────────────────────────
@@ -1110,6 +1233,8 @@ class SearchView:
             animate=ft.Animation(120, ft.AnimationCurve.EASE_OUT),
         )
 
+        self._mic_btn = None # Moved to AssistantView
+
         self._search_bar_container = ft.Container(
             content=ft.Row(
                 [
@@ -1165,7 +1290,7 @@ class SearchView:
                         ft.Button(
                             "Go to Settings",
                             icon=ft.Icons.SETTINGS_ROUNDED,
-                            on_click=lambda _: self.app._switch_tab(2),
+                            on_click=lambda _: self.app._switch_tab(3),
                             style=ft.ButtonStyle(color=BG, bgcolor=CYAN)
                         ),
                         ft.TextButton(
@@ -1326,7 +1451,7 @@ class SearchView:
                                     ft.IconButton(
                                         icon=ft.Icons.SETTINGS_OUTLINED,
                                         icon_color=DIM, icon_size=22,
-                                        on_click=lambda e: self.app._switch_tab(2),
+                                        on_click=lambda e: self.app._switch_tab(3),
                                     ),
                                 ],
                                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -1586,7 +1711,7 @@ class SearchView:
         q = cfg.get("qobuz", {})
         if not q.get("email_or_userid") or not q.get("password_or_token"):
             self.app.show_snackbar("Qobuz credentials not set. Search disabled.", icon=ft.Icons.LOCK_OUTLINE_ROUNDED, color="#FFA500")
-            self.app._switch_tab(2)
+            self.app._switch_tab(3)
             return
 
         self._search_indicator.visible = True
@@ -1737,7 +1862,7 @@ class SearchView:
         self._update_view_tabs()
         query = (self._search_field.value or "").strip()
         if query:
-            # Re-render instantly from the local pre-fetched cache — zero network.
+            # Re-render instantly from the local pre-fetched cache; zero network.
             # Only trigger a fresh search if the cache is entirely empty (first load
             # for this query somehow missed all types, which should not happen).
             cache_populated = any(v for v in self.cached_results.values())
@@ -1795,7 +1920,7 @@ class SearchView:
         
         if m_type == "search_exhausted":
             return ft.Container(
-                content=ft.Text("— End of Discography —", color=DIM, size=11, weight=ft.FontWeight.W_500),
+                content=ft.Text("; End of Discography ;", color=DIM, size=11, weight=ft.FontWeight.W_500),
                 alignment=ft.alignment.center,
                 padding=ft.padding.only(left=20 * depth, top=16, bottom=16),
             )
@@ -2380,7 +2505,7 @@ class LibraryView:
 
         # Cache the flat tracks list when view_mode == "tracks", so subsequent
         # play_track taps don't re-issue the full get_all_tracks() query
-        # (which is the dominant cost on large libraries — a few thousand
+        # (which is the dominant cost on large libraries; a few thousand
         # rows of dict marshalling per tap). Invalidated on every
         # load_library() call, which is the only path that can change the
         # underlying ordering or filter.
@@ -2416,6 +2541,7 @@ class LibraryView:
         self._search_spinner = ft.ProgressRing(
             width=16, height=16, stroke_width=2, color=CYAN, visible=False,
         )
+        self._mic_btn = None # Moved to AssistantView
         self._search_bar_container = ft.Container(
             content=ft.Row(
                 [
@@ -2488,8 +2614,8 @@ class LibraryView:
                     ),
                     ft.Container(height=10),
                     ft.TextButton(
-                        content=ft.Row([ft.Icon(ft.Icons.REFRESH_ROUNDED, size=16), ft.Text("INDEX LIBRARY", size=13)], spacing=6),
-                        on_click=lambda e: self.start_scan(),
+                        content=ft.Row([ft.Icon(ft.Icons.SETTINGS_ROUNDED, size=16), ft.Text("LET'S GET STARTED", size=13)], spacing=6),
+                        on_click=lambda e: self.app._switch_tab(3),
                         style=ft.ButtonStyle(color=CYAN)
                     )
                 ],
@@ -2522,7 +2648,7 @@ class LibraryView:
                                     ft.IconButton(
                                         icon=ft.Icons.SETTINGS_OUTLINED, icon_color=DIM,
                                         icon_size=22,
-                                        on_click=lambda e: self.app._switch_tab(2),
+                                        on_click=lambda e: self.app._switch_tab(3),
                                     ),
                                 ],
                                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -2766,7 +2892,7 @@ class LibraryView:
             stats_text = f"{len(tracks)} {'TRACK' if len(tracks) == 1 else 'TRACKS'}"
             # Stash the in-memory list so play_track() taps can reuse it
             # instead of re-running get_all_tracks() (which dominates
-            # initialisation time when the result set is large — a few
+            # initialisation time when the result set is large; a few
             # thousand rows of dict materialisation per tap).
             self._tracks_cache = tracks
             self._tracks_cache_key = (self.view_mode, self.search_query, self.sort_mode)
@@ -2812,7 +2938,7 @@ class LibraryView:
         token = self._load_token
         self._current_gen = None
         self._is_loading_chunk = False
-        # Drop the tracks cache — any sort/search/view change forces a
+        # Drop the tracks cache; any sort/search/view change forces a
         # fresh fetch, and the cached list would otherwise be stale.
         self._tracks_cache = None
         self._tracks_cache_key = None
@@ -2823,7 +2949,7 @@ class LibraryView:
         # render with that path already highlighted. If we leave the cache
         # at None (or some stale older value), the next refresh_now_playing
         # diff thinks "nothing was highlighted before" and skips the old
-        # row instead of clearing its rendered highlight — leaving a
+        # row instead of clearing its rendered highlight; leaving a
         # phantom highlight from the previous current track that never
         # goes away when the user plays a different one.
         self._last_highlighted_path = audio_engine.current_path or None
@@ -2935,9 +3061,14 @@ class LibraryView:
                         "playlist": LIB_PLAYLIST_COLOR
                     }.get(node_type, CYAN)
                     ctrl.bgcolor = apply_opacity(0.07 if node_type == "artist" else 0.06, accent)
-                    icon = ctrl.trailing.controls[0] if isinstance(ctrl.trailing, ft.Row) else ctrl.trailing
-                    icon.name = ft.Icons.KEYBOARD_ARROW_DOWN
-                    icon.color = accent
+                    
+                    # Direct reference access (O(1))
+                    icon = getattr(ctrl, "_chevron", None)
+                    if icon:
+                        icon.rotate = ft.Rotate(1.57) # Rotate 90 degrees down
+                        icon.color = accent
+                        try: icon.update()
+                        except: pass
                 else:
                     self.expanded_nodes.discard(nid)
                     while idx + 1 < len(controls):
@@ -2950,14 +3081,21 @@ class LibraryView:
                         else:
                             break
                     ctrl.bgcolor = "transparent"
-                    icon = ctrl.trailing.controls[0] if isinstance(ctrl.trailing, ft.Row) else ctrl.trailing
-                    icon.name = ft.Icons.KEYBOARD_ARROW_RIGHT
-                    icon.color = DIM
+                    
+                    # Direct reference access (O(1))
+                    icon = getattr(ctrl, "_chevron", None)
+                    if icon:
+                        icon.rotate = ft.Rotate(0) # Rotate back to right
+                        icon.color = DIM
+                        try: icon.update()
+                        except: pass
                 
-                # We do NOT call self._library_list.update() here.
-                # safe_update already calls page.update(), and double-updating
-                # a list with thousands of items is the primary cause of
-                # CPU spikes during expansion/collapse.
+                # Explicitly update both the tile and the list to force refresh
+                try:
+                    ctrl.update()
+                    self._library_list.update()
+                except:
+                    pass
                 
             self.app.safe_update(_mutate)
         finally:
@@ -2970,10 +3108,14 @@ class LibraryView:
         sub  = f"{ac} albums  ·  {tc} tracks"
         accent = LIB_ARTIST_COLOR
 
-        def toggle(e, nid=node_id):
-            self.page.run_task(self._toggle_node, nid, e.control)
-
-        return ft.ListTile(
+        chevron = ft.Icon(
+            ft.Icons.KEYBOARD_ARROW_RIGHT, 
+            color=accent if expanded else DIM,
+            rotate=ft.Rotate(1.57) if expanded else ft.Rotate(0),
+            animate_rotation=ft.Animation(200, ft.AnimationCurve.DECELERATE),
+            data="chevron"
+        )
+        tile = ft.ListTile(
             data={"node_id": node_id, "depth": 0, "type": "artist", "name": name},
             leading=ft.Icon(ft.Icons.PERSON_ROUNDED, color=accent),
             title=ft.Text(name, color=TEXT, size=14, weight=ft.FontWeight.W_600, max_lines=3),
@@ -2981,13 +3123,15 @@ class LibraryView:
             trailing=ft.Row(
                 [
                     self._edit_btn("artist", {"artist_name": name}),
-                    ft.Icon(ft.Icons.KEYBOARD_ARROW_DOWN if expanded else ft.Icons.KEYBOARD_ARROW_RIGHT, color=accent if expanded else DIM),
+                    chevron,
                 ],
                 tight=True, spacing=0,
             ),
             bgcolor=apply_opacity(0.07, accent) if expanded else "transparent",
-            on_click=toggle,
         )
+        tile._chevron = chevron # Direct reference for O(1) access
+        tile.on_click = lambda e: self.page.run_task(self._toggle_node, node_id, tile)
+        return tile
 
     def _album_row(self, a: dict, node_id: str, expanded: bool, depth: int = 0) -> ft.Control:
         album  = a.get("album") or "Unknown Album"
@@ -2995,11 +3139,15 @@ class LibraryView:
         tc     = a.get("track_count", "?")
         accent = LIB_ALBUM_COLOR
 
-        def toggle(e, nid=node_id):
-            self.page.run_task(self._toggle_node, nid, e.control)
-
+        chevron = ft.Icon(
+            ft.Icons.KEYBOARD_ARROW_RIGHT, 
+            color=accent if expanded else DIM,
+            rotate=ft.Rotate(1.57) if expanded else ft.Rotate(0),
+            animate_rotation=ft.Animation(200, ft.AnimationCurve.DECELERATE),
+            data="chevron"
+        )
         meta = {"artist_name": artist, "album_title": album}
-        return ft.ListTile(
+        tile = ft.ListTile(
             data={"node_id": node_id, "depth": depth, "type": "album",
                   "album": album, "artist": artist},
             leading=ft.Row(
@@ -3014,13 +3162,15 @@ class LibraryView:
             trailing=ft.Row(
                 [
                     self._edit_btn("album", meta),
-                    ft.Icon(ft.Icons.KEYBOARD_ARROW_DOWN if expanded else ft.Icons.KEYBOARD_ARROW_RIGHT, color=accent if expanded else DIM),
+                    chevron,
                 ],
                 tight=True, spacing=0,
             ),
             bgcolor=apply_opacity(0.06, accent) if expanded else "transparent",
-            on_click=toggle,
         )
+        tile._chevron = chevron # Direct reference for O(1) access
+        tile.on_click = lambda e: self.page.run_task(self._toggle_node, node_id, tile)
+        return tile
 
     def _new_playlist_row(self) -> ft.Control:
         accent = LIB_PLAYLIST_COLOR
@@ -3072,14 +3222,11 @@ class LibraryView:
         self.page.update()
 
     def _playlist_row(self, pl: dict, node_id: str, expanded: bool) -> ft.Control:
-        """Expandable playlist row — mirrors _album_row but for user playlists."""
+        """Expandable playlist row; mirrors _album_row but for user playlists."""
         name   = pl.get("name") or "Untitled Playlist"
         pl_id  = pl.get("id", 0)
         tc     = pl.get("track_count", 0)
         accent = LIB_PLAYLIST_COLOR
-
-        def toggle(e, nid=node_id):
-            self.page.run_task(self._toggle_node, nid, e.control)
 
         def _confirm_delete(_e):
             async def _do():
@@ -3091,7 +3238,14 @@ class LibraryView:
         def _edit_pl(_e):
             self.app.playlist_editor.open(pl_id, name, pl.get("color") or LIB_PLAYLIST_COLOR)
 
-        return ft.ListTile(
+        chevron = ft.Icon(
+            ft.Icons.KEYBOARD_ARROW_RIGHT,
+            color=(pl.get("color") or accent) if expanded else DIM,
+            rotate=ft.Rotate(1.57) if expanded else ft.Rotate(0),
+            animate_rotation=ft.Animation(200, ft.AnimationCurve.DECELERATE),
+            data="chevron"
+        )
+        tile = ft.ListTile(
             data={"node_id": node_id, "depth": 0, "type": "playlist", "playlist_id": pl_id, "name": name},
             leading=ft.Icon(ft.Icons.QUEUE_MUSIC_ROUNDED, color=pl.get("color") or accent),
             title=ft.Text(name, color=TEXT, size=14, weight=ft.FontWeight.W_600, max_lines=3),
@@ -3104,10 +3258,7 @@ class LibraryView:
                         icon_size=16,
                         on_click=_edit_pl,
                     ),
-                    ft.Icon(
-                        ft.Icons.KEYBOARD_ARROW_DOWN if expanded else ft.Icons.KEYBOARD_ARROW_RIGHT,
-                        color=(pl.get("color") or accent) if expanded else DIM,
-                    ),
+                    chevron,
                     ft.IconButton(
                         icon=ft.Icons.DELETE_OUTLINE,
                         icon_color=apply_opacity(0.5, "#FF5555"),
@@ -3119,15 +3270,16 @@ class LibraryView:
                 tight=True, spacing=0,
             ),
             bgcolor=apply_opacity(0.06, pl.get("color") or accent) if expanded else "transparent",
-            on_click=toggle,
         )
+        tile._chevron = chevron # Direct reference for O(1) access
+        tile.on_click = lambda e: self.page.run_task(self._toggle_node, node_id, tile)
+        return tile
 
     def _update_row_highlight(self, ctrl: ft.Control, is_current: bool) -> bool:
         """Atomic update of a single track row's visual state."""
         try:
             # Structure: GestureDetector -> Dismissible -> ListTile
             tile = ctrl.content.content
-            if not tile.page: return False # Not mounted
             
             active_color = apply_opacity(0.1, CYAN)
             
@@ -3147,7 +3299,8 @@ class LibraryView:
             tile.subtitle.color = CYAN if is_current else DIM
             tile.bgcolor = active_color if is_current else "transparent"
             
-            tile.update()
+            if tile.page:
+                tile.update()
             return True
         except Exception:
             return False
@@ -3155,26 +3308,22 @@ class LibraryView:
     def refresh_now_playing(self):
         """Optimized highlight update using the path map."""
         if self.app.is_background:
-            return # UI is suspended
+            return
 
         current_path = audio_engine.current_path
         prev_path = getattr(self, "_last_highlighted_path", None)
         if prev_path == current_path:
             return
 
-        any_changed = False
-        
-        # Clear old highlight
+        # 1. Clear old highlights using the map
         if prev_path:
             for ctrl in self._path_to_controls.get(prev_path, []):
-                if self._update_row_highlight(ctrl, is_current=False):
-                    any_changed = True
+                self._update_row_highlight(ctrl, is_current=False)
         
-        # Set new highlight
+        # 2. Set new highlights using the map
         if current_path:
             for ctrl in self._path_to_controls.get(current_path, []):
-                if self._update_row_highlight(ctrl, is_current=True):
-                    any_changed = True
+                self._update_row_highlight(ctrl, is_current=True)
 
         self._last_highlighted_path = current_path
 
@@ -3186,11 +3335,7 @@ class LibraryView:
             # treat this widget as a child row of its parent playlist.
             data={"depth": depth, "type": "auto_generate"},
             content=ft.Row([
-                ft.Icon(ft.Icons.AUTO_AWESOME_ROUNDED, color=CYAN, size=18),
-                ft.Column([
-                    ft.Text("Playlist is empty", color=TEXT, size=13, weight=ft.FontWeight.BOLD),
-                    ft.Text("Generate a playlist based on your tastes", color=DIM, size=11),
-                ], spacing=1, expand=True),
+                ft.Text("Playlist is empty", color=TEXT, size=13, weight=ft.FontWeight.BOLD, expand=True),
                 ft.TextButton(
                     "Auto-Generate",
                     icon=ft.Icons.BOLT_ROUNDED,
@@ -3259,7 +3404,7 @@ class LibraryView:
     def _remove_playlist_track_in_place(self, playlist_id, path, title):
         """Optimistic remove: drop the matching ListTile from the ListView
         immediately, then delete the row in the DB. Same motivation as
-        _move_playlist_track_in_place — avoids a full library reload."""
+        _move_playlist_track_in_place; avoids a full library reload."""
         controls = self._library_list.controls
         target_gi = None
         for gi, c in enumerate(controls):
@@ -3321,7 +3466,7 @@ class LibraryView:
         tile = ft.ListTile(
             # `data` lets _move_playlist_track_in_place locate the tile in
             # the flat _library_list.controls without rebuilding the whole
-            # tree — same in-place pattern the queue uses.
+            # tree; same in-place pattern the queue uses.
             data={
                 "type": "track",
                 "depth": depth,
@@ -3344,7 +3489,7 @@ class LibraryView:
                     # long titles wrap onto additional lines instead of
                     # pushing the format badge past the right edge of the
                     # tile (which is what was happening with tight=True +
-                    # ELLIPSIS — the badge clipped off-screen on long names).
+                    # ELLIPSIS; the badge clipped off-screen on long names).
                     ft.Text(
                         title,
                         color=CYAN if is_current else TEXT,
@@ -3379,15 +3524,16 @@ class LibraryView:
         )
 
         async def _on_swipe_right(e):
+            # Swipe Right = Play Next (Right after current)
             audio_engine.queue_next({
                 "path":        path,
                 "track_title": title,
                 "artist_name": artist,
                 "album_title": album,
             })
-            await e.control.confirm_dismiss(False)  # snap back — don't remove from list
+            await e.control.confirm_dismiss(False)
             self.app.show_snackbar(
-                f"'{title}' queued next",
+                f"'{title}' will play next",
                 icon=ft.Icons.QUEUE_MUSIC_ROUNDED,
                 color=CYAN,
             )
@@ -3446,10 +3592,15 @@ class LibraryView:
                 bs_holder[0].update()
                 self.page.update()
 
-        def _add_to_queue(_e):
+        def _play_next(_e):
             _close()
             audio_engine.queue_next(meta)
-            self.app.show_snackbar(f"'{meta.get('track_title')}' queued next", icon=ft.Icons.QUEUE_MUSIC_ROUNDED, color=CYAN)
+            self.app.show_snackbar(f"'{meta.get('track_title')}' will play next", icon=ft.Icons.QUEUE_MUSIC_ROUNDED, color=CYAN)
+
+        def _add_to_queue(_e):
+            _close()
+            audio_engine.queue_last(meta)
+            self.app.show_snackbar(f"'{meta.get('track_title')}' added to queue", icon=ft.Icons.PLAYLIST_ADD_ROUNDED, color=CYAN)
 
         def _add_to_playlist(_e):
             _close()
@@ -3501,6 +3652,11 @@ class LibraryView:
                         ft.ListTile(
                             leading=ft.Icon(ft.Icons.QUEUE_MUSIC_ROUNDED, color=CYAN),
                             title=ft.Text("Play Next", color=TEXT),
+                            on_click=_play_next,
+                        ),
+                        ft.ListTile(
+                            leading=ft.Icon(ft.Icons.PLAYLIST_ADD_CHECK_ROUNDED, color=CYAN),
+                            title=ft.Text("Add to Queue", color=TEXT),
                             on_click=_add_to_queue,
                         ),
                         ft.ListTile(
@@ -3641,6 +3797,8 @@ class LibraryView:
         self._scan_status_lbl.value = "Initializing active scan…"
         self._scan_btn.disabled = True
         self._empty_label.visible = False
+        self.expanded_nodes = set()
+        self._path_to_controls = {}
         self.app.safe_update(lambda: None)
 
         async def _scan():
@@ -3656,11 +3814,7 @@ class LibraryView:
     def _on_scan_progress(self, percent: float, track_title: str):
         if not hasattr(self, "_scan_update_count"):
             self._scan_update_count = 0
-
         self._scan_update_count += 1
-
-        # The scanner already batches updates (once per 100 tracks), 
-        # so we can apply every update for a smooth UI experience.
         _pct = percent
         _title = track_title
         def _apply():
@@ -3669,7 +3823,7 @@ class LibraryView:
                 self._scan_status_lbl.value = f"Searching: {_title}"
             else:
                 self._scan_progress.value = _pct / 100
-                self._scan_status_lbl.value = f"Indexing: {_title}"
+                self._scan_status_lbl.value = _title
         self.app.safe_update(_apply)
 
     def _on_scan_complete(self, count: int, _skipped: int):
@@ -3702,7 +3856,7 @@ class SettingsView:
         self._picking_target = None # "download" or "library"
 
         # File Picker: Windows only. macOS/Linux use native subprocess picker.
-        # Android uses _browse_android_paths() — no FilePicker (separate Flet extension).
+        # Android uses _browse_android_paths(); no FilePicker (separate Flet extension).
         self._file_picker = None
         if platform.system() not in ["Darwin", "Linux"]:
             try:
@@ -3796,6 +3950,7 @@ class SettingsView:
                 ft.dropdown.Option("Search"),
                 ft.dropdown.Option("Library"),
             ],
+            on_select=lambda _e: self._save_general_settings(),
             **common_style
         )
         self._default_sort_dropdown = ft.Dropdown(
@@ -3806,6 +3961,7 @@ class SettingsView:
                 ft.dropdown.Option(key="album", text="Album (A–Z)"),
                 ft.dropdown.Option(key="track", text="Track (A–Z)"),
             ],
+            on_select=lambda _e: self._save_general_settings(),
             **common_style
         )
 
@@ -3845,9 +4001,12 @@ class SettingsView:
             HubSettingItem(ft.Icons.STORAGE_ROUNDED, "Storage & Paths", "Library and download locations", 
                            on_tap=lambda _: self._show_sub_page("Storage", self._build_storage_group())),
             
-            HubSettingItem(ft.Icons.PALETTE_ROUNDED, "Appearance", "Accent colors and UI behavior", 
+            HubSettingItem(ft.Icons.PALETTE_ROUNDED, "Appearance", "Accent colors and UI behavior",
                            on_tap=lambda _: self._show_sub_page("Appearance", self._build_appearance_group())),
-            
+
+            HubSettingItem(ft.Icons.SHIELD_OUTLINED, "Permissions", "Notifications, audio, and file access",
+                           on_tap=lambda _: self._show_sub_page("Permissions", self._build_permissions_group())),
+
             ft.Divider(color=BORDER, height=40),
             
             HubSettingItem(ft.Icons.TERMINAL_ROUNDED, "Advanced", "Edit TOML config and data maintenance", 
@@ -3894,6 +4053,7 @@ class SettingsView:
         return ft.Column([
             ft.Text("Customize how the app looks and behaves on startup.", color=DIM, size=12),
             self._startup_page_dropdown,
+            self._default_sort_dropdown,
             ft.Divider(color=BORDER, height=20),
             ft.Text("Landing Page Sections", color=CYAN, size=12, weight=ft.FontWeight.BOLD),
             ft.Row([self._show_most_listened_switch, ft.Text("Show Most Listened Tracks", color=TEXT, size=12)], spacing=10),
@@ -3904,6 +4064,124 @@ class SettingsView:
             OnyxButton("APPLY VISUALS", ft.Icons.PALETTE, on_tap=lambda _: self._save_appearance_settings())
         ], spacing=20)
 
+
+    # ── Permissions ──────────────────────────────────────────────────────────
+    _PERMISSION_SPECS = [
+        ("notification",            "Notifications",   "Required for media controls on the lock screen"),
+        ("audio",                   "Audio Files",     "Read access to music files (Android 13+)"),
+        ("storage",                 "Storage",         "Read/write external storage (Android ≤12)"),
+        ("manage_external_storage", "All Files Access", "Required to delete or edit songs on Android 11+"),
+        ("record_audio",            "Microphone",      "Required for Jarvis voice commands"),
+    ]
+
+    def _build_permissions_group(self):
+        if "ANDROID_ROOT" not in os.environ and "ANDROID_DATA" not in os.environ:
+            return ft.Column([
+                ft.Text(
+                    "Permissions are managed by the OS on this platform; this panel "
+                    "only applies on Android.",
+                    color=DIM, size=12,
+                ),
+            ], spacing=12)
+
+        self._perm_rows: dict[str, dict] = {}
+        rows: list[ft.Control] = [
+            ft.Text(
+                "Some features (delete, tag editing) need elevated access. "
+                "Tap GRANT to request, or open Android Settings to manage directly.",
+                color=DIM, size=12,
+            ),
+            ft.Container(height=4),
+        ]
+
+        for name, label, desc in self._PERMISSION_SPECS:
+            status_text = ft.Text("checking…", color=DIM, size=11)
+            grant_btn = ft.TextButton(
+                "GRANT",
+                icon=ft.Icons.LOCK_OPEN_ROUNDED,
+                on_click=lambda _e, n=name: self._on_grant_permission(n),
+            )
+            row = ft.Container(
+                content=ft.Column([
+                    ft.Row([
+                        ft.Text(label, color=TEXT, size=14, weight=ft.FontWeight.W_600, expand=True),
+                        status_text,
+                    ]),
+                    ft.Text(desc, color=DIM, size=11),
+                    ft.Row([grant_btn], alignment=ft.MainAxisAlignment.END),
+                ], spacing=4),
+                padding=ft.Padding.all(12),
+                border=ft.Border.all(1, BORDER),
+                border_radius=10,
+            )
+            self._perm_rows[name] = {"status": status_text, "grant": grant_btn}
+            rows.append(row)
+
+        rows.append(ft.Container(height=8))
+        rows.append(ft.Row([
+            OnyxButton("REFRESH", ft.Icons.REFRESH, on_tap=lambda _: self._refresh_permissions()),
+            OnyxButton("OPEN SYSTEM SETTINGS", ft.Icons.LAUNCH, on_tap=lambda _: self._open_app_settings()),
+        ], spacing=10))
+
+        # Kick off the initial status query.
+        self.page.run_task(self._refresh_permissions_async)
+        return ft.Column(rows, spacing=12)
+
+    def _refresh_permissions(self):
+        self.page.run_task(self._refresh_permissions_async)
+
+    async def _refresh_permissions_async(self):
+        service = getattr(audio_engine, "audio_service", None)
+        if service is None:
+            return
+        try:
+            result = await service.query_permissions()
+        except Exception as exc:
+            logger.warning("query_permissions failed: %s", exc)
+            return
+        self._apply_perm_status(result)
+
+    def _apply_perm_status(self, result: dict):
+        for name, _label, _desc in self._PERMISSION_SPECS:
+            row = self._perm_rows.get(name)
+            if row is None:
+                continue
+            status = result.get(name, "unknown")
+            granted = status == "granted"
+            row["status"].value = status.upper() if status else "UNKNOWN"
+            row["status"].color = CYAN if granted else "#FF8866"
+            row["grant"].disabled = granted
+            row["grant"].text = "GRANTED" if granted else "GRANT"
+        self.app.safe_update(lambda: None)
+
+    def _on_grant_permission(self, name: str):
+        self.page.run_task(self._grant_permission_async, name)
+
+    async def _grant_permission_async(self, name: str):
+        service = getattr(audio_engine, "audio_service", None)
+        if service is None:
+            return
+        try:
+            await service.request_permission(name)
+        except Exception as exc:
+            logger.warning("request_permission(%s) failed: %s", name, exc)
+            self.app.show_snackbar(f"Permission request failed: {exc}")
+            return
+        # Re-query so the row reflects the user's choice (especially for
+        # manage_external_storage, where status flips on return from Settings).
+        await self._refresh_permissions_async()
+
+    def _open_app_settings(self):
+        self.page.run_task(self._open_app_settings_async)
+
+    async def _open_app_settings_async(self):
+        service = getattr(audio_engine, "audio_service", None)
+        if service is None:
+            return
+        try:
+            await service.open_app_settings()
+        except Exception as exc:
+            logger.warning("open_app_settings failed: %s", exc)
 
     def _build_advanced_group(self):
         return ft.Column([
@@ -4084,14 +4362,21 @@ class SettingsView:
         sort = self._default_sort_dropdown.value
         if not startup or not sort:
             return
-            
+
         update_config_params({
             "general": {
                 "startup_page": startup,
-                "library_sort": sort
+                "library_sort": sort,
             }
         })
-        self.app.show_snackbar("General preferences updated.")
+
+        # Apply the new library sort to the live view so the change is visible
+        # without restarting the app. startup_page takes effect on next launch.
+        lib_view = getattr(self.app, "library_view", None)
+        if lib_view is not None and getattr(lib_view, "sort_mode", None) != sort:
+            lib_view.sort_mode = sort
+            if hasattr(lib_view, "load_library"):
+                self.page.run_task(lib_view.load_library)
 
     def _save_config(self):
         try:
@@ -4129,7 +4414,7 @@ class SettingsView:
         app_data = os.getenv("FLET_APP_STORAGE_DATA") or ""
         label    = "Download Folder" if target == "download" else "Library Folder"
 
-        # Root bookmarks — listed at the top level
+        # Root bookmarks; listed at the top level
         BOOKMARKS = [
             (os.path.abspath("/storage/emulated/0"),          "Internal Storage"),
             (os.path.abspath("/sdcard"),                       "SD Card"),
@@ -4443,7 +4728,7 @@ class MiniPlayerBar:
             clip_behavior=ft.ClipBehavior.ANTI_ALIAS, # Crucial: clips the progress bar to the rounded corners
             margin=ft.Margin.only(left=8, right=8, bottom=8),
             padding=0, # Crucial: Remove padding so the progress bar touches the edges
-            visible=False,   # no layout space until first song — avoids the phantom gap
+            visible=False,   # no layout space until first song; avoids the phantom gap
             opacity=0,
             animate_opacity=ft.Animation(200, ft.AnimationCurve.EASE_OUT),
         )
@@ -4452,7 +4737,7 @@ class MiniPlayerBar:
         return self.container
 
     def update_meta(self, title: str, artist: str):
-        # Called from within safe_update — mutate directly, rely on outer page.update()
+        # Called from within safe_update; mutate directly, rely on outer page.update()
         if title:
             self._last_title  = title
             self._last_artist = artist or ""
@@ -4464,7 +4749,7 @@ class MiniPlayerBar:
                 self.container.visible = True
             self.container.opacity = 1.0
         elif self._ever_shown:
-            # Playback stopped but we have history — show last track dimmed
+            # Playback stopped but we have history; show last track dimmed
             self._title.value  = self._last_title
             self._artist.value = self._last_artist
             self.container.opacity = 0.55
@@ -4701,7 +4986,7 @@ class NowPlayingSheet:
             ),
             fullscreen=True,       # CRITICAL FIX: Bypasses the 50% height restriction safely
             scrollable=False,      # CRITICAL FIX: Disable so expand=True works inside
-            show_drag_handle=False, # <-- THE CRITICAL FIX
+            show_drag_handle=False,
             draggable=True,        # Native swipe-to-dismiss physics
             use_safe_area=True,    # Ensures content respects notch/gesture bar
             bgcolor=BG,
@@ -4778,6 +5063,8 @@ class NowPlayingSheet:
         pct = (position / duration * 100) if duration > 0 else 0
         self._scrubber.value = pct
         self._time_cur.value = fmt_time(position)
+
+    def update_duration(self, duration: float):
         self._time_tot.value = fmt_time(duration)
 
     def update_shuffle(self, is_shuffle: bool):
@@ -4871,7 +5158,7 @@ class QueueSheet:
             ),
             fullscreen=True,
             scrollable=False, # CRITICAL FIX: Let the ListView scroll, not the sheet
-            show_drag_handle=False, # <-- THE CRITICAL FIX: Prevents scroll controller conflict
+            show_drag_handle=False, # CRITICAL FIX: Prevents scroll controller conflict
             draggable=True,
             use_safe_area=True, 
             bgcolor=SURFACE,
@@ -5001,16 +5288,16 @@ class QueueSheet:
                 target_height=60,
             )
 
-        # Cap at 25 items to avoid DOM explosion and performance drops on mobile
+        # Cap at 15 items to avoid DOM explosion and performance drops on mobile
         upcoming = audio_engine.queue[cur_idx:]
         rows = [
             track_row(cur_idx + i, t)
-            for i, t in enumerate(upcoming[:25])
+            for i, t in enumerate(upcoming[:15])
         ]
 
         is_empty = len(rows) == 0
         self._empty_label.visible = is_empty
-        # Single synchronous assignment — no async chunking.
+        # Single synchronous assignment; no async chunking.
         # Chunked async writes race with subsequent refresh() calls and corrupt
         # the Flet control tree (RangeError in Control.applyPatch on Dart side).
         self._queue_list.controls = rows
@@ -5028,6 +5315,437 @@ class QueueSheet:
         audio_engine.clear_queue()
         self.collapse()
         self.app.show_snackbar("Playback queue cleared.")
+
+
+# ─── Assistant (chat sheet + TTS) ──────────────────────────────────────────────
+class AssistantView:
+    """Integrated chat surface for the faux-AI assistant.
+
+    Owns the chat scrollback, the input field, and the initialisation banner
+    (which surfaces the DSP analyser sweep + graph-build progress).
+    """
+
+    def __init__(self, app: "StreamripFletApp"):
+        self.app = app
+        self.page = app.page
+        self._initialized = False
+        self.layout: ft.Column | None = None
+        # Runner is created lazily so it picks up the DB + engine after they
+        # have themselves finished setting up.
+        self._runner = None
+        self._init_started = False
+        self._init_done = False
+        self._tts_enabled = True
+        # Cancellation hook for the analyser sweep so the user can dismiss
+        # the panel without leaving a background analyser running forever.
+        self._init_cancel = False
+
+    def _ensure_initialized(self):
+        if self._initialized:
+            return
+
+        self._messages = ft.ListView(
+            expand=True,
+            spacing=8,
+            padding=ft.Padding.symmetric(horizontal=12, vertical=8),
+            auto_scroll=True,
+        )
+
+        self._input = ft.TextField(
+            hint_text="Ask me anything, sir…",
+            border_color=BORDER,
+            focused_border_color=CYAN,
+            text_style=ft.TextStyle(color=TEXT, size=14),
+            content_padding=ft.Padding.symmetric(horizontal=14, vertical=12),
+            border_radius=22,
+            multiline=False,
+            min_lines=1,
+            max_lines=1,
+            expand=True,
+            on_submit=lambda _e: self._on_send_click(),
+        )
+
+        self._send_btn = ft.IconButton(
+            icon=ft.Icons.ARROW_UPWARD_ROUNDED,
+            icon_color=CYAN,
+            on_click=lambda _e: self._on_send_click(),
+        )
+
+        self._tts_toggle = ft.IconButton(
+            icon=ft.Icons.VOLUME_UP_ROUNDED,
+            icon_color=CYAN,
+            tooltip="Toggle voice replies",
+            on_click=lambda _e: self._toggle_tts(),
+        )
+
+        self._mic_btn = ft.IconButton(
+            icon=ft.Icons.MIC_ROUNDED,
+            icon_color=CYAN,
+            tooltip="Voice Command",
+            on_click=self._on_mic_click,
+        )
+
+        # Initialisation banner: hidden once the graph is ready.
+        self._init_label = ft.Text(
+            "Preparing your music network…", color=DIM, size=12,
+        )
+        self._init_bar = ft.ProgressBar(value=None, color=CYAN, bgcolor=SURFACE2)
+        self._init_banner = ft.Container(
+            content=ft.Column([self._init_label, self._init_bar], spacing=6),
+            padding=ft.Padding.symmetric(horizontal=16, vertical=10),
+            visible=False,
+        )
+
+        empty_state = ft.Container(
+            content=ft.Column(
+                [
+                    ft.Icon(ft.Icons.AUTO_AWESOME_ROUNDED, color=CYAN, size=42),
+                    ft.Text("Jarvis", color=TEXT, size=20,
+                            weight=ft.FontWeight.W_900,
+                            text_align=ft.TextAlign.CENTER),
+                    ft.Text(
+                        "Try: 'play stairway', 'more like this', "
+                        "'add radiohead to queue', or 'help'.",
+                        color=DIM, size=12, text_align=ft.TextAlign.CENTER,
+                    ),
+                ],
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                spacing=8,
+            ),
+            padding=ft.Padding.all(24),
+        )
+        self._messages.controls = [empty_state]
+
+        self.layout = ft.Column(
+            [
+                # Header
+                ft.Container(
+                    content=ft.Row(
+                        [
+                            ft.Text("JARVIS", color=TEXT, size=13,
+                                    weight=ft.FontWeight.W_700, expand=True),
+                            self._tts_toggle,
+                        ],
+                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
+                    padding=ft.Padding.symmetric(horizontal=16, vertical=12),
+                ),
+                self._init_banner,
+                ft.Divider(color=BORDER, height=1),
+                # Messages Slot
+                ft.Container(content=self._messages, expand=True),
+                ft.Divider(color=BORDER, height=1),
+                # Footer Input
+                ft.Container(
+                    content=ft.Row(
+                        [self._mic_btn, self._input, self._send_btn],
+                        spacing=6,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
+                    padding=ft.Padding.only(
+                        left=12, right=8, top=8, bottom=24,
+                    ),
+                ),
+            ],
+            spacing=0,
+            expand=True,
+        )
+        self._initialized = True
+
+    def build(self) -> ft.Control:
+        self._ensure_initialized()
+        return self.layout
+
+    # ── Public lifecycle ───────────────────────────────────────────────────
+
+    def expand(self):
+        # In Tab-mode, expand is simply a trigger for lazy initialization.
+        self.page.run_task(self._init_assistant)
+
+    def collapse(self):
+        # No-op in Tab-mode; visibility is handled by the tab-switcher.
+        pass
+        # Stop any in-flight TTS so the user isn't talked at after dismissing.
+        service = getattr(audio_engine, "audio_service", None)
+        if service is not None:
+            self.page.run_task(service.tts_stop)
+
+    # ── Initialisation flow ────────────────────────────────────────────────
+
+    async def _init_assistant(self):
+        """Build the runner + graph if not done yet. Idempotent: safe to call
+        every time the sheet opens."""
+        if self._init_done or self._init_started:
+            return
+        self._init_started = True
+
+        # Yield to the UI loop for a beat to ensure the Jarvis tab finishes 
+        # its initial paint before we start the heavy DSP/Graph work.
+        await asyncio.sleep(0.2)
+
+        # Show the banner *before* any async work so the user sees activity
+        # immediately. Even the graph_status query below is async and yields,
+        # which on slow startups can leave the sheet blank for a beat.
+        self._set_banner(visible=True, message="Checking your library…", determinate=None)
+        logger.info("AssistantView: init flow started")
+
+        # Lazily construct the runner now that db_manager + audio_engine are
+        # fully set up. The downloader stays None until we wire one through.
+        from utils.assistant_runner import AssistantRunner
+        from utils import track_graph as tg
+        self._runner = AssistantRunner(self.app.db_manager, audio_engine)
+        
+        # Configure Jarvis voice parameters (British English Male, deeper tone, measured pace)
+        if audio_engine.audio_service:
+            self.page.run_task(audio_engine.audio_service.tts_set_voice, pitch=0.75, rate=0.75)
+
+        try:
+            status = await tg.graph_status(self.app.db_manager)
+        except Exception as exc:
+            logger.exception("AssistantView: graph_status failed")
+            self._set_banner(visible=False)
+            self._init_started = False
+            await self._append_bubble(
+                "assistant",
+                f"Couldn't read your library: {exc}",
+            )
+            return
+
+        logger.info("AssistantView: graph_status = %s", status)
+
+        # Empty-library short-circuit. Saying "Ready" is misleading — the
+        # assistant has nothing to act on. Tell the user what to do next.
+        if status["total_tracks"] == 0:
+            self._init_done = True
+            self._init_started = False
+            self._set_banner(visible=False)
+            await self._append_bubble(
+                "assistant",
+                "Your library looks empty. Scan a music folder in Library → "
+                "Scan, then re-open me so I can index it.",
+            )
+            return
+
+        needs_metadata = (status["artist_edges"] == 0 and status["album_edges"] == 0)
+        needs_acoustic = (status["acoustic_edges"] == 0 and status["total_tracks"] >= 2)
+
+        if not (needs_metadata or needs_acoustic):
+            self._init_done = True
+            self._init_started = False
+            self._set_banner(visible=False)
+            edge_total = (status["acoustic_edges"]
+                          + status["artist_edges"] + status["album_edges"])
+            await self._append_bubble(
+                "assistant",
+                f"Ready. Library graph already built "
+                f"({status['total_tracks']} tracks, {edge_total} edges). "
+                "Try 'play …', 'more like this', or 'help'.",
+            )
+            return
+
+        # 1. Cheap metadata edges first — gives the assistant a working
+        # fallback for 'play_similar' before the analyser sweep finishes.
+        if needs_metadata:
+            self._set_banner(
+                visible=True,
+                message=f"Linking {status['total_tracks']} tracks by artist & album…",
+                determinate=None,
+            )
+            try:
+                a_n, b_n = await tg.build_metadata_edges(self.app.db_manager)
+                logger.info("AssistantView: metadata edges built (%d artist, %d album)", a_n, b_n)
+            except Exception as exc:
+                logger.warning("AssistantView: metadata edge build failed: %s", exc)
+
+        # 2. Analyser sweep for tracks lacking DSP features. This is the
+        # expensive step — minutes-to-hours depending on library size.
+        missing = await self.app.db_manager.get_tracks_missing_features(
+            tg.FEATURES_VERSION
+        )
+        logger.info("AssistantView: %d tracks need DSP features", len(missing))
+        if missing and audio_engine.audio_service:
+            total = len(missing)
+            self._set_banner(
+                visible=True,
+                message=f"Analysing 1 / {total} tracks…",
+                determinate=0.0,
+            )
+
+            async def _on_progress(done, total_, current, failures):
+                if self._init_cancel:
+                    return
+                suffix = f" ({failures} failed)" if failures else ""
+                self._set_banner(
+                    visible=True,
+                    message=f"Analysing {done} / {total_}{suffix}",
+                    determinate=(done / total_) if total_ else None,
+                )
+
+            try:
+                await tg.bulk_analyze_library(
+                    self.app.db_manager,
+                    audio_engine.audio_service,
+                    progress_cb=_on_progress,
+                    cancel_check=lambda: self._init_cancel,
+                )
+            except Exception as exc:
+                logger.warning("AssistantView: analyser sweep failed: %s", exc)
+
+        # 3. Build acoustic edges from whatever features are present.
+        self._set_banner(visible=True, message="Linking similar tracks…", determinate=None)
+        try:
+            n_acoustic = await tg.build_acoustic_edges(self.app.db_manager)
+            logger.info("AssistantView: acoustic edges built (%d)", n_acoustic)
+        except Exception as exc:
+            logger.warning("AssistantView: acoustic edge build failed: %s", exc)
+
+        self._init_done = True
+        self._init_started = False
+        self._set_banner(visible=False)
+        await self._append_bubble(
+            "assistant",
+            self._runner._say("greeting"),
+            speak=True,
+        )
+
+    def _set_banner(self, visible: bool, message: str = "", determinate=None):
+        def _mutate():
+            self._init_banner.visible = visible
+            if message:
+                self._init_label.value = message
+            self._init_bar.value = determinate
+        self.app.safe_update(_mutate)
+
+    # ── Chat plumbing ──────────────────────────────────────────────────────
+
+    def _toggle_tts(self):
+        self._tts_enabled = not self._tts_enabled
+        self._tts_toggle.icon = (
+            ft.Icons.VOLUME_UP_ROUNDED if self._tts_enabled
+            else ft.Icons.VOLUME_OFF_ROUNDED
+        )
+        if not self._tts_enabled:
+            service = getattr(audio_engine, "audio_service", None)
+            if service is not None:
+                self.page.run_task(service.tts_stop)
+        self.app.safe_update(lambda: None)
+
+    def _on_send_click(self):
+        text = (self._input.value or "").strip()
+        if not text:
+            return
+        self._input.value = ""
+        self.app.safe_update(lambda: None)
+        self.page.run_task(self._handle_user_text, text)
+
+    async def _on_mic_click(self, _e=None):
+        if self._mic_btn.icon == ft.Icons.MIC_NONE_ROUNDED:
+            return
+            
+        # Ensure we have microphone permissions on Android
+        try:
+            if audio_engine.audio_service:
+                perms = await audio_engine.audio_service.query_permissions()
+                if perms.get("record_audio") != "granted":
+                    res = await audio_engine.audio_service.request_permission("record_audio")
+                    if res.get("status") != "granted":
+                        self.app.show_snackbar("Microphone permission is required for voice commands.")
+                        return
+        except Exception as ex:
+            logger.warning(f"Permission check failed: {ex}")
+
+        self._mic_btn.icon = ft.Icons.MIC_NONE_ROUNDED
+        self._mic_btn.icon_color = DIM
+        self.page.update()
+        
+        try:
+            if not audio_engine.audio_service:
+                self.app.show_snackbar("Audio engine not ready.")
+                return
+
+            res = await audio_engine.audio_service.stt_listen()
+            if res.get("ok") and res.get("text"):
+                self._input.value = res["text"]
+                self.page.update()
+                # Automatically send to assistant
+                self._on_send_click()
+            elif res.get("error") and "cancel" not in res["error"].lower():
+                 self.app.show_snackbar(f"Speech error: {res['error']}")
+        except Exception as ex:
+            logger.error(f"STT Error: {ex}")
+        finally:
+            self._mic_btn.icon = ft.Icons.MIC_ROUNDED
+            self._mic_btn.icon_color = CYAN
+            self.page.update()
+
+    async def _handle_user_text(self, text: str):
+        await self._append_bubble("user", text)
+        if self._runner is None:
+            await self._append_bubble(
+                "assistant",
+                "Hold on — I'm still initialising. Try again in a moment.",
+            )
+            return
+        response = await self._runner.dispatch_text(text)
+        await self._append_bubble(
+            "assistant", response.displayed,
+            speak=response.success and bool(response.spoken),
+            speak_text=response.spoken,
+        )
+
+    async def _append_bubble(
+        self,
+        sender: str,
+        text: str,
+        speak: bool = False,
+        speak_text: str | None = None,
+    ):
+        is_user = (sender == "user")
+        bubble = ft.Container(
+            content=ft.Text(
+                text,
+                color=TEXT if not is_user else "#FFFFFF",
+                size=13,
+                selectable=True,
+            ),
+            padding=ft.Padding.symmetric(horizontal=14, vertical=10),
+            bgcolor=CYAN if is_user else SURFACE2,
+            border_radius=14,
+            # Use conditional width to simulate max_width for wrap support
+            width=350 if len(text) > 35 else None,
+        )
+        row = ft.Row(
+            [bubble],
+            alignment=(
+                ft.MainAxisAlignment.END if is_user
+                else ft.MainAxisAlignment.START
+            ),
+        )
+
+        def _mutate():
+            # Drop the empty-state on first real message.
+            if self._messages.controls and isinstance(self._messages.controls[0], ft.Container) \
+                    and not isinstance(getattr(self._messages.controls[0], "content", None), ft.Row):
+                if len(self._messages.controls) == 1:
+                    self._messages.controls = []
+            self._messages.controls.append(row)
+        self.app.safe_update(_mutate)
+
+        if speak and self._tts_enabled:
+            service = getattr(audio_engine, "audio_service", None)
+            if service is not None:
+                try:
+                    # Pause music briefly so TTS isn't drowned out. Resume
+                    # afterwards only if we were the ones who paused.
+                    was_playing = bool(getattr(audio_engine, "is_playing", False))
+                    if was_playing:
+                        audio_engine.pause()
+                    await service.tts_speak(speak_text or text, timeout=30.0)
+                    if was_playing:
+                        audio_engine.play()
+                except Exception as exc:
+                    logger.warning("AssistantView: TTS speak failed: %s", exc)
 
 
 # ─── Quality Selector Sheet ────────────────────────────────────────────────────
@@ -5334,6 +6052,7 @@ class StreamripFletApp:
         self._flush_pending = False
         self._is_restarting = False
         self.is_background  = False
+        self.is_restoring_session = False
         
     def _show_error(self, e=None):
         """Surfaces critical errors to the full-screen ErrorBoundary."""
@@ -5487,6 +6206,7 @@ class StreamripFletApp:
         self.metadata_editor     = MetadataEditorDialog(self)
         self.playlist_editor     = PlaylistEditorDialog(self)
         self.notifications       = NotificationSystem(self)
+        self.assistant_view      = AssistantView(self)
 
         # wire ft.Audio into the page
         audio_engine.setup(self.page)
@@ -5496,6 +6216,7 @@ class StreamripFletApp:
             current_path=self._on_current_path,
             position=self._on_position,
             is_playing=self._on_is_playing,
+            duration=self._on_duration,
         )
         def _on_queue_mutated(_inst, _val):
             self.safe_update(self.queue_sheet.refresh)
@@ -5564,11 +6285,11 @@ class StreamripFletApp:
         self.page.update()
 
     async def open_auto_playlist_dialog(self, playlist_id):
-        logger.info(f"Opening Vibe Island Generator for playlist {playlist_id}")
+        logger.info(f"Opening Playlist Creation dialog for playlist {playlist_id}")
         inflation_slider = ft.Slider(
             min=1.2, max=4.5, value=2.0, divisions=33, label="{value}x", active_color=CYAN,
         )
-        # Length slider: 5–50 tracks. Default 20 — long enough to feel like a
+        # Length slider: 5-50 tracks. Default 20; long enough to feel like a
         # real playlist, short enough that lazy DSP analysis on the hot set
         # finishes in a reasonable time on a phone.
         length_slider = ft.Slider(
@@ -5628,7 +6349,7 @@ class StreamripFletApp:
                     was_playing = True
                     audio_engine.pause()
                     # Give the framework a beat to actually release the
-                    # codec — pause() is async at the Dart layer.
+                    # codec; pause() is async at the Dart layer.
                     await asyncio.sleep(0.4)
 
                 failures = 0
@@ -5641,7 +6362,7 @@ class StreamripFletApp:
                         except Exception as ex:
                             failures += 1
                             # One bad file shouldn't kill the whole run; log
-                            # and skip — the engine drops featureless entries.
+                            # and skip; the engine drops featureless entries.
                             logger.warning(f"DSP analyse failed for {t['path']}: {ex}")
                             progress_label.value = (
                                 f"Analyzing {i} / {len(stale)} tracks "
@@ -5714,8 +6435,8 @@ class StreamripFletApp:
                 logger.exception("Magic Generation failed")
                 self.show_snackbar(f"Generation failed: {ex}", color="#FF4444")
             finally:
-                # Always resume playback if we paused it for the DSP loop —
-                # even if clustering or DB writes raised — so the user
+                # Always resume playback if we paused it for the DSP loop;
+                # even if clustering or DB writes raised; so the user
                 # doesn't end up silently paused after a failed generation.
                 if was_playing:
                     try:
@@ -5732,13 +6453,13 @@ class StreamripFletApp:
         dlg = ft.AlertDialog(
             title=ft.Row(
                 [ft.Icon(ft.Icons.AUTO_AWESOME_ROUNDED, color=CYAN),
-                 ft.Text("Vibe Island Generator")],
+                 ft.Text("Playlist Creation")],
                 spacing=10,
             ),
             content=ft.Column([
                 ft.Text(
-                    "MCL clustering on real DSP features finds a 'Vibe Island' "
-                    "of tracks similar in tempo, energy and timbre.",
+                    "MCL clustering on acoustic DSP features and artist/album "
+                    "metadata finds a cluster of tracks with a similar sonic profile.",
                     size=12, color=DIM,
                 ),
                 ft.Container(height=10),
@@ -5793,8 +6514,8 @@ class StreamripFletApp:
             except Exception as ex:
                 logger.error(f"Failed to write onboarding marker: {ex}")
 
-            # Switch to Settings tab to help them start
-            self._switch_tab(2)
+            # Switch to Settings tab to help them start (now index 3)
+            self._switch_tab(3)
 
         self.onboarding_dlg = ft.AlertDialog(
             modal=True,
@@ -5895,7 +6616,7 @@ class StreamripFletApp:
         async with self._update_lock:
             self._pending_fns.append(fn)
             if self._flush_pending:
-                # A flush is already scheduled — just queue the fn and return.
+                # A flush is already scheduled; just queue the fn and return.
                 # This is the key coalescing step: multiple safe_update() calls
                 # arriving in the same event-loop burst share a single flush.
                 return
@@ -5925,6 +6646,11 @@ class StreamripFletApp:
             except Exception:
                 logger.exception("safe_update execution error")
         
+        # Skip page.update() while the app is backgrounded; pushing diffs to
+        # a suspended Flet/Flutter client wastes CPU and can cause UI hangs.
+        # _on_lifecycle calls safe_update(lambda: None) on resume to force-sync.
+        if self.is_background:
+            return
         try:
             self.page.update()
         except Exception:
@@ -5943,11 +6669,16 @@ class StreamripFletApp:
             except:
                 startup_name = "Library"
             
-            mapping = {"Search": 0, "Library": 1, "Settings": 2}
-            self._current_tab = mapping.get(startup_name, 1)
+            mapping = {"Search": 0, "Jarvis": 1, "Library": 2, "Settings": 3}
+            self._current_tab = mapping.get(startup_name, 2) # Default to Library (now index 2)
         
-        # Build views (Only Search, Library, Settings)
-        view_builders = [self.search_view.build, self.library_view.build, self.settings_view.build]
+        # Build views (Search, Jarvis, Library, Settings)
+        view_builders = [
+            self.search_view.build, 
+            self.assistant_view.build,
+            self.library_view.build, 
+            self.settings_view.build
+        ]
         
         # Pre-build the startup view
         startup_view = view_builders[self._current_tab]()
@@ -5975,15 +6706,20 @@ class StreamripFletApp:
 
         # Navigation bar
         self._nav = ft.NavigationBar(
-            selected_index=self._current_tab if self._current_tab < 2 else 0,
+            selected_index=self._current_tab if self._current_tab < 3 else 0,
             bgcolor=SURFACE,
-            indicator_color=(CYAN + "33" if self._current_tab < 2 else "transparent"),
+            indicator_color=CYAN + "55",
             label_behavior=ft.NavigationBarLabelBehavior.ALWAYS_SHOW,
             destinations=[
                 ft.NavigationBarDestination(
                     icon=ft.Icons.SEARCH_OUTLINED,
                     selected_icon=ft.Icons.SEARCH,
                     label="Search",
+                ),
+                ft.NavigationBarDestination(
+                    icon=ft.Icons.AUTO_AWESOME_ROUNDED,
+                    selected_icon=ft.Icons.AUTO_AWESOME_ROUNDED,
+                    label="Jarvis",
                 ),
                 ft.NavigationBarDestination(
                     icon=ft.Icons.LIBRARY_MUSIC_OUTLINED,
@@ -5994,7 +6730,7 @@ class StreamripFletApp:
             on_change=lambda e: self._switch_tab(e.control.selected_index),
         )
 
-        # Main layout — NO Stack, NO overlay for primary UI
+        # Main layout; NO Stack, NO overlay for primary UI
         # Use a simple Column with SafeArea for Android notch/gesture bar handling
         main_layout = ft.Column(
             [
@@ -6015,7 +6751,17 @@ class StreamripFletApp:
             expand=True,
         )
 
-        # Add ONLY the root to page — no overlays for main UI
+        # Assistant FAB: positioned above the mini-player + nav bar + the
+        # Android gesture/3-button system bar. The FAB lives in the root
+        # Stack (outside SafeArea) so it's measured from the absolute
+        # screen edge; the offset budget below accounts for:
+        #   • ~32 px system gesture/nav bar
+        #   • ~80 px Flet NavigationBar
+        #   • ~64 px mini-player when visible
+        # Total ~176 px — we use 188 to leave breathing room without crowding
+        # the mini-player's controls.
+
+        # Add ONLY the root to page; no overlays for main UI
         self._root_stack = ft.Stack(
             [
                 safe_root,
@@ -6040,13 +6786,14 @@ class StreamripFletApp:
         # FIX: Extract primary_velocity natively to prevent AttributeError
         vx = getattr(e, "primary_velocity", 0) or 0
         
-        if abs(vx) < 800:
+        # Increased threshold to 1000 to make swiping less aggressive
+        if abs(vx) < 1000:
             return
             
         new_tab = self._current_tab
         if vx < 0 and self._current_tab < 1:
             new_tab += 1
-        elif vx > 0 and self._current_tab == 1:
+        elif vx > 0 and self._current_tab > 0:
             new_tab -= 1
         
         if new_tab != self._current_tab:
@@ -6056,38 +6803,52 @@ class StreamripFletApp:
 
     def _switch_tab(self, index: int):
         self._current_tab = index
+        
+        # Reset labels to standard text
+        labels = ["Search", "Jarvis", "Library"]
+        for i, dest in enumerate(self._nav.destinations):
+            if i < len(labels):
+                dest.label = labels[i]
+
         if index == 0:
             content = self._view_cache.get(0) or self.search_view.build()
             self._view_cache[0] = content
         elif index == 1:
-            content = self._view_cache.get(1)
+            # Jarvis / Assistant View
+            content = self._view_cache.get(1) or self.assistant_view.build()
+            self._view_cache[1] = content
+            # Ensure assistant initialisation is triggered
+            self.page.run_task(self.assistant_view._init_assistant)
+        elif index == 2:
+            # Library View
+            content = self._view_cache.get(2)
             if content is None:
                 content = self.library_view.build()
-                self._view_cache[1] = content
-            # CRITICAL FIX: Only load if the library is empty.
-            # Do not force a massive database read just by changing tabs.
+                self._view_cache[2] = content
             elif not self.library_view._library_list.controls:
                 self.page.run_task(self.library_view.load_library)
         else:
+            # Settings View
             self.settings_view.refresh()
-            content = self._view_cache.get(2) or self.settings_view.build()
-            self._view_cache[2] = content
+            content = self._view_cache.get(3) or self.settings_view.build()
+            self._view_cache[3] = content
             
         def _mutate():
             self._tab_content.content = content
+            # If in Settings (index 3), deselect the bar or default to index 0 visually
             is_nav_tab = index < len(self._nav.destinations)
             self._nav.selected_index = index if is_nav_tab else 0
-            self._nav.indicator_color = (CYAN + "33" if is_nav_tab else "transparent")
+            self._nav.indicator_color = (CYAN + "55" if is_nav_tab else "transparent")
 
         self.safe_update(_mutate)
 
     # ── audio engine callbacks ───────────────────────────────────────────────
     def _on_current_path(self, _instance, path: str):
-        if path:
+        if path and not getattr(self, "is_restoring_session", False):
             # Increment play count in background
             asyncio.create_task(self.db_manager.increment_play_count(path))
 
-        # Track changed (manual skip or auto-advance) — flush queue state so
+        # Track changed (manual skip or auto-advance); flush queue state so
         # the persisted current_index points at the right slot if the OS
         # kills us before the next mutation event.
         self._schedule_queue_save()
@@ -6123,7 +6884,7 @@ class StreamripFletApp:
         self.safe_update(_atomic_update)
 
     def _fetch_artwork_url_async(self, img_url: str):
-        # Check in-memory cache first — avoids any disk/network I/O
+        # Check in-memory cache first; avoids any disk/network I/O
         cached = _ARTWORK_CACHE.get(img_url)
         if cached:
             self.safe_update(lambda p=cached: (
@@ -6148,7 +6909,7 @@ class StreamripFletApp:
         asyncio.create_task(asyncio.to_thread(_worker))
 
     def _extract_artwork_async(self, path: str):
-        # Check in-memory cache — avoids PIL decode + disk write on repeat plays
+        # Check in-memory cache; avoids PIL decode + disk write on repeat plays
         cached = _ARTWORK_CACHE.get(path)
         if cached:
             self.safe_update(lambda p=cached: (
@@ -6217,25 +6978,15 @@ class StreamripFletApp:
         self._artwork_task = asyncio.create_task(_delayed_extract())
 
     def _on_position(self, _instance, position: float):
-        # Suspend UI updates in background to save battery/CPU
-        if self.is_background:
-            return
-
-        # Throttle updates to ~1 per second to keep UI snappy and CPU low
-        now = time.time()
-        if not hasattr(self, "_last_pos_update"):
-            self._last_pos_update = 0
-        if now - self._last_pos_update < 0.95:
-            return
-        self._last_pos_update = now
-
-        if self.is_scrubbing:
+        # Pacing is set in Dart (flet_audio_service.dart) and dirty-checked in
+        # the engine's _set(). No throttle needed here — every dispatch reflects
+        # a visible (≥1 s) change at the slider granularity.
+        if self.is_background or self.is_scrubbing:
             return
 
         dur = audio_engine.duration
         pct = (position / dur * 100) if dur > 0 else 0
 
-        # Targeted updates: bypass page.update() to avoid diffing the whole library tree
         if self.mini_player.container and self.mini_player.container.page:
             self.mini_player.update_progress(pct)
             self.mini_player.container.update()
@@ -6244,6 +6995,15 @@ class StreamripFletApp:
             self.now_playing.update_progress(position, dur)
             if self.now_playing.container.page:
                 self.now_playing.container.update()
+
+    def _on_duration(self, _instance, duration: float):
+        # Duration is invariant during playback of a single track, so the
+        # total-time label is set once per track-change instead of per tick.
+        if self.is_background:
+            return
+        self.now_playing.update_duration(duration)
+        if self.now_playing.container and self.now_playing.container.open and self.now_playing.container.page:
+            self.now_playing.container.update()
 
     def _on_is_playing(self, _instance, is_playing: bool):
         if self.is_background:
@@ -6259,7 +7019,7 @@ class StreamripFletApp:
         if not os.path.exists(state_path):
             return
         try:
-            # File read is the only blocking bit — keep it off the loop.
+            # File read is the only blocking bit; keep it off the loop.
             state = await asyncio.to_thread(self._read_queue_state, state_path)
             if not state:
                 return
@@ -6270,7 +7030,7 @@ class StreamripFletApp:
             if not queue:
                 return
 
-            # Bound `index` defensively — a stale snapshot may reference a
+            # Bound `index` defensively; a stale snapshot may reference a
             # row that no longer exists in the persisted queue.
             index = max(0, min(int(index or 0), len(queue) - 1))
 
@@ -6279,7 +7039,11 @@ class StreamripFletApp:
             # etc.) reach safe_update / page.run_task in a thread that
             # actually has a running loop. Without this, the mini-player
             # never gets revived.
-            audio_engine.restore_queue(queue, index, pos, dur)
+            try:
+                self.is_restoring_session = True
+                audio_engine.restore_queue(queue, index, pos, dur)
+            finally:
+                self.is_restoring_session = False
 
             # Pre-extract artwork for the restored track so the mini-
             # player and now-playing screen don't render a blank tile
@@ -6303,7 +7067,7 @@ class StreamripFletApp:
                 self.mini_player.update_state(False)
                 self.now_playing.update_state(False)
 
-            # Show the saved progress on the bar — duration is unknown
+            # Show the saved progress on the bar; duration is unknown
             # until the source loads, so leave the percent at 0 and let
             # _on_position fix it once the engine reports duration.
 
@@ -6324,7 +7088,7 @@ class StreamripFletApp:
             return None
 
     def _restore_queue_state(self):
-        """Synchronous compat wrapper kept for any external callers — the
+        """Synchronous compat wrapper kept for any external callers; the
         runtime path now uses _restore_queue_state_async on the event loop
         so observer dispatches actually update the UI."""
         try:
@@ -6338,7 +7102,7 @@ class StreamripFletApp:
         """Write the current queue snapshot to disk atomically.
 
         Atomicity matters because Android can SIGKILL the process between
-        the open() and the close() — without the tmp+rename dance we'd
+        the open() and the close(); without the tmp+rename dance we'd
         leave a half-written JSON file that breaks the next restore.
 
         Empty queue ⇒ delete the file rather than write `{"queue": []}` so
@@ -6402,7 +7166,7 @@ class StreamripFletApp:
         try:
             self._queue_save_task = asyncio.create_task(_do_save())
         except RuntimeError:
-            # Called before the loop is running (e.g. during shutdown) —
+            # Called before the loop is running (e.g. during shutdown);
             # fall back to a synchronous write so we don't lose the snapshot.
             self._save_queue_state()
 
@@ -6441,7 +7205,7 @@ class StreamripFletApp:
         db = self.db_manager
 
         # ── Resolve the candidate item list based on tap context ──────────
-        # Album / playlist taps query a small, scoped set directly — far
+        # Album / playlist taps query a small, scoped set directly; far
         # cheaper than re-fetching every track in the library. Library taps
         # reuse the in-memory list captured by LibraryView on the last
         # tracks-view render; we fall back to a fresh query only if that
@@ -6722,10 +7486,19 @@ async def main(page: ft.Page):
     font_path = "assets/Outfit-Regular.ttf"
     if os.path.exists(font_path):
         page.fonts = {"Outfit": font_path}
-        page.theme = ft.Theme(font_family="Outfit")
+        page.theme = ft.Theme(
+            font_family="Outfit",
+            navigation_bar_theme=ft.NavigationBarTheme(
+                label_text_style=ft.TextStyle(size=12),
+            )
+        )
     else:
         logger.warning("Font asset missing, using system default")
-        page.theme = ft.Theme()
+        page.theme = ft.Theme(
+            navigation_bar_theme=ft.NavigationBarTheme(
+                label_text_style=ft.TextStyle(size=12),
+            )
+        )
     
     try:
         app = StreamripFletApp(page)

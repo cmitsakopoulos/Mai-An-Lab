@@ -9,6 +9,8 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:flutter_tts/flutter_tts.dart';
+import 'package:speech_to_text/speech_to_text.dart';
 
 // Bridge to the native PCM decoder implemented in FletAudioServicePlugin.kt.
 // We keep this MethodChannel separate from audio_service's own channels so a
@@ -36,7 +38,7 @@ class Extension extends FletExtension {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// FletAudioService — Flet 0.84.0 FletService bridge
+// FletAudioService; Flet 0.84.0 FletService bridge
 // ─────────────────────────────────────────────────────────────────────────────
 
 class FletAudioService extends FletService {
@@ -55,19 +57,31 @@ class FletAudioService extends FletService {
 
   // Position throttling: just_audio emits ~5x/sec which is wasted battery on
   // mobile (each emit = IPC → Python → observer dispatch → Flet rebuild).
-  // Coalesce to ≤ 1 emit/sec, but always emit on a large jump so seeks update
-  // the UI immediately.
-  static const int _positionEmitMinMs = 1000;
+  // This Dart-side throttle is the SINGLE source of position pacing — Python
+  // and UI layers no longer re-throttle. Jump detection still emits on seeks
+  // so the slider snaps immediately.
+  static const int _positionEmitMinMs = 1500;
   static const int _positionJumpMs = 1500;
   int _lastEmittedPositionMs = -1;
   int _lastEmitWallClockMs = 0;
+
+  // TTS singleton: lazily initialised on first speak so cold-start cost is
+  // paid only by users who actually invoke the assistant. Pause/resume of
+  // music playback is the caller's responsibility — flutter_tts mixes by
+  // default which is the right behaviour for short assistant utterances on
+  // top of a paused player.
+  static FlutterTts? _tts;
+  double _ttsRate = 0.5;
+  double _ttsPitch = 1.0;
+
+  static SpeechToText? _stt;
 
   bool _initRan = false;
 
   @override
   void init() {
     if (_initRan) {
-      debugPrint("FletAudioService(${control.id}).init — already ran, skipping");
+      debugPrint("FletAudioService(${control.id}).init; already ran, skipping");
       return;
     }
     _initRan = true;
@@ -142,7 +156,7 @@ class FletAudioService extends FletService {
         final rawItems = (a['items'] as List<dynamic>?) ?? [];
         final startIndex = (a['start_index'] as num?)?.toInt() ?? 0;
         // Items arrive as Map<dynamic, dynamic> from the Flet protocol; we
-        // need Map<String, dynamic>. .cast<>() can't bridge that — manually
+        // need Map<String, dynamic>. .cast<>() can't bridge that; manually
         // re-key each map.
         final items = rawItems.map((raw) {
           final m = raw is Map<String, dynamic>
@@ -180,7 +194,7 @@ class FletAudioService extends FletService {
       case 'decode_pcm':
         // Fire-and-forget: the actual reply comes back via the
         // 'decode_complete' event. Python correlates by `request_id`.
-        // We MUST NOT await here — decoding a 60s clip can exceed the Flet
+        // We MUST NOT await here; decoding a 60s clip can exceed the Flet
         // method-channel's 10s timeout.
         final reqId = (a['request_id'] as String?) ?? '';
         final path = (a['path'] as String?) ?? '';
@@ -197,10 +211,263 @@ class FletAudioService extends FletService {
           _runDecode(reqId, path);
         }
 
+      case 'query_permissions':
+        // Async-but-fast: each .status read returns within a few ms. We still
+        // route the result through an event so Python's correlation pattern
+        // matches decode_pcm and we don't depend on the method-channel return
+        // value (which Flet treats as fire-and-forget on Android).
+        final reqId = (a['request_id'] as String?) ?? '';
+        _runQueryPermissions(reqId);
+
+      case 'request_permission':
+        // For Permission.manageExternalStorage this opens the Android Settings
+        // page (not a dialog) and resolves once the user returns to the app.
+        final reqId = (a['request_id'] as String?) ?? '';
+        final permName = (a['name'] as String?) ?? '';
+        _runRequestPermission(reqId, permName);
+
+      case 'open_app_settings':
+        // Fire-and-forget. Used as a last-resort link from in-app prompts.
+        openAppSettings();
+
+      case 'tts_speak':
+        // Fire-and-forget. Callers (the assistant) await a completion event
+        // if they need to know when speaking finishes; play/pause coordination
+        // is handled Python-side, not here.
+        final reqId = (a['request_id'] as String?) ?? '';
+        final text = (a['text'] as String?) ?? '';
+        _runTtsSpeak(reqId, text);
+
+      case 'tts_stop':
+        _runTtsStop();
+
+      case 'tts_set_voice':
+        final rate = (a['rate'] as num?)?.toDouble();
+        final pitch = (a['pitch'] as num?)?.toDouble();
+        if (rate != null) _ttsRate = rate.clamp(0.1, 1.5);
+        if (pitch != null) _ttsPitch = pitch.clamp(0.5, 2.0);
+        _applyTtsVoice();
+
+      case 'stt_listen':
+        final reqId = (a['request_id'] as String?) ?? '';
+        final timeout = (a['timeout'] as num?)?.toDouble() ?? 10.0;
+        _runSttListen(reqId, timeout);
+
+      case 'stt_stop':
+        _runSttStop();
+
       default:
         throw Exception("Unknown FletAudioService method: $name");
     }
     return null;
+  }
+
+  Future<FlutterTts> _ensureTts() async {
+    if (_tts != null) return _tts!;
+    final tts = FlutterTts();
+    // Force Android to wait for the utterance to finish (otherwise speak()
+    // returns immediately and the assistant's completion event would fire
+    // before the user hears anything).
+    if (Platform.isAndroid) {
+      try {
+        await tts.awaitSpeakCompletion(true);
+      } catch (_) {}
+    }
+    try {
+      if (Platform.isAndroid) {
+        // Force the high-quality Google engine if available.
+        await tts.setEngine("com.google.android.tts");
+      }
+      await tts.setLanguage('en-GB');
+      // Attempt to find a higher-quality British male voice (Jarvis style)
+      await _applyJarvisVoice(tts);
+    } catch (_) {}
+    try {
+      await tts.setSpeechRate(_ttsRate);
+      await tts.setPitch(_ttsPitch);
+    } catch (_) {}
+    _tts = tts;
+    return tts;
+  }
+
+  Future<void> _applyJarvisVoice(FlutterTts tts) async {
+    try {
+      // 1. Scan available voices for a British male voice
+      dynamic voices = await tts.getVoices;
+      if (voices is List) {
+        // Preference: British English Male
+        for (var voice in voices) {
+          String name = voice["name"].toString().toLowerCase();
+          String locale = voice["locale"].toString().toLowerCase();
+          // Heuristic for British Male: common Android tags include 'male', 'man', 'low', 'rjs', 'gb-local'
+          if ((locale.contains("en-gb") || locale.contains("en_gb")) && 
+              (name.contains("male") || name.contains("man") || name.contains("low") || 
+               name.contains("rjs") || name.contains("x-gb-local") || name.contains("gb-x-fis-local"))) {
+            await tts.setVoice({"name": voice["name"], "locale": voice["locale"]});
+            return;
+          }
+        }
+        // Fallback 1: Any British English voice
+        for (var voice in voices) {
+          String locale = voice["locale"].toString().toLowerCase();
+          if (locale.contains("en-gb") || locale.contains("en_gb")) {
+            await tts.setVoice({"name": voice["name"], "locale": voice["locale"]});
+            return;
+          }
+        }
+        // Fallback 2: Any male voice
+        for (var voice in voices) {
+          String name = voice["name"].toString().toLowerCase();
+          if (name.contains("male") || name.contains("man")) {
+            await tts.setVoice({"name": voice["name"], "locale": voice["locale"]});
+            return;
+          }
+        }
+      }
+      // If no specific voice found, just stick to en-GB
+      await tts.setLanguage('en-GB');
+    } catch (e) {
+      debugPrint("Jarvis voice selection error: $e");
+    }
+  }
+
+  Future<void> _applyTtsVoice() async {
+    if (_tts == null) return;
+    try {
+      await _tts!.setSpeechRate(_ttsRate);
+      await _tts!.setPitch(_ttsPitch);
+    } catch (_) {}
+  }
+
+  Future<void> _runTtsSpeak(String requestId, String text) async {
+    if (text.trim().isEmpty) {
+      control.triggerEvent('tts_complete', jsonEncode({
+        'request_id': requestId, 'ok': true, 'skipped': true,
+      }));
+      return;
+    }
+    try {
+      final tts = await _ensureTts();
+      await tts.speak(text);
+      control.triggerEvent('tts_complete', jsonEncode({
+        'request_id': requestId, 'ok': true,
+      }));
+    } catch (e) {
+      control.triggerEvent('tts_complete', jsonEncode({
+        'request_id': requestId, 'ok': false, 'error': e.toString(),
+      }));
+    }
+  }
+
+  Future<void> _runTtsStop() async {
+    if (_tts == null) return;
+    try {
+      await _tts!.stop();
+    } catch (_) {}
+  }
+
+  Future<SpeechToText> _ensureStt() async {
+    if (_stt != null) return _stt!;
+    final stt = SpeechToText();
+    final ok = await stt.initialize(
+      onError: (err) => debugPrint("STT Error: $err"),
+      onStatus: (stat) => debugPrint("STT Status: $stat"),
+    );
+    if (!ok) throw Exception("Speech recognition not available on this device");
+    _stt = stt;
+    return stt;
+  }
+
+  Future<void> _runSttListen(String requestId, double timeout) async {
+    try {
+      final stt = await _ensureStt();
+      // listen() resolves when it successfully starts listening. 
+      // We then await the result in the onResult callback.
+      await stt.listen(
+        onResult: (result) {
+          if (result.finalResult) {
+            control.triggerEvent('stt_result', jsonEncode({
+              'request_id': requestId,
+              'ok': true,
+              'text': result.recognizedWords,
+            }));
+          }
+        },
+        listenFor: Duration(seconds: timeout.toInt()),
+        cancelOnError: true,
+      );
+    } catch (e) {
+      control.triggerEvent('stt_result', jsonEncode({
+        'request_id': requestId,
+        'ok': false,
+        'error': e.toString(),
+      }));
+    }
+  }
+
+  Future<void> _runSttStop() async {
+    if (_stt == null) return;
+    try {
+      await _stt!.stop();
+    } catch (_) {}
+  }
+
+  Future<void> _runQueryPermissions(String requestId) async {
+    try {
+      final notif = await Permission.notification.status;
+      final audio = await Permission.audio.status;
+      final storage = await Permission.storage.status;
+      final mes = await Permission.manageExternalStorage.status;
+      final microphone = await Permission.microphone.status;
+      control.triggerEvent('permissions_result', jsonEncode({
+        'request_id': requestId,
+        'ok': true,
+        'notification': notif.name,
+        'audio': audio.name,
+        'storage': storage.name,
+        'manage_external_storage': mes.name,
+        'record_audio': microphone.name,
+      }));
+    } catch (e) {
+      control.triggerEvent('permissions_result', jsonEncode({
+        'request_id': requestId,
+        'ok': false,
+        'error': e.toString(),
+      }));
+    }
+  }
+
+  Future<void> _runRequestPermission(String requestId, String name) async {
+    try {
+      PermissionStatus status;
+      switch (name) {
+        case 'notification':
+          status = await Permission.notification.request();
+        case 'audio':
+          status = await Permission.audio.request();
+        case 'storage':
+          status = await Permission.storage.request();
+        case 'manage_external_storage':
+          status = await Permission.manageExternalStorage.request();
+        case 'record_audio':
+          status = await Permission.microphone.request();
+        default:
+          throw Exception("Unknown permission name: $name");
+      }
+      control.triggerEvent('permission_request_result', jsonEncode({
+        'request_id': requestId,
+        'ok': true,
+        'name': name,
+        'status': status.name,
+      }));
+    } catch (e) {
+      control.triggerEvent('permission_request_result', jsonEncode({
+        'request_id': requestId,
+        'ok': false,
+        'name': name,
+        'error': e.toString(),
+      }));
+    }
   }
 
   Future<void> _runDecode(String requestId, String path) async {
@@ -288,13 +555,25 @@ class FletAudioService extends FletService {
     // granted or if the OS doesn't apply that permission to this API level.
     try {
       final results = await [
-        Permission.notification,        // POST_NOTIFICATIONS — Android 13+
-        Permission.audio,               // READ_MEDIA_AUDIO  — Android 13+
-        Permission.storage,             // READ/WRITE_EXTERNAL_STORAGE — ≤ Android 12
+        Permission.notification,        // POST_NOTIFICATIONS: Android 13+
+        Permission.audio,               // READ_MEDIA_AUDIO:  Android 13+
+        Permission.storage,             // READ/WRITE_EXTERNAL_STORAGE: ≤ Android 12
+        Permission.microphone,          // RECORD_AUDIO: Jarvis Voice Search
       ].request();
       results.forEach((perm, status) {
         debugPrint("FletAudioService: permission $perm = $status");
       });
+
+      // MANAGE_EXTERNAL_STORAGE is a special permission on Android 11+ —
+      // request() launches the system Settings activity rather than showing
+      // an in-app dialog. Gate on isGranted so we don't re-open Settings on
+      // every cold start once the user has granted access. Required for
+      // delete/metadata-edit operations on files under /storage/emulated/0.
+      final mesGranted = await Permission.manageExternalStorage.isGranted;
+      if (!mesGranted) {
+        final mesStatus = await Permission.manageExternalStorage.request();
+        debugPrint("FletAudioService: manageExternalStorage = $mesStatus");
+      }
     } catch (e) {
       debugPrint("FletAudioService: permission request failed: $e");
     }
@@ -362,7 +641,7 @@ class FletAudioService extends FletService {
           artUri = parsed;
         }
       } catch (_) {
-        // ignore — leave artUri null
+        // ignore: leave artUri null
       }
     }
     return MediaItem(
@@ -509,10 +788,10 @@ class AudioPlayerHandler extends BaseAudioHandler with QueueHandler, SeekHandler
     // preload: true (combined with useLazyPreparation on the parent) eagerly
     // loads only the initial child. This is critical for session-restore:
     // without it, the source isn't decoded until play() is called, so
-    // durationStream/processingState=ready never fire — Python's
+    // durationStream/processingState=ready never fire; Python's
     // _is_loaded stays False, the slider's max stays 0, and any user scrub
     // gets stuffed into _restore_position instead of seeking. The first
-    // play() then applies that stale scrub target — which can exceed the
+    // play() then applies that stale scrub target; which can exceed the
     // actual track duration and trigger auto-advance ("skip song").
     await _player.setAudioSource(
       _playlist,
@@ -522,7 +801,7 @@ class AudioPlayerHandler extends BaseAudioHandler with QueueHandler, SeekHandler
   }
 
   Future<void> addQueueItemAt(MediaItem item, int index) async {
-    // In-place insert on the live ConcatenatingAudioSource — does NOT call
+    // In-place insert on the live ConcatenatingAudioSource; does NOT call
     // _player.setAudioSource, so the currently-playing source is not torn
     // down. _rebuildPlaylist (the previous approach) reloaded the player
     // from position 0 on every queue mutation, which the user perceived
@@ -571,7 +850,7 @@ class AudioPlayerHandler extends BaseAudioHandler with QueueHandler, SeekHandler
     mediaItem.add(item);
     if (url != null) {
       try {
-        // preload: false — just_audio will load lazily when play() is called.
+        // preload: false; just_audio will load lazily when play() is called.
         // No _player.stop() first: setAudioSource replaces the previous
         // source, and stop() can deadlock against a previously-pending source.
         await _player.setAudioSource(

@@ -17,7 +17,7 @@ The decoder is platform-specific:
   • Android   → flet_audio_service.decode_pcm (MediaCodec)
   • Desktop   → ffmpeg subprocess (or skip if ffmpeg missing)
 
-Math notes — every step is intentionally textbook so future-you can audit it:
+Math notes: every step is intentionally textbook so future-you can audit it:
 
   • RMS energy: sqrt(mean(x^2)) on samples in [-1, 1]. Mapped to [0, 1] via a
     dB curve where -60 dBFS → 0 and 0 dBFS → 1. Loudness is roughly linear
@@ -70,7 +70,7 @@ N_MELS = 40
 N_MFCC = 13
 N_CHROMA = 12
 # Total length of the packed sound-profile BLOB (mfcc_mean + mfcc_std + chroma).
-# Stored as float32 little-endian — kept as a single BLOB rather than three
+# Stored as float32 little-endian; kept as a single BLOB rather than three
 # columns so adding a new descriptor only touches FEATURES_VERSION.
 EMBED_DIMS = N_MFCC + N_MFCC + N_CHROMA
 TARGET_SAMPLE_RATE = 22050  # must match the Kotlin decoder's TARGET_SAMPLE_RATE
@@ -90,8 +90,8 @@ class Features:
     brightness: float          # [0, 1] mean spectral centroid / Nyquist
     rolloff: float             # [0, 1] mean 85-percentile rolloff / Nyquist
     beat_strength: float       # [0, 1] prominence of the chosen tempo peak
-    mfcc_mean: np.ndarray      # (N_MFCC,) timbre — average MFCC across frames
-    mfcc_std: np.ndarray       # (N_MFCC,) timbral dynamics — frame-to-frame variance
+    mfcc_mean: np.ndarray      # (N_MFCC,) timbre; average MFCC across frames
+    mfcc_std: np.ndarray       # (N_MFCC,) timbral dynamics; frame-to-frame variance
     chroma: np.ndarray         # (N_CHROMA,) mean pitch-class energy → harmonic profile
 
     def timbre_blob(self) -> bytes:
@@ -144,8 +144,9 @@ def is_android() -> bool:
 async def decode_to_pcm(audio_service, path: str) -> tuple[str, int]:
     """Decode audio file → raw int16 LE mono PCM file. Returns (path, sr).
 
-    On Android, calls into the flet_audio_service Kotlin decoder. On desktop,
-    shells out to ffmpeg. Raises RuntimeError if no decoder is available.
+    On Android, calls into the flet_audio_service Kotlin decoder. On non-Android
+    environments (development fallback), shells out to ffmpeg.
+    Raises RuntimeError if no decoder is available.
     """
     if is_android():
         if audio_service is None:
@@ -161,8 +162,8 @@ async def _decode_pcm_ffmpeg(path: str) -> tuple[str, int]:
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         raise RuntimeError(
-            "ffmpeg not found on PATH — install it (`brew install ffmpeg`) or "
-            "skip DSP analysis on this platform"
+            "ffmpeg not found on PATH; install it (`brew install ffmpeg`) or "
+            "skip DSP analysis in this environment"
         )
 
     # Cache PCM next to the source under a hashed filename so re-analysis is
@@ -172,13 +173,13 @@ async def _decode_pcm_ffmpeg(path: str) -> tuple[str, int]:
     out_path = os.path.join(cache_dir, f"{abs(hash(path))}.pcm")
 
     # We don't know the duration up front without an extra ffprobe call. Just
-    # ask ffmpeg to skip 15s and read 90s — for short tracks this still
-    # decodes whatever's left after 15s and stops naturally. The window
+    # ask ffmpeg to skip 15s and read 90s; for short tracks this still
+    # does the right thing (it just reads to EOF). The window
     # matches the Kotlin path's MAX_SECONDS.
     cmd = [
         ffmpeg, "-hide_banner", "-loglevel", "error",
         "-ss", "15",                     # skip first 15s (intro)
-        "-t", "90",                      # cap at 90s — matches Kotlin
+        "-t", "90",                      # cap at 90s; matches Kotlin
         "-i", path,
         "-f", "s16le",
         "-acodec", "pcm_s16le",
@@ -228,7 +229,7 @@ def _frame(x: np.ndarray, n_fft: int, hop: int) -> np.ndarray:
         # Pad short signals up to one frame so downstream code doesn't crash.
         x = np.pad(x, (0, n_fft - x.size))
     n_frames = 1 + (x.size - n_fft) // hop
-    # stride_tricks gives a view — no copy. Read-only because writing would
+    # stride_tricks gives a view; no copy. Read-only because writing would
     # corrupt overlapping frames.
     return np.lib.stride_tricks.as_strided(
         x,
@@ -241,7 +242,7 @@ def _frame(x: np.ndarray, n_fft: int, hop: int) -> np.ndarray:
 def _stft_magnitude(x: np.ndarray, sr: int) -> tuple[np.ndarray, np.ndarray]:
     """Returns (magnitude_spectrogram[n_frames, n_fft//2+1], freqs[n_fft//2+1])."""
     frames = _frame(x, N_FFT, HOP)
-    # Hann window — standard choice; reduces spectral leakage. .copy() because
+    # Hann window: standard choice; reduces spectral leakage. .copy() because
     # frames is a read-only stride view and we need to multiply in place...
     # actually rfft accepts read-only input, so we can multiply via broadcast.
     window = np.hanning(N_FFT).astype(np.float32)
@@ -277,7 +278,7 @@ def _spectral_rolloff(mag: np.ndarray, freqs: np.ndarray, sr: int,
                       pct: float = 0.85) -> float:
     """Mean spectral rolloff at percentile `pct`, normalised to [0, 1] by
     Nyquist. The rolloff frequency is the lowest f below which `pct` of the
-    spectrum's energy lies. Complements `brightness` (centroid) — two tracks
+    spectrum's energy lies. Complements `brightness` (centroid); two tracks
     can have similar centroids but very different roll-offs (e.g. a bright
     pad vs a track with a sharp high-frequency cymbal hit)."""
     cum = np.cumsum(mag, axis=1)
@@ -287,8 +288,8 @@ def _spectral_rolloff(mag: np.ndarray, freqs: np.ndarray, sr: int,
         return 0.0
     threshold = pct * totals[safe]
     # For each safe frame, find the first bin index where cumsum >= threshold.
-    # argmax over a boolean array returns the first True index — exactly what
-    # we want — provided at least one True exists, which it does because
+    # argmax over a boolean array returns the first True index; exactly what
+    # we want; provided at least one True exists, which it does because
     # cum[:, -1] == totals.
     idx = np.argmax(cum[safe] >= threshold, axis=1)
     rolloff_hz = freqs[idx]
@@ -305,7 +306,7 @@ def _chroma_mean(mag: np.ndarray, freqs: np.ndarray) -> np.ndarray:
     above 5 kHz (predominantly noise / harmonics with weak pitch identity)
     are excluded. Per-frame chroma is the sum of magnitudes per pitch class;
     we L1-normalise per frame so a quiet harmonic frame contributes equally
-    to a loud one — chroma is about *which notes*, not *how loud*."""
+    to a loud one; chroma is about *which notes*, not *how loud*."""
     valid = (freqs >= 80.0) & (freqs <= 5000.0)
     f = freqs[valid]
     if f.size == 0:
@@ -333,7 +334,7 @@ def _chroma_mean(mag: np.ndarray, freqs: np.ndarray) -> np.ndarray:
 def _onset_envelope(mag: np.ndarray) -> np.ndarray:
     """Spectral flux onset envelope. Sums positive frame-to-frame differences
     of log-magnitude across all frequency bins. Standard onset detector."""
-    log_mag = np.log1p(mag)  # log(1+x) — keeps zeros tame, no -inf
+    log_mag = np.log1p(mag)  # log(1+x); keeps zeros tame, no -inf
     diff = np.diff(log_mag, axis=0)
     flux = np.maximum(diff, 0.0).sum(axis=1)
     # Subtract a local mean to suppress slow drifts; this is what makes the
@@ -380,7 +381,7 @@ def _estimate_bpm(onset_env: np.ndarray, sr: int) -> tuple[float, float]:
     if not valid.any():
         return 0.0, 0.0
 
-    # Log-Gaussian prior on 120 BPM, sigma ≈ 0.9 octaves (broad — we only
+    # Log-Gaussian prior on 120 BPM, sigma ≈ 0.9 octaves (broad: we only
     # want to break octave ties, not force every track to 120).
     prior = np.exp(-0.5 * (np.log2(bpms / 120.0) / 0.9) ** 2)
     score = ac[1:] * prior
@@ -430,7 +431,7 @@ def _mel_filterbank(sr: int, n_fft: int, n_mels: int) -> np.ndarray:
     for i in range(n_mels):
         l, c, r = bin_pts[i], bin_pts[i + 1], bin_pts[i + 2]
         if c == l or c == r:
-            # Degenerate filter (happens at very low frequencies). Skip — the
+            # Degenerate filter (happens at very low frequencies). Skip: the
             # row stays zero and that band contributes nothing, which is
             # better than a divide-by-zero.
             continue

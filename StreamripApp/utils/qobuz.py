@@ -357,7 +357,7 @@ class QobuzClient(Client):
 
         # Qobuz silently downgrades streams in regions where the requested
         # tier isn't licensed (e.g. ask for Hi-Res FLAC, get MP3). The actual
-        # format is reported in the `mime_type` field — trust that, not the
+        # format is reported in the `mime_type` field; trust that, not the
         # quality the caller asked for. Saving an MP3 with a `.flac`
         # extension causes downstream mime/format mismatches in mutagen,
         # tinytag, and ExoPlayer.
@@ -371,7 +371,7 @@ class QobuzClient(Client):
         else:
             fallback = "flac" if quality > 1 else "mp3"
             logger.warning(
-                "Qobuz returned unrecognised mime_type %r for track %s — "
+                "Qobuz returned unrecognised mime_type %r for track %s; "
                 "falling back to %s based on requested quality",
                 mime_type, item, fallback,
             )

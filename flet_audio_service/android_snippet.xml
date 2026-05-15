@@ -4,7 +4,7 @@
   or in your custom template.
 
   ─────────────────────────────────────────────────────────────────────────
-  STEP 0 — build.gradle (app-level)
+  STEP 0: build.gradle (app-level)
   ─────────────────────────────────────────────────────────────────────────
   audio_service and just_audio require minSdkVersion 21 (Android 5.0 Lollipop).
   In your app's build.gradle, set:
@@ -24,12 +24,24 @@
 <!-- WAKE_LOCK: Required to keep the CPU awake during background playback. -->
 <!-- FOREGROUND_SERVICE: Required to start the media foreground service. -->
 <!-- FOREGROUND_SERVICE_MEDIA_PLAYBACK: Required on Android 14+ (API 34+). -->
-<!--   Without FOREGROUND_SERVICE_MEDIA_PLAYBACK, the foreground service    -->
-<!--   will be killed immediately by the system on Android 14+.             -->
+<!-- POST_NOTIFICATIONS: Required on Android 13+ (API 33+). -->
+<!-- RECORD_AUDIO: Required for Speech-to-Text (Voice Search). -->
+<uses-permission android:name="android.permission.INTERNET"/>
 <uses-permission android:name="android.permission.WAKE_LOCK"/>
 <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
 <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"/>
-<uses-permission android:name="android.permission.INTERNET"/>
+<uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>
+<uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
+<uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+<uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+<uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+<!-- 1.1 ADD QUERIES (Required for Speech Recognition on Android 11+) -->
+<queries>
+    <intent>
+        <action android:name="android.speech.RecognitionService" />
+    </intent>
+</queries>
 
 <!-- 2. ADD SERVICE AND RECEIVER (Inside <application> tag) -->
 

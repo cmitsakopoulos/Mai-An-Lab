@@ -64,6 +64,7 @@ class LibraryScanner:
             await self._dispatch_completion(0, 0)
             return
 
+        self.db_manager.clear_caches()
         db_state = await self.db_manager.get_path_mtime_map()
         
         if self.progress_callback:
@@ -90,13 +91,14 @@ class LibraryScanner:
             return
 
         # For large scans, drop the per-row INSERT trigger and rebuild counts/FTS
-        # in a single bulk pass at the end — dramatically faster for big libraries.
+        # in a single bulk pass at the end; dramatically faster for big libraries.
         bulk_mode = total_to_process >= 200
         if bulk_mode:
             await self.db_manager.begin_bulk_import()
 
         processed = 0
-        batch_size = 500
+        batch_size = 500    # DB insert granularity — keep large for performance
+        read_chunk_size = 50  # Tag-read granularity — smaller for live UI updates
 
         try:
             for i in range(0, total_to_process, batch_size):
@@ -104,20 +106,28 @@ class LibraryScanner:
 
                 chunk = to_process[i:i + batch_size]
 
-                # Send the entire chunk to the thread pool in one go
-                batch_results = await asyncio.to_thread(self._read_tags_batch, chunk)
+                # Read tags in smaller sub-chunks so the UI updates frequently,
+                # but accumulate all results and do one DB insert per batch_size
+                # to avoid per-row overhead.
+                batch_results = []
+                for j in range(0, len(chunk), read_chunk_size):
+                    if self.stop_requested: break
+                    sub_chunk = chunk[j:j + read_chunk_size]
+                    sub_results = await asyncio.to_thread(self._read_tags_batch, sub_chunk)
+                    batch_results.extend(sub_results)
+                    processed += len(sub_chunk)
 
-                # Update DB and UI
+                    if self.progress_callback:
+                        p = (processed / total_to_process) * 100
+                        current_file = os.path.basename(sub_chunk[-1][0]) if sub_chunk else ""
+                        msg = f"{processed}/{total_to_process}"
+                        if current_file:
+                            msg += f" — {current_file}"
+                        await self._ui_callback(p, msg)
+
+                # Single DB insert per 500-track batch
                 if batch_results:
                     await self.db_manager.insert_tracks_batch(batch_results)
-
-                processed += len(chunk)
-                if self.progress_callback:
-                    p = (processed / total_to_process) * 100
-                    msg = f"Imported {processed} of {total_to_process} tracks"
-                    if chunk:
-                        msg += f": {os.path.basename(chunk[-1][0])}"
-                    await self._ui_callback(p, msg)
         finally:
             if bulk_mode:
                 await self.db_manager.end_bulk_import()
