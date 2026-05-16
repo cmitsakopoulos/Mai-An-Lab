@@ -11,6 +11,7 @@ import 'package:just_audio/just_audio.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 import 'package:speech_to_text/speech_to_text.dart';
+import 'package:flutter/widgets.dart';
 
 
 // Bridge to the native PCM decoder implemented in FletAudioServicePlugin.kt.
@@ -42,7 +43,7 @@ class Extension extends FletExtension {
 // FletAudioService; Flet 0.84.0 FletService bridge
 // ─────────────────────────────────────────────────────────────────────────────
 
-class FletAudioService extends FletService {
+class FletAudioService extends FletService with WidgetsBindingObserver {
   FletAudioService({required super.control});
 
   static AudioPlayerHandler? _handler;
@@ -65,6 +66,7 @@ class FletAudioService extends FletService {
   static const int _positionJumpMs = 1500;
   int _lastEmittedPositionMs = -1;
   int _lastEmitWallClockMs = 0;
+  bool _isBackground = false;
 
   // TTS singleton: lazily initialised on first speak so cold-start cost is
   // paid only by users who actually invoke the assistant. Pause/resume of
@@ -100,6 +102,7 @@ class FletAudioService extends FletService {
 
     super.init();
     debugPrint("FletAudioService(${control.id}).init");
+    WidgetsBinding.instance.addObserver(this);
     // Register the invoke-method listener immediately so Python method calls
     // can resolve as soon as the handler is ready. flet_audio (the working
     // reference) does the same.
@@ -528,6 +531,8 @@ class FletAudioService extends FletService {
 
     _positionSub = _handler!._player.positionStream.listen((position) {
       if (!_handler!._player.playing) return;
+      if (_isBackground) return;
+
       final posMs = position.inMilliseconds;
       final nowMs = DateTime.now().millisecondsSinceEpoch;
       final jumped = (_lastEmittedPositionMs >= 0) &&
@@ -635,7 +640,14 @@ class FletAudioService extends FletService {
     _positionSub?.cancel();
     _durationSub?.cancel();
     _errorSub?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    _isBackground = (state == AppLifecycleState.paused || state == AppLifecycleState.detached);
+    debugPrint("FletAudioService: Lifecycle state changed to $state, _isBackground=$_isBackground");
   }
 
   MediaItem _mediaItemFromMap(Map<String, dynamic> map) {
