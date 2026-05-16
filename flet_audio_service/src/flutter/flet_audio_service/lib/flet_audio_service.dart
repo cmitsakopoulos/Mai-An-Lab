@@ -12,6 +12,7 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 import 'package:speech_to_text/speech_to_text.dart';
 
+
 // Bridge to the native PCM decoder implemented in FletAudioServicePlugin.kt.
 // We keep this MethodChannel separate from audio_service's own channels so a
 // hung decode can never wedge playback.
@@ -71,10 +72,21 @@ class FletAudioService extends FletService {
   // default which is the right behaviour for short assistant utterances on
   // top of a paused player.
   static FlutterTts? _tts;
-  double _ttsRate = 0.5;
+  // 0.5 is the flutter_tts default, but on Android the system TTS engine
+  // tends to interpret it as 'fast' (especially Google TTS on Pixel/Samsung
+  // devices). 0.4 is a comfortable narration pace for short assistant
+  // utterances; the Python side can override via tts_set_voice.
+  double _ttsRate = 0.4;
   double _ttsPitch = 1.0;
 
+  // STT (push-to-talk). Lazy singleton mirroring the TTS pattern. We hold
+  // an in-flight request_id so a second start_listening cancels the first
+  // gracefully — recognition sessions are serialised, not concurrent.
   static SpeechToText? _stt;
+  static bool _sttAvailable = false;
+  String? _activeSttRequestId;
+
+
 
   bool _initRan = false;
 

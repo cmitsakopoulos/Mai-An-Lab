@@ -1097,16 +1097,25 @@ class DatabaseManager:
     # ── Track Graph (k-NN neighbours) ────────────────────────────────────────
 
     async def get_tracks_with_features(self, features_version: int) -> list[dict]:
-        """Returns every track whose DSP features are present and current.
-        Used by the graph builder to compute acoustic edges."""
+        """Returns every track whose DSP features are present and current,
+        joined with the metadata fields the assistant needs to enqueue them
+        (title/artist/album/duration). Used by the graph builder for
+        acoustic edges AND by the mood-based DSP search."""
         conn = await self.get_connection()
         sql = '''
             SELECT pc.track_path AS path, pc.timbre,
-                   COALESCE(pc.bpm, 0)        AS bpm,
-                   COALESCE(pc.brightness, 0) AS brightness,
-                   COALESCE(pc.energy, 0)     AS energy,
-                   COALESCE(pc.rolloff, 0)    AS rolloff
+                   COALESCE(pc.bpm, 0)           AS bpm,
+                   COALESCE(pc.brightness, 0)    AS brightness,
+                   COALESCE(pc.energy, 0)        AS energy,
+                   COALESCE(pc.rolloff, 0)       AS rolloff,
+                   COALESCE(pc.beat_strength, 0) AS beat_strength,
+                   t.title, t.duration,
+                   ar.name  AS artist,
+                   al.title AS album
             FROM play_counts pc
+            LEFT JOIN tracks  t  ON t.path  = pc.track_path
+            LEFT JOIN albums  al ON al.id   = t.album_id
+            LEFT JOIN artists ar ON ar.id   = al.artist_id
             WHERE pc.timbre IS NOT NULL
               AND COALESCE(pc.features_version, 0) >= ?
         '''
