@@ -183,19 +183,23 @@ class FletAudioServicePlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         var nextOutAt = 0.0
         var lastSample: Short = 0  // sample at srcIndex
         var prevSample: Short = 0  // sample at srcIndex - 1
-        // Output buffer batched to disk in 64KB chunks.
-        val outBuf = ByteBuffer.allocate(64 * 1024).order(ByteOrder.LITTLE_ENDIAN)
+        // Output buffer batched to disk in 256KB chunks for better I/O performance.
+        val outBuf = ByteBuffer.allocate(256 * 1024).order(ByteOrder.LITTLE_ENDIAN)
         var totalOutSamples = 0L
 
         val info = MediaCodec.BufferInfo()
         var inputDone = false
         var outputDone = false
+        var lastProgressLogUs = startUs
+        var lastDataActivityMs = System.currentTimeMillis()
 
         try {
             while (!outputDone) {
+                var activity = false
                 if (!inputDone) {
                     val inIdx = codec.dequeueInputBuffer(DECODE_TIMEOUT_US)
                     if (inIdx >= 0) {
+                        activity = true
                         val inBuf = codec.getInputBuffer(inIdx)!!
                         val sampleSize = extractor.readSampleData(inBuf, 0)
                         val sampleTime = extractor.sampleTime
@@ -215,10 +219,18 @@ class FletAudioServicePlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                 val outIdx = codec.dequeueOutputBuffer(info, DECODE_TIMEOUT_US)
                 when {
                     outIdx >= 0 -> {
+                        activity = true
+                        lastDataActivityMs = System.currentTimeMillis()
                         if (info.size > 0) {
                             val pcmBuf = codec.getOutputBuffer(outIdx)!!
                             pcmBuf.position(info.offset)
                             pcmBuf.limit(info.offset + info.size)
+
+                            // Periodic progress logging (every 10s of audio)
+                            if (info.presentationTimeUs - lastProgressLogUs > 10_000_000L) {
+                                Log.d(TAG, "decodePcm: progress ${info.presentationTimeUs / 1_000_000}s")
+                                lastProgressLogUs = info.presentationTimeUs
+                            }
                             // PCM 16-bit interleaved per Android docs for
                             // OUTPUT_FORMAT_AUDIO_PCM_16BIT (the default).
                             val shorts = pcmBuf.order(ByteOrder.LITTLE_ENDIAN)
@@ -262,7 +274,16 @@ class FletAudioServicePlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                         }
                     }
                     outIdx == MediaCodec.INFO_TRY_AGAIN_LATER -> {
-                        // Spin again.
+                        // If no activity on either input or output, sleep briefly
+                        // to avoid pegged CPU consumption which can actually
+                        // slow down the hardware codec.
+                        if (!activity) {
+                            Thread.sleep(1)
+                            // Hang detection: if no data for 5s while expecting it, bail.
+                            if (System.currentTimeMillis() - lastDataActivityMs > 5000L) {
+                                throw IllegalStateException("MediaCodec hang detected (no output for 5s)")
+                            }
+                        }
                     }
                     outIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
                         // Some codecs emit this once after start(). The new

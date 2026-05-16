@@ -46,6 +46,7 @@ pathlib.Path.home = classmethod(_hijacked_home)
 import time
 import logging
 import functools
+import platform
 import re
 import json
 import asyncio
@@ -89,17 +90,10 @@ try:
 except ImportError:
     AudioContext = AudioContextConfig = AudioContextConfigFocus = None
 
-from utils.history_manager import load_history, save_history, add_to_history
-from utils.search_history import load_searches, add_search
 from utils.streamrip_api import (
     load_config, update_config_params, download,
     get_config_path, repair_config, get_default_download_path,
 )
-from utils.streamrip_search import StreamripSearcher
-from utils.db_manager import DatabaseManager
-from utils.library_scanner import LibraryScanner
-from utils.metadata_editor import update_physical_metadata, extract_artwork
-import sys
 if sys.platform == "darwin":
     from utils.audio_engine_macos import audio_engine
 else:
@@ -187,9 +181,6 @@ def src_color(source: str) -> str:
 def fmt_time(s: float) -> str:
     m, s = divmod(int(s), 60)
     return f"{m}:{s:02d}"
-
-import platform
-import subprocess
 
 def pick_folder(title="Select Folder") -> str | None:
     """Native folder picker fallback for desktop platforms."""
@@ -356,10 +347,6 @@ class NotificationSystem:
         asyncio.create_task(_dismiss())
 
 # ─── High Fidelity UI Components ──────────────────────────────────────────────
-import numpy as np
-from utils.dsp import (
-    EMBED_DIMS, N_CHROMA, N_MFCC, unpack_embedding_groups, unpack_timbre,
-)  # noqa: F401  # unpack_timbre re-exported for the dialog's quick "has features?" check
 
 class AutoPlaylistEngine:
     """MCL-based clustering over real DSP features with optional metadata blending.
@@ -406,9 +393,7 @@ class AutoPlaylistEngine:
         Artist and album contribute equally (50/50) to string_sim.
     """
 
-    # Dimension layout; class-level so internal slicing stays consistent.
     _N_SCALARS = 5  # bpm, energy, brightness, rolloff, beat_strength
-    _DIM_TOTAL = _N_SCALARS + EMBED_DIMS
 
     # Noise tokens stripped before token-set comparison. These are common
     # filler words that appear inconsistently across different music providers and
@@ -474,7 +459,7 @@ class AutoPlaylistEngine:
 
     def _build_string_similarity_matrix(self,
                                          artists: list[str],
-                                         albums: list[str]) -> np.ndarray:
+                                         albums: list[str]):
         """Build an (n×n) pairwise metadata similarity matrix.
 
         For each pair (i, j):
@@ -486,6 +471,7 @@ class AutoPlaylistEngine:
         acoustic Gaussian kernel; no column-stochastic normalisation is applied
         here because blending happens before the final normalisation step.
         """
+        import numpy as np
         n = len(artists)
         mat = np.zeros((n, n), dtype=np.float64)
         for i in range(n):
@@ -511,6 +497,7 @@ class AutoPlaylistEngine:
         if not hot_set_data:
             return [seed_path]
 
+        from utils.dsp import unpack_timbre
         # Drop entries with missing features. The orchestrator should have
         # populated them, but if extraction failed for a track we don't want
         # zeros to drag the cluster centroid toward 0 BPM / 0 energy.
@@ -551,6 +538,8 @@ class AutoPlaylistEngine:
         return self._sequence_flow(seed_path, cluster_paths, cluster_vectors)
 
     def _encode_hot_set(self, data):
+        import numpy as np
+        from utils.dsp import unpack_embedding_groups, N_MFCC, N_CHROMA
         paths = [d["path"] for d in data]
         rows = []
         for d in data:
@@ -605,6 +594,7 @@ class AutoPlaylistEngine:
         """
         if target <= 0:
             return cluster_indices
+        import numpy as np
         n = vectors.shape[0]
         seed_vec = vectors[seed_idx]
         # Distances from every track to the seed, used for both directions.
@@ -630,9 +620,9 @@ class AutoPlaylistEngine:
         return cluster_indices
 
     def _build_similarity_graph(self,
-                                vectors: np.ndarray,
+                                vectors,
                                 artists: list[str] | None = None,
-                                albums: list[str] | None = None) -> np.ndarray:
+                                albums: list[str] | None = None):
         """Build the column-stochastic similarity matrix for MCL.
 
         Acoustic component: Gaussian kernel on the weighted z-scored feature
@@ -646,6 +636,7 @@ class AutoPlaylistEngine:
         The blend is applied *before* column-stochastic normalisation so both
         signals contribute proportionally to each column's probability mass.
         """
+        import numpy as np
         # Compute pairwise squared Euclidean distances.
         # ||a-b||² = ||a||² + ||b||² - 2·a·b  (efficient via broadcasting)
         dot_product = np.dot(vectors, vectors.T)
@@ -670,6 +661,7 @@ class AutoPlaylistEngine:
         return similarity / col_sums
 
     def _run_mcl(self, matrix):
+        import numpy as np
         m = matrix.copy()
         for _ in range(20):  # Typical convergence
             prev = m
@@ -699,6 +691,7 @@ class AutoPlaylistEngine:
         Look up the seed's column to find which attractor it flows into,
         then return that attractor's row.
         """
+        import numpy as np
         col = matrix[:, seed_idx]
         attractor = int(np.argmax(col))
         cluster = np.where(matrix[attractor, :] > 0)[0].tolist()
@@ -721,6 +714,7 @@ class AutoPlaylistEngine:
 
         current_vec = vectors[current_idx]
 
+        import numpy as np
         # Greedy search: Find the 'nearest neighbor' in feature space
         while remaining_indices:
             candidates = vectors[remaining_indices]
@@ -1183,6 +1177,7 @@ class SkeletonRow(ft.Container):
 # ─── Search View ───────────────────────────────────────────────────────────────
 class SearchView:
     def __init__(self, app: "StreamripFletApp"):
+        from utils.streamrip_search import StreamripSearcher
         self.app             = app
         self.page            = app.page
         self.searcher        = StreamripSearcher()
@@ -1637,6 +1632,7 @@ class SearchView:
         self.app.safe_update(_mutate)
 
     def _show_recent_searches(self, e):
+        from utils.search_history import load_searches
         searches = load_searches()
         if not searches: return
         
@@ -1690,6 +1686,7 @@ class SearchView:
             self.app.show_snackbar("Please enter a search term.")
             return
 
+        from utils.search_history import add_search
         add_search(query)
         preview_dir = os.path.join(get_app_dir(), "previews")
         if await asyncio.to_thread(os.path.exists, preview_dir):
@@ -3802,6 +3799,7 @@ class LibraryView:
         self.app.safe_update(lambda: None)
 
         async def _scan():
+            from utils.library_scanner import LibraryScanner
             scanner = LibraryScanner(
                 target_folder=target,
                 db_manager=self.app.db_manager,
@@ -6033,6 +6031,7 @@ class MetadataEditorDialog:
         def load_art():
             if path:
                 try:
+                    from utils.metadata_editor import extract_artwork
                     raw = extract_artwork(path)
                     if raw:
                         ext      = "png" if raw.startswith(b"\x89PNG") else "jpg"
@@ -6291,6 +6290,7 @@ class StreamripFletApp:
         # sub-systems
         await asyncio.to_thread(repair_config)
         self.download_history_list = []
+        from utils.db_manager import DatabaseManager
         self.db_manager = DatabaseManager(os.path.join(DATA_DIR, "library.db"))
         self.auto_engine = AutoPlaylistEngine()
         await self.db_manager.initialize()
@@ -7055,6 +7055,7 @@ class StreamripFletApp:
                         break
                 if not raw_bytes:
                     try:
+                        from utils.metadata_editor import extract_artwork
                         raw_bytes = extract_artwork(path)
                     except Exception as exc:
                         logger.error("Artwork extraction failed: %s", exc)
@@ -7422,6 +7423,7 @@ class StreamripFletApp:
                 meta.get("album_title", ""), meta.get("artist_name", ""))
             paths = [t.get("path") for t in items if t.get("path")]
 
+        from utils.metadata_editor import update_physical_metadata
         count = 0
         for p in paths:
             # Update physical tags in a thread to avoid blocking the event loop
