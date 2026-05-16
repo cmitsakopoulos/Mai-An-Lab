@@ -41,6 +41,7 @@ assets_dir = "assets"
 "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" = true
 "android.permission.POST_NOTIFICATIONS" = true
 "android.permission.WAKE_LOCK" = true
+"android.permission.RECORD_AUDIO" = true
 
 [tool.flet.flutter.pubspec.dependency_overrides]
 serious_python = "^0.9.0"

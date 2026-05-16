@@ -46,8 +46,26 @@ INTENT_MUTE           = "mute"
 INTENT_UNMUTE         = "unmute"
 INTENT_SHUFFLE        = "shuffle"
 INTENT_NOW_PLAYING    = "now_playing"     # what's playing
+INTENT_PLAY_MOOD      = "play_mood"       # play something <mood>; DSP-driven
+INTENT_RESCAN_DSP     = "rescan_dsp"      # run analyser for missing tracks
+INTENT_AFFIRMATIVE    = "affirmative"     # yes / yeah / do it (confirmation)
+INTENT_NEGATIVE       = "negative"        # no / later / not now (cancel pending)
 INTENT_HELP           = "help"
 INTENT_UNKNOWN        = "unknown"
+
+
+# Mood vocabulary handled by INTENT_PLAY_MOOD. Adding a new word requires a
+# matching entry in track_graph.MOOD_PROFILES — otherwise the runner falls
+# back to a "I don't know that mood" reply. Kept here (not in track_graph)
+# so the regex is built from the same source of truth.
+MOOD_KEYWORDS = (
+    "chill", "chilled", "relaxed", "relaxing", "calm", "mellow", "soft",
+    "upbeat", "energetic", "intense", "hard", "heavy", "powerful",
+    "happy", "uplifting",
+    "fast", "quick", "slow", "lazy",
+    "dark", "moody", "bright",
+    "ambient",
+)
 
 
 @dataclass
@@ -66,7 +84,37 @@ class Intent:
 #
 # Order matters: more specific patterns first.
 
+# Built once: a constrained alternation over the known mood vocabulary so
+# the mood pattern can claim "play something chill" without swallowing
+# "play something radiohead" (which is a play_now query, not a mood).
+_MOOD_ALT = "|".join(MOOD_KEYWORDS)
+
+
 _PATTERNS: list[tuple[str, re.Pattern]] = [
+    # ── Confirmation routine (highest priority) ─────────────────────────────
+    # Match these BEFORE play/queue so a bare "yes" or "no" during a
+    # pending-confirmation turn doesn't get misread as a search query.
+    (INTENT_AFFIRMATIVE,  re.compile(
+        r"^\s*(?:yes|yeah|yep|yup|sure|ok|okay|do\s+it|go\s+ahead|please\s+do|"
+        r"confirm|affirmative|sounds\s+good|alright)\s*[.!]?\s*$", re.I)),
+    (INTENT_NEGATIVE,     re.compile(
+        r"^\s*(?:no|nope|nah|not\s+now|later|cancel|stop|forget\s+it|"
+        r"negative|never\s+mind|nevermind)\s*[.!]?\s*$", re.I)),
+
+    # ── Manual graph maintenance ────────────────────────────────────────────
+    # Verb-only: "rescan", "reindex", "reanalyse".
+    (INTENT_RESCAN_DSP,   re.compile(
+        r"^\s*(?:rescan|re-?scan|reindex|re-?index|re-?analy[sz]e)\s*$",
+        re.I)),
+    # Verb + object: covers most natural phrasings, including modifiers
+    # like "new" ("analyse new tracks") and "the/my" ("scan the library").
+    (INTENT_RESCAN_DSP,   re.compile(
+        r"^\s*(?:rescan|re-?scan|reindex|re-?index|analy[sz]e|"
+        r"rebuild|refresh|update|scan)\s+"
+        r"(?:(?:my|the|new|for\s+new|all)\s+)*"
+        r"(?:library|graph|music|tracks?|songs?|dsp|features?)\s*$",
+        re.I)),
+
     # ── Verbless single-word commands first ─────────────────────────────────
     (INTENT_HELP,         re.compile(r"^\s*(?:help|what can you do|commands?)\s*\??\s*$", re.I)),
     (INTENT_NOW_PLAYING,  re.compile(r"^\s*(?:what(?:'s| is)\s+(?:this|playing|on)|now\s+playing|current\s+(?:song|track))\s*\??\s*$", re.I)),
@@ -84,6 +132,25 @@ _PATTERNS: list[tuple[str, re.Pattern]] = [
     (INTENT_PLAY_SIMILAR, re.compile(r"^\s*(?:play\s+)?(?:something|stuff|tracks?|songs?)\s+(?:like|similar\s+to)\s+(?:this|that|current)\s*$", re.I)),
     (INTENT_PLAY_SIMILAR, re.compile(r"^\s*more\s+(?:like\s+)?(?:this|that)\s*$", re.I)),
     (INTENT_PLAY_MORE_BY, re.compile(r"^\s*(?:play\s+)?more\s+(?:by|from)\s+(?:this|that|the)\s+artist\s*$", re.I)),
+
+    # ── Mood (DSP-driven) ───────────────────────────────────────────────────
+    # Restricted to MOOD_KEYWORDS so we don't steal "play something <artist>"
+    # phrasings. The captured word IS the mood; it's matched against
+    # track_graph.MOOD_PROFILES at dispatch time.
+    (INTENT_PLAY_MOOD, re.compile(
+        rf"^\s*(?:play\s+)?(?:me\s+)?(?:some|any|something|anything|stuff|tracks?|songs?|music|tunes?)\s+"
+        rf"(?P<q>{_MOOD_ALT})"
+        rf"(?:\s+(?:music|tracks?|songs?|tunes?|stuff))?\s*$",
+        re.I,
+    )),
+    (INTENT_PLAY_MOOD, re.compile(
+        rf"^\s*(?:play\s+)?(?P<q>{_MOOD_ALT})\s+(?:music|tracks?|songs?|tunes?)\s*$",
+        re.I,
+    )),
+    (INTENT_PLAY_MOOD, re.compile(
+        rf"^\s*(?:i\s+(?:want|need|feel\s+like))\s+(?:some\s+|something\s+)?(?P<q>{_MOOD_ALT})\s*(?:music|tracks?|songs?)?\s*$",
+        re.I,
+    )),
 
     # ── Queue ops with query ────────────────────────────────────────────────
     (INTENT_QUEUE_NEXT, re.compile(
@@ -108,8 +175,12 @@ _PATTERNS: list[tuple[str, re.Pattern]] = [
 
 # Common politeness / filler trailing tokens. Stripped post-match so
 # "play stairway please" doesn't become a literal search for that string.
+# NOTE: "now" was here but collided with "not now" (the negative confirmation
+# phrasing), turning it into a bare "not" that no pattern recognises.
+# "play radiohead now" still parses fine without the strip — the trailing
+# "now" gets captured into the query slot and the LIKE search ignores it.
 _TRAILING_FILLER = re.compile(
-    r"\s+(?:please|now|for\s+me|on\s+spotify|on\s+qobuz|thanks?)\s*$",
+    r"\s+(?:please|for\s+me|on\s+spotify|on\s+qobuz|thanks?)\s*$",
     re.I,
 )
 # Leading filler ("hey assistant, play X" → "play X").
@@ -130,11 +201,53 @@ def _normalise(raw: str) -> str:
 
 
 def _clean_query(q: str) -> str:
-    """Strip leftover filler from the query slot."""
+    """Strip leftover filler from the query slot so the library search hits
+    the actual entity name. Casual phrasings drop "play some radiohead",
+    "play me a beatles song", "play any pink floyd" — without this pass
+    the SQL LIKE search treats "some radiohead" as a literal substring and
+    returns zero hits even though the artist is right there.
+
+    Cleaning runs as a fixed-point loop: each pass peels one filler layer,
+    and we re-run until the string stops shrinking. This handles chained
+    fillers like "me a beatles" (→ "a beatles" → "beatles") without
+    needing to enumerate every n-way combination in the regex."""
     q = q.strip().strip("\"'").strip()
-    # 'play the song stairway' → 'stairway'
-    q = re.sub(r"^(?:the\s+)?(?:song|track|tune|album)\s+", "", q, flags=re.I)
-    return q.strip()
+
+    # Single-token leading words that act as fillers when followed by the
+    # entity. Ordered for clarity, not priority — the loop re-runs anyway.
+    _LEAD_FILLERS = (
+        # quantifiers / articles
+        "some", "any", "a", "an", "the",
+        # politeness / pronouns
+        "me", "for",
+        # "song/track/album/tune/tunes" noise word
+        "song", "songs", "track", "tracks", "tune", "tunes", "album", "albums",
+        # "by" / "from" — bare leading prepositions
+        "by", "from",
+    )
+    lead_alt = "|".join(re.escape(w) for w in _LEAD_FILLERS)
+    _MULTI_FILLER_PHRASES = (
+        # "something by", "anything by", "stuff from" etc. as a single token
+        r"(?:something|anything|stuff|music)\s+(?:by|from)",
+    )
+
+    prev = None
+    while prev != q:
+        prev = q
+        # Strip multi-word filler phrases first (they include a single
+        # leading word that would otherwise be matched in isolation).
+        for phrase in _MULTI_FILLER_PHRASES:
+            q = re.sub(rf"^(?:{phrase})\s+", "", q, flags=re.I)
+        # Then peel a single leading filler word per iteration.
+        q = re.sub(rf"^(?:{lead_alt})\s+", "", q, flags=re.I)
+        # Trailing noise words: "beatles song" → "beatles".
+        q = re.sub(
+            r"\s+(?:songs?|tracks?|tunes?|albums?|music)\s*$",
+            "", q, flags=re.I,
+        )
+        q = q.strip()
+
+    return q
 
 
 def parse(text: str) -> Intent:
@@ -183,6 +296,11 @@ __all__ = [
     "INTENT_UNMUTE",
     "INTENT_SHUFFLE",
     "INTENT_NOW_PLAYING",
+    "INTENT_PLAY_MOOD",
+    "INTENT_RESCAN_DSP",
+    "INTENT_AFFIRMATIVE",
+    "INTENT_NEGATIVE",
     "INTENT_HELP",
     "INTENT_UNKNOWN",
+    "MOOD_KEYWORDS",
 ]

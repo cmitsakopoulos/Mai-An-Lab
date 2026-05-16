@@ -469,7 +469,7 @@ class AudioEngine:
         self.dispatch("on_queue_mutated")
         if self._page:
             self._arm_queue_gate()
-            self._page.run_task(self._push_queue_native, self.current_index, False)
+            self._page.run_task(self._native_add_queue_item, track, insert_at)
 
     def queue_last(self, track: dict):
         if not self.queue:
@@ -479,7 +479,42 @@ class AudioEngine:
         self.dispatch("on_queue_mutated")
         if self._page:
             self._arm_queue_gate()
-            self._page.run_task(self._push_queue_native, self.current_index, False)
+            # Append: use the Python-side length AFTER our local insert as the
+            # native insert index. Dart clamps to the actual playlist length,
+            # so any drift between the two sides resolves to a tail append.
+            self._page.run_task(
+                self._native_add_queue_item, track, len(self.queue) - 1
+            )
+
+    async def _native_add_queue_item(self, track: dict, index: int):
+        """Non-destructive insert into the live ConcatenatingAudioSource via
+        Dart's addQueueItemAt. Does NOT call set_playlist, so the currently
+        playing source isn't torn down and position is preserved.
+
+        Falls back to a full set_playlist push if the native call fails
+        (network race, Dart side not yet ready), at which point the user
+        will see the legacy 'restart on resume' behaviour for that one
+        mutation — better than a silently dropped queue insert."""
+        self._ensure_audio()
+        if not self._audio:
+            return
+        item = self._track_to_playlist_item(track)
+        if item is None:
+            return
+        try:
+            await self._audio.add_queue_item(
+                src=item["src"],
+                title=item["title"],
+                artist=item["artist"],
+                album_art=item.get("album_art"),
+                index=index,
+            )
+        except Exception as exc:
+            logger.warning("ADB_AUDIO: add_queue_item failed; falling back to "
+                           "set_playlist (will reset position): %s", exc)
+            await self._push_queue_native(
+                start_index=self.current_index, autoplay=False
+            )
 
     def play_track_at(self, index: int):
         if not (0 <= index < len(self.queue)) or not self._audio or not self._page:
@@ -494,6 +529,8 @@ class AudioEngine:
         if not 0 <= index < len(self.queue):
             return
         removed_active = (index == self.current_index)
+        # Capture the index to send to Dart BEFORE adjusting Python's view.
+        native_index = index
         self.queue.pop(index)
         if not self.queue:
             self.stop()
@@ -505,8 +542,24 @@ class AudioEngine:
         self.dispatch("on_queue_mutated")
         if self._page:
             self._arm_queue_gate()
-            self._page.run_task(
-                self._push_queue_native, self.current_index, removed_active
+            # Removing the active source: just_audio auto-advances to the
+            # next item, so we don't need a follow-up skip. Removing a
+            # non-active item: in-place remove, no position change.
+            self._page.run_task(self._native_remove_queue_item, native_index)
+
+    async def _native_remove_queue_item(self, index: int):
+        """Non-destructive removal via Dart's removeQueueItemAt. Falls back
+        to a full rebuild if the native call fails."""
+        self._ensure_audio()
+        if not self._audio:
+            return
+        try:
+            await self._audio.remove_queue_item(index)
+        except Exception as exc:
+            logger.warning("ADB_AUDIO: remove_queue_item failed; falling back "
+                           "to set_playlist: %s", exc)
+            await self._push_queue_native(
+                start_index=self.current_index, autoplay=False
             )
 
     def move_queue_item(self, old_index: int, new_index: int):
@@ -520,7 +573,24 @@ class AudioEngine:
         self.dispatch("on_queue_mutated")
         if self._page:
             self._arm_queue_gate()
-            self._page.run_task(self._push_queue_native, self.current_index, False)
+            self._page.run_task(
+                self._native_move_queue_item, old_index, new_index
+            )
+
+    async def _native_move_queue_item(self, old_index: int, new_index: int):
+        """Non-destructive reorder via Dart's ConcatenatingAudioSource.move.
+        Position is preserved even when the active source is moved."""
+        self._ensure_audio()
+        if not self._audio:
+            return
+        try:
+            await self._audio.move_queue_item(old_index, new_index)
+        except Exception as exc:
+            logger.warning("ADB_AUDIO: move_queue_item failed; falling back "
+                           "to set_playlist: %s", exc)
+            await self._push_queue_native(
+                start_index=self.current_index, autoplay=False
+            )
 
     def clear_queue(self):
         self.stop()

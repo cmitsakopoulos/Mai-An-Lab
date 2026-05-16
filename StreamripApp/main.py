@@ -3837,6 +3837,15 @@ class LibraryView:
             self._scan_btn.disabled = False
         self.app.safe_update(_hide_scanner)
 
+        # Re-arm the assistant's greeting so the next time the user opens
+        # Jarvis, the init flow re-runs and surfaces a confirmation prompt
+        # for any newly-scanned tracks that need DSP analysis. Without this
+        # reset, _init_greeted stays True for the whole session and Jarvis
+        # silently skips the "X tracks need analysis" prompt.
+        assistant = getattr(self.app, "assistant_view", None)
+        if assistant is not None:
+            assistant._init_greeted = False
+
         msg = f"Scan complete. Indexed {count} items." if count else "Library is up to date."
         self.app.show_snackbar(msg, icon=ft.Icons.CHECK_CIRCLE_OUTLINE if "Indexed" in msg else ft.Icons.INFO_OUTLINE, color=CYAN)
 
@@ -5333,8 +5342,15 @@ class AssistantView:
         # Runner is created lazily so it picks up the DB + engine after they
         # have themselves finished setting up.
         self._runner = None
+        # Concurrency guard: only one init pass at a time. There is NO
+        # _init_done flag — init is intentionally re-run on every open so
+        # newly-added tracks get surfaced as a confirmation prompt without
+        # needing a manual reset.
         self._init_started = False
-        self._init_done = False
+        # Suppresses the "Hi, ready" greeting on subsequent opens within
+        # the same session. Reset to False when LibraryView finishes a scan
+        # (so the next open re-greets, surfacing newly-scanned tracks).
+        self._init_greeted = False
         self._tts_enabled = True
         # Cancellation hook for the analyser sweep so the user can dismiss
         # the panel without leaving a background analyser running forever.
@@ -5371,18 +5387,23 @@ class AssistantView:
             on_click=lambda _e: self._on_send_click(),
         )
 
-        self._tts_toggle = ft.IconButton(
-            icon=ft.Icons.VOLUME_UP_ROUNDED,
-            icon_color=CYAN,
-            tooltip="Toggle voice replies",
-            on_click=lambda _e: self._toggle_tts(),
-        )
-
+        # Push-to-talk mic. Tapping starts a short listening session via
+        # speech_to_text; tapping again stops it. While listening, the icon
+        # turns red so the user can see we're capturing audio. STT runs
+        # through the audio_service bridge.
         self._mic_btn = ft.IconButton(
             icon=ft.Icons.MIC_ROUNDED,
             icon_color=CYAN,
             tooltip="Voice Command",
             on_click=self._on_mic_click,
+        )
+        self._stt_listening = False
+
+        self._tts_toggle = ft.IconButton(
+            icon=ft.Icons.VOLUME_UP_ROUNDED,
+            icon_color=CYAN,
+            tooltip="Toggle voice replies",
+            on_click=lambda _e: self._toggle_tts(),
         )
 
         # Initialisation banner: hidden once the graph is ready.
@@ -5474,38 +5495,53 @@ class AssistantView:
     # ── Initialisation flow ────────────────────────────────────────────────
 
     async def _init_assistant(self):
-        """Build the runner + graph if not done yet. Idempotent: safe to call
-        every time the sheet opens."""
-        if self._init_done or self._init_started:
+        """Inspect graph state and decide what to surface to the user.
+
+        Cheap operations (building metadata edges from existing data,
+        rebuilding the acoustic graph when features are already present)
+        run silently in the background — they take seconds and don't need
+        confirmation. The expensive DSP analyser sweep is *always* offered
+        as a confirmation prompt, never auto-run, because it can take hours
+        on large libraries and consume battery the user didn't ask for.
+
+        Re-runs are cheap and safe: every open just re-reads status and
+        either says "Ready" or asks again about pending analysis work.
+        _init_done is intentionally absent — making this stateless means
+        new tracks added between opens automatically get surfaced as a new
+        prompt without needing a manual reset."""
+        if self._init_started:
             return
         self._init_started = True
+        try:
+            await self._do_init()
+        finally:
+            self._init_started = False
 
-        # Yield to the UI loop for a beat to ensure the Jarvis tab finishes 
+    async def _do_init(self):
+        # Yield to the UI loop for a beat to ensure the Jarvis tab finishes
         # its initial paint before we start the heavy DSP/Graph work.
         await asyncio.sleep(0.2)
 
-        # Show the banner *before* any async work so the user sees activity
-        # immediately. Even the graph_status query below is async and yields,
-        # which on slow startups can leave the sheet blank for a beat.
         self._set_banner(visible=True, message="Checking your library…", determinate=None)
         logger.info("AssistantView: init flow started")
 
-        # Lazily construct the runner now that db_manager + audio_engine are
-        # fully set up. The downloader stays None until we wire one through.
-        from utils.assistant_runner import AssistantRunner
+        # Lazy runner construction.
+        from utils.assistant_runner import AssistantRunner, PendingConfirmation
         from utils import track_graph as tg
-        self._runner = AssistantRunner(self.app.db_manager, audio_engine)
-        
-        # Configure Jarvis voice parameters (British English Male, deeper tone, measured pace)
+        if self._runner is None:
+            self._runner = AssistantRunner(self.app.db_manager, audio_engine)
+
+        # Voice config — slower pace + lower pitch for the Jarvis persona.
         if audio_engine.audio_service:
-            self.page.run_task(audio_engine.audio_service.tts_set_voice, pitch=0.75, rate=0.75)
+            self.page.run_task(
+                audio_engine.audio_service.tts_set_voice, pitch=0.75, rate=0.75
+            )
 
         try:
             status = await tg.graph_status(self.app.db_manager)
         except Exception as exc:
             logger.exception("AssistantView: graph_status failed")
             self._set_banner(visible=False)
-            self._init_started = False
             await self._append_bubble(
                 "assistant",
                 f"Couldn't read your library: {exc}",
@@ -5514,58 +5550,116 @@ class AssistantView:
 
         logger.info("AssistantView: graph_status = %s", status)
 
-        # Empty-library short-circuit. Saying "Ready" is misleading — the
-        # assistant has nothing to act on. Tell the user what to do next.
+        # Empty library: nothing to do, just inform the user.
         if status["total_tracks"] == 0:
-            self._init_done = True
-            self._init_started = False
             self._set_banner(visible=False)
-            await self._append_bubble(
-                "assistant",
-                "Your library looks empty. Scan a music folder in Library → "
-                "Scan, then re-open me so I can index it.",
-            )
+            if not self._init_greeted:
+                self._init_greeted = True
+                await self._append_bubble(
+                    "assistant",
+                    "Your library looks empty. Scan a music folder in "
+                    "Library → Scan, then ask me to 'rescan my library'.",
+                )
             return
+
+        # Count tracks that the analyser would touch — drives both the
+        # confirmation prompt and the "everything's fine" silent path.
+        try:
+            missing = await self.app.db_manager.get_tracks_missing_features(
+                tg.FEATURES_VERSION
+            )
+        except Exception as exc:
+            logger.warning("AssistantView: missing-features check failed: %s", exc)
+            missing = []
+        missing_count = len(missing)
+        logger.info("AssistantView: %d tracks need DSP features", missing_count)
 
         needs_metadata = (status["artist_edges"] == 0 and status["album_edges"] == 0)
         needs_acoustic = (status["acoustic_edges"] == 0 and status["total_tracks"] >= 2)
 
-        if not (needs_metadata or needs_acoustic):
-            self._init_done = True
-            self._init_started = False
+        # Cheap path: rebuild metadata + acoustic edges from already-present
+        # features. No DSP analysis required. Run silently.
+        if needs_metadata or (needs_acoustic and missing_count == 0):
+            self._set_banner(
+                visible=True,
+                message="Linking your music graph…",
+                determinate=None,
+            )
+            try:
+                if needs_metadata:
+                    await tg.build_metadata_edges(self.app.db_manager)
+                if needs_acoustic:
+                    await tg.build_acoustic_edges(self.app.db_manager)
+            except Exception as exc:
+                logger.warning("AssistantView: edge build failed: %s", exc)
             self._set_banner(visible=False)
+
+        # Now ask the user about any DSP work. Never auto-run.
+        if missing_count > 0:
+            self._set_banner(visible=False)
+            self._runner.queue_confirmation(PendingConfirmation(
+                prompt="rescan",
+                on_yes_action="rebuild_graph",
+                on_yes_msg=f"Acknowledged. Analysing {missing_count} tracks now.",
+                on_no_msg="Understood. I'll work with what I have for now.",
+            ))
+            await self._append_bubble(
+                "assistant",
+                (
+                    f"I notice **{missing_count}** of your **{status['total_tracks']}** "
+                    "tracks haven't been DSP-analysed yet. Without features they "
+                    "won't appear in mood searches or 'play similar' walks. "
+                    "Should I run the analyser now? Reply **yes** or **no**, "
+                    "or say 'rescan' later to trigger it manually."
+                ),
+                speak=True,
+                speak_text=(
+                    f"I notice {missing_count} of your tracks haven't been analysed yet. "
+                    "Should I run the analyser now, sir?"
+                ),
+            )
+            return
+
+        # Everything's built and analysed. Quiet "ready" only on first open
+        # this session so we don't spam the chat on every reopen.
+        self._set_banner(visible=False)
+        if not self._init_greeted:
+            self._init_greeted = True
             edge_total = (status["acoustic_edges"]
                           + status["artist_edges"] + status["album_edges"])
             await self._append_bubble(
                 "assistant",
-                f"Ready. Library graph already built "
-                f"({status['total_tracks']} tracks, {edge_total} edges). "
-                "Try 'play …', 'more like this', or 'help'.",
+                self._runner._say("greeting") +
+                f" ({status['total_tracks']} tracks, {edge_total} graph edges)",
+                speak=True,
+            )
+
+    async def _do_graph_rebuild(self):
+        """Long-running operation: run the analyser for any tracks lacking
+        features, then rebuild metadata + acoustic edges. Invoked when the
+        runner emits action='rebuild_graph' (either from a confirmation
+        yes-response or the explicit 'rescan' intent)."""
+        from utils import track_graph as tg
+
+        if not audio_engine.audio_service:
+            await self._append_bubble(
+                "assistant",
+                "I can't access the audio decoder right now — try again "
+                "after you've played a track to wake up the engine.",
             )
             return
 
-        # 1. Cheap metadata edges first — gives the assistant a working
-        # fallback for 'play_similar' before the analyser sweep finishes.
-        if needs_metadata:
-            self._set_banner(
-                visible=True,
-                message=f"Linking {status['total_tracks']} tracks by artist & album…",
-                determinate=None,
+        try:
+            missing = await self.app.db_manager.get_tracks_missing_features(
+                tg.FEATURES_VERSION
             )
-            try:
-                a_n, b_n = await tg.build_metadata_edges(self.app.db_manager)
-                logger.info("AssistantView: metadata edges built (%d artist, %d album)", a_n, b_n)
-            except Exception as exc:
-                logger.warning("AssistantView: metadata edge build failed: %s", exc)
+        except Exception as exc:
+            logger.warning("AssistantView: missing-features check failed: %s", exc)
+            missing = []
 
-        # 2. Analyser sweep for tracks lacking DSP features. This is the
-        # expensive step — minutes-to-hours depending on library size.
-        missing = await self.app.db_manager.get_tracks_missing_features(
-            tg.FEATURES_VERSION
-        )
-        logger.info("AssistantView: %d tracks need DSP features", len(missing))
-        if missing and audio_engine.audio_service:
+        if missing:
             total = len(missing)
+            self._init_cancel = False
             self._set_banner(
                 visible=True,
                 message=f"Analysing 1 / {total} tracks…",
@@ -5583,29 +5677,30 @@ class AssistantView:
                 )
 
             try:
-                await tg.bulk_analyze_library(
+                result = await tg.bulk_analyze_library(
                     self.app.db_manager,
                     audio_engine.audio_service,
                     progress_cb=_on_progress,
                     cancel_check=lambda: self._init_cancel,
                 )
+                logger.info("AssistantView: analyser sweep done: %s", result)
             except Exception as exc:
                 logger.warning("AssistantView: analyser sweep failed: %s", exc)
 
-        # 3. Build acoustic edges from whatever features are present.
+        # Rebuild edges — metadata is fast, acoustic depends on new feature
+        # vectors. Run both unconditionally after a sweep so the graph
+        # reflects the latest analyser output.
         self._set_banner(visible=True, message="Linking similar tracks…", determinate=None)
         try:
-            n_acoustic = await tg.build_acoustic_edges(self.app.db_manager)
-            logger.info("AssistantView: acoustic edges built (%d)", n_acoustic)
+            await tg.build_metadata_edges(self.app.db_manager)
+            await tg.build_acoustic_edges(self.app.db_manager)
         except Exception as exc:
-            logger.warning("AssistantView: acoustic edge build failed: %s", exc)
+            logger.warning("AssistantView: edge rebuild failed: %s", exc)
 
-        self._init_done = True
-        self._init_started = False
         self._set_banner(visible=False)
         await self._append_bubble(
             "assistant",
-            self._runner._say("greeting"),
+            "Analysis complete. Mood search and similarity walks are ready.",
             speak=True,
         )
 
@@ -5640,44 +5735,62 @@ class AssistantView:
         self.page.run_task(self._handle_user_text, text)
 
     async def _on_mic_click(self, _e=None):
-        if self._mic_btn.icon == ft.Icons.MIC_NONE_ROUNDED:
+        service = getattr(audio_engine, "audio_service", None)
+        if service is None:
+            self.app.show_snackbar("Audio engine not ready.")
             return
-            
-        # Ensure we have microphone permissions on Android
+
+        # Second tap while a session is live = cancel. We flip the flag
+        # first so any in-flight stt_listen future short-circuits its
+        # finally block (which is what restores the cyan mic icon).
+        if self._stt_listening:
+            self._stt_listening = False
+            try:
+                await service.stt_stop()
+            except Exception as ex:
+                logger.warning(f"stt_stop failed: {ex}")
+            return
+
+        # First tap: ensure mic permission, then start listening.
         try:
-            if audio_engine.audio_service:
-                perms = await audio_engine.audio_service.query_permissions()
-                if perms.get("record_audio") != "granted":
-                    res = await audio_engine.audio_service.request_permission("record_audio")
-                    if res.get("status") != "granted":
-                        self.app.show_snackbar("Microphone permission is required for voice commands.")
-                        return
+            perms = await service.query_permissions()
+            if perms.get("record_audio") != "granted":
+                res = await service.request_permission("record_audio")
+                if res.get("status") != "granted":
+                    self.app.show_snackbar(
+                        "Microphone permission is required for voice commands."
+                    )
+                    return
         except Exception as ex:
-            logger.warning(f"Permission check failed: {ex}")
+            logger.warning(f"Mic permission check failed: {ex}")
+            self.app.show_snackbar("Couldn't verify microphone permission.")
+            return
 
-        self._mic_btn.icon = ft.Icons.MIC_NONE_ROUNDED
-        self._mic_btn.icon_color = DIM
-        self.page.update()
-        
+        self._stt_listening = True
+        self._mic_btn.icon = ft.Icons.MIC_ROUNDED
+        self._mic_btn.icon_color = "#FF4444"
+        self._mic_btn.tooltip = "Listening… tap to cancel"
+        self.app.safe_update(lambda: None)
+
         try:
-            if not audio_engine.audio_service:
-                self.app.show_snackbar("Audio engine not ready.")
-                return
-
-            res = await audio_engine.audio_service.stt_listen()
+            res = await service.stt_listen(timeout=15.0)
             if res.get("ok") and res.get("text"):
                 self._input.value = res["text"]
-                self.page.update()
-                # Automatically send to assistant
+                self.app.safe_update(lambda: None)
                 self._on_send_click()
             elif res.get("error") and "cancel" not in res["error"].lower():
-                 self.app.show_snackbar(f"Speech error: {res['error']}")
+                self.app.show_snackbar(f"Speech error: {res['error']}")
+        except asyncio.TimeoutError:
+            # No utterance recognised in the listen window; silent no-op.
+            pass
         except Exception as ex:
             logger.error(f"STT Error: {ex}")
         finally:
+            self._stt_listening = False
             self._mic_btn.icon = ft.Icons.MIC_ROUNDED
             self._mic_btn.icon_color = CYAN
-            self.page.update()
+            self._mic_btn.tooltip = "Voice Command"
+            self.app.safe_update(lambda: None)
 
     async def _handle_user_text(self, text: str):
         await self._append_bubble("user", text)
@@ -5693,6 +5806,11 @@ class AssistantView:
             speak=response.success and bool(response.spoken),
             speak_text=response.spoken,
         )
+        # Honour any UI-side action the runner requested. Long-running
+        # operations live here, not in the runner, so we own the banner +
+        # cancellation state.
+        if response.action == "rebuild_graph":
+            await self._do_graph_rebuild()
 
     async def _append_bubble(
         self,

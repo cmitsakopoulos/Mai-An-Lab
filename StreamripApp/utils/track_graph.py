@@ -297,6 +297,106 @@ async def walk(
     return path_seq
 
 
+# ── Mood (DSP-driven) ───────────────────────────────────────────────────────
+#
+# Maps a mood keyword to a direction-vector over the scalar DSP features. The
+# scoring function z-scores each feature column across the library, then
+# computes a weighted dot product per track; the top-N highest scores get
+# enqueued. Weights are heuristic and library-relative — a "fast" track in a
+# library of ambient is slower than a "fast" track in a library of techno.
+#
+# Adding a mood here AND in assistant_intent.MOOD_KEYWORDS is what makes the
+# assistant understand a new vocabulary word; the regex only fires for words
+# present in MOOD_KEYWORDS.
+
+MOOD_PROFILES: dict[str, dict[str, float]] = {
+    # Calm / low-energy
+    "chill":     {"bpm": -1.0, "energy": -1.0, "brightness": -0.5, "beat_strength": -0.5},
+    "chilled":   {"bpm": -1.0, "energy": -1.0, "brightness": -0.5, "beat_strength": -0.5},
+    "relaxed":   {"bpm": -1.0, "energy": -1.0, "brightness": -0.5},
+    "relaxing":  {"bpm": -1.0, "energy": -1.0, "brightness": -0.5},
+    "calm":      {"bpm": -1.0, "energy": -1.0, "brightness": -0.5},
+    "mellow":    {"bpm": -0.7, "energy": -0.7, "brightness": -0.5},
+    "soft":      {"energy": -1.5, "brightness": -0.5},
+    "ambient":   {"bpm": -1.5, "energy": -1.5, "beat_strength": -1.5},
+
+    # High-energy
+    "upbeat":    {"bpm": 1.0, "energy": 1.0, "brightness": 0.5},
+    "energetic": {"bpm": 1.0, "energy": 1.5, "beat_strength": 1.0},
+    "intense":   {"energy": 2.0, "beat_strength": 1.5, "brightness": 0.5},
+    "hard":      {"energy": 1.5, "beat_strength": 1.5},
+    "heavy":     {"energy": 1.5, "rolloff": 0.5, "brightness": -0.3},
+    "powerful":  {"energy": 1.5, "beat_strength": 1.0},
+    "happy":     {"bpm": 0.8, "brightness": 1.0, "energy": 0.5},
+    "uplifting": {"bpm": 0.8, "brightness": 1.0, "energy": 0.8},
+
+    # Tempo-specific
+    "fast":      {"bpm": 2.0},
+    "quick":     {"bpm": 2.0},
+    "slow":      {"bpm": -2.0},
+    "lazy":      {"bpm": -1.5, "energy": -1.0},
+
+    # Timbre / spectrum
+    "dark":      {"brightness": -1.5, "rolloff": -1.0},
+    "moody":     {"brightness": -1.0, "energy": -0.5},
+    "bright":    {"brightness": 1.5, "rolloff": 1.0},
+}
+
+# Feature columns participating in mood scoring. Order matters: weights and
+# the z-scored matrix are aligned to this list. Adding a column here means
+# every profile may optionally include it.
+_MOOD_FEATURES = ("bpm", "brightness", "energy", "rolloff", "beat_strength")
+
+
+async def tracks_by_mood(
+    db_manager,
+    mood: str,
+    limit: int = 12,
+    features_version: int = FEATURES_VERSION,
+) -> list[dict]:
+    """Rank tracks by how well they match a mood's DSP profile and return
+    the top `limit`. Returns library rows (with title/artist/album/path)
+    ready for the assistant to enqueue.
+
+    The ranking is library-relative: features are z-scored across all
+    analysed tracks before scoring, so the same mood word will pick
+    different tracks depending on the library's distribution. This is the
+    right behaviour — "energetic" should mean "energetic for this library",
+    not against an absolute scale that may not match the user's collection.
+
+    Returns [] for unknown moods or when fewer than 2 tracks have features.
+    """
+    profile = MOOD_PROFILES.get(mood.lower())
+    if profile is None:
+        return []
+
+    rows = await db_manager.get_tracks_with_features(features_version)
+    if len(rows) < 2:
+        return []
+
+    # Build the feature matrix in the canonical column order.
+    matrix = np.array(
+        [[float(r.get(f, 0) or 0) for f in _MOOD_FEATURES] for r in rows],
+        dtype=np.float32,
+    )
+    mu = matrix.mean(axis=0, keepdims=True)
+    sd = matrix.std(axis=0, keepdims=True)
+    sd = np.where(sd < 1e-8, 1.0, sd)
+    Z = (matrix - mu) / sd
+
+    weights = np.array(
+        [profile.get(f, 0.0) for f in _MOOD_FEATURES],
+        dtype=np.float32,
+    )
+    scores = Z @ weights  # (N,)
+
+    k = min(limit, len(scores))
+    # argpartition gives the top-K (unordered), argsort orders them by score.
+    top_unsorted = np.argpartition(-scores, k - 1)[:k]
+    top_ordered = top_unsorted[np.argsort(-scores[top_unsorted])]
+    return [rows[int(i)] for i in top_ordered]
+
+
 async def bulk_analyze_library(
     db_manager,
     audio_service,
