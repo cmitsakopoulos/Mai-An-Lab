@@ -42,8 +42,12 @@ The Search view intentionally replicates the Library's aesthetic:
 - **Tabbed Results**: Results are grouped into **Tracks**, **Albums**, and **Artists** tabs, matching the Library's organization.
 - **Result Cards**: ListTile items use the same typography, spacing, and icon sets as Library items.
 
-### 2.2 Source Integration
+### 2.2 Source Integration & High-Performance Page Pagination
 - **Default Source**: Qobuz is currently the primary search provider.
+- **Scroll Boundary Pagination**: Removed all rigid per-instance limits. Results are structured into dynamic, paginated lists. Scrolling past the bottom boundary automatically loads the next page, while scrolling to the top boundary transitions back to the previous page.
+- **Slide-In Animation**: To deliver a premium tactile feel, swapping pages instantly teleports the scroll position off-screen and glides the new page into view using a hardware-accelerated **Slide-In Offset Animation**.
+- **Tree-Containment Performance**: By rendering only one active page at a time (typically 20 items) rather than appending thousands of search cards, the Flet widget tree remains tiny, completely preventing memory leaks, layout lag, or battery drain.
+- **Safe Ceiling Protection**: A general max results ceiling is actively enforced under the hood to secure local memory, preventing the DOM from choking during extremely deep searches.
 - **Credentials**: If Qobuz credentials are missing, a "Setup Required" prompt directs the user to Settings.
 - **Search History**: Recent searches are stored in `recent_searches.json` and can be accessed via a history sheet.
 
@@ -85,8 +89,9 @@ Interactions with tracks in the Library view support advanced gestures:
     - **Play Next**: Queues the track to play after the current song.
     - **Add to Queue**: Appends the track to the end of the global queue.
     - **Add to Playlist**: Opens a selector to add the track to a custom playlist.
-    - **Edit Metadata**: Launches the metadata editor for manual tag adjustments.
-    - **Redownload**: Triggers a remote search (Qobuz) to find and download a replacement or higher-quality version of the track.
+    - **Edit Metadata**: Launches the metadata editor for manual tag adjustments. Writes updates directly to the file header and immediately propagates new values across the database index.
+    - **Delete Song**: Removes the audio file permanently from local storage and cleanses the track row and relationships instantly from the database and active playlists.
+    - **Redownload**: Triggers a remote search (Qobuz) to find and download a replacement or higher-quality version of the track. Once downloaded, the library engine automatically performs an atomic index rescan in the background to seamlessly integrate the replacement.
 
 ### 4.2 Player Gestures (Now Playing)
 The full-screen player supports intuitive touch controls for navigation:
@@ -99,4 +104,18 @@ The full-screen player supports intuitive touch controls for navigation:
 ### 4.3 Playlist Management
 - **In-Place Reordering**: Within a playlist, tracks feature **Up/Down arrows** for optimistic reordering.
 - **Quick Removal**: The **Minus icon** allows for instant removal of a track from the playlist without rebuilding the entire library list.
+
+### 4.4 Gesture-Driven Push-to-Talk (PTT) Voice System
+Jarvis integrates advanced gesture-based push-to-talk microphone interactions to deliver a tactile and conversational experience:
+- **Press & Hold (Tap Down)**:
+  * Triggers the microphone voice input engine.
+  * The mic icon immediately turns **vibrant red** (`#FF4444`) with the tooltip changing to *"Release to Send"*.
+  * A pulsating, animated *"Listening, sir..."* bubble is appended at the bottom of the chat list, keeping active focus on current input.
+- **Release (Tap Up / Cancel)**:
+  * Instantly halts the voice capturing engine.
+  * Automatically finishes the Speech-to-Text session, packages the transcribed phrase, submits it to Jarvis, and resets the icon back to a sleek, passive cyan.
+  * Ensures zero raw hardware delays, letting you speak naturally and stop dictation instantly by letting go of the control.
+- **Scroll Tracking**:
+  * Chat lists leverage native GPU-accelerated scrolling. The viewport smoothly tracks and slides down for new messages *only* if the user is currently at the bottom.
+  * If browsing history, new updates append silently in the background, preserving historical reading positions without aggressive snapping.
 

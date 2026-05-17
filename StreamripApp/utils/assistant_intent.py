@@ -117,7 +117,7 @@ _PATTERNS: list[tuple[str, re.Pattern]] = [
         re.I)),
 
     # ── Verbless single-word commands first ─────────────────────────────────
-    (INTENT_HELP,         re.compile(r"^\s*(?:help|what can you do|commands?)\s*\??\s*$", re.I)),
+    (INTENT_HELP,         re.compile(r"^\s*(?:help|what can you do|commands?|what can i say|show help|info)\s*\??\s*$", re.I)),
     (INTENT_NOW_PLAYING,  re.compile(r"^\s*(?:what(?:'s| is)\s+(?:this|playing|on)|now\s+playing|current\s+(?:song|track))\s*\??\s*$", re.I)),
     (INTENT_SKIP,         re.compile(r"^\s*(?:skip|next|fwd|forward|next\s+track|next\s+song)\s*$", re.I)),
     (INTENT_PREV,         re.compile(r"^\s*(?:previous|prev|back|last|previous\s+track|previous\s+song)\s*$", re.I)),
@@ -160,7 +160,7 @@ _PATTERNS: list[tuple[str, re.Pattern]] = [
         r"^\s*(?:play\s+)?(?P<q>.+?)\s+next\s*$", re.I
     )),
     (INTENT_QUEUE_ADD, re.compile(
-        r"^\s*(?:add|queue|enqueue)\s+(?P<q>.+?)(?:\s+(?:to\s+(?:the\s+)?queue|to\s+queue))?\s*$",
+        r"^\s*(?:add|queue|enqueue|put)\s+(?P<q>.+?)(?:\s+(?:to|in)\s+(?:the\s+)?queue)?\s*$",
         re.I,
     )),
 
@@ -183,20 +183,33 @@ _PATTERNS: list[tuple[str, re.Pattern]] = [
 # "play radiohead now" still parses fine without the strip — the trailing
 # "now" gets captured into the query slot and the LIKE search ignores it.
 _TRAILING_FILLER = re.compile(
-    r"\s+(?:please|for\s+me|on\s+spotify|on\s+qobuz|thanks?)\s*$",
+    r"\s+(?:please|for\s+me|on\s+spotify|on\s+qobuz|thanks?|immediately|right\s+now)\s*$",
     re.I,
 )
 # Leading filler ("hey assistant, play X" → "play X").
+# Includes wake words like "jarvis" and common conversational starters/hesitations.
 _LEADING_FILLER = re.compile(
-    r"^\s*(?:hey|ok|okay|please|yo|um|uh|hi)[,\s]+(?:assistant[,\s]+)?",
+    r"^\s*(?:"
+    r"hey|ok|okay|yo|hi|hello|assistant|jarvis|"
+    r"um|uh|err|ah|eh|hmm|so|well|like|just|"
+    r"please|can\s+you|could\s+you|would\s+you(?:\s+mind)?|"
+    r"let's|let\s+us|i\s+(?:want|would\s+like)\s+to"
+    r")[,\s]+",
     re.I,
 )
 
 
 def _normalise(raw: str) -> str:
     s = raw.strip()
-    s = _LEADING_FILLER.sub("", s)
-    s = _TRAILING_FILLER.sub("", s)
+    # Fixed-point loop to peel off multiple stacked leading/trailing fillers
+    # e.g., "Yo, um, Jarvis, play X please" -> "play X"
+    prev = None
+    while prev != s:
+        prev = s
+        s = _LEADING_FILLER.sub("", s)
+        s = _TRAILING_FILLER.sub("", s)
+        s = s.strip()
+        
     s = re.sub(r"\s+", " ", s).strip()
     # Strip trailing punctuation that doesn't add meaning.
     s = re.sub(r"[.!?]+\s*$", "", s).strip()
@@ -225,6 +238,8 @@ def _clean_query(q: str) -> str:
         "me", "for",
         # "song/track/album/tune/tunes" noise word
         "song", "songs", "track", "tracks", "tune", "tunes", "album", "albums",
+        # homophones / synonyms for queue
+        "cue", "queue",
         # "by" / "from" — bare leading prepositions
         "by", "from",
     )
@@ -248,6 +263,8 @@ def _clean_query(q: str) -> str:
             r"\s+(?:songs?|tracks?|tunes?|albums?|music)\s*$",
             "", q, flags=re.I,
         )
+        # Strip trailing punctuation inside the query too (e.g. trailing commas, periods)
+        q = re.sub(r"[.!?,\s]+$", "", q).strip()
         q = q.strip()
 
     return q
