@@ -348,413 +348,14 @@ class NotificationSystem:
 
 # ─── High Fidelity UI Components ──────────────────────────────────────────────
 
-class AutoPlaylistEngine:
-    """MCL-based clustering over real DSP features with optional metadata blending.
 
-    Acoustic feature vector layout per track (43 dims total):
-        [0]            BPM
-        [1]            energy
-        [2]            brightness
-        [3]            rolloff
-        [4]            beat_strength
-        [5:18]         MFCC mean       (13)
-        [18:31]        MFCC std        (13)   : timbral dynamics
-        [31:43]        chroma mean     (12)   : harmonic profile
-
-    Z-scoring is applied per axis so units are commensurable, then per-axis
-    weights are applied. Crucially we do NOT renormalise groups to equal
-    L2 magnitude; the user explicitly wants sound-profile groups (MFCC +
-    chroma) to dominate distance, and BPM to be a strong second signal.
-    Sum-of-squared-weights × dim count drives effective contribution:
-
-        BPM:           1 dim × 4.0² = 16.0
-        dynamics(4):   4 dims × 0.5² =  1.0    (energy/brightness/rolloff/beat)
-        MFCC mean:    13 dims × 1.5² = 29.25
-        MFCC std:     13 dims × 1.0² = 13.0
-        chroma:       12 dims × 1.5² = 27.0
-        ─────────────────────────────────
-        sound profile total           ≈ 69     (≈4× BPM, ≈70× dynamics)
-
-    so two tracks must be close in timbre + harmony to land in the same
-    cluster, with tempo as a strong secondary cut and energy/brightness
-    barely moving the needle.
-
-    Metadata blending (w_meta):
-        An independent (n×n) string similarity matrix is computed from artist
-        and album names using token-set Jaccard similarity, then blended:
-
-            combined_sim = (1 - w_meta) * acoustic_sim + w_meta * string_sim
-
-        Token-set Jaccard handles metadata inconsistencies between sources
-        naturally; "Daft Punk feat. Pharrell" vs "Daft Punk" → high similarity
-        because shared tokens dominate. Common noise tokens ('the', 'a', 'an',
-        'of', 'and', '&') are stripped before comparison.
-
-        Artist and album contribute equally (50/50) to string_sim.
-    """
-
-    _N_SCALARS = 5  # bpm, energy, brightness, rolloff, beat_strength
-
-    # Noise tokens stripped before token-set comparison. These are common
-    # filler words that appear inconsistently across different music providers and
-    # would otherwise produce spurious high-similarity scores.
-    _META_STOPWORDS = frozenset({'the', 'a', 'an', 'of', 'and', '&'})
-
-    def __init__(
-        self,
-        w_bpm=4.0,
-        w_dynamics=0.5,    # applied to energy, brightness, rolloff, beat_strength
-        w_mfcc_mean=1.5,
-        w_mfcc_std=1.0,
-        w_chroma=1.5,
-        inflation=2.0,
-        w_meta=0.2,        # blend weight for artist/album string similarity [0, 1]
-    ):
-        self.w_bpm = w_bpm
-        self.w_dynamics = w_dynamics
-        self.w_mfcc_mean = w_mfcc_mean
-        self.w_mfcc_std = w_mfcc_std
-        self.w_chroma = w_chroma
-        self.inflation = inflation
-        self.w_meta = w_meta
-
-    @staticmethod
-    def _token_set_similarity(a: str, b: str) -> float:
-        """Token-set Jaccard similarity, robust to cross-platform metadata quirks.
-
-        Algorithm:
-          1. Strip common 'feat.'/'ft.'/'featuring' suffixes that differ across
-             download platforms (e.g. Qobuz adds featured artists; local rips may not).
-          2. Lower-case, strip punctuation, tokenise by whitespace.
-          3. Remove stopwords ('the', 'a', 'an', 'of', 'and', '&') that cause
-             spurious matches (e.g. "The National" ≈ "The Beatles" via shared 'the').
-          4. Compute Jaccard: |A ∩ B| / |A ∪ B|.
-
-        Examples:
-          "Pink Floyd"                   vs "Pink Floyd"            → 1.0
-          "Daft Punk feat. Pharrell"     vs "Daft Punk"             → 0.67
-          "The Beatles (Remastered)"     vs "Beatles, The"          → 0.67
-          "Dark Side of the Moon"        vs "Dark Side of the Moon" → 1.0
-        """
-        import re
-        if not a or not b:
-            return 0.0
-
-        def _tokens(s: str) -> set:
-            # Strip featured-artist clauses that vary by platform.
-            s = re.sub(r'\b(feat\.?|ft\.?|featuring|with)\b.*', '', s, flags=re.IGNORECASE)
-            # Drop parenthetical qualifiers like (Remastered), (Deluxe Edition).
-            s = re.sub(r'\(.*?\)', ' ', s)
-            # Normalise punctuation to whitespace.
-            s = re.sub(r'[^\w\s]', ' ', s)
-            tokens = set(s.lower().split())
-            return tokens - AutoPlaylistEngine._META_STOPWORDS
-
-        ta, tb = _tokens(a), _tokens(b)
-        if not ta or not tb:
-            return 0.0
-        intersection = len(ta & tb)
-        union = len(ta | tb)
-        return intersection / union if union else 0.0
-
-    def _build_string_similarity_matrix(self,
-                                         artists: list[str],
-                                         albums: list[str]):
-        """Build an (n×n) pairwise metadata similarity matrix.
-
-        For each pair (i, j):
-            artist_sim = _token_set_similarity(artists[i], artists[j])
-            album_sim  = _token_set_similarity(albums[i],  albums[j])
-            sim[i,j]   = 0.5 * artist_sim + 0.5 * album_sim   (equal weighting)
-
-        Returns a raw [0, 1] similarity matrix. The caller blends this with the
-        acoustic Gaussian kernel; no column-stochastic normalisation is applied
-        here because blending happens before the final normalisation step.
-        """
-        import numpy as np
-        import re
-        n = len(artists)
-        
-        # Pre-compute token sets for all artists and albums once to avoid
-        # expensive O(N^2) regular expression evaluations.
-        def _get_tokens_set(s: str) -> set:
-            if not s:
-                return set()
-            s = re.sub(r'\b(feat\.?|ft\.?|featuring|with)\b.*', '', s, flags=re.IGNORECASE)
-            s = re.sub(r'\(.*?\)', ' ', s)
-            s = re.sub(r'[^\w\s]', ' ', s)
-            tokens = set(s.lower().split())
-            return tokens - AutoPlaylistEngine._META_STOPWORDS
-
-        artist_tokens = [_get_tokens_set(a) for a in artists]
-        album_tokens = [_get_tokens_set(al) for al in albums]
-        
-        mat = np.zeros((n, n), dtype=np.float64)
-        for i in range(n):
-            art_i = artist_tokens[i]
-            alb_i = album_tokens[i]
-            for j in range(i, n):
-                art_j = artist_tokens[j]
-                if not art_i or not art_j:
-                    a_sim = 0.0
-                else:
-                    a_sim = len(art_i & art_j) / len(art_i | art_j)
-                
-                alb_j = album_tokens[j]
-                if not alb_i or not alb_j:
-                    al_sim = 0.0
-                else:
-                    al_sim = len(alb_i & alb_j) / len(alb_i | alb_j)
-                
-                val = 0.5 * a_sim + 0.5 * al_sim
-                mat[i, j] = val
-                mat[j, i] = val  # symmetric
-        return mat
-
-    def generate_magic_playlist(self, seed_path, hot_set_data, target_length=20):
-        """
-        Main entry point.
-        hot_set_data: List of dicts. Entries without DSP features (no
-                      `timbre` BLOB) are dropped; see open_auto_playlist_dialog
-                      for the analyse-then-call flow.
-        target_length: desired playlist size. The cluster is truncated to
-                      this many tracks (closest-first), or padded from
-                      outside the cluster (next-nearest neighbours in
-                      feature space) if the cluster is too small.
-        """
-        if not hot_set_data:
-            return [seed_path]
-
-        from utils.dsp import unpack_timbre
-        # Drop entries with missing features. The orchestrator should have
-        # populated them, but if extraction failed for a track we don't want
-        # zeros to drag the cluster centroid toward 0 BPM / 0 energy.
-        usable = [
-            d for d in hot_set_data
-            if d.get("bpm", 0) > 0 and unpack_timbre(d.get("timbre")) is not None
-        ]
-        if not usable:
-            return [seed_path]
-
-        paths, vectors = self._encode_hot_set(usable)
-
-        if seed_path not in paths:
-            return [seed_path]
-        if len(paths) < 2:
-            return [seed_path]
-
-        # Extract metadata strings aligned with the encoded paths list.
-        # Falls back to empty string gracefully if the DB query predates the
-        # artist/album JOIN (old schema or missing hot-set fields).
-        path_to_data = {d["path"]: d for d in usable}
-        artists = [path_to_data[p].get("artist", "") or "" for p in paths]
-        albums  = [path_to_data[p].get("album",  "") or "" for p in paths]
-
-        adj_matrix = self._build_similarity_graph(vectors, artists, albums)
-        clustered_matrix = self._run_mcl(adj_matrix)
-
-        seed_idx = paths.index(seed_path)
-        cluster_indices = self._get_seed_cluster(clustered_matrix, seed_idx)
-
-        # Resize the cluster to the requested length.
-        cluster_indices = self._resize_cluster(
-            cluster_indices, seed_idx, vectors, target_length
-        )
-
-        cluster_paths = [paths[i] for i in cluster_indices]
-        cluster_vectors = vectors[cluster_indices]
-        return self._sequence_flow(seed_path, cluster_paths, cluster_vectors)
-
-    def _encode_hot_set(self, data):
-        import numpy as np
-        from utils.dsp import unpack_embedding_groups, N_MFCC, N_CHROMA
-        paths = [d["path"] for d in data]
-        rows = []
-        for d in data:
-            groups = unpack_embedding_groups(d["timbre"])
-            # Caller (generate_magic_playlist) already filtered featureless
-            # rows; this is just defensive against schema drift.
-            if groups is None:
-                continue
-            mfcc_mean, mfcc_std, chroma = groups
-            rows.append(
-                [float(d["bpm"]),
-                 float(d["energy"]),
-                 float(d["brightness"]),
-                 float(d.get("rolloff", 0.0)),
-                 float(d.get("beat_strength", 0.0))]
-                + mfcc_mean.tolist()
-                + mfcc_std.tolist()
-                + chroma.tolist()
-            )
-        raw_v = np.array(rows, dtype=np.float64)
-
-        # Z-score every column. Without this, BPM (range 60-200) would
-        # dominate every distance calculation simply because of unit scale,
-        # and chroma (already in [0, 1]) would barely register. After
-        # z-scoring, *units* are commensurable; weights then control the
-        # actual influence each group has on distance.
-        means = raw_v.mean(axis=0)
-        stds = raw_v.std(axis=0) + 1e-6
-        norm_v = (raw_v - means) / stds
-
-        # Per-axis weights aligned with the layout documented on the class.
-        # NB: we deliberately skip group L2 normalisation here; the user
-        # wants sound-profile groups to dominate via their raw dim count,
-        # with BPM amplified by w_bpm to remain a strong secondary signal.
-        n_dynamics = 4  # energy, brightness, rolloff, beat_strength
-        weights = np.empty(norm_v.shape[1], dtype=np.float64)
-        weights[0] = self.w_bpm
-        weights[1:1 + n_dynamics] = self.w_dynamics
-        s = 1 + n_dynamics
-        weights[s:s + N_MFCC] = self.w_mfcc_mean
-        weights[s + N_MFCC:s + 2 * N_MFCC] = self.w_mfcc_std
-        weights[s + 2 * N_MFCC:s + 2 * N_MFCC + N_CHROMA] = self.w_chroma
-        return paths, norm_v * weights
-
-    def _resize_cluster(self, cluster_indices, seed_idx, vectors, target):
-        """Bring the cluster up/down to `target` size while keeping the seed.
-
-        - If too big: keep the `target` tracks closest to the seed in the
-          weighted feature space.
-        - If too small: append nearest-neighbour tracks from outside the
-          cluster, ordered by distance to the seed.
-        """
-        if target <= 0:
-            return cluster_indices
-        import numpy as np
-        n = vectors.shape[0]
-        seed_vec = vectors[seed_idx]
-        # Distances from every track to the seed, used for both directions.
-        dists = np.linalg.norm(vectors - seed_vec, axis=1)
-
-        cluster_set = set(cluster_indices)
-        if len(cluster_indices) > target:
-            # Sort cluster by distance to seed; take the closest `target`.
-            ordered = sorted(cluster_indices, key=lambda i: dists[i])
-            kept = ordered[:target]
-            if seed_idx not in kept:
-                # Always preserve the seed even if it's somehow not closest
-                # to itself due to floating point (it will be; defensive).
-                kept[-1] = seed_idx
-            return kept
-
-        if len(cluster_indices) < target:
-            outside = [i for i in range(n) if i not in cluster_set]
-            outside.sort(key=lambda i: dists[i])
-            need = target - len(cluster_indices)
-            return list(cluster_indices) + outside[:need]
-
-        return cluster_indices
-
-    def _build_similarity_graph(self,
-                                vectors,
-                                artists: list[str] | None = None,
-                                albums: list[str] | None = None):
-        """Build the column-stochastic similarity matrix for MCL.
-
-        Acoustic component: Gaussian kernel on the weighted z-scored feature
-        vectors (||a-b||² via the identity expansion for efficiency).
-
-        Metadata component (optional): if artist/album strings are supplied,
-        a token-set Jaccard similarity matrix is computed and blended:
-
-            combined = (1 - w_meta) * acoustic + w_meta * string_sim
-
-        The blend is applied *before* column-stochastic normalisation so both
-        signals contribute proportionally to each column's probability mass.
-        """
-        import numpy as np
-        # Compute pairwise squared Euclidean distances.
-        # ||a-b||² = ||a||² + ||b||² - 2·a·b  (efficient via broadcasting)
-        dot_product = np.dot(vectors, vectors.T)
-        sq_norms = np.diag(dot_product)
-        dist_sq = sq_norms[:, None] + sq_norms[None, :] - 2 * dot_product
-        # Clip negative values produced by floating-point error.
-        dist_sq = np.maximum(dist_sq, 0.0)
-
-        # Gaussian kernel: sim = exp(-d² / 2σ²)  with σ=1 on z-scored space.
-        acoustic = np.exp(-dist_sq / 2.0)
-
-        # Blend in metadata signal when strings are available.
-        if self.w_meta > 0 and artists is not None and albums is not None:
-            string_sim = self._build_string_similarity_matrix(artists, albums)
-            similarity = (1.0 - self.w_meta) * acoustic + self.w_meta * string_sim
-        else:
-            similarity = acoustic
-
-        # Column-stochastic normalisation required by MCL.
-        col_sums = similarity.sum(axis=0)
-        col_sums[col_sums == 0] = 1.0
-        return similarity / col_sums
-
-    def _run_mcl(self, matrix):
-        import numpy as np
-        m = matrix.copy()
-        for _ in range(20):  # Typical convergence
-            prev = m
-            # Expansion: Square the matrix
-            m = m @ m
-
-            # Inflation: Raise to power, then re-normalize columns
-            m = np.power(m, self.inflation)
-            col_sums = m.sum(axis=0)
-            col_sums[col_sums == 0] = 1.0
-            m = m / col_sums
-
-            # Pruning + re-normalize so columns stay stochastic
-            m[m < 1e-4] = 0
-            col_sums = m.sum(axis=0)
-            col_sums[col_sums == 0] = 1.0
-            m = m / col_sums
-
-            if np.allclose(m, prev, atol=1e-6):
-                break
-        return m
-
-    def _get_seed_cluster(self, matrix, seed_idx):
-        """
-        After MCL converges, only attractor rows have non-zero entries; the
-        non-zero columns of an attractor row identify its cluster members.
-        Look up the seed's column to find which attractor it flows into,
-        then return that attractor's row.
-        """
-        import numpy as np
-        col = matrix[:, seed_idx]
-        attractor = int(np.argmax(col))
-        cluster = np.where(matrix[attractor, :] > 0)[0].tolist()
-        if seed_idx not in cluster:
-            cluster.append(seed_idx)
-        return cluster
-
-    def _sequence_flow(self, seed_path, paths, vectors):
-        """
-        The 'Spread' Logic:
-        Orders the cluster to create a smooth 'Rising Wedge' or 'Energy Arc'.
-        """
-        if len(paths) <= 1:
-            return list(paths)
-
-        ordered_playlist = [seed_path]
-        current_idx = paths.index(seed_path)
-        remaining_indices = list(range(len(paths)))
-        remaining_indices.remove(current_idx)
-
-        current_vec = vectors[current_idx]
-
-        import numpy as np
-        # Greedy search: Find the 'nearest neighbor' in feature space
-        while remaining_indices:
-            candidates = vectors[remaining_indices]
-            dists = np.linalg.norm(candidates - current_vec, axis=1)
-
-            best_match_idx = remaining_indices[int(np.argmin(dists))]
-            ordered_playlist.append(paths[best_match_idx])
-
-            current_vec = vectors[best_match_idx]
-            remaining_indices.remove(best_match_idx)
-
-        return ordered_playlist
+# NOTE: An MCL-based AutoPlaylistEngine used to live here. It was removed
+# when playlist generation moved to the KNN selector in
+# `utils/auto_playlist.py` — KNN over the hot-set's weighted feature
+# vectors gives the same coherent groupings without the matrix-power
+# convergence loop or the artist/album string-similarity blending, and
+# loads on demand instead of at app start. See git history if you need
+# the old implementation.
 
 
 class AnimatedEntry(ft.Container):
@@ -2837,14 +2438,14 @@ class LibraryView:
             scroll_interval=150,
         )
 
-        # Animating carousel wrapper for the track list
+        # Animating carousel wrapper for the track list (optimized snappy transition)
         self._animated_list_wrapper = ft.Container(
             content=self._library_list,
             expand=True,
             opacity=1.0,
             offset=ft.Offset(0, 0),
-            animate_opacity=ft.Animation(220, ft.AnimationCurve.EASE_OUT_QUAD),
-            animate_offset=ft.Animation(220, ft.AnimationCurve.EASE_OUT_QUAD),
+            animate_opacity=ft.Animation(120, ft.AnimationCurve.EASE_OUT_QUAD),
+            animate_offset=ft.Animation(120, ft.AnimationCurve.EASE_OUT_QUAD),
         )
 
         # Glassmorphic premium pagination bar
@@ -2871,14 +2472,17 @@ class LibraryView:
             weight=ft.FontWeight.W_700,
         )
         self._pagination_bar = ft.Container(
-            content=ft.Row(
-                [
-                    self._prev_page_btn,
-                    self._page_label,
-                    self._next_page_btn,
-                ],
-                alignment=ft.MainAxisAlignment.CENTER,
-                spacing=20,
+            content=ft.GestureDetector(
+                content=ft.Row(
+                    [
+                        self._prev_page_btn,
+                        self._page_label,
+                        self._next_page_btn,
+                    ],
+                    alignment=ft.MainAxisAlignment.CENTER,
+                    spacing=20,
+                ),
+                on_horizontal_drag_end=self._on_pagination_swipe,
             ),
             bgcolor=apply_opacity(0.1, SURFACE),
             border_radius=12,
@@ -3193,44 +2797,24 @@ class LibraryView:
 
 
 
+    def _on_pagination_swipe(self, e):
+        """Switch pages on horizontal swipe of the pagination bar."""
+        if self._is_changing_page or getattr(self, "_is_programmatic_scroll", False):
+            return
+        vx = getattr(e, "primary_velocity", 0) or 0
+        if abs(vx) < 300:  # Deliberate swipe threshold
+            return
+            
+        if vx < 0: # Swipe Left = Go Forward
+            if self.current_page < self.total_pages - 1:
+                self.page.run_task(self.change_page, self.current_page + 1)
+        elif vx > 0: # Swipe Right = Go Backward
+            if self.current_page > 0:
+                self.page.run_task(self.change_page, self.current_page - 1, scroll_to_bottom=True)
+
     def _on_list_scroll(self, e: ft.OnScrollEvent):
         if self.view_mode in ("tracks", "albums", "artists"):
-            if self._is_changing_page or getattr(self, "_is_programmatic_scroll", False):
-                return
-            current_pixels = e.pixels
-            direction = current_pixels - getattr(self, "_last_scroll_pixels", 0)
-            self._last_scroll_pixels = current_pixels
-            
-            import time
-            now = time.time()
-            
-            # Bottom Boundary check (scroll down to next page)
-            if e.max_scroll_extent > 0 and current_pixels >= e.max_scroll_extent - 10:
-                if direction > 0:
-                    if not getattr(self, "_at_bottom_boundary", False):
-                        self._at_bottom_boundary = True
-                        self._bottom_boundary_time = now
-                    elif now - getattr(self, "_bottom_boundary_time", 0) > 0.28:
-                        self._at_bottom_boundary = False
-                        if self.current_page < self.total_pages - 1:
-                            self.page.run_task(self.change_page, self.current_page + 1, scroll_to_bottom=False)
-            else:
-                if direction < 0:
-                    self._at_bottom_boundary = False
-                    
-            # Top Boundary check (scroll up to prev page)
-            if current_pixels <= 5:
-                if direction < 0:
-                    if not getattr(self, "_at_top_boundary", False):
-                        self._at_top_boundary = True
-                        self._top_boundary_time = now
-                    elif now - getattr(self, "_top_boundary_time", 0) > 0.28:
-                        self._at_top_boundary = False
-                        if self.current_page > 0:
-                            self.page.run_task(self.change_page, self.current_page - 1, scroll_to_bottom=True)
-            else:
-                if direction > 0:
-                    self._at_top_boundary = False
+            self._last_scroll_pixels = e.pixels
             return
 
         if self._is_loading_chunk or not self._current_gen:
@@ -3264,36 +2848,38 @@ class LibraryView:
         return ft.Container(
             content=ft.Row(
                 [
-                    ft.Icon(ft.Icons.KEYBOARD_DOUBLE_ARROW_UP_ROUNDED, color=apply_opacity(0.3, CYAN), size=14),
-                    ft.Text("Scroll up for previous page", color=DIM, size=11, weight=ft.FontWeight.W_500),
-                    ft.Icon(ft.Icons.KEYBOARD_DOUBLE_ARROW_UP_ROUNDED, color=apply_opacity(0.3, CYAN), size=14),
+                    ft.Icon(ft.Icons.KEYBOARD_DOUBLE_ARROW_UP_ROUNDED, color=CYAN, size=16),
+                    ft.Text("Swipe on pagination bar or tap arrows to load previous page", color=TEXT, size=11, weight=ft.FontWeight.W_500),
+                    ft.Icon(ft.Icons.KEYBOARD_DOUBLE_ARROW_UP_ROUNDED, color=CYAN, size=16),
                 ],
                 alignment=ft.MainAxisAlignment.CENTER,
-                spacing=8,
+                spacing=10,
             ),
-            height=40,
+            height=48,
             alignment=ft.Alignment(0, 0),
-            bgcolor=apply_opacity(0.02, SURFACE),
-            border_radius=8,
-            margin=ft.Margin.only(bottom=8),
+            bgcolor=apply_opacity(0.03, CYAN),
+            border=ft.Border.all(1, apply_opacity(0.08, CYAN)),
+            border_radius=12,
+            margin=ft.Margin.only(bottom=12),
         )
 
     def _build_bottom_ghost(self) -> ft.Control:
         return ft.Container(
             content=ft.Row(
                 [
-                    ft.Icon(ft.Icons.KEYBOARD_DOUBLE_ARROW_DOWN_ROUNDED, color=apply_opacity(0.3, CYAN), size=14),
-                    ft.Text("Scroll down for next page", color=DIM, size=11, weight=ft.FontWeight.W_500),
-                    ft.Icon(ft.Icons.KEYBOARD_DOUBLE_ARROW_DOWN_ROUNDED, color=apply_opacity(0.3, CYAN), size=14),
+                    ft.Icon(ft.Icons.KEYBOARD_DOUBLE_ARROW_DOWN_ROUNDED, color=CYAN, size=16),
+                    ft.Text("Swipe on pagination bar or tap arrows to load next page", color=TEXT, size=11, weight=ft.FontWeight.W_500),
+                    ft.Icon(ft.Icons.KEYBOARD_DOUBLE_ARROW_DOWN_ROUNDED, color=CYAN, size=16),
                 ],
                 alignment=ft.MainAxisAlignment.CENTER,
-                spacing=8,
+                spacing=10,
             ),
-            height=40,
+            height=48,
             alignment=ft.Alignment(0, 0),
-            bgcolor=apply_opacity(0.02, SURFACE),
-            border_radius=8,
-            margin=ft.Margin.only(top=8),
+            bgcolor=apply_opacity(0.03, CYAN),
+            border=ft.Border.all(1, apply_opacity(0.08, CYAN)),
+            border_radius=12,
+            margin=ft.Margin.only(top=12),
         )
 
     def _update_pagination_ui(self):
@@ -3325,8 +2911,8 @@ class LibraryView:
             self._animated_list_wrapper.opacity = 0.0
             self.try_update(self._animated_list_wrapper)
             
-            # Wait for transition animation to finish
-            await asyncio.sleep(0.18)
+            # Wait for transition animation to finish (snappy 80ms)
+            await asyncio.sleep(0.08)
             
             # 2. Update page index and instantiate new controls
             self.current_page = new_page
@@ -3385,8 +2971,8 @@ class LibraryView:
             self._animated_list_wrapper.offset = entry_offset
             self.try_update(self._animated_list_wrapper, self._library_list)
             
-            # Wait a tiny tick for the layout to render and compute heights in client
-            await asyncio.sleep(0.08)
+            # Wait a tiny tick for the layout to render and compute heights in client (optimized 40ms)
+            await asyncio.sleep(0.04)
             
             # 4. Programmatically scroll to the correct position (locked out of scroll listener)
             self._is_programmatic_scroll = True
@@ -3399,7 +2985,7 @@ class LibraryView:
             except Exception:
                 pass
             finally:
-                await asyncio.sleep(0.05)
+                await asyncio.sleep(0.03)
                 self._is_programmatic_scroll = False
                 
             # 5. Slide in and fade back to center
@@ -3407,8 +2993,8 @@ class LibraryView:
             self._animated_list_wrapper.opacity = 1.0
             self.try_update(self._animated_list_wrapper)
         finally:
-            # Cooldown to let scroll physics settle fully in Flutter client
-            await asyncio.sleep(0.35)
+            # Cooldown to let scroll physics settle fully in Flutter client (optimized 150ms)
+            await asyncio.sleep(0.15)
             self._is_changing_page = False
 
     async def load_library(self):
@@ -4776,6 +4362,27 @@ class SettingsView:
             OnyxButton("SAVE CONFIG FILE", ft.Icons.TERMINAL, on_tap=lambda _: self._save_config()),
             ft.Container(height=10),
             ft.TextButton("Debug: Populate Play Counts", icon=ft.Icons.BUG_REPORT_ROUNDED, on_click=self._on_debug_populate_click),
+            ft.Divider(color=BORDER, height=40),
+            ft.Text("Debug: App State Bundle", weight=ft.FontWeight.BOLD, color=DIM),
+            ft.Text(
+                "Package the library DB (with DSP features), Streamrip config "
+                "and search history into a single ZIP. Pick any folder to "
+                "export into; pick the .zip back on another build to skip the "
+                "DSP sweep and folder setup.",
+                color=DIM, size=12,
+            ),
+            ft.Row([
+                ft.TextButton(
+                    "Export State",
+                    icon=ft.Icons.IOS_SHARE_ROUNDED,
+                    on_click=self._on_export_state_click,
+                ),
+                ft.TextButton(
+                    "Import State",
+                    icon=ft.Icons.FILE_DOWNLOAD_ROUNDED,
+                    on_click=self._on_import_state_click,
+                ),
+            ]),
         ], spacing=15)
 
     def _build_about_group(self):
@@ -4817,6 +4424,271 @@ class SettingsView:
         self.app.show_snackbar("Done! Check your Most Listened Tracks.", icon=ft.Icons.CHECK_CIRCLE, color=CYAN)
         # Refresh UI
         self.app.search_view.refresh_setup_state()
+
+    # ── State bundle (export/import) ────────────────────────────────────────
+    def _on_export_state_click(self, _e):
+        # Reuse the same Android folder picker as the Download/Library
+        # selectors; pick a directory and write the bundle inside it.
+        if hasattr(sys, 'getandroidapilevel'):
+            self._browse_android_state_bundle(mode="export")
+        else:
+            path = pick_folder("Choose export folder") or os.path.join(
+                os.path.expanduser("~"), "Downloads"
+            )
+            self.page.run_task(self._do_export_state, path)
+
+    def _on_import_state_click(self, _e):
+        if hasattr(sys, 'getandroidapilevel'):
+            self._browse_android_state_bundle(mode="import")
+        else:
+            self.app.show_snackbar(
+                "Desktop import: drop a bundle into ~/Downloads and use Android.",
+                color="#FF4444",
+            )
+
+    async def _do_export_state(self, out_dir: str):
+        from utils import state_export
+        from utils.streamrip_api import get_config_path
+        from utils.search_history import get_search_history_path
+
+        self.app.show_snackbar("Exporting state...", icon=ft.Icons.IOS_SHARE_ROUNDED)
+        try:
+            # Run the zip + sqlite-backup in a worker thread so the UI doesn't
+            # hitch — backup() on a multi-MB DB can take a few hundred ms.
+            out_path = await asyncio.to_thread(
+                state_export.export_state,
+                self.app.db_manager.db_path,
+                get_config_path(),
+                get_search_history_path(),
+                out_dir,
+            )
+        except Exception as ex:
+            logger.exception("state export failed")
+            self.app.show_snackbar(f"Export failed: {ex}", color="#FF4444")
+            return
+        self.app.show_snackbar(
+            f"Exported to {out_path}", icon=ft.Icons.CHECK_CIRCLE, color=CYAN
+        )
+
+    async def _do_import_state(self, zip_path: str):
+        from utils import state_export
+        from utils.streamrip_api import get_config_path
+        from utils.search_history import get_search_history_path
+
+        self.app.show_snackbar("Importing state...", icon=ft.Icons.FILE_DOWNLOAD_ROUNDED)
+
+        # Close the live aiosqlite connection so the .db file isn't locked
+        # while we overwrite it. The app will be killed right after.
+        try:
+            close = getattr(self.app.db_manager, "close", None)
+            if close is not None:
+                await close()
+        except Exception as ex:
+            logger.warning(f"db_manager.close() raised before import: {ex}")
+
+        try:
+            result = await asyncio.to_thread(
+                state_export.import_state,
+                zip_path,
+                self.app.db_manager.db_path,
+                get_config_path(),
+                get_search_history_path(),
+            )
+        except Exception as ex:
+            logger.exception("state import failed")
+            self.app.show_snackbar(f"Import failed: {ex}", color="#FF4444")
+            return
+
+        replaced = ", ".join(result["replaced"].keys()) or "nothing"
+        self.app.show_snackbar(
+            f"Imported {replaced}. Force-close and relaunch the app.",
+            icon=ft.Icons.CHECK_CIRCLE,
+            color=CYAN,
+        )
+
+    def _browse_android_state_bundle(self, mode: str):
+        """Folder/file picker for the debug state-bundle round trip.
+        mode='export' picks a destination directory; mode='import' picks a
+        `.zip` file. Mirrors the layout of _browse_android_paths so users get
+        a consistent navigator across the app."""
+        is_import = (mode == "import")
+        app_data = os.getenv("FLET_APP_STORAGE_DATA") or ""
+
+        BOOKMARKS = [
+            (os.path.abspath("/storage/emulated/0/Download"), "Downloads"),
+            (os.path.abspath("/storage/emulated/0"),          "Internal Storage"),
+            (os.path.abspath("/sdcard"),                       "SD Card"),
+            (os.path.abspath("/storage/emulated/0/Music"),    "Music"),
+        ]
+        if app_data:
+            BOOKMARKS.append((app_data, "App Storage"))
+
+        bs_holder = [None]
+        path_state = [None]
+
+        title_text = ft.Text("", color=TEXT, weight=ft.FontWeight.W_700, size=14)
+        path_text  = ft.Text("", color=DIM, size=10, italic=True)
+        dir_list   = ft.Column(tight=True, spacing=0, scroll=ft.ScrollMode.AUTO)
+
+        def _close():
+            if bs_holder[0]:
+                bs_holder[0].open = False
+                bs_holder[0].update()
+                self.page.update()
+
+        def _confirm_dir(path):
+            _close()
+            self.page.run_task(self._do_export_state, path)
+
+        def _confirm_file(path):
+            _close()
+            self.page.run_task(self._do_import_state, path)
+
+        def _render(directory):
+            path_state[0] = directory
+            dir_list.controls.clear()
+
+            if directory is None:
+                title_text.value = "Import State Bundle" if is_import else "Export State Bundle"
+                path_text.value  = (
+                    "Pick a .zip bundle" if is_import else "Pick a destination folder"
+                )
+                for bpath, bname in BOOKMARKS:
+                    exists = os.path.isdir(bpath)
+                    dir_list.controls.append(ft.ListTile(
+                        leading=ft.Icon(
+                            ft.Icons.FOLDER_ROUNDED,
+                            color=CYAN if exists else DIM,
+                            size=20,
+                        ),
+                        title=ft.Text(bname, color=TEXT if exists else DIM, size=13),
+                        subtitle=ft.Text(bpath, color=DIM, size=10),
+                        on_click=_nav_to(bpath),
+                    ))
+                return
+
+            title_text.value = os.path.basename(directory) or directory
+            path_text.value  = directory
+
+            if not is_import:
+                # Export: lead with the "use this folder" affordance.
+                dir_list.controls.append(
+                    ft.Container(
+                        content=ft.Button(
+                            f"Export here",
+                            icon=ft.Icons.IOS_SHARE_ROUNDED,
+                            on_click=lambda _: _confirm_dir(directory),
+                            bgcolor=CYAN,
+                            color=BG,
+                            style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=8)),
+                        ),
+                        padding=ft.Padding.only(bottom=6),
+                    )
+                )
+
+            try:
+                entries = sorted(os.listdir(directory))
+            except PermissionError:
+                dir_list.controls.append(
+                    ft.Text("Permission denied", color="#FF5555", size=12, italic=True)
+                )
+                if bs_holder[0] and bs_holder[0].open:
+                    bs_holder[0].update()
+                return
+
+            sub_dirs = [e for e in entries
+                        if os.path.isdir(os.path.join(directory, e)) and not e.startswith(".")]
+            zip_files = [e for e in entries
+                         if is_import
+                         and e.lower().endswith(".zip")
+                         and os.path.isfile(os.path.join(directory, e))]
+
+            # Import: surface .zip files first so they're easy to tap.
+            for entry in zip_files:
+                full = os.path.join(directory, entry)
+                dir_list.controls.append(ft.ListTile(
+                    leading=ft.Icon(ft.Icons.ARCHIVE_ROUNDED, color=CYAN, size=18),
+                    title=ft.Text(entry, color=TEXT, size=13),
+                    subtitle=ft.Text(
+                        f"{os.path.getsize(full)/1024:.0f} KB", color=DIM, size=10,
+                    ),
+                    on_click=lambda _e, p=full: _confirm_file(p),
+                ))
+
+            for entry in sub_dirs:
+                full = os.path.join(directory, entry)
+                dir_list.controls.append(ft.ListTile(
+                    leading=ft.Icon(ft.Icons.FOLDER_OUTLINED, color=CYAN, size=18),
+                    title=ft.Text(entry, color=TEXT, size=13),
+                    on_click=_nav_to(full),
+                ))
+
+            if not sub_dirs and not zip_files:
+                dir_list.controls.append(
+                    ft.Text(
+                        "(no .zip bundles or sub-folders)" if is_import else "(no sub-folders)",
+                        color=DIM, size=12, italic=True,
+                    )
+                )
+
+            if bs_holder[0] and bs_holder[0].open:
+                bs_holder[0].update()
+
+        def _nav_to(path):
+            def _handler(_e):
+                _render(path)
+            return _handler
+
+        def _go_up(_e):
+            cur = path_state[0]
+            if cur is None:
+                return
+            parent = os.path.dirname(cur)
+            if parent == cur:
+                _render(None)
+            else:
+                _render(parent)
+
+        _render(None)
+
+        bs = ft.BottomSheet(
+            content=ft.Container(
+                content=ft.Column(
+                    [
+                        ft.Row(
+                            [
+                                ft.IconButton(
+                                    ft.Icons.ARROW_BACK_ROUNDED,
+                                    icon_color=CYAN,
+                                    on_click=_go_up,
+                                    tooltip="Up",
+                                ),
+                                ft.Column(
+                                    [title_text, path_text],
+                                    spacing=0,
+                                    expand=True,
+                                ),
+                                ft.TextButton("Cancel", on_click=lambda _: _close()),
+                            ],
+                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                            spacing=4,
+                        ),
+                        ft.Divider(color=BORDER),
+                        ft.Container(content=dir_list, height=320),
+                    ],
+                    tight=True,
+                    spacing=6,
+                ),
+                bgcolor=SURFACE,
+                padding=ft.Padding.only(left=16, right=16, top=16, bottom=40),
+            ),
+            use_safe_area=True,
+            bgcolor=SURFACE,
+        )
+        bs_holder[0] = bs
+        self.app.page.overlay.append(bs)
+        bs.open = True
+        self.app.page.update()
 
     def refresh(self):
         self._dl_path_field.value  = self.app.target_folder
@@ -5925,6 +5797,7 @@ class AssistantView:
         # Cancellation hook for the analyser sweep so the user can dismiss
         # the panel without leaving a background analyser running forever.
         self._init_cancel = False
+        self._analysing_library = False
 
     def _ensure_initialized(self):
         if self._initialized:
@@ -5969,9 +5842,14 @@ class AssistantView:
                 border_radius=20,
             ),
             tooltip="Hold to Speak",
+            # Touch-down starts listening immediately. Release stops it:
+            #   • short tap   → on_tap_up
+            #   • held button → on_long_press_end (Flutter cancels the tap
+            #     gesture once long-press wins arbitration, so on_tap_cancel
+            #     would fire mid-hold — we deliberately don't wire it).
             on_tap_down=self._on_mic_down,
             on_tap_up=self._on_mic_up,
-            on_tap_cancel=self._on_mic_up,
+            on_long_press_end=self._on_mic_up,
         )
         self._stt_listening = False
 
@@ -6098,6 +5976,13 @@ class AssistantView:
         # its initial paint before we start the heavy DSP/Graph work.
         await asyncio.sleep(0.2)
 
+        if getattr(self, "_analysing_library", False):
+            await self._append_bubble(
+                "assistant",
+                "I am currently busy analyzing the music library and rebuilding the DSP graph, sir. I will notify you as soon as I am done.",
+            )
+            return
+
         self._set_banner(visible=True, message="Checking your library…", determinate=None)
         logger.info("AssistantView: init flow started")
 
@@ -6196,8 +6081,9 @@ class AssistantView:
             )
             return
 
-        # Everything's built and analysed. Quiet "ready" only on first open
-        # this session so we don't spam the chat on every reopen.
+        # Everything's built and analysed. Show a quiet "ready" bubble (no TTS;
+        # the assistant only speaks when something actually happened — e.g.
+        # after a graph rebuild — not on every reopen of the pane).
         self._set_banner(visible=False)
         if not self._init_greeted:
             self._init_greeted = True
@@ -6207,7 +6093,6 @@ class AssistantView:
                 "assistant",
                 self._runner._say("greeting") +
                 f" ({status['total_tracks']} tracks, {edge_total} graph edges)",
-                speak=True,
             )
 
     async def _do_graph_rebuild(self):
@@ -6215,71 +6100,124 @@ class AssistantView:
         features, then rebuild metadata + acoustic edges. Invoked when the
         runner emits action='rebuild_graph' (either from a confirmation
         yes-response or the explicit 'rescan' intent)."""
+        import time
         from utils import track_graph as tg
-
+        self._analysing_library = True
         audio_active = bool(audio_engine.audio_service)
-        if not audio_active:
-            await self._append_bubble(
-                "assistant",
-                "⚠️ *Audio engine not active. Running edge linkage in offline developer mode...*",
-            )
+        start_time = time.time()
 
         try:
-            missing = await self.app.db_manager.get_tracks_missing_features(
-                tg.FEATURES_VERSION
-            )
-        except Exception as exc:
-            logger.warning("AssistantView: missing-features check failed: %s", exc)
-            missing = []
-
-        if missing and audio_active:
-            total = len(missing)
-            self._init_cancel = False
-            self._set_banner(
-                visible=True,
-                message=f"Analysing 1 / {total} tracks…",
-                determinate=0.0,
-            )
-
-            async def _on_progress(done, total_, current, failures):
-                if self._init_cancel:
-                    return
-                suffix = f" ({failures} failed)" if failures else ""
-                self._set_banner(
-                    visible=True,
-                    message=f"Analysing {done} / {total_}{suffix}",
-                    determinate=(done / total_) if total_ else None,
+            if not audio_active:
+                await self._append_bubble(
+                    "assistant",
+                    "⚠️ *Audio engine not active. Running edge linkage in offline developer mode...*",
                 )
 
             try:
-                result = await tg.bulk_analyze_library(
-                    self.app.db_manager,
-                    audio_engine.audio_service,
-                    progress_cb=_on_progress,
-                    cancel_check=lambda: self._init_cancel,
+                missing = await self.app.db_manager.get_tracks_missing_features(
+                    tg.FEATURES_VERSION
                 )
-                logger.info("AssistantView: analyser sweep done: %s", result)
             except Exception as exc:
-                logger.warning("AssistantView: analyser sweep failed: %s", exc)
-        elif missing and not audio_active:
-            logger.info("AssistantView: skipped bulk feature extraction (no audio service)")
+                logger.warning("AssistantView: missing-features check failed: %s", exc)
+                missing = []
 
-        # Rebuild edges — metadata is fast, acoustic depends on new feature
-        # vectors. Run both unconditionally after a sweep so the graph
-        # reflects the latest analyser output.
-        self._set_banner(visible=True, message="Linking similar tracks…", determinate=None)
-        try:
-            await tg.build_metadata_edges(self.app.db_manager)
-            await tg.build_acoustic_edges(self.app.db_manager)
-        except Exception as exc:
-            logger.warning("AssistantView: edge rebuild failed: %s", exc)
+            if missing and audio_active:
+                total = len(missing)
+                self._init_cancel = False
+                await self._append_bubble(
+                    "assistant",
+                    "🔊 *Sir, please ensure a song is playing (even at 0 volume) in the background. "
+                    "This activates Android's keep-alive service, preventing the OS from killing "
+                    "our background DSP worker thread while we work!*",
+                    speak=True,
+                    speak_text="Sir, please ensure a song is playing in the background. This activates Android's keep-alive service, preventing the OS from killing our background DSP thread.",
+                )
+                self._set_banner(
+                    visible=True,
+                    message=f"Analysing 1 / {total} tracks…",
+                    determinate=0.0,
+                )
 
-        self._set_banner(visible=False)
-        await self._append_bubble(
-            "assistant",
-            "Analysis complete. Mood search and similarity walks are ready.",
-            speak=True,
-        )
+                async def _on_progress(done, total_, current, failures):
+                    if self._init_cancel:
+                        return
+                    
+                    # Compute dynamic estimated time remaining (ETA)
+                    eta_str = ""
+                    if done > 0 and total_ > done:
+                        elapsed = time.time() - start_time
+                        avg_time_per_track = elapsed / done
+                        remaining_tracks = total_ - done
+                        eta_seconds = int(avg_time_per_track * remaining_tracks)
+                        
+                        if eta_seconds < 60:
+                            eta_str = f" (~{eta_seconds}s left)"
+                        elif eta_seconds < 3600:
+                            eta_str = f" (~{eta_seconds // 60}m {eta_seconds % 60}s left)"
+                        else:
+                            eta_str = f" (~{eta_seconds // 3600}h {(eta_seconds % 3600) // 60}m left)"
+
+                    suffix = f" ({failures} failed)" if failures else ""
+                    self._set_banner(
+                        visible=True,
+                        message=f"Analysing {done} / {total_}{suffix}{eta_str}…",
+                        determinate=(done / total_) if total_ else None,
+                    )
+                    # Keep background process alive and show progress on Android notification
+                    if audio_active:
+                        try:
+                            await audio_engine.audio_service.show_progress_notification(
+                                title="DSP Analysis Progress",
+                                content=f"Analysing {done} / {total_}{suffix}{eta_str}",
+                                progress=done,
+                                total=total_
+                            )
+                        except Exception as ex:
+                            logger.warning("AssistantView: failed to update notification: %s", ex)
+
+                try:
+                    result = await tg.bulk_analyze_library(
+                        self.app.db_manager,
+                        audio_engine.audio_service,
+                        progress_cb=_on_progress,
+                        cancel_check=lambda: self._init_cancel,
+                    )
+                    logger.info("AssistantView: analyser sweep done: %s", result)
+                except Exception as exc:
+                    logger.warning("AssistantView: analyser sweep failed: %s", exc)
+            elif missing and not audio_active:
+                logger.info("AssistantView: skipped bulk feature extraction (no audio service)")
+
+            # Rebuild edges — metadata is fast, acoustic depends on new feature
+            # vectors. Run both unconditionally after a sweep so the graph
+            # reflects the latest analyser output.
+            self._set_banner(visible=True, message="Linking similar tracks…", determinate=None)
+            try:
+                await tg.build_metadata_edges(self.app.db_manager)
+                await tg.build_acoustic_edges(self.app.db_manager)
+            except Exception as exc:
+                logger.warning("AssistantView: edge rebuild failed: %s", exc)
+
+            self._set_banner(visible=False)
+            await self._append_bubble(
+                "assistant",
+                "Analysis complete. Mood search and similarity walks are ready.",
+                speak=True,
+            )
+        finally:
+            self._analysing_library = False
+            # Clear Android system progress notification
+            if audio_active:
+                try:
+                    await audio_engine.audio_service.show_progress_notification(
+                        title="",
+                        content="",
+                        progress=0,
+                        total=0,
+                        done=True
+                    )
+                except Exception as ex:
+                    logger.warning("AssistantView: failed to cancel notification: %s", ex)
 
     def _set_banner(self, visible: bool, message: str = "", determinate=None):
         def _mutate():
@@ -6318,6 +6256,10 @@ class AssistantView:
         self.page.run_task(self._stop_listening)
 
     async def _start_listening(self):
+        if getattr(self, "_analysing_library", False):
+            self.app.show_snackbar("Please wait until library analysis is complete.")
+            return
+
         if self._stt_listening:
             return
 
@@ -6382,7 +6324,9 @@ class AssistantView:
 
         try:
             if not is_mock:
-                res = await service.stt_listen(timeout=15.0)
+                # 60 s upper bound on a single hold (the plugin still
+                # finalises early when stt_stop() is called on release).
+                res = await service.stt_listen(timeout=60.0)
             else:
                 # Simulated Speech-to-Text session for offline debugging on macOS
                 # Check if self._stt_listening is flipped to False every 0.05 seconds
@@ -6429,6 +6373,13 @@ class AssistantView:
 
     async def _handle_user_text(self, text: str):
         await self._append_bubble("user", text)
+        if getattr(self, "_analysing_library", False):
+            await self._append_bubble(
+                "assistant",
+                "Please wait, sir. I am currently busy analyzing the music library and rebuilding the DSP graph.",
+            )
+            return
+
         if self._runner is None:
             await self._append_bubble(
                 "assistant",
@@ -6441,6 +6392,18 @@ class AssistantView:
             speak=response.success and bool(response.spoken),
             speak_text=response.spoken,
         )
+        # Playback intents stage the queue but leave engine.play() to us so
+        # Jarvis finishes his sentence before the music starts. _append_bubble
+        # awaits the TTS future before returning, so by here it's safe to
+        # kick off playback. Guarded so a failed-intent response that still
+        # has deferred_play set (shouldn't happen, but defensive) doesn't
+        # start audio on top of an error message.
+        if response.success and response.deferred_play:
+            try:
+                audio_engine.play()
+            except Exception as exc:
+                logger.warning("AssistantView: deferred play failed: %s", exc)
+
         # Update shuffle button color in Now Playing if state changed in audio_engine
         try:
             if hasattr(self.app, "now_playing") and self.app.now_playing:
@@ -6951,7 +6914,6 @@ class StreamripFletApp:
         self.download_history_list = []
         from utils.db_manager import DatabaseManager
         self.db_manager = DatabaseManager(os.path.join(DATA_DIR, "library.db"))
-        self.auto_engine = AutoPlaylistEngine()
         await self.db_manager.initialize()
         self.queue = QueueController(self)
         self._view_cache: dict[int, ft.Control] = {}
@@ -7063,9 +7025,6 @@ class StreamripFletApp:
 
     async def open_auto_playlist_dialog(self, playlist_id):
         logger.info(f"Opening Playlist Creation dialog for playlist {playlist_id}")
-        inflation_slider = ft.Slider(
-            min=1.2, max=4.5, value=2.0, divisions=33, label="{value}x", active_color=CYAN,
-        )
         # Length slider: 5-50 tracks. Default 20; long enough to feel like a
         # real playlist, short enough that lazy DSP analysis on the hot set
         # finishes in a reasonable time on a phone.
@@ -7083,15 +7042,15 @@ class StreamripFletApp:
             from utils.dsp import (
                 FEATURES_VERSION, analyze_track, unpack_timbre,
             )
+            from utils.auto_playlist import generate_knn_playlist
             gen_btn.disabled = True
-            inflation_slider.disabled = True
             length_slider.disabled = True
             loading_indicator.visible = True
             self.page.update()
 
             # Track whether we paused playback so the `finally` block can
             # resume it whether the run succeeds, fails, or hits an
-            # uncaught exception during clustering.
+            # uncaught exception during selection.
             was_playing = False
 
             try:
@@ -7139,7 +7098,7 @@ class StreamripFletApp:
                         except Exception as ex:
                             failures += 1
                             # One bad file shouldn't kill the whole run; log
-                            # and skip; the engine drops featureless entries.
+                            # and skip; the selector drops featureless entries.
                             logger.warning(f"DSP analyse failed for {t['path']}: {ex}")
                             progress_label.value = (
                                 f"Analyzing {i} / {len(stale)} tracks "
@@ -7154,7 +7113,7 @@ class StreamripFletApp:
                             features.rolloff, features.beat_strength,
                             blob, FEATURES_VERSION,
                         )
-                        # Reflect into the in-memory hot_set so the engine
+                        # Reflect into the in-memory hot_set so the selector
                         # sees the just-computed features without a re-fetch.
                         t["bpm"] = features.bpm
                         t["energy"] = features.energy
@@ -7168,7 +7127,7 @@ class StreamripFletApp:
                             f"Analyzing {i} / {len(stale)} tracks{suffix}…"
                         )
                         self.page.update()
-                    progress_label.value = "Clustering…"
+                    progress_label.value = "Selecting…"
                     self.page.update()
 
                 # 3. Drop entries that still lack features after analysis.
@@ -7184,19 +7143,17 @@ class StreamripFletApp:
                     return
 
                 # 4. Pick a random seed from the entries that actually have
-                #    features (otherwise the engine would return [seed]).
+                #    features (otherwise the selector would return [seed]).
                 import random
                 seed_track = random.choice(ready)
                 seed_path = seed_track["path"]
 
-                # 5. Configure + run engine on a worker thread (matrix math
-                #    on the asyncio loop blocks UI updates).
-                self.auto_engine.inflation = inflation_slider.value
+                # 5. KNN selection runs synchronously on the asyncio loop;
+                #    it's a handful of numpy ops on a small hot-set matrix
+                #    (no matrix-power convergence) and finishes in single-
+                #    digit milliseconds for typical hot-set sizes.
                 target_length = int(length_slider.value)
-                magic_paths = await asyncio.to_thread(
-                    self.auto_engine.generate_magic_playlist,
-                    seed_path, ready, target_length,
-                )
+                magic_paths = generate_knn_playlist(seed_path, ready, target_length)
 
                 # 6. Persist into the chosen playlist.
                 for path in magic_paths:
@@ -7213,7 +7170,7 @@ class StreamripFletApp:
                 self.show_snackbar(f"Generation failed: {ex}", color="#FF4444")
             finally:
                 # Always resume playback if we paused it for the DSP loop;
-                # even if clustering or DB writes raised; so the user
+                # even if selection or DB writes raised; so the user
                 # doesn't end up silently paused after a failed generation.
                 if was_playing:
                     try:
@@ -7235,18 +7192,11 @@ class StreamripFletApp:
             ),
             content=ft.Column([
                 ft.Text(
-                    "MCL clustering on acoustic DSP features and artist/album "
-                    "metadata finds a cluster of tracks with a similar sonic profile.",
+                    "K-nearest-neighbour selection over the hot set's DSP "
+                    "feature vectors picks the tracks closest to a random "
+                    "seed and orders them into a smooth listening arc.",
                     size=12, color=DIM,
                 ),
-                ft.Container(height=10),
-                ft.Text("Similarity (Inflation)", size=13, weight=ft.FontWeight.W_600),
-                inflation_slider,
-                ft.Row([
-                    ft.Text("Broad Vibe", size=10, color=DIM),
-                    ft.Container(expand=True),
-                    ft.Text("Strict Genre", size=10, color=DIM),
-                ]),
                 ft.Container(height=10),
                 ft.Text("Playlist length", size=13, weight=ft.FontWeight.W_600),
                 length_slider,

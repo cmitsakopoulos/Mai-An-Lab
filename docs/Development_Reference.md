@@ -28,12 +28,72 @@ The "Playlist Creation" engine requires precise acoustic features, which are ext
 1. **Request**; Python sends a `decode_pcm` request with a file path to the Kotlin bridge.
 2. **MediaExtractor**; the Kotlin layer uses `MediaExtractor` to identify the track's format and locate the audio stream.
 3. **MediaCodec**; the hardware decoder (`MediaCodec`) extracts raw PCM samples at a target sample rate of **22,050 Hz**.
-4. **PCM Buffer**; the raw bytes are sent back to Python via the bridge as a list of integers.
-5. **Feature Extraction**; Python (via `numpy`) processes the PCM buffer to extract the 43D feature vector (BPM, Energy, MFCCs, Chroma).
+4. **PCM File**; samples are written to `appContext.cacheDir/dsp_pcm/<hash>.pcm` (the app's private internal storage, always accessible to Python in the same process). The bridge returns the absolute path, not the bytes themselves; this avoids serialising ~4 MB of audio across the Dart↔Python event channel for every track.
+5. **Feature Extraction**; Python (via `numpy`) memory-maps the PCM file and extracts the 38D feature vector (BPM, Energy, MFCCs, Chroma).
 
 ### Performance Considerations
 - **Hardware-Accelerated**; by using `MediaCodec`, decoding is significantly faster and more battery-efficient than software-based decoders like FFmpeg.
 - **Batched Processing**; to avoid UI stutter, DSP analysis is performed on a background thread in Kotlin and a separate `asyncio` task in Python.
+
+### Cross-Thread Method Channel Reply (gotcha)
+Kotlin runs `decodePcm` on a `Executors.newSingleThreadExecutor()` background thread so the foreground codec is not blocked. Flutter's `MethodChannel.Result` callbacks **must** be delivered on the main looper — calling `result.success(...)` from the worker thread silently drops the reply on some Android builds. The symptom is misleading: the Kotlin log shows a clean decode, the PCM file is written, but the Dart side receives `null`. The Dart wrapper at `_runDecode` then emits a `decode_complete` event with no `ok` key, which the Python correlator surfaces as `RuntimeError("decode failed")` for every track.
+
+The fix is to marshal the reply back via a `Handler(Looper.getMainLooper())`:
+
+```kotlin
+private val mainHandler = Handler(Looper.getMainLooper())
+…
+executor.submit {
+    try {
+        val out = decodePcm(path)
+        mainHandler.post { result.success(out) }
+    } catch (t: Throwable) {
+        mainHandler.post { result.error("DECODE_FAILED", t.message ?: "unknown", null) }
+    }
+}
+```
+
+### `libc++_shared.so` bundling (gotcha)
+NumPy's prebuilt Android wheels (specifically `numpy/fft/_pocketfft_umath.cpython-3xx.so`) are linked against the NDK's C++ shared runtime, `libc++_shared.so`. The Flet/`serious_python` build pipeline does **not** ship this library automatically. With it missing the analyser will reach `extract_features_from_pcm`, then die on the first `np.fft.rfft` call:
+
+```
+ImportError: dlopen failed: library "libc++_shared.so" not found:
+  needed by …/numpy/fft/_pocketfft_umath.cpython-312.so
+```
+
+Because this fires inside an `asyncio.to_thread` worker, the only UI-visible signal is the `(N failed)` counter on the assistant rescan banner / Magic Playlist progress label — there is no other clue.
+
+**Resolution.** Bundle `libc++_shared.so` for every ABI the app ships into the `flet_audio_service` plugin's `jniLibs` tree:
+
+```
+flet_audio_service/src/flutter/flet_audio_service/android/src/main/jniLibs/
+├── arm64-v8a/libc++_shared.so
+├── armeabi-v7a/libc++_shared.so
+├── x86/libc++_shared.so
+└── x86_64/libc++_shared.so
+```
+
+Source files come from the NDK at
+`$NDK/toolchains/llvm/prebuilt/<host>/sysroot/usr/lib/<triple>/libc++_shared.so`
+where `<triple>` maps to the Android ABI:
+
+| ABI            | NDK triple                |
+|----------------|---------------------------|
+| `arm64-v8a`    | `aarch64-linux-android`   |
+| `armeabi-v7a`  | `arm-linux-androideabi`   |
+| `x86`          | `i686-linux-android`      |
+| `x86_64`       | `x86_64-linux-android`    |
+
+The Android Gradle Plugin auto-merges `jniLibs/<abi>/*.so` into every APK that depends on the plugin, so no further build configuration is needed. If a second plugin also ships its own copy, add `packagingOptions { pickFirst 'lib/**/libc++_shared.so' }` to the plugin's `build.gradle`.
+
+This same bundling step is required for any future native dependency that links against the C++ runtime (e.g. SciPy, PyTorch Mobile, ONNX Runtime). Keep the libs pinned to the NDK version used to compile the wheels — mixing NDK 25 wheels with NDK 28 `libc++_shared.so` is normally safe (it is forward-compatible), but a major NDK jump is worth verifying.
+
+### Diagnosing future decode failures
+Python's `logging` output from the `dsp` module is not routed to logcat in release builds. The proven-visible channels are:
+
+- Kotlin `Log.d(TAG, …)` under tag `FletAudioServiceDsp` — visible via `adb logcat`.
+- Python `logger.warning("FAS: …")` on the `flet_audio_service` logger — visible under the `serious_python` tag.
+- A direct file write to `/sdcard/Download/<name>.log` if the app has `MANAGE_EXTERNAL_STORAGE` (which it does); pull with `adb pull /sdcard/Download/<name>.log`. This bypasses the logging layer entirely and is the most reliable diagnostic channel on a non-debuggable release APK.
 
 ---
 

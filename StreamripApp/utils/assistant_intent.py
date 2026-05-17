@@ -49,6 +49,9 @@ INTENT_NOW_PLAYING    = "now_playing"     # what's playing
 INTENT_PLAY_MOOD      = "play_mood"       # play something <mood>; DSP-driven
 INTENT_PLAY_RANDOM    = "play_random"     # play a random song and shuffle
 INTENT_RESCAN_DSP     = "rescan_dsp"      # run analyser for missing tracks
+INTENT_PLAYLIST_CREATE = "playlist_create"  # create playlist X
+INTENT_PLAYLIST_ADD    = "playlist_add"     # add track X to playlist Y
+INTENT_PLAYLIST_PLAY   = "playlist_play"    # play playlist X
 INTENT_AFFIRMATIVE    = "affirmative"     # yes / yeah / do it (confirmation)
 INTENT_NEGATIVE       = "negative"        # no / later / not now (cancel pending)
 INTENT_HELP           = "help"
@@ -152,6 +155,28 @@ _PATTERNS: list[tuple[str, re.Pattern]] = [
     )),
     (INTENT_PLAY_MOOD, re.compile(
         rf"^\s*(?:i\s+(?:want|need|feel\s+like))\s+(?:some\s+|something\s+)?(?P<q>{_MOOD_ALT})\s*(?:music|tracks?|songs?)?\s*$",
+        re.I,
+    )),
+
+    # ── Playlist ops ────────────────────────────────────────────────────────
+    (INTENT_PLAYLIST_CREATE, re.compile(
+        r"^\s*(?:create|make|generate)\s+(?:a\s+)?(?:new\s+)?playlist\s+(?:called\s+)?(?P<q>.+?)\s*$",
+        re.I,
+    )),
+    (INTENT_PLAYLIST_ADD, re.compile(
+        r"^\s*(?:add|put|queue|enqueue)\s+(?:this|the\s+current)\s*(?:song|track)?\s+(?:to|in)\s+(?:playlist\s+)?(?P<playlist>.+?)\s*$",
+        re.I,
+    )),
+    (INTENT_PLAYLIST_ADD, re.compile(
+        r"^\s*(?:add|put|queue|enqueue)\s+(?P<track>.+?)\s+(?:to|in)\s+(?:playlist\s+)?(?P<playlist>.+?)\s*$",
+        re.I,
+    )),
+    (INTENT_PLAYLIST_PLAY, re.compile(
+        r"^\s*(?:play|load|start)\s+(?:my\s+)?playlist\s+(?P<q>.+?)\s*$",
+        re.I,
+    )),
+    (INTENT_PLAYLIST_PLAY, re.compile(
+        r"^\s*(?:play|load|start)\s+(?P<q>.+?)\s+playlist\s*$",
         re.I,
     )),
 
@@ -287,10 +312,19 @@ def parse(text: str) -> Intent:
             continue
         groups = m.groupdict()
         q = groups.get("q") if groups else None
+        
+        # Clean extra parsed capture groups (like 'playlist' or 'track')
+        extras = {}
+        if groups:
+            for k, v in groups.items():
+                if k != "q" and v is not None:
+                    extras[k] = _clean_query(v)
+                    
         return Intent(
             name=name,
             query=_clean_query(q) if q else None,
             raw=raw,
+            extras=extras,
         )
 
     return Intent(name=INTENT_UNKNOWN, raw=raw)
@@ -319,6 +353,9 @@ __all__ = [
     "INTENT_PLAY_MOOD",
     "INTENT_PLAY_RANDOM",
     "INTENT_RESCAN_DSP",
+    "INTENT_PLAYLIST_CREATE",
+    "INTENT_PLAYLIST_ADD",
+    "INTENT_PLAYLIST_PLAY",
     "INTENT_AFFIRMATIVE",
     "INTENT_NEGATIVE",
     "INTENT_HELP",

@@ -233,6 +233,27 @@ class AudioServiceControl(Service):
             },
         )
 
+    async def show_progress_notification(
+        self,
+        title: str,
+        content: str,
+        progress: int,
+        total: int,
+        done: bool = False,
+    ):
+        """Displays a native Android notification showing progress of a task (e.g. DSP scan)."""
+        await self._wait_ready()
+        await self._invoke_method(
+            "show_progress_notification",
+            {
+                "title": title,
+                "content": content,
+                "progress": progress,
+                "total": total,
+                "done": done,
+            },
+        )
+
     async def set_playlist(self, items: list, start_index: int = 0):
         """Replaces the entire playlist with a new list of tracks and starts
         playback at start_index. Atomic on the Dart side; avoids the race

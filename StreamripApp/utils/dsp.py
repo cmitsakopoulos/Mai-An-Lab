@@ -51,6 +51,27 @@ import numpy as np
 
 logger = logging.getLogger("dsp")
 
+# Debug trace file. Logging config swallows the "dsp" logger on Android, so
+# write our diagnostics to a world-readable spot under /sdcard/Download so
+# `adb pull` works on a release build. Remove once the pipeline is verified.
+_DSP_TRACE_CANDIDATES = (
+    "/storage/emulated/0/Download/dsp_trace.log",
+    "/sdcard/Download/dsp_trace.log",
+    "/data/user/0/com.mitsakopoulos.maianlab.mai_an_lab/cache/dsp_trace.log",
+)
+
+def _trace(msg: str) -> None:
+    import time
+    line = f"{time.strftime('%H:%M:%S')} {msg}\n"
+    for p in _DSP_TRACE_CANDIDATES:
+        try:
+            with open(p, "a") as f:
+                f.write(line)
+            break
+        except OSError:
+            continue
+    logging.getLogger("flet_audio_service").warning(f"FAS: {msg}")
+
 # Output of the analyser that gets persisted. The features_version is bumped
 # when the extraction semantics change so callers can decide whether to honour
 # cached values. Keep this in sync with the DB column of the same name.
@@ -114,7 +135,7 @@ def unpack_timbre(blob: bytes | None) -> np.ndarray | None:
 
     Returns the full 38-dim vector. Callers that need the individual groups
     can use `unpack_embedding_groups`. The single-vector form is what the
-    AutoPlaylistEngine consumes; it slices internally.
+    auto_playlist KNN selector consumes; it slices internally.
     """
     if not blob or len(blob) != EMBED_DIMS * 4:
         return None
@@ -136,9 +157,8 @@ def unpack_embedding_groups(blob: bytes | None):
 # ─── Decoder dispatch ──────────────────────────────────────────────────────
 
 def is_android() -> bool:
-    # Flet on Android sets ANDROID_DATA / ANDROID_ROOT in the runtime env.
-    # sys.platform is 'linux' there, so we can't rely on it alone.
-    return "ANDROID_ROOT" in os.environ or "ANDROID_DATA" in os.environ
+    import sys
+    return hasattr(sys, "getandroidapilevel")
 
 
 async def decode_to_pcm(audio_service, path: str) -> tuple[str, int]:
@@ -150,9 +170,26 @@ async def decode_to_pcm(audio_service, path: str) -> tuple[str, int]:
     """
     if is_android():
         if audio_service is None:
+            _trace("decode_to_pcm called but audio_service is None")
             raise RuntimeError("audio_service not available for decode")
-        result = await audio_service.decode_pcm(path)
-        return str(result["output_path"]), int(result["sample_rate"])
+        _trace(f"decode_to_pcm START path={path}")
+        try:
+            result = await audio_service.decode_pcm(path)
+        except Exception as ex:
+            _trace(f"decode_pcm raised {type(ex).__name__}: {ex}")
+            raise
+        _trace(f"decode_pcm RAW result type={type(result).__name__} value={result!r}")
+        out_path = str(result.get("output_path", "")) if isinstance(result, dict) else ""
+        sr = int(result.get("sample_rate", 0)) if isinstance(result, dict) else 0
+        try:
+            sz = os.path.getsize(out_path) if out_path else -1
+        except OSError as ex:
+            sz = f"stat-failed:{ex}"
+        _trace(
+            f"decode_pcm OK out={out_path} sr={sr} bytes={sz} "
+            f"payload_keys={list(result.keys()) if isinstance(result, dict) else 'NOT_DICT'}"
+        )
+        return out_path, sr
     return await _decode_pcm_ffmpeg(path)
 
 
@@ -173,13 +210,13 @@ async def _decode_pcm_ffmpeg(path: str) -> tuple[str, int]:
     out_path = os.path.join(cache_dir, f"{abs(hash(path))}.pcm")
 
     # We don't know the duration up front without an extra ffprobe call. Just
-    # ask ffmpeg to skip 15s and read 90s; for short tracks this still
+    # ask ffmpeg to skip 15s and read 40s; for short tracks this still
     # does the right thing (it just reads to EOF). The window
     # matches the Kotlin path's MAX_SECONDS.
     cmd = [
         ffmpeg, "-hide_banner", "-loglevel", "error",
         "-ss", "15",                     # skip first 15s (intro)
-        "-t", "90",                      # cap at 90s; matches Kotlin
+        "-t", "40",                      # cap at 40s; matches Kotlin
         "-i", path,
         "-f", "s16le",
         "-acodec", "pcm_s16le",
@@ -262,16 +299,12 @@ def _energy_db(x: np.ndarray) -> float:
 
 def _brightness(mag: np.ndarray, freqs: np.ndarray, sr: int) -> float:
     """Mean spectral centroid normalised to [0, 1] by Nyquist."""
-    # Per-frame centroid = sum(f * |X|) / sum(|X|). Frames with near-zero
-    # magnitude (silence) get assigned centroid 0 to avoid NaN.
     mag_sum = mag.sum(axis=1)
     safe = mag_sum > 1e-6
-    centroids = np.zeros(mag.shape[0], dtype=np.float32)
-    centroids[safe] = (mag[safe] * freqs[None, :]).sum(axis=1) / mag_sum[safe]
     if not safe.any():
         return 0.0
-    mean_centroid = float(centroids[safe].mean())
-    return float(np.clip(mean_centroid / (sr / 2.0), 0.0, 1.0))
+    centroids = (mag[safe] * freqs).sum(axis=1) / mag_sum[safe]
+    return float(np.clip(centroids.mean() / (sr / 2.0), 0.0, 1.0))
 
 
 def _spectral_rolloff(mag: np.ndarray, freqs: np.ndarray, sr: int,
@@ -283,16 +316,12 @@ def _spectral_rolloff(mag: np.ndarray, freqs: np.ndarray, sr: int,
     pad vs a track with a sharp high-frequency cymbal hit)."""
     cum = np.cumsum(mag, axis=1)
     totals = cum[:, -1:]
+    threshold = pct * totals
+    idx = np.argmax(cum >= threshold, axis=1)
     safe = totals[:, 0] > 1e-6
     if not safe.any():
         return 0.0
-    threshold = pct * totals[safe]
-    # For each safe frame, find the first bin index where cumsum >= threshold.
-    # argmax over a boolean array returns the first True index; exactly what
-    # we want; provided at least one True exists, which it does because
-    # cum[:, -1] == totals.
-    idx = np.argmax(cum[safe] >= threshold, axis=1)
-    rolloff_hz = freqs[idx]
+    rolloff_hz = freqs[idx[safe]]
     return float(np.clip(rolloff_hz.mean() / (sr / 2.0), 0.0, 1.0))
 
 
@@ -312,16 +341,12 @@ def _chroma_mean(mag: np.ndarray, freqs: np.ndarray) -> np.ndarray:
     if f.size == 0:
         return np.zeros(N_CHROMA, dtype=np.float32)
     pc = (np.round(12.0 * np.log2(f / 440.0)).astype(int)) % N_CHROMA
-    # Bucket the magnitudes per pitch class. For each frame we want
-    # sum of mag[:, valid] grouped by pc. np.add.at gives unbuffered
-    # accumulation across frames in one call.
-    n_frames = mag.shape[0]
-    bucket = np.zeros((n_frames, N_CHROMA), dtype=np.float32)
     sub = mag[:, valid]                              # (n_frames, n_valid_bins)
-    for c in range(N_CHROMA):
-        cols = np.where(pc == c)[0]
-        if cols.size:
-            bucket[:, c] = sub[:, cols].sum(axis=1)
+    
+    # 100% Vectorized pitch class mapping via matrix multiplication
+    mapping = (pc[:, None] == np.arange(N_CHROMA)[None, :]).astype(np.float32)
+    bucket = sub @ mapping
+    
     # L1 normalise per frame so quiet/loud frames contribute equally.
     row_sum = bucket.sum(axis=1, keepdims=True)
     safe = row_sum[:, 0] > 1e-6
@@ -484,18 +509,36 @@ def extract_features_from_pcm(pcm_path: str, sr: int) -> Features:
     All numpy work is synchronous; callers should `asyncio.to_thread` this if
     they're on the main loop.
     """
+    import time
+    t0 = time.perf_counter()
     x = load_pcm(pcm_path)
+    t1 = time.perf_counter()
     mag, freqs = _stft_magnitude(x, sr)
-
+    t2 = time.perf_counter()
     energy = _energy_db(x)
+    t3 = time.perf_counter()
     brightness = _brightness(mag, freqs, sr)
+    t4 = time.perf_counter()
     rolloff = _spectral_rolloff(mag, freqs, sr)
+    t5 = time.perf_counter()
     chroma = _chroma_mean(mag, freqs)
+    t6 = time.perf_counter()
     onset_env = _onset_envelope(mag)
+    t7 = time.perf_counter()
     bpm, beat_strength = _estimate_bpm(onset_env, sr)
+    t8 = time.perf_counter()
     mfcc = _mfcc_per_frame(mag, sr)
+    t9 = time.perf_counter()
     mfcc_mean = mfcc.mean(axis=0).astype(np.float32)
     mfcc_std = mfcc.std(axis=0).astype(np.float32)
+    t10 = time.perf_counter()
+
+    _trace(
+        f"  EXTRACT STEPS: load={t1 - t0:.3f}s, stft={t2 - t1:.3f}s, "
+        f"energy={t3 - t2:.3f}s, brightness={t4 - t3:.3f}s, rolloff={t5 - t4:.3f}s, "
+        f"chroma={t6 - t5:.3f}s, onset={t7 - t6:.3f}s, bpm={t8 - t7:.3f}s, "
+        f"mfcc={t9 - t8:.3f}s, stats={t10 - t9:.3f}s"
+    )
 
     return Features(
         bpm=bpm,
@@ -513,9 +556,26 @@ async def analyze_track(audio_service, path: str) -> Features:
     """High-level: decode, then extract. Cleans up the temp PCM file afterwards
     to avoid filling the cache on long sessions (the cache lives in app
     storage and isn't auto-pruned by the OS)."""
+    import time
+    t_start = time.perf_counter()
     pcm_path, sr = await decode_to_pcm(audio_service, path)
+    t_decoded = time.perf_counter()
     try:
-        return await asyncio.to_thread(extract_features_from_pcm, pcm_path, sr)
+        feats = await asyncio.to_thread(extract_features_from_pcm, pcm_path, sr)
+        t_extracted = time.perf_counter()
+        _trace(
+            f"PROFILE: {path} total={t_extracted - t_start:.3f}s "
+            f"decode={t_decoded - t_start:.3f}s "
+            f"extract={t_extracted - t_decoded:.3f}s"
+        )
+        return feats
+    except Exception as ex:
+        import traceback
+        _trace(
+            f"extract FAIL {type(ex).__name__}: {ex} path={pcm_path}\n"
+            f"{traceback.format_exc()}"
+        )
+        raise
     finally:
         try:
             os.remove(pcm_path)
