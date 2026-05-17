@@ -138,14 +138,30 @@ class LibraryScanner:
 
     def _get_disk_files(self):
         disk_files = {}
-        for root, _, files in os.walk(self.target_folder):
-            if self.stop_requested: break
-            for f in files:
-                if f.lower().endswith(self.supported_extensions):
-                    p = os.path.join(root, f)
-                    try:
-                        disk_files[p] = os.path.getmtime(p)
-                    except: pass
+        supported = self.supported_extensions
+
+        def _scan(dir_path):
+            if self.stop_requested:
+                return
+            try:
+                with os.scandir(dir_path) as it:
+                    for entry in it:
+                        if self.stop_requested:
+                            break
+                        if entry.is_file():
+                            if entry.name.lower().endswith(supported):
+                                try:
+                                    # On macOS, Windows, and Linux, entry.stat() is highly optimized
+                                    # or pre-fetched, avoiding a separate stat system call.
+                                    disk_files[entry.path] = entry.stat().st_mtime
+                                except Exception:
+                                    pass
+                        elif entry.is_dir(follow_symlinks=False):
+                            _scan(entry.path)
+            except Exception:
+                pass
+
+        _scan(self.target_folder)
         return disk_files
 
     async def _ui_callback(self, p, msg):

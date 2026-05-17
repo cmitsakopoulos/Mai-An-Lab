@@ -47,6 +47,7 @@ INTENT_UNMUTE         = "unmute"
 INTENT_SHUFFLE        = "shuffle"
 INTENT_NOW_PLAYING    = "now_playing"     # what's playing
 INTENT_PLAY_MOOD      = "play_mood"       # play something <mood>; DSP-driven
+INTENT_PLAY_RANDOM    = "play_random"     # play a random song and shuffle
 INTENT_RESCAN_DSP     = "rescan_dsp"      # run analyser for missing tracks
 INTENT_AFFIRMATIVE    = "affirmative"     # yes / yeah / do it (confirmation)
 INTENT_NEGATIVE       = "negative"        # no / later / not now (cancel pending)
@@ -132,6 +133,8 @@ _PATTERNS: list[tuple[str, re.Pattern]] = [
     (INTENT_PLAY_SIMILAR, re.compile(r"^\s*(?:play\s+)?(?:something|stuff|tracks?|songs?)\s+(?:like|similar\s+to)\s+(?:this|that|current)\s*$", re.I)),
     (INTENT_PLAY_SIMILAR, re.compile(r"^\s*more\s+(?:like\s+)?(?:this|that)\s*$", re.I)),
     (INTENT_PLAY_MORE_BY, re.compile(r"^\s*(?:play\s+)?more\s+(?:by|from)\s+(?:this|that|the)\s+artist\s*$", re.I)),
+    (INTENT_PLAY_RANDOM,  re.compile(r"^\s*(?:play\s+)?(?:a\s+)?random\s*(?:song|track|music|tunes?)?\s*$", re.I)),
+    (INTENT_PLAY_RANDOM,  re.compile(r"^\s*(?:shuffle\s+play|play\s+(?:anything|something\s+random|some\s+random\s*(?:songs?|tracks?|music|tunes?))|surprise\s+me)\s*$", re.I)),
 
     # ── Mood (DSP-driven) ───────────────────────────────────────────────────
     # Restricted to MOOD_KEYWORDS so we don't steal "play something <artist>"
@@ -297,6 +300,7 @@ __all__ = [
     "INTENT_SHUFFLE",
     "INTENT_NOW_PLAYING",
     "INTENT_PLAY_MOOD",
+    "INTENT_PLAY_RANDOM",
     "INTENT_RESCAN_DSP",
     "INTENT_AFFIRMATIVE",
     "INTENT_NEGATIVE",

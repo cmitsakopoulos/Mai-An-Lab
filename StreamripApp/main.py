@@ -472,12 +472,40 @@ class AutoPlaylistEngine:
         here because blending happens before the final normalisation step.
         """
         import numpy as np
+        import re
         n = len(artists)
+        
+        # Pre-compute token sets for all artists and albums once to avoid
+        # expensive O(N^2) regular expression evaluations.
+        def _get_tokens_set(s: str) -> set:
+            if not s:
+                return set()
+            s = re.sub(r'\b(feat\.?|ft\.?|featuring|with)\b.*', '', s, flags=re.IGNORECASE)
+            s = re.sub(r'\(.*?\)', ' ', s)
+            s = re.sub(r'[^\w\s]', ' ', s)
+            tokens = set(s.lower().split())
+            return tokens - AutoPlaylistEngine._META_STOPWORDS
+
+        artist_tokens = [_get_tokens_set(a) for a in artists]
+        album_tokens = [_get_tokens_set(al) for al in albums]
+        
         mat = np.zeros((n, n), dtype=np.float64)
         for i in range(n):
+            art_i = artist_tokens[i]
+            alb_i = album_tokens[i]
             for j in range(i, n):
-                a_sim = self._token_set_similarity(artists[i], artists[j])
-                al_sim = self._token_set_similarity(albums[i], albums[j])
+                art_j = artist_tokens[j]
+                if not art_i or not art_j:
+                    a_sim = 0.0
+                else:
+                    a_sim = len(art_i & art_j) / len(art_i | art_j)
+                
+                alb_j = album_tokens[j]
+                if not alb_i or not alb_j:
+                    al_sim = 0.0
+                else:
+                    al_sim = len(alb_i & alb_j) / len(alb_i | alb_j)
+                
                 val = 0.5 * a_sim + 0.5 * al_sim
                 mat[i, j] = val
                 mat[j, i] = val  # symmetric
@@ -1123,6 +1151,13 @@ class QueueController:
             
             self._ui(lambda: self.app.search_view.update_progress(
                 "Finished", 100, "Download completed successfully!"))
+
+            # Automatically trigger library scan ~1s after download completes to import the new song
+            if hasattr(self.app, "library_view") and self.app.library_view:
+                async def _deferred_scan():
+                    await asyncio.sleep(1.0)
+                    self.app.library_view.start_scan()
+                asyncio.create_task(_deferred_scan())
 
         except JobCancelledException:
             self._ui(lambda: self.app.search_view.update_progress(
@@ -2611,8 +2646,11 @@ class LibraryView:
                     ),
                     ft.Container(height=10),
                     ft.TextButton(
-                        content=ft.Row([ft.Icon(ft.Icons.SETTINGS_ROUNDED, size=16), ft.Text("LET'S GET STARTED", size=13)], spacing=6),
-                        on_click=lambda e: self.app._switch_tab(3),
+                        content=ft.Row([ft.Icon(ft.Icons.SETTINGS_ROUNDED, size=16), ft.Text("ENTER PATHS", size=13)], spacing=6),
+                        on_click=lambda e: (
+                            self.app._switch_tab(3),
+                            self.app.settings_view._show_sub_page("Storage", self.app.settings_view._build_storage_group())
+                        ),
                         style=ft.ButtonStyle(color=CYAN)
                     )
                 ],
@@ -4719,13 +4757,13 @@ class MiniPlayerBar:
                                 self.app.now_playing.expand() if (getattr(e, "primary_velocity", 0) or 0) < 0 else None
                             ),
                         ),
-                        padding=ft.Padding.symmetric(horizontal=10, vertical=8),
+                        padding=ft.Padding.only(left=10, right=10, top=12, bottom=8),
                     ),
 
-                    # 2. The Progress Bar locked to the top edge
+                    # 2. The Progress Bar positioned elegantly at the top
                     ft.Container(
                         content=self._progress,
-                        top=0, left=0, right=0, # Pin to absolute top edge
+                        top=4, left=12, right=12,
                     ),
                 ]
             ),
@@ -5804,6 +5842,13 @@ class AssistantView:
             speak=response.success and bool(response.spoken),
             speak_text=response.spoken,
         )
+        # Update shuffle button color in Now Playing if state changed in audio_engine
+        try:
+            if hasattr(self.app, "now_playing") and self.app.now_playing:
+                self.app.now_playing.update_shuffle(audio_engine.is_shuffle)
+        except Exception:
+            pass
+
         # Honour any UI-side action the runner requested. Long-running
         # operations live here, not in the runner, so we own the banner +
         # cancellation state.
@@ -5818,13 +5863,24 @@ class AssistantView:
         speak_text: str | None = None,
     ):
         is_user = (sender == "user")
-        bubble = ft.Container(
-            content=ft.Text(
+        if is_user:
+            bubble_content = ft.Text(
                 text,
-                color=TEXT if not is_user else "#FFFFFF",
+                color="#FFFFFF",
                 size=13,
                 selectable=True,
-            ),
+            )
+        else:
+            bubble_content = ft.Markdown(
+                value=text,
+                selectable=True,
+                extension_set=ft.MarkdownExtensionSet.GITHUB_FLAVORED,
+                code_theme="github-dark",
+                auto_follow_links=True,
+            )
+
+        bubble = ft.Container(
+            content=bubble_content,
             padding=ft.Padding.symmetric(horizontal=14, vertical=10),
             bgcolor=CYAN if is_user else SURFACE2,
             border_radius=14,
@@ -7532,13 +7588,10 @@ class StreamripFletApp:
     def sync_config_to_ui(self):
         try:
             cfg = load_config()
-            self.target_folder = cfg.get("downloads", {}).get("folder", self.target_folder)
+            self.target_folder = cfg.get("downloads", {}).get("folder", "") or ""
         except Exception:
-            pass
-        if not self.target_folder:
-            self.target_folder = str(Path.home() / "StreamripDownloads")
-        if not self.library_folder:
-            self.library_folder = self._prefs.get("library_path", self.target_folder)
+            self.target_folder = ""
+        self.library_folder = self._prefs.get("library_path", "") or ""
 
     def _load_prefs(self):
         try:
@@ -7586,6 +7639,14 @@ class StreamripFletApp:
 # ─── Entry point ───────────────────────────────────────────────────────────────
 async def main(page: ft.Page):
     page.title = "Mai An Lab"
+    
+    # Force phone aspect ratio on macOS / desktop
+    if platform.system() == "Darwin":
+        page.window.width = 390
+        page.window.height = 844
+        page.window.min_width = 320
+        page.window.min_height = 640
+        
     page.theme_mode = ft.ThemeMode.DARK
     page.bgcolor = BG
     page.scrollbar_theme = ft.ScrollbarTheme(thickness=1.5, radius=1)
