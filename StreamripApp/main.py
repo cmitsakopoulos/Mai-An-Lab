@@ -1296,15 +1296,71 @@ class SearchView:
             visible=False,
         )
 
+        # Pagination variables
+        self.current_page = 0
+        self.total_pages = 1
+        self.items_per_page = 50
+        self._is_changing_page = False
+        self._is_programmatic_scroll = False
+        self._at_bottom_boundary = False
+        self._at_top_boundary = False
+        self._bottom_boundary_time = 0
+        self._top_boundary_time = 0
+        self._last_scroll_pixels = 0
+
         # results list
         self._results_list = ft.ListView(
             expand=True,
             spacing=8,
-            padding=ft.Padding.only(left=12, right=12, bottom=100),
+            padding=ft.Padding.only(left=12, right=12, top=4, bottom=20),
             animate_opacity=ft.Animation(300, ft.AnimationCurve.EASE_OUT_EXPO),
             opacity=1,
             offset=ft.Offset(0, 0),
             animate_offset=ft.Animation(400, ft.AnimationCurve.EASE_OUT_EXPO),
+            on_scroll=self._on_list_scroll,
+        )
+
+        self._animated_results_wrapper = ft.Container(
+            content=self._results_list,
+            expand=True,
+            offset=ft.Offset(0, 0),
+            opacity=1.0,
+            animate_offset=ft.Animation(250, ft.AnimationCurve.EASE_OUT),
+            animate_opacity=ft.Animation(200, ft.AnimationCurve.EASE_OUT),
+        )
+
+        self._prev_page_btn = ft.IconButton(
+            icon=ft.Icons.KEYBOARD_ARROW_LEFT_ROUNDED,
+            icon_color=CYAN,
+            on_click=lambda e: self.page.run_task(self.change_page, self.current_page - 1, scroll_to_bottom=True),
+        )
+        self._next_page_btn = ft.IconButton(
+            icon=ft.Icons.KEYBOARD_ARROW_RIGHT_ROUNDED,
+            icon_color=CYAN,
+            on_click=lambda e: self.page.run_task(self.change_page, self.current_page + 1, scroll_to_bottom=False),
+        )
+        self._page_label = ft.Text(
+            "Page 1 of 1",
+            color=TEXT,
+            size=12,
+            weight=ft.FontWeight.W_700,
+        )
+        self._pagination_bar = ft.Container(
+            content=ft.Row(
+                [
+                    self._prev_page_btn,
+                    self._page_label,
+                    self._next_page_btn,
+                ],
+                alignment=ft.MainAxisAlignment.CENTER,
+                spacing=20,
+            ),
+            bgcolor=apply_opacity(0.1, SURFACE),
+            border_radius=12,
+            padding=ft.Padding.symmetric(vertical=4, horizontal=16),
+            margin=ft.Margin.only(left=14, right=14, bottom=6),
+            border=ft.Border.all(1, apply_opacity(0.1, CYAN)),
+            visible=False,
         )
 
         # setup prompt (shown when credentials missing)
@@ -1510,13 +1566,15 @@ class SearchView:
                 # Main Results Area
                 ft.Stack(
                     [
-                        self._results_list,
+                        self._animated_results_wrapper,
                         self._empty_label,
                         self._setup_prompt,
                         self._landing_container,
                     ],
                     expand=True,
                 ),
+                
+                self._pagination_bar,
                 
                 # History / Up Next Section
                 ft.Container(
@@ -1531,6 +1589,176 @@ class SearchView:
             expand=True,
             spacing=0,
         )
+
+
+    def try_update(self, *controls):
+        for c in controls:
+            try: c.update()
+            except: pass
+
+    def _build_top_ghost(self) -> ft.Control:
+        return ft.Container(
+            content=ft.Row(
+                [
+                    ft.Icon(ft.Icons.KEYBOARD_DOUBLE_ARROW_UP_ROUNDED, color=apply_opacity(0.3, CYAN), size=14),
+                    ft.Text("Scroll up for previous page", color=DIM, size=11, weight=ft.FontWeight.W_500),
+                    ft.Icon(ft.Icons.KEYBOARD_DOUBLE_ARROW_UP_ROUNDED, color=apply_opacity(0.3, CYAN), size=14),
+                ],
+                alignment=ft.MainAxisAlignment.CENTER,
+                spacing=8,
+            ),
+            height=40,
+            alignment=ft.Alignment(0, 0),
+            bgcolor=apply_opacity(0.02, SURFACE),
+            border_radius=8,
+            margin=ft.Margin.only(bottom=8),
+        )
+
+    def _build_bottom_ghost(self) -> ft.Control:
+        return ft.Container(
+            content=ft.Row(
+                [
+                    ft.Icon(ft.Icons.KEYBOARD_DOUBLE_ARROW_DOWN_ROUNDED, color=apply_opacity(0.3, CYAN), size=14),
+                    ft.Text("Scroll down for next page", color=DIM, size=11, weight=ft.FontWeight.W_500),
+                    ft.Icon(ft.Icons.KEYBOARD_DOUBLE_ARROW_DOWN_ROUNDED, color=apply_opacity(0.3, CYAN), size=14),
+                ],
+                alignment=ft.MainAxisAlignment.CENTER,
+                spacing=8,
+            ),
+            height=40,
+            alignment=ft.Alignment(0, 0),
+            bgcolor=apply_opacity(0.02, SURFACE),
+            border_radius=8,
+            margin=ft.Margin.only(top=8),
+        )
+
+    def _update_pagination_ui(self):
+        total = max(1, self.total_pages)
+        self._page_label.value = f"Page {self.current_page + 1} of {total}"
+        
+        self._prev_page_btn.disabled = self.current_page <= 0
+        self._prev_page_btn.icon_color = DIM if self.current_page <= 0 else CYAN
+        
+        self._next_page_btn.disabled = self.current_page >= self.total_pages - 1
+        self._next_page_btn.icon_color = DIM if self.current_page >= self.total_pages - 1 else CYAN
+        
+        self._pagination_bar.visible = self.total_pages > 1
+        self.try_update(self._pagination_bar)
+
+    def _on_list_scroll(self, e: ft.OnScrollEvent):
+        if self._is_changing_page or getattr(self, "_is_programmatic_scroll", False):
+            return
+        current_pixels = e.pixels
+        direction = current_pixels - getattr(self, "_last_scroll_pixels", 0)
+        self._last_scroll_pixels = current_pixels
+        
+        import time
+        now = time.time()
+        
+        # Bottom Boundary check (scroll down to next page)
+        if e.max_scroll_extent > 0 and current_pixels >= e.max_scroll_extent - 10:
+            if direction > 0:
+                if not getattr(self, "_at_bottom_boundary", False):
+                    self._at_bottom_boundary = True
+                    self._bottom_boundary_time = now
+                elif now - getattr(self, "_bottom_boundary_time", 0) > 0.28:
+                    self._at_bottom_boundary = False
+                    if self.current_page < self.total_pages - 1:
+                        self.page.run_task(self.change_page, self.current_page + 1, scroll_to_bottom=False)
+        else:
+            if direction < 0:
+                self._at_bottom_boundary = False
+                
+        # Top Boundary check (scroll up to prev page)
+        if current_pixels <= 5:
+            if direction < 0:
+                if not getattr(self, "_at_top_boundary", False):
+                    self._at_top_boundary = True
+                    self._top_boundary_time = now
+                elif now - getattr(self, "_top_boundary_time", 0) > 0.28:
+                    self._at_top_boundary = False
+                    if self.current_page > 0:
+                        self.page.run_task(self.change_page, self.current_page - 1, scroll_to_bottom=True)
+        else:
+            if direction > 0:
+                self._at_top_boundary = False
+
+    async def change_page(self, new_page: int, scroll_to_bottom: bool = False):
+        if self._is_changing_page or new_page < 0 or new_page >= self.total_pages:
+            return
+        
+        self._is_changing_page = True
+        try:
+            # 1. Slide Out active view (left if going forward, right if going backward)
+            is_forward = new_page > self.current_page
+            exit_offset = ft.Offset(-0.15, 0) if is_forward else ft.Offset(0.15, 0)
+            entry_offset = ft.Offset(0.15, 0) if is_forward else ft.Offset(-0.15, 0)
+            
+            self._animated_results_wrapper.offset = exit_offset
+            self._animated_results_wrapper.opacity = 0.0
+            self.try_update(self._animated_results_wrapper)
+            
+            # Wait for transition animation to finish
+            await asyncio.sleep(0.18)
+            
+            # 2. Update page index and instantiate new controls
+            self.current_page = new_page
+            
+            active_type = self.view_mode[:-1]  # "tracks" -> "track"
+            source = self.cached_results.get(active_type, [])
+            
+            # Re-slice items
+            start_idx = self.current_page * self.items_per_page
+            end_idx = start_idx + self.items_per_page
+            page_items = source[start_idx:end_idx]
+            
+            controls = []
+            
+            if self.current_page > 0:
+                controls.append(self._build_top_ghost())
+                
+            for i, r in enumerate(page_items):
+                card = self._result_card(start_idx + i, r, depth=0)
+                controls.append(card)
+                
+            if self.current_page < self.total_pages - 1:
+                controls.append(self._build_bottom_ghost())
+                    
+            # Update controls
+            self._results_list.controls = controls
+            self._update_pagination_ui()
+            
+            # 3. Teleport off-screen to the other side instantly
+            self._animated_results_wrapper.offset = entry_offset
+            self.try_update(self._animated_results_wrapper, self._results_list)
+            
+            # Wait 0.08s for Flet to repaint
+            self._is_programmatic_scroll = True
+            await asyncio.sleep(0.08)
+            
+            # 4. Scroll to target offset safely
+            if scroll_to_bottom:
+                target_offset = 3250
+            else:
+                target_offset = 45
+            
+            await self._results_list.scroll_to(offset=target_offset, duration=0)
+            self._last_scroll_pixels = target_offset
+            
+            # Wait another 0.05s for scroll to finalize
+            await asyncio.sleep(0.05)
+            self._is_programmatic_scroll = False
+            
+            # 5. Slide In the new view from the other side
+            self._animated_results_wrapper.offset = ft.Offset(0, 0)
+            self._animated_results_wrapper.opacity = 1.0
+            self.try_update(self._animated_results_wrapper)
+            
+        except Exception as ex:
+            logger.error(f"Error in SearchView.change_page: {ex}")
+            self._is_programmatic_scroll = False
+        finally:
+            self._is_changing_page = False
 
 
     # ── public build ────────────────────────────────────────────────────────
@@ -1707,6 +1935,9 @@ class SearchView:
             self.cached_results = {"track": [], "album": [], "artist": []}
             self.expanded_nodes.clear()
             self.node_cache.clear()
+            self.current_page = 0
+            self.total_pages = 1
+            self._pagination_bar.visible = False
             self._landing_container.visible = True
         self.app.safe_update(_mutate)
         self.refresh_setup_state()
@@ -1759,7 +1990,7 @@ class SearchView:
 
         def results_callback(results):
             if self.current_search_id == search_id:
-                self._on_results(results, append=False)
+                self._on_results(results)
 
         # Always fetch all three types at once. The concurrent gather in the
         # searcher means this costs no more latency than fetching a single type.
@@ -1767,10 +1998,10 @@ class SearchView:
             self.searcher.search,
             query, self.selected_source, results_callback,
             media_types=["track", "album", "artist"],
-            limit=50, offset=0
+            limit=250, offset=0
         ))
 
-    def _on_results(self, results, append: bool = False):
+    def _on_results(self, results, *args, **kwargs):
         self._is_loading_more = False
         async def _update_ui():
             self._stop_skeleton_pulse()
@@ -1785,12 +2016,10 @@ class SearchView:
                 return
 
             if not results:
-                if not append:
-                    self._empty_label.visible = True
-                else:
-                    if self._results_list.controls and isinstance(self._results_list.controls[-1], ft.Container):
-                        self._results_list.controls.pop()
-                self.app.page.update()
+                self._empty_label.visible = True
+                self._results_list.controls.clear()
+                self._update_pagination_ui()
+                self.page.update()
                 return
 
             for r in results:
@@ -1803,94 +2032,54 @@ class SearchView:
                     exists = await self.app.db_manager.get_album_by_meta(title, artist)
                 r["is_in_library"] = bool(exists)
 
-            if append:
-                # Pagination: append only to the currently active tab's bucket
-                active_type = self.view_mode[:-1]  # "tracks" -> "track"
-                for r in results:
-                    if r.get("media_type") == active_type:
-                        self.cached_results[active_type].append(r)
-            else:
-                # Full search: route every result into its typed bucket
-                self.cached_results = {"track": [], "album": [], "artist": []}
-                for r in results:
-                    m_type = r.get("media_type", "track")
-                    if m_type in self.cached_results:
-                        self.cached_results[m_type].append(r)
+            # Full search: route every result into its typed bucket
+            self.cached_results = {"track": [], "album": [], "artist": []}
+            for r in results:
+                m_type = r.get("media_type", "track")
+                if m_type in self.cached_results:
+                    self.cached_results[m_type].append(r)
             
-            self._rebuild_results(append=append)
+            self.current_page = 0
+            self._rebuild_results()
 
         self.page.run_task(_update_ui)
 
-    def _rebuild_results(self, append: bool = False):
+    def _rebuild_results(self):
         # Always render from the local typed cache for the active tab
         active_type = self.view_mode[:-1]  # "tracks" -> "track"
         source = self.cached_results.get(active_type, [])
 
-        if not append:
-            self._results_list.controls.clear()
-        else:
-            if self._results_list.controls and isinstance(self._results_list.controls[-1], ft.Container):
-                self._results_list.controls.pop()
+        self._results_list.controls.clear()
 
-        count_already = len(self._results_list.controls)
-        new_items = source[count_already:] if append else source
-
-        self._empty_label.visible = not source and not append
-
-        for i, r in enumerate(new_items):
-            card = self._result_card(count_already + i, r, depth=0)
-            self._results_list.controls.append(card)
-
-        if len(new_items) >= 50:
-            self._results_list.controls.append(self._load_more_widget())
-
-        self.app.safe_update(lambda: None)
-
-    def _load_more_widget(self):
-        return ft.Container(
-            content=ft.Button(
-                "Load More Results",
-                icon=ft.Icons.ADD_ROUNDED,
-                on_click=self._load_more_click,
-                style=ft.ButtonStyle(
-                    color=TEXT,
-                    bgcolor=apply_opacity(0.1, CYAN),
-                    padding=20,
-                    shape=ft.RoundedRectangleBorder(radius=12),
-                ),
-            ),
-            padding=ft.Padding.only(top=20, bottom=40),
-            alignment=ft.Alignment(0, 0),
-        )
-
-    async def _load_more_click(self, e):
-        if self._is_loading_more: return
-        self._is_loading_more = True
-        self.current_offset += 50
+        import math
+        self.total_pages = math.ceil(len(source) / self.items_per_page)
         
-        if self._results_list.controls:
-            btn_container = self._results_list.controls[-1]
-            if isinstance(btn_container, ft.Container):
-                btn_container.content = ft.ProgressRing(width=20, height=20, stroke_width=2, color=CYAN)
-                self.app.page.update()
+        # Sliced items for current page
+        start_idx = self.current_page * self.items_per_page
+        end_idx = start_idx + self.items_per_page
+        page_items = source[start_idx:end_idx]
 
-        query = (self._search_field.value or "").strip()
-        search_id = self.current_search_id
+        self._empty_label.visible = not source
 
-        def more_results_callback(results):
-            if self.current_search_id == search_id:
-                self._on_results(results, append=True)
+        first_chunk = []
+        if self.current_page > 0:
+            first_chunk.append(self._build_top_ghost())
 
-        asyncio.create_task(asyncio.to_thread(
-            self.searcher.search,
-            query, self.selected_source, more_results_callback,
-            media_types=[self.view_mode[:-1]],
-            limit=50, offset=self.current_offset
-        ))
+        for i, r in enumerate(page_items):
+            card = self._result_card(start_idx + i, r, depth=0)
+            first_chunk.append(card)
+
+        if self.current_page < self.total_pages - 1:
+            first_chunk.append(self._build_bottom_ghost())
+
+        self._results_list.controls.extend(first_chunk)
+        self._update_pagination_ui()
+        self.app.safe_update(lambda: None)
 
     def _set_view_mode(self, mode: str):
         self.view_mode = mode
         self.expanded_nodes.clear()
+        self.current_page = 0
         self._update_view_tabs()
         query = (self._search_field.value or "").strip()
         if query:
@@ -1899,7 +2088,7 @@ class SearchView:
             # for this query somehow missed all types, which should not happen).
             cache_populated = any(v for v in self.cached_results.values())
             if cache_populated:
-                self._rebuild_results(append=False)
+                self._rebuild_results()
             else:
                 asyncio.create_task(self.start_search())
         else:
@@ -2627,12 +2816,76 @@ class LibraryView:
 
         self._search_token = 0  # Incremented each keystroke to cancel stale queries
 
+        # Pagination variables for tracks view mode
+        self.current_page = 0
+        self.items_per_page = 50
+        self.total_pages = 1
+        self._flat_rows = []
+        self._is_changing_page = False
+        self._last_scroll_pixels = 0
+        self._is_programmatic_scroll = False
+        self._at_bottom_boundary = False
+        self._bottom_boundary_time = 0.0
+        self._at_top_boundary = False
+        self._top_boundary_time = 0.0
+
         self._library_list = ft.ListView(
             expand=True,
             spacing=6,
-            padding=ft.Padding.only(left=12, right=12, top=4, bottom=120),
+            padding=ft.Padding.only(left=12, right=12, top=4, bottom=20),
             on_scroll=self._on_list_scroll,
             scroll_interval=150,
+        )
+
+        # Animating carousel wrapper for the track list
+        self._animated_list_wrapper = ft.Container(
+            content=self._library_list,
+            expand=True,
+            opacity=1.0,
+            offset=ft.Offset(0, 0),
+            animate_opacity=ft.Animation(220, ft.AnimationCurve.EASE_OUT_QUAD),
+            animate_offset=ft.Animation(220, ft.AnimationCurve.EASE_OUT_QUAD),
+        )
+
+        # Glassmorphic premium pagination bar
+        self._prev_page_btn = ft.IconButton(
+            icon=ft.Icons.CHEVRON_LEFT_ROUNDED,
+            icon_color=DIM,
+            icon_size=20,
+            disabled=True,
+            tooltip="Previous Page",
+            on_click=lambda e: self.page.run_task(self.change_page, self.current_page - 1)
+        )
+        self._next_page_btn = ft.IconButton(
+            icon=ft.Icons.CHEVRON_RIGHT_ROUNDED,
+            icon_color=DIM,
+            icon_size=20,
+            disabled=True,
+            tooltip="Next Page",
+            on_click=lambda e: self.page.run_task(self.change_page, self.current_page + 1)
+        )
+        self._page_label = ft.Text(
+            "Page 1 of 1",
+            color=TEXT,
+            size=12,
+            weight=ft.FontWeight.W_700,
+        )
+        self._pagination_bar = ft.Container(
+            content=ft.Row(
+                [
+                    self._prev_page_btn,
+                    self._page_label,
+                    self._next_page_btn,
+                ],
+                alignment=ft.MainAxisAlignment.CENTER,
+                spacing=20,
+            ),
+            bgcolor=apply_opacity(0.1, SURFACE),
+            border_radius=12,
+            padding=ft.Padding.symmetric(vertical=4, horizontal=16),
+            margin=ft.Margin.only(left=14, right=14, bottom=6),
+            border=ft.Border.all(1, apply_opacity(0.1, CYAN)),
+            visible=False,
         )
 
         self._empty_label = ft.Container(
@@ -2697,7 +2950,8 @@ class LibraryView:
                     padding=ft.Padding.only(left=14, right=14, top=18, bottom=8),
                 ),
                 # list or empty state
-                self._library_list,
+                self._animated_list_wrapper,
+                self._pagination_bar,
                 self._empty_label,
             ],
             expand=True,
@@ -2940,6 +3194,45 @@ class LibraryView:
 
 
     def _on_list_scroll(self, e: ft.OnScrollEvent):
+        if self.view_mode in ("tracks", "albums", "artists"):
+            if self._is_changing_page or getattr(self, "_is_programmatic_scroll", False):
+                return
+            current_pixels = e.pixels
+            direction = current_pixels - getattr(self, "_last_scroll_pixels", 0)
+            self._last_scroll_pixels = current_pixels
+            
+            import time
+            now = time.time()
+            
+            # Bottom Boundary check (scroll down to next page)
+            if e.max_scroll_extent > 0 and current_pixels >= e.max_scroll_extent - 10:
+                if direction > 0:
+                    if not getattr(self, "_at_bottom_boundary", False):
+                        self._at_bottom_boundary = True
+                        self._bottom_boundary_time = now
+                    elif now - getattr(self, "_bottom_boundary_time", 0) > 0.28:
+                        self._at_bottom_boundary = False
+                        if self.current_page < self.total_pages - 1:
+                            self.page.run_task(self.change_page, self.current_page + 1, scroll_to_bottom=False)
+            else:
+                if direction < 0:
+                    self._at_bottom_boundary = False
+                    
+            # Top Boundary check (scroll up to prev page)
+            if current_pixels <= 5:
+                if direction < 0:
+                    if not getattr(self, "_at_top_boundary", False):
+                        self._at_top_boundary = True
+                        self._top_boundary_time = now
+                    elif now - getattr(self, "_top_boundary_time", 0) > 0.28:
+                        self._at_top_boundary = False
+                        if self.current_page > 0:
+                            self.page.run_task(self.change_page, self.current_page - 1, scroll_to_bottom=True)
+            else:
+                if direction > 0:
+                    self._at_top_boundary = False
+            return
+
         if self._is_loading_chunk or not self._current_gen:
             return
         if e.max_scroll_extent <= 0 or e.pixels < e.max_scroll_extent - 800:
@@ -2967,73 +3260,314 @@ class LibraryView:
 
         asyncio.create_task(load_chunk())
 
+    def _build_top_ghost(self) -> ft.Control:
+        return ft.Container(
+            content=ft.Row(
+                [
+                    ft.Icon(ft.Icons.KEYBOARD_DOUBLE_ARROW_UP_ROUNDED, color=apply_opacity(0.3, CYAN), size=14),
+                    ft.Text("Scroll up for previous page", color=DIM, size=11, weight=ft.FontWeight.W_500),
+                    ft.Icon(ft.Icons.KEYBOARD_DOUBLE_ARROW_UP_ROUNDED, color=apply_opacity(0.3, CYAN), size=14),
+                ],
+                alignment=ft.MainAxisAlignment.CENTER,
+                spacing=8,
+            ),
+            height=40,
+            alignment=ft.Alignment(0, 0),
+            bgcolor=apply_opacity(0.02, SURFACE),
+            border_radius=8,
+            margin=ft.Margin.only(bottom=8),
+        )
+
+    def _build_bottom_ghost(self) -> ft.Control:
+        return ft.Container(
+            content=ft.Row(
+                [
+                    ft.Icon(ft.Icons.KEYBOARD_DOUBLE_ARROW_DOWN_ROUNDED, color=apply_opacity(0.3, CYAN), size=14),
+                    ft.Text("Scroll down for next page", color=DIM, size=11, weight=ft.FontWeight.W_500),
+                    ft.Icon(ft.Icons.KEYBOARD_DOUBLE_ARROW_DOWN_ROUNDED, color=apply_opacity(0.3, CYAN), size=14),
+                ],
+                alignment=ft.MainAxisAlignment.CENTER,
+                spacing=8,
+            ),
+            height=40,
+            alignment=ft.Alignment(0, 0),
+            bgcolor=apply_opacity(0.02, SURFACE),
+            border_radius=8,
+            margin=ft.Margin.only(top=8),
+        )
+
+    def _update_pagination_ui(self):
+        import math
+        total = max(1, self.total_pages)
+        self._page_label.value = f"Page {self.current_page + 1} of {total}"
+        
+        self._prev_page_btn.disabled = self.current_page <= 0
+        self._prev_page_btn.icon_color = DIM if self.current_page <= 0 else CYAN
+        
+        self._next_page_btn.disabled = self.current_page >= self.total_pages - 1
+        self._next_page_btn.icon_color = DIM if self.current_page >= self.total_pages - 1 else CYAN
+        
+        self._pagination_bar.visible = self.total_pages > 1 and self.view_mode in ("tracks", "albums", "artists")
+        self.try_update(self._pagination_bar)
+
+    async def change_page(self, new_page: int, scroll_to_bottom: bool = False):
+        if self._is_changing_page or new_page < 0 or new_page >= self.total_pages:
+            return
+        
+        self._is_changing_page = True
+        try:
+            # 1. Slide Out active view (left if going forward, right if going backward)
+            is_forward = new_page > self.current_page
+            exit_offset = ft.Offset(-0.15, 0) if is_forward else ft.Offset(0.15, 0)
+            entry_offset = ft.Offset(0.15, 0) if is_forward else ft.Offset(-0.15, 0)
+            
+            self._animated_list_wrapper.offset = exit_offset
+            self._animated_list_wrapper.opacity = 0.0
+            self.try_update(self._animated_list_wrapper)
+            
+            # Wait for transition animation to finish
+            await asyncio.sleep(0.18)
+            
+            # 2. Update page index and instantiate new controls
+            self.current_page = new_page
+            
+            # Re-slice items
+            start_idx = self.current_page * self.items_per_page
+            end_idx = start_idx + self.items_per_page
+            page_items = self._flat_rows[start_idx:end_idx]
+            
+            controls = []
+            self._path_to_controls.clear()
+            
+            if self.current_page > 0:
+                controls.append(self._build_top_ghost())
+                
+            if self.view_mode == "tracks":
+                for item in page_items:
+                    controls.append(self._track_row(item["data"], item["depth"]))
+            elif self.view_mode == "albums":
+                db = self.app.db_manager
+                for item in page_items:
+                    a = item["data"]
+                    node_id = f"album_{a['artist']}_{a['album']}"
+                    expanded = node_id in self.expanded_nodes
+                    controls.append(self._album_row(a, node_id, expanded, depth=0))
+                    if expanded:
+                        sub_tracks = await db.get_tracks_by_album(a['album'], a['artist'])
+                        for t in sub_tracks:
+                            controls.append(self._track_row(t, depth=1, album_context=(a['artist'], a['album'])))
+            elif self.view_mode == "artists":
+                db = self.app.db_manager
+                for item in page_items:
+                    a = item["data"]
+                    node_id = f"artist_{a['name']}"
+                    expanded = node_id in self.expanded_nodes
+                    controls.append(self._artist_row(a, node_id, expanded))
+                    if expanded:
+                        sub_albums = await db.get_albums_by_artist(a['name'])
+                        for al in sub_albums:
+                            alb_id = f"album_{al['artist']}_{al['album']}"
+                            alb_exp = alb_id in self.expanded_nodes
+                            controls.append(self._album_row(al, alb_id, alb_exp, depth=1))
+                            if alb_exp:
+                                sub_tracks = await db.get_tracks_by_album(al['album'], al['artist'])
+                                for t in sub_tracks:
+                                    controls.append(self._track_row(t, depth=2, album_context=(al['artist'], al['album'])))
+                
+            if self.current_page < self.total_pages - 1:
+                controls.append(self._build_bottom_ghost())
+                    
+            # Update controls
+            self._library_list.controls = controls
+            self._update_pagination_ui()
+            
+            # 3. Teleport off-screen to the other side instantly
+            self._animated_list_wrapper.offset = entry_offset
+            self.try_update(self._animated_list_wrapper, self._library_list)
+            
+            # Wait a tiny tick for the layout to render and compute heights in client
+            await asyncio.sleep(0.08)
+            
+            # 4. Programmatically scroll to the correct position (locked out of scroll listener)
+            self._is_programmatic_scroll = True
+            try:
+                if scroll_to_bottom:
+                    target_offset = 3080 if self.current_page < self.total_pages - 1 else 3250
+                else:
+                    target_offset = 45 if self.current_page > 0 else 0
+                await self._library_list.scroll_to(offset=target_offset, duration=0)
+            except Exception:
+                pass
+            finally:
+                await asyncio.sleep(0.05)
+                self._is_programmatic_scroll = False
+                
+            # 5. Slide in and fade back to center
+            self._animated_list_wrapper.offset = ft.Offset(0, 0)
+            self._animated_list_wrapper.opacity = 1.0
+            self.try_update(self._animated_list_wrapper)
+        finally:
+            # Cooldown to let scroll physics settle fully in Flutter client
+            await asyncio.sleep(0.35)
+            self._is_changing_page = False
+
     async def load_library(self):
         """Rebuild the library list using an async generator."""
         self._load_token += 1
         token = self._load_token
         self._current_gen = None
         self._is_loading_chunk = False
+        
+        # Reset current page index on fresh loads
+        self.current_page = 0
+
         # Drop the tracks cache; any sort/search/view change forces a
         # fresh fetch, and the cached list would otherwise be stale.
         self._tracks_cache = None
         self._tracks_cache_key = None
 
         # Sync the highlight cache to whatever path the rows are about to
-        # be *built* against. _track_row evaluates `is_current = path ==
-        # audio_engine.current_path` at construction, so the new tiles
-        # render with that path already highlighted. If we leave the cache
-        # at None (or some stale older value), the next refresh_now_playing
-        # diff thinks "nothing was highlighted before" and skips the old
-        # row instead of clearing its rendered highlight; leaving a
-        # phantom highlight from the previous current track that never
-        # goes away when the user plays a different one.
+        # be *built* against.
         self._last_highlighted_path = audio_engine.current_path or None
 
         self.app.safe_update(lambda: (
             setattr(self._search_spinner, "visible", True),
             self._library_list.controls.clear(),
             self._path_to_controls.clear(),
-            setattr(self._empty_label, "visible", False)
+            setattr(self._empty_label, "visible", False),
+            setattr(self._pagination_bar, "visible", False)
         ))
 
         try:
-            gen, stats_text = await self._build_rows_generator()
-
-            first_chunk = []
-            async for item in gen:
-                first_chunk.append(item)
-                if len(first_chunk) >= 100:
-                    break
-
-            if self._load_token != token:
-                return
-
-            self._current_gen = gen
-
-            def finalize():
-                self._stats_label.text = stats_text
-                self._library_list.controls.extend(first_chunk)
-                self._search_spinner.visible = False
+            # Check if we are in tracks, albums, or artists mode to use the paginated flat row setup
+            if self.view_mode in ("tracks", "albums", "artists"):
+                import math
+                db = self.app.db_manager
                 
-                # Check for empty state, excluding the "New Playlist" row if in playlists mode
-                is_empty = not first_chunk or (self.view_mode == "playlists" and len(first_chunk) == 1)
+                if self.view_mode == "tracks":
+                    tracks = await db.get_all_tracks(search_query=self.search_query, sort_mode=self.sort_mode)
+                    
+                    # Cache the list so play_track taps don't issue get_all_tracks queries
+                    self._tracks_cache = tracks
+                    self._tracks_cache_key = (self.view_mode, self.search_query, self.sort_mode)
+                    
+                    self._flat_rows = [{"type": "track", "data": t, "depth": 0} for t in tracks]
+                    stats_text = f"{len(tracks)} {'TRACK' if len(tracks) == 1 else 'TRACKS'}"
+                elif self.view_mode == "albums":
+                    albums = await db.get_all_albums(search_query=self.search_query, sort_mode=self.sort_mode)
+                    self._flat_rows = [{"type": "album", "data": a, "depth": 0} for a in albums]
+                    stats_text = f"{len(albums)} {'ALBUM' if len(albums) == 1 else 'ALBUMS'}"
+                else:
+                    artists = await db.get_all_artists(search_query=self.search_query, sort_mode=self.sort_mode)
+                    self._flat_rows = [{"type": "artist", "data": a, "depth": 0} for a in artists]
+                    stats_text = f"{len(artists)} {'ARTIST' if len(artists) == 1 else 'ARTISTS'}"
                 
-                # Customise empty message based on view mode
-                if is_empty:
-                    self._empty_label.visible = True
-                    if self.view_mode == "playlists":
-                        self._empty_label.content.controls[0].name = ft.Icons.QUEUE_MUSIC_ROUNDED
-                        self._empty_label.content.controls[0].color = apply_opacity(0.3, LIB_PLAYLIST_COLOR)
-                        self._empty_label.content.controls[1].value = "No playlists yet."
-                        self._empty_label.content.controls[2].value = "Create your first playlist below."
-                    else:
+                # Calculate total pages
+                self.total_pages = math.ceil(len(self._flat_rows) / self.items_per_page)
+                
+                if self._load_token != token:
+                    return
+
+                # Instantiate only the 50 rows for the first page
+                start_idx = self.current_page * self.items_per_page
+                end_idx = start_idx + self.items_per_page
+                page_items = self._flat_rows[start_idx:end_idx]
+                
+                first_chunk = []
+                if self.current_page > 0:
+                    first_chunk.append(self._build_top_ghost())
+                    
+                if self.view_mode == "tracks":
+                    for item in page_items:
+                        first_chunk.append(self._track_row(item["data"], item["depth"]))
+                elif self.view_mode == "albums":
+                    for item in page_items:
+                        a = item["data"]
+                        node_id = f"album_{a['artist']}_{a['album']}"
+                        expanded = node_id in self.expanded_nodes
+                        first_chunk.append(self._album_row(a, node_id, expanded, depth=0))
+                        if expanded:
+                            sub_tracks = await db.get_tracks_by_album(a['album'], a['artist'])
+                            for t in sub_tracks:
+                                first_chunk.append(self._track_row(t, depth=1, album_context=(a['artist'], a['album'])))
+                else:
+                    for item in page_items:
+                        a = item["data"]
+                        node_id = f"artist_{a['name']}"
+                        expanded = node_id in self.expanded_nodes
+                        first_chunk.append(self._artist_row(a, node_id, expanded))
+                        if expanded:
+                            sub_albums = await db.get_albums_by_artist(a['name'])
+                            for al in sub_albums:
+                                alb_id = f"album_{al['artist']}_{al['album']}"
+                                alb_exp = alb_id in self.expanded_nodes
+                                first_chunk.append(self._album_row(al, alb_id, alb_exp, depth=1))
+                                if alb_exp:
+                                    sub_tracks = await db.get_tracks_by_album(al['album'], al['artist'])
+                                    for t in sub_tracks:
+                                        first_chunk.append(self._track_row(t, depth=2, album_context=(al['artist'], al['album'])))
+                    
+                if self.current_page < self.total_pages - 1:
+                    first_chunk.append(self._build_bottom_ghost())
+
+                def finalize_paginated():
+                    self._stats_label.text = stats_text
+                    self._library_list.controls.extend(first_chunk)
+                    self._search_spinner.visible = False
+                    
+                    is_empty = not first_chunk
+                    if is_empty:
+                        self._empty_label.visible = True
                         self._empty_label.content.controls[0].name = ft.Icons.LIBRARY_MUSIC_OUTLINED
                         self._empty_label.content.controls[0].color = apply_opacity(0.3, CYAN)
                         self._empty_label.content.controls[1].value = "It's empty in here."
                         self._empty_label.content.controls[2].value = "Index your folders to start listening."
-                self.page.update()
+                    
+                    self._update_pagination_ui()
+                    self.page.update()
 
-            self.app.safe_update(finalize)
+                self.app.safe_update(finalize_paginated)
+
+            else:
+                # Expandable view modes (artists, playlists) use the original lazy chunk scroll generator
+                self.total_pages = 1
+                gen, stats_text = await self._build_rows_generator()
+
+                first_chunk = []
+                async for item in gen:
+                    first_chunk.append(item)
+                    if len(first_chunk) >= 100:
+                        break
+
+                if self._load_token != token:
+                    return
+
+                self._current_gen = gen
+
+                def finalize():
+                    self._stats_label.text = stats_text
+                    self._library_list.controls.extend(first_chunk)
+                    self._search_spinner.visible = False
+                    
+                    # Check for empty state, excluding the "New Playlist" row if in playlists mode
+                    is_empty = not first_chunk or (self.view_mode == "playlists" and len(first_chunk) == 1)
+                    
+                    # Customise empty message based on view mode
+                    if is_empty:
+                        self._empty_label.visible = True
+                        if self.view_mode == "playlists":
+                            self._empty_label.content.controls[0].name = ft.Icons.QUEUE_MUSIC_ROUNDED
+                            self._empty_label.content.controls[0].color = apply_opacity(0.3, LIB_PLAYLIST_COLOR)
+                            self._empty_label.content.controls[1].value = "No playlists yet."
+                            self._empty_label.content.controls[2].value = "Create your first playlist below."
+                        else:
+                            self._empty_label.content.controls[0].name = ft.Icons.LIBRARY_MUSIC_OUTLINED
+                            self._empty_label.content.controls[0].color = apply_opacity(0.3, CYAN)
+                            self._empty_label.content.controls[1].value = "It's empty in here."
+                            self._empty_label.content.controls[2].value = "Index your folders to start listening."
+                    self.page.update()
+
+                self.app.safe_update(finalize)
 
         except Exception as e:
             logger.error(f"Library load failed: {e}")
