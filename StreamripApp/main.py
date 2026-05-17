@@ -5957,15 +5957,21 @@ class AssistantView:
             on_click=lambda _e: self._on_send_click(),
         )
 
-        # Push-to-talk mic. Tapping starts a short listening session via
-        # speech_to_text; tapping again stops it. While listening, the icon
+        # Push-to-talk mic. Pressing and holding starts a listening session via
+        # speech_to_text; releasing stops it. While listening, the icon
         # turns red so the user can see we're capturing audio. STT runs
         # through the audio_service bridge.
-        self._mic_btn = ft.IconButton(
-            icon=ft.Icons.MIC_ROUNDED,
-            icon_color=CYAN,
-            tooltip="Voice Command",
-            on_click=self._on_mic_click,
+        self._mic_icon = ft.Icon(ft.Icons.MIC_ROUNDED, color=CYAN)
+        self._mic_btn = ft.GestureDetector(
+            content=ft.Container(
+                content=self._mic_icon,
+                padding=10,
+                border_radius=20,
+            ),
+            tooltip="Hold to Speak",
+            on_tap_down=self._on_mic_down,
+            on_tap_up=self._on_mic_up,
+            on_tap_cancel=self._on_mic_up,
         )
         self._stt_listening = False
 
@@ -6211,13 +6217,12 @@ class AssistantView:
         yes-response or the explicit 'rescan' intent)."""
         from utils import track_graph as tg
 
-        if not audio_engine.audio_service:
+        audio_active = bool(audio_engine.audio_service)
+        if not audio_active:
             await self._append_bubble(
                 "assistant",
-                "I can't access the audio decoder right now — try again "
-                "after you've played a track to wake up the engine.",
+                "⚠️ *Audio engine not active. Running edge linkage in offline developer mode...*",
             )
-            return
 
         try:
             missing = await self.app.db_manager.get_tracks_missing_features(
@@ -6227,7 +6232,7 @@ class AssistantView:
             logger.warning("AssistantView: missing-features check failed: %s", exc)
             missing = []
 
-        if missing:
+        if missing and audio_active:
             total = len(missing)
             self._init_cancel = False
             self._set_banner(
@@ -6256,6 +6261,8 @@ class AssistantView:
                 logger.info("AssistantView: analyser sweep done: %s", result)
             except Exception as exc:
                 logger.warning("AssistantView: analyser sweep failed: %s", exc)
+        elif missing and not audio_active:
+            logger.info("AssistantView: skipped bulk feature extraction (no audio service)")
 
         # Rebuild edges — metadata is fast, acoustic depends on new feature
         # vectors. Run both unconditionally after a sweep so the graph
@@ -6304,46 +6311,88 @@ class AssistantView:
         self.app.safe_update(lambda: None)
         self.page.run_task(self._handle_user_text, text)
 
-    async def _on_mic_click(self, _e=None):
-        service = getattr(audio_engine, "audio_service", None)
-        if service is None:
-            self.app.show_snackbar("Audio engine not ready.")
-            return
+    def _on_mic_down(self, e):
+        self.page.run_task(self._start_listening)
 
-        # Second tap while a session is live = cancel. We flip the flag
-        # first so any in-flight stt_listen future short-circuits its
-        # finally block (which is what restores the cyan mic icon).
+    def _on_mic_up(self, e):
+        self.page.run_task(self._stop_listening)
+
+    async def _start_listening(self):
         if self._stt_listening:
-            self._stt_listening = False
-            try:
-                await service.stt_stop()
-            except Exception as ex:
-                logger.warning(f"stt_stop failed: {ex}")
             return
 
-        # First tap: ensure mic permission, then start listening.
-        try:
-            perms = await service.query_permissions()
-            if perms.get("record_audio") != "granted":
-                res = await service.request_permission("record_audio")
-                if res.get("status") != "granted":
-                    self.app.show_snackbar(
-                        "Microphone permission is required for voice commands."
-                    )
-                    return
-        except Exception as ex:
-            logger.warning(f"Mic permission check failed: {ex}")
-            self.app.show_snackbar("Couldn't verify microphone permission.")
-            return
+        service = getattr(audio_engine, "audio_service", None)
+        is_mock = (service is None)
+
+        # First tap: ensure mic permission (skip if mock mode)
+        if not is_mock:
+            try:
+                perms = await service.query_permissions()
+                if perms.get("record_audio") != "granted":
+                    res = await service.request_permission("record_audio")
+                    if res.get("status") != "granted":
+                        self.app.show_snackbar(
+                            "Microphone permission is required for voice commands."
+                        )
+                        return
+            except Exception as ex:
+                logger.warning(f"Mic permission check failed: {ex}")
+                self.app.show_snackbar("Couldn't verify microphone permission.")
+                return
 
         self._stt_listening = True
-        self._mic_btn.icon = ft.Icons.MIC_ROUNDED
-        self._mic_btn.icon_color = "#FF4444"
-        self._mic_btn.tooltip = "Listening… tap to cancel"
-        self.app.safe_update(lambda: None)
+        self._mic_icon.color = "#FF4444"
+        self._mic_btn.tooltip = "[MOCK MODE] Release to Send" if is_mock else "Release to Send"
+        self._mic_icon.update()
+        self._mic_btn.update()
+
+        self._listening_bubble = ft.Row(
+            [
+                ft.Container(
+                    content=ft.Row(
+                        [
+                            ft.Icon(ft.Icons.MIC_ROUNDED, color="#FF4444", size=18),
+                            ft.Text(
+                                "Listening (mock mode), sir..." if is_mock else "Listening, sir...",
+                                color=DIM, size=13, italic=True
+                            ),
+                            ft.ProgressRing(width=12, height=12, stroke_width=1.5, color=CYAN),
+                        ],
+                        spacing=8,
+                        alignment=ft.MainAxisAlignment.START,
+                    ),
+                    padding=ft.Padding.symmetric(horizontal=14, vertical=10),
+                    bgcolor=SURFACE2,
+                    border_radius=14,
+                    border=ft.Border.all(1, apply_opacity(0.1, CYAN)),
+                )
+            ],
+            alignment=ft.MainAxisAlignment.START,
+        )
+
+        def _show_listening():
+            # Drop the empty-state on first real message.
+            if self._messages.controls and isinstance(self._messages.controls[0], ft.Container) \
+                    and not isinstance(getattr(self._messages.controls[0], "content", None), ft.Row):
+                if len(self._messages.controls) == 1:
+                    self._messages.controls = []
+            self._messages.controls.append(self._listening_bubble)
+            self._messages.update()
+        self.app.safe_update(_show_listening)
 
         try:
-            res = await service.stt_listen(timeout=15.0)
+            if not is_mock:
+                res = await service.stt_listen(timeout=15.0)
+            else:
+                # Simulated Speech-to-Text session for offline debugging on macOS
+                # Check if self._stt_listening is flipped to False every 0.05 seconds
+                timeout_counter = 0.0
+                while self._stt_listening and timeout_counter < 15.0:
+                    await asyncio.sleep(0.05)
+                    timeout_counter += 0.05
+                typed = (self._input.value or "").strip()
+                res = {"ok": True, "text": typed if typed else "play random"}
+
             if res.get("ok") and res.get("text"):
                 self._input.value = res["text"]
                 self.app.safe_update(lambda: None)
@@ -6357,10 +6406,26 @@ class AssistantView:
             logger.error(f"STT Error: {ex}")
         finally:
             self._stt_listening = False
-            self._mic_btn.icon = ft.Icons.MIC_ROUNDED
-            self._mic_btn.icon_color = CYAN
-            self._mic_btn.tooltip = "Voice Command"
-            self.app.safe_update(lambda: None)
+            self._mic_icon.color = CYAN
+            self._mic_btn.tooltip = "Hold to Speak"
+            
+            def _hide_listening():
+                if hasattr(self, "_listening_bubble") and self._listening_bubble in self._messages.controls:
+                    self._messages.controls.remove(self._listening_bubble)
+                    self._messages.update()
+            self.app.safe_update(_hide_listening)
+
+    async def _stop_listening(self):
+        if not self._stt_listening:
+            return
+        
+        self._stt_listening = False
+        service = getattr(audio_engine, "audio_service", None)
+        if service is not None:
+            try:
+                await service.stt_stop()
+            except Exception as ex:
+                logger.warning(f"stt_stop failed: {ex}")
 
     async def _handle_user_text(self, text: str):
         await self._append_bubble("user", text)
@@ -6436,6 +6501,10 @@ class AssistantView:
                 if len(self._messages.controls) == 1:
                     self._messages.controls = []
             self._messages.controls.append(row)
+            
+            # Proactive performance cap: keep history limited to 50 bubbles maximum
+            if len(self._messages.controls) > 50:
+                self._messages.controls.pop(0)
         self.app.safe_update(_mutate)
 
         if speak and self._tts_enabled:
