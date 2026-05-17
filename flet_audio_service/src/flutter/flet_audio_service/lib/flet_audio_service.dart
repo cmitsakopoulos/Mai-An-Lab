@@ -206,6 +206,20 @@ class FletAudioService extends FletService with WidgetsBindingObserver {
         final index = (a['index'] as num?)?.toInt() ?? 0;
         _handler?.skipToQueueItem(index);
 
+      case 'show_progress_notification':
+        final title = (a['title'] as String?) ?? '';
+        final content = (a['content'] as String?) ?? '';
+        final progress = (a['progress'] as num?)?.toInt() ?? 0;
+        final total = (a['total'] as num?)?.toInt() ?? 0;
+        final done = (a['done'] as bool?) ?? false;
+        _decodeChannel.invokeMethod('showProgressNotification', {
+          'title': title,
+          'content': content,
+          'progress': progress,
+          'total': total,
+          'done': done,
+        });
+
       case 'decode_pcm':
         // Fire-and-forget: the actual reply comes back via the
         // 'decode_complete' event. Python correlates by `request_id`.
@@ -398,6 +412,7 @@ class FletAudioService extends FletService with WidgetsBindingObserver {
       final stt = await _ensureStt();
       // listen() resolves when it successfully starts listening. 
       // We then await the result in the onResult callback.
+      final maxDuration = Duration(seconds: timeout.toInt());
       await stt.listen(
         onResult: (result) {
           if (result.finalResult) {
@@ -408,7 +423,12 @@ class FletAudioService extends FletService with WidgetsBindingObserver {
             }));
           }
         },
-        listenFor: Duration(seconds: timeout.toInt()),
+        listenFor: maxDuration,
+        // Match pauseFor to listenFor so the plugin's silence detector
+        // doesn't auto-terminate mid-utterance. For push-to-talk we
+        // rely on the explicit stt_stop() call (fired on button release)
+        // to finalise the session.
+        pauseFor: maxDuration,
         cancelOnError: true,
       );
     } catch (e) {

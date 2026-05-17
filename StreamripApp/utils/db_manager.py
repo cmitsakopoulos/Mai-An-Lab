@@ -137,7 +137,7 @@ class DatabaseManager:
 
                 await self._create_fts_and_triggers(conn)
 
-                # Migration for AutoPlaylistEngine columns
+                # Migration for KNN auto-playlist DSP feature columns
                 for table in ["tracks", "play_counts"]:
                     for col in ["bpm", "energy", "brightness"]:
                         try:
@@ -1001,7 +1001,7 @@ class DatabaseManager:
 
     async def get_autoplaylist_hot_set(self) -> list[dict]:
         """
-        Retrieves the 'Hot Set' for the AutoPlaylistEngine.
+        Retrieves the 'Hot Set' for the KNN auto-playlist selector.
         Filters tracks based on play count quartiles.
         Rule: count >= 1/2 of Q1 (lowest quartile).
 
@@ -1026,7 +1026,7 @@ class DatabaseManager:
 
         # 3. Fetch tracks that meet the 'Hot Set' threshold, including
         #    artist and album names for the string-similarity blending step
-        #    in AutoPlaylistEngine. LEFT JOINs are used defensively so a
+        #    in the auto-playlist KNN selector. LEFT JOINs are used so a
         #    missing tracks row (shouldn't happen) still returns the play_count
         #    entry with NULL artist/album rather than silently dropping it.
         sql = '''
@@ -1318,7 +1318,7 @@ class DatabaseManager:
         """
         Randomly assigns play counts so the AutoPlaylist UI has data to work
         with on a fresh install. Does NOT synthesise audio features any more;
-        the random values were poisoning the MCL clusters (every playlist
+        the random values were poisoning the KNN selector (every playlist
         was just a slice of uniform noise). The DSP analyser populates real
         features lazily for the hot set the first time a playlist is generated.
         """

@@ -48,6 +48,12 @@ class AssistantResponse:
     # action names so view dispatch can be a simple switch.
     #   "rebuild_graph": rerun analyser for missing tracks + rebuild edges.
     action: Optional[str] = None
+    # When True the handler has populated the queue but deliberately NOT
+    # called engine.play(); the view should start playback only after TTS
+    # finishes. Used by intents that begin a new playback session so Jarvis
+    # finishes his sentence before the music kicks in. Playback-control
+    # intents (resume/skip/etc.) act eagerly and leave this False.
+    deferred_play: bool = False
 
 
 @dataclass
@@ -254,16 +260,58 @@ class AssistantRunner:
         """Find the single best local-library match for a free-text query."""
         if not query:
             return None
-        hits = await self.db.search_tracks_simple(query, limit=5)
+        hits = await self._resolve_queries(query, limit=1)
         return hits[0] if hits else None
 
     async def _resolve_queries(self, query: str, limit: int = 25) -> list[dict]:
-        """Like `_resolve_query` but returns up to `limit` matches. Used by
-        play_now so 'play radiohead' enqueues every track by that artist
-        instead of just the top hit."""
+        """Like _resolve_query but returns up to limit matches with fuzzy matching fallback."""
         if not query:
             return []
-        return await self.db.search_tracks_simple(query, limit=limit)
+            
+        # 1. Try simple database search first
+        hits = await self.db.search_tracks_simple(query, limit=limit)
+        if hits:
+            for h in hits:
+                h["fuzzy_match"] = False
+            return hits
+            
+        # 2. Fuzzy string matching fallback across the whole library
+        all_tracks = await self.db.get_all_tracks()
+        if not all_tracks:
+            return []
+            
+        import difflib
+        scored_tracks = []
+        q_lower = query.lower()
+        for track in all_tracks:
+            title = (track.get("title") or "").lower()
+            artist = (track.get("artist") or "").lower()
+            combined = f"{title} {artist}"
+            
+            r_title = difflib.SequenceMatcher(None, q_lower, title).ratio()
+            r_artist = difflib.SequenceMatcher(None, q_lower, artist).ratio()
+            r_comb = difflib.SequenceMatcher(None, q_lower, combined).ratio()
+            
+            score = max(r_title, r_artist, r_comb)
+            if score > 0.65:
+                scored_tracks.append((score, track))
+                
+        if not scored_tracks:
+            return []
+            
+        scored_tracks.sort(key=lambda x: x[0], reverse=True)
+        results = []
+        for _, t in scored_tracks[:limit]:
+            results.append({
+                "path": t.get("path"),
+                "title": t.get("title") or t.get("track_title") or "",
+                "artist": t.get("artist") or t.get("artist_name") or "Unknown Artist",
+                "album": t.get("album") or t.get("album_title") or "Unknown Album",
+                "duration": t.get("duration", 0.0) or 0.0,
+                "image_url": t.get("image_url") or "",
+                "fuzzy_match": True,
+            })
+        return results
 
     # ── Handlers ────────────────────────────────────────────────────────────
 
@@ -282,35 +330,38 @@ class AssistantRunner:
             )
 
         engine_tracks = [_to_engine_track(t) for t in hits]
+        first = hits[0]
+        is_fuzzy = first.get("fuzzy_match", False)
+        prefix_spoken = f"I couldn't find exactly '{intent.query}', sir. Playing " if is_fuzzy else ""
+        prefix_displayed = f"No exact match for '{intent.query}'. Playing " if is_fuzzy else ""
 
         if len(engine_tracks) == 1:
-            first = hits[0]
             self.engine.set_queue(engine_tracks, start_index=0)
-            self.engine.play()
             self._remember(engine_tracks[0]["path"])
             return AssistantResponse(
-                spoken=f"{self._say('affirmative')} Playing {first.get('title')} by {first.get('artist')}.",
-                displayed=f"Certainly. Now playing: **{first.get('title')}** — {first.get('artist')}",
+                spoken=f"{self._say('affirmative')} {prefix_spoken}{first.get('title')} by {first.get('artist')}.",
+                displayed=f"Certainly. {prefix_displayed}**{first.get('title')}** — {first.get('artist')}",
                 extras={"track": first},
+                deferred_play=True,
             )
 
         # Multi-match: start from a random index so repeated 'play radiohead'
         # doesn't open with the same track every time.
         start = random.randint(0, len(engine_tracks) - 1)
         self.engine.set_queue(engine_tracks, start_index=start)
-        self.engine.play()
         self._remember(engine_tracks[start]["path"])
         first = hits[start]
         return AssistantResponse(
             spoken=(
-                f"{self._say('affirmative')} Queued {len(engine_tracks)} tracks matching "
+                f"{self._say('affirmative')} {prefix_spoken}{len(engine_tracks)} tracks matching "
                 f"'{intent.query}'. Starting with {first.get('title')} by {first.get('artist')}."
             ),
             displayed=(
                 f"Queued **{len(engine_tracks)}** matches for **{intent.query}**. "
-                f"Starting with **{first.get('title')}** — {first.get('artist')}."
+                f"{prefix_displayed}**{first.get('title')}** — {first.get('artist')}."
             ),
             extras={"queued": len(engine_tracks), "first": first},
+            deferred_play=True,
         )
 
     async def _handle_play_mood(self, intent: ai.Intent) -> AssistantResponse:
@@ -349,7 +400,6 @@ class AssistantRunner:
 
         engine_tracks = [_to_engine_track(t) for t in tracks]
         self.engine.set_queue(engine_tracks, start_index=0)
-        self.engine.play()
         for t in engine_tracks:
             self._remember(t["path"])
 
@@ -364,6 +414,7 @@ class AssistantRunner:
                 f"Starting with **{first.get('title')}** — {first.get('artist')}."
             ),
             extras={"mood": mood, "queued": len(tracks)},
+            deferred_play=True,
         )
 
     async def _handle_play_random(self, _intent: ai.Intent) -> AssistantResponse:
@@ -380,7 +431,6 @@ class AssistantRunner:
 
         self.engine.is_shuffle = True
         self.engine.set_queue(engine_tracks, start_index=0)
-        self.engine.play()
         self._remember(engine_tracks[0]["path"])
 
         first = engine_tracks[0]
@@ -390,6 +440,7 @@ class AssistantRunner:
             spoken=f"{self._say('affirmative')} Initiating shuffle play. Starting with {title} by {artist}.",
             displayed=f"Shuffle play active. Queued **{len(engine_tracks)}** tracks. Starting with: **{title}** — {artist}",
             extras={"track": first, "queued": len(engine_tracks)},
+            deferred_play=True,
         )
 
     async def _handle_queue_add(self, intent: ai.Intent) -> AssistantResponse:
@@ -688,6 +739,151 @@ class AssistantRunner:
         )
         return AssistantResponse(spoken=msg, displayed=msg)
 
+    async def _handle_playlist_create(self, intent: ai.Intent) -> AssistantResponse:
+        name = (intent.query or "").strip()
+        if not name:
+            return AssistantResponse(
+                spoken="What should I name the playlist, sir?",
+                displayed="Please specify a playlist name.",
+                success=False,
+            )
+        try:
+            await self.db.create_playlist(name)
+            return AssistantResponse(
+                spoken=f"{self._say('affirmative')} I have created the playlist '{name}' for you.",
+                displayed=f"Created playlist: **{name}**",
+            )
+        except Exception:
+            return AssistantResponse(
+                spoken=f"It seems a playlist called '{name}' already exists, sir.",
+                displayed=f"Playlist **{name}** already exists.",
+                success=False,
+            )
+
+    async def _handle_playlist_add(self, intent: ai.Intent) -> AssistantResponse:
+        playlist_name = intent.extras.get("playlist")
+        track_query = intent.extras.get("track")
+        
+        if not playlist_name:
+            return AssistantResponse(
+                spoken="Which playlist should I add it to, sir?",
+                displayed="Please specify a playlist name.",
+                success=False,
+            )
+            
+        # Find playlist
+        playlists = await self.db.get_all_playlists()
+        target_playlist = None
+        if playlists:
+            for p in playlists:
+                if p["name"].lower() == playlist_name.lower():
+                    target_playlist = p
+                    break
+            if not target_playlist:
+                import difflib
+                best_p = None
+                best_score = 0.0
+                for p in playlists:
+                    score = difflib.SequenceMatcher(None, playlist_name.lower(), p["name"].lower()).ratio()
+                    if score > best_score:
+                        best_score = score
+                        best_p = p
+                if best_score > 0.6:
+                    target_playlist = best_p
+                    
+        if not target_playlist:
+            return AssistantResponse(
+                spoken=f"I couldn't find a playlist named '{playlist_name}', sir.",
+                displayed=f"Playlist **{playlist_name}** not found.",
+                success=False,
+            )
+            
+        track_path = None
+        track_title = ""
+        track_artist = ""
+        
+        if track_query:
+            track = await self._resolve_query(track_query)
+            if not track:
+                return AssistantResponse(
+                    spoken=f"I couldn't find a track matching '{track_query}', sir.",
+                    displayed=f"No local match for **{track_query}**.",
+                    success=False,
+                )
+            track_path = track["path"]
+            track_title = track["title"]
+            track_artist = track["artist"]
+        else:
+            # Add currently playing track
+            track_path = self.engine.current_path
+            if not track_path:
+                return AssistantResponse(
+                    spoken="Nothing is playing right now, sir.",
+                    displayed="No current track to add.",
+                    success=False,
+                )
+            track_title = getattr(self.engine, "current_track", "") or "Unknown Song"
+            track_artist = getattr(self.engine, "current_artist", "") or "Unknown Artist"
+            
+        await self.db.add_track_to_playlist(target_playlist["id"], track_path)
+        return AssistantResponse(
+            spoken=f"{self._say('affirmative')} Added '{track_title}' by {track_artist} to your '{target_playlist['name']}' playlist.",
+            displayed=f"Added to **{target_playlist['name']}**: **{track_title}** — {track_artist}",
+        )
+
+    async def _handle_playlist_play(self, intent: ai.Intent) -> AssistantResponse:
+        playlist_name = (intent.query or "").strip()
+        if not playlist_name:
+            return AssistantResponse(
+                spoken="Which playlist would you like to play, sir?",
+                displayed="Please specify a playlist name.",
+                success=False,
+            )
+            
+        # Find playlist
+        playlists = await self.db.get_all_playlists()
+        target_playlist = None
+        if playlists:
+            for p in playlists:
+                if p["name"].lower() == playlist_name.lower():
+                    target_playlist = p
+                    break
+            if not target_playlist:
+                import difflib
+                best_p = None
+                best_score = 0.0
+                for p in playlists:
+                    score = difflib.SequenceMatcher(None, playlist_name.lower(), p["name"].lower()).ratio()
+                    if score > best_score:
+                        best_score = score
+                        best_p = p
+                if best_score > 0.6:
+                    target_playlist = best_p
+                    
+        if not target_playlist:
+            return AssistantResponse(
+                spoken=f"I couldn't find a playlist named '{playlist_name}', sir.",
+                displayed=f"Playlist **{playlist_name}** not found.",
+                success=False,
+            )
+            
+        tracks = await self.db.get_tracks_in_playlist(target_playlist["id"])
+        if not tracks:
+            return AssistantResponse(
+                spoken=f"The playlist '{target_playlist['name']}' is empty, sir.",
+                displayed=f"Playlist **{target_playlist['name']}** is empty.",
+                success=False,
+            )
+            
+        engine_tracks = [_to_engine_track(t) for t in tracks]
+        self.engine.set_queue(engine_tracks, start_index=0)
+
+        return AssistantResponse(
+            spoken=f"{self._say('affirmative')} Playing playlist '{target_playlist['name']}'.",
+            displayed=f"Now playing playlist: **{target_playlist['name']}** ({len(engine_tracks)} tracks)",
+            deferred_play=True,
+        )
+
     async def _handle_unknown(self, intent: ai.Intent) -> AssistantResponse:
         # Last-resort fallback: treat the whole utterance as a library search.
         text = (intent.raw or "").strip()
@@ -706,12 +902,17 @@ class AssistantRunner:
             )
         engine_track = _to_engine_track(track)
         self.engine.set_queue([engine_track], start_index=0)
-        self.engine.play()
         self._remember(engine_track["path"])
+
+        is_fuzzy = track.get("fuzzy_match", False)
+        prefix_spoken = f"I couldn't find exactly '{text}', sir. Playing " if is_fuzzy else "Playing "
+        prefix_displayed = f"No exact match. Best guess: playing " if is_fuzzy else "Best guess: playing "
+
         return AssistantResponse(
-            spoken=f"Playing {track.get('title')} by {track.get('artist')}.",
-            displayed=f"Best guess: playing **{track.get('title')}** — {track.get('artist')}",
+            spoken=f"{prefix_spoken}{track.get('title')} by {track.get('artist')}.",
+            displayed=f"{prefix_displayed}**{track.get('title')}** — {track.get('artist')}",
             extras={"track": track, "fallback": True},
+            deferred_play=True,
         )
 
     # ── Dispatch table ──────────────────────────────────────────────────────
@@ -738,6 +939,9 @@ AssistantRunner._INTENT_DISPATCH = {
     ai.INTENT_UNMUTE:        AssistantRunner._handle_unmute,
     ai.INTENT_NOW_PLAYING:   AssistantRunner._handle_now_playing,
     ai.INTENT_RESCAN_DSP:    AssistantRunner._handle_rescan_dsp,
+    ai.INTENT_PLAYLIST_CREATE: AssistantRunner._handle_playlist_create,
+    ai.INTENT_PLAYLIST_ADD:    AssistantRunner._handle_playlist_add,
+    ai.INTENT_PLAYLIST_PLAY:   AssistantRunner._handle_playlist_play,
     ai.INTENT_HELP:          AssistantRunner._handle_help,
     ai.INTENT_UNKNOWN:       AssistantRunner._handle_unknown,
 }

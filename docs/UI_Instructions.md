@@ -30,6 +30,16 @@ The Sort menu (accessible via the Sort icon) provides context-aware options:
 - **Playlists**: Sort by Name (A–Z) or Date Created.
 - **Albums/Tracks**: Sort by Date Added, Artist (A–Z), Album (A–Z), or Track (A–Z).
 
+### 1.5 High-Performance Page Pagination & Snappy Gestures
+To keep Flet’s widget tree extremely tiny and guarantee memory-safe, ultra-fluid library navigation even on massive multi-thousand-song catalogs:
+- **Active Slicing**: Library listings (Tracks, Albums, Artists) are sliced into dynamic pages (typically **50 items per page**), rendering only one active page at a time.
+- **Snappy Slide-In Carousel**: Switching pages initiates a lightning-fast hardware-accelerated **Slide-In Offset and Fade Animation** (optimized down to **120ms**), delivering a premium tactile feel.
+- **Tactile Pagination Bar**: An elegant, glassmorphic pagination bar is rendered at the bottom of the screen.
+- **Dual-Control Navigation**:
+  - **Button Taps**: Tap the left or right chevron arrow buttons to change pages.
+  - **Swipe-to-Turn**: Swipe horizontally (left or right) directly on the bottom pagination bar container to change pages.
+- **Boundary Ghost Cards**: Custom glassmorphic boundary ghost cards appear at the top and bottom of the list when scrolled to the limits, seamlessly directing the user to swipe the pagination bar or tap chevrons to continue.
+
 ---
 
 ## 2. Search Functionality
