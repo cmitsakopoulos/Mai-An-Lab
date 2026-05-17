@@ -366,6 +366,32 @@ class AssistantRunner:
             extras={"mood": mood, "queued": len(tracks)},
         )
 
+    async def _handle_play_random(self, _intent: ai.Intent) -> AssistantResponse:
+        tracks = await self.db.get_all_tracks()
+        if not tracks:
+            return AssistantResponse(
+                spoken="Your library is currently empty, sir. Please configure your music folder first.",
+                displayed="Library is empty — cannot play a random track.",
+                success=False,
+            )
+
+        engine_tracks = [_to_engine_track(t) for t in tracks]
+        random.shuffle(engine_tracks)
+
+        self.engine.is_shuffle = True
+        self.engine.set_queue(engine_tracks, start_index=0)
+        self.engine.play()
+        self._remember(engine_tracks[0]["path"])
+
+        first = engine_tracks[0]
+        title = first.get("track_title") or "Unknown Track"
+        artist = first.get("artist_name") or "Unknown Artist"
+        return AssistantResponse(
+            spoken=f"{self._say('affirmative')} Initiating shuffle play. Starting with {title} by {artist}.",
+            displayed=f"Shuffle play active. Queued **{len(engine_tracks)}** tracks. Starting with: **{title}** — {artist}",
+            extras={"track": first, "queued": len(engine_tracks)},
+        )
+
     async def _handle_queue_add(self, intent: ai.Intent) -> AssistantResponse:
         track = await self._resolve_query(intent.query or "")
         if track is None:
@@ -699,6 +725,7 @@ AssistantRunner._INTENT_DISPATCH = {
     ai.INTENT_PLAY_SIMILAR:  AssistantRunner._handle_play_similar,
     ai.INTENT_PLAY_MORE_BY:  AssistantRunner._handle_play_more_by,
     ai.INTENT_PLAY_MOOD:     AssistantRunner._handle_play_mood,
+    ai.INTENT_PLAY_RANDOM:    AssistantRunner._handle_play_random,
     ai.INTENT_DOWNLOAD:      AssistantRunner._handle_download,
     ai.INTENT_SKIP:          AssistantRunner._handle_skip,
     ai.INTENT_PREV:          AssistantRunner._handle_prev,

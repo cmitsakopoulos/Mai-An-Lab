@@ -56,11 +56,11 @@ def ensure_config_exists():
         try:
             with open(path, "r", encoding="utf-8") as f:
                 doc = parse(f.read())
-            doc["downloads"]["folder"] = get_default_download_path()
+            doc["downloads"]["folder"] = ""
             with open(path, "w", encoding="utf-8") as f:
                 f.write(dumps(doc))
         except Exception as e:
-            logger.error(f"Failed to set default download path: {e}")
+            logger.error(f"Failed to set empty download path: {e}")
 
     # Check for version mismatch and update if necessary
     try:

@@ -766,29 +766,22 @@ class DatabaseManager:
 
     async def get_all_playlists(self, search_query: str = "", sort_mode: str = "date") -> list[dict]:
         """Lock-free read. Returns all playlists sorted by name or creation date."""
-        order = "name COLLATE NOCASE ASC" if sort_mode == "name" else "created DESC"
+        order_col = "p.name COLLATE NOCASE ASC" if sort_mode == "name" else "p.created DESC"
         conn = await self.get_connection()
-        if search_query:
-            like_q = f"%{search_query}%"
-            sql = f"SELECT id, name, created, color FROM playlists WHERE name LIKE ? ORDER BY {order}"
-            async with conn.execute(sql, (like_q,)) as cursor:
-                rows = await cursor.fetchall()
-        else:
-            async with conn.execute(
-                f"SELECT id, name, created, color FROM playlists ORDER BY {order}"
-            ) as cursor:
-                rows = await cursor.fetchall()
-
-        # Annotate each playlist with its track count.
-        result = []
-        for row in rows:
-            async with conn.execute(
-                "SELECT COUNT(*) AS cnt FROM playlist_tracks WHERE playlist_id = ?",
-                (row["id"],)
-            ) as c:
-                cnt_row = await c.fetchone()
-            result.append({**dict(row), "track_count": cnt_row["cnt"] if cnt_row else 0})
-        return result
+        
+        sql = f'''
+            SELECT p.id, p.name, p.created, p.color, COUNT(pt.track_path) AS track_count
+            FROM playlists p
+            LEFT JOIN playlist_tracks pt ON pt.playlist_id = p.id
+            {"WHERE p.name LIKE ?" if search_query else ""}
+            GROUP BY p.id
+            ORDER BY {order_col}
+        '''
+        
+        params = (f"%{search_query}%",) if search_query else ()
+        async with conn.execute(sql, params) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(r) for r in rows]
 
     async def get_tracks_in_playlist(self, playlist_id: int) -> list[dict]:
         """
@@ -1235,6 +1228,70 @@ class DatabaseManager:
         if not q:
             return []
         conn = await self.get_connection()
+
+        # 1. First attempt: Split by "by" or "from" (e.g. "comfortably numb by pink floyd")
+        by_parts = re.split(r"\s+(?:by|from)\s+", q, flags=re.I)
+        if len(by_parts) == 2:
+            p1, p2 = by_parts[0].strip(), by_parts[1].strip()
+            if p1 and p2:
+                like1 = f"%{p1}%"
+                like2 = f"%{p2}%"
+                sql = '''
+                    SELECT t.path, t.title, t.duration,
+                           ar.name AS artist, al.title AS album
+                    FROM tracks t
+                    LEFT JOIN albums  al ON al.id     = t.album_id
+                    LEFT JOIN artists ar ON ar.id     = al.artist_id
+                    WHERE (t.title LIKE ? COLLATE NOCASE AND ar.name LIKE ? COLLATE NOCASE)
+                       OR (t.title LIKE ? COLLATE NOCASE AND ar.name LIKE ? COLLATE NOCASE)
+                    ORDER BY t.added_date DESC
+                    LIMIT ?
+                '''
+                async with conn.execute(sql, (like1, like2, like2, like1, limit)) as cursor:
+                    results = [dict(r) for r in await cursor.fetchall()]
+                    if results:
+                        return results
+
+        # 2. Second attempt: Multi-word intersection query (matches all words across fields in any order)
+        stop_words = {"a", "an", "the", "by", "from", "of", "in", "on", "at", "to", "and", "or", "for", "some", "any"}
+        words = [w for w in q.split() if w.lower() not in stop_words]
+        if not words:
+            words = q.split()  # fallback if all were stop words
+
+        if words:
+            clauses = []
+            params = []
+            for w in words:
+                clauses.append("(t.title LIKE ? COLLATE NOCASE OR ar.name LIKE ? COLLATE NOCASE OR al.title LIKE ? COLLATE NOCASE)")
+                like_w = f"%{w}%"
+                params.extend([like_w, like_w, like_w])
+
+            where_clause = " AND ".join(clauses)
+            sql = f'''
+                SELECT t.path, t.title, t.duration,
+                       ar.name AS artist, al.title AS album
+                FROM tracks t
+                LEFT JOIN albums  al ON al.id     = t.album_id
+                LEFT JOIN artists ar ON ar.id     = al.artist_id
+                WHERE {where_clause}
+                ORDER BY
+                    CASE
+                        WHEN t.title LIKE ? COLLATE NOCASE THEN 0
+                        WHEN ar.name LIKE ? COLLATE NOCASE THEN 1
+                        ELSE 2
+                    END,
+                    t.added_date DESC
+                LIMIT ?
+            '''
+            exact_like = f"%{q}%"
+            params.extend([exact_like, exact_like, limit])
+
+            async with conn.execute(sql, params) as cursor:
+                results = [dict(r) for r in await cursor.fetchall()]
+                if results:
+                    return results
+
+        # 3. Third attempt: Fallback to single rigid LIKE match (original behavior)
         like = f"%{q}%"
         sql = '''
             SELECT t.path, t.title, t.duration,
