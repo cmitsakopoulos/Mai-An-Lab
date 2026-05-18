@@ -930,10 +930,6 @@ class SearchView:
         self.items_per_page = 35
         self._is_changing_page = False
         self._is_programmatic_scroll = False
-        self._at_bottom_boundary = False
-        self._at_top_boundary = False
-        self._bottom_boundary_time = 0
-        self._top_boundary_time = 0
         self._last_scroll_pixels = 0
 
         # results list
@@ -957,14 +953,23 @@ class SearchView:
             animate_opacity=ft.Animation(200, ft.AnimationCurve.EASE_OUT),
         )
 
+        # Pagination bar styled and behaving identically to LibraryView:
+        # explicit arrow taps OR horizontal swipe on the bar — no scroll-to-
+        # boundary auto-advance. Buttons start disabled until results land.
         self._prev_page_btn = ft.IconButton(
-            icon=ft.Icons.KEYBOARD_ARROW_LEFT_ROUNDED,
-            icon_color=CYAN,
+            icon=ft.Icons.CHEVRON_LEFT_ROUNDED,
+            icon_color=DIM,
+            icon_size=20,
+            disabled=True,
+            tooltip="Previous Page",
             on_click=lambda e: self.page.run_task(self.change_page, self.current_page - 1, scroll_to_bottom=True),
         )
         self._next_page_btn = ft.IconButton(
-            icon=ft.Icons.KEYBOARD_ARROW_RIGHT_ROUNDED,
-            icon_color=CYAN,
+            icon=ft.Icons.CHEVRON_RIGHT_ROUNDED,
+            icon_color=DIM,
+            icon_size=20,
+            disabled=True,
+            tooltip="Next Page",
             on_click=lambda e: self.page.run_task(self.change_page, self.current_page + 1, scroll_to_bottom=False),
         )
         self._page_label = ft.Text(
@@ -974,14 +979,17 @@ class SearchView:
             weight=ft.FontWeight.W_700,
         )
         self._pagination_bar = ft.Container(
-            content=ft.Row(
-                [
-                    self._prev_page_btn,
-                    self._page_label,
-                    self._next_page_btn,
-                ],
-                alignment=ft.MainAxisAlignment.CENTER,
-                spacing=20,
+            content=ft.GestureDetector(
+                content=ft.Row(
+                    [
+                        self._prev_page_btn,
+                        self._page_label,
+                        self._next_page_btn,
+                    ],
+                    alignment=ft.MainAxisAlignment.CENTER,
+                    spacing=20,
+                ),
+                on_horizontal_drag_end=self._on_pagination_swipe,
             ),
             bgcolor=apply_opacity(0.1, SURFACE),
             border_radius=12,
@@ -1228,88 +1236,72 @@ class SearchView:
         return ft.Container(
             content=ft.Row(
                 [
-                    ft.Icon(ft.Icons.KEYBOARD_DOUBLE_ARROW_UP_ROUNDED, color=apply_opacity(0.3, CYAN), size=14),
-                    ft.Text("Scroll up for previous page", color=DIM, size=11, weight=ft.FontWeight.W_500),
-                    ft.Icon(ft.Icons.KEYBOARD_DOUBLE_ARROW_UP_ROUNDED, color=apply_opacity(0.3, CYAN), size=14),
+                    ft.Icon(ft.Icons.KEYBOARD_DOUBLE_ARROW_UP_ROUNDED, color=CYAN, size=16),
+                    ft.Text("Swipe on pagination bar or tap arrows to load previous page", color=TEXT, size=11, weight=ft.FontWeight.W_500),
+                    ft.Icon(ft.Icons.KEYBOARD_DOUBLE_ARROW_UP_ROUNDED, color=CYAN, size=16),
                 ],
                 alignment=ft.MainAxisAlignment.CENTER,
-                spacing=8,
+                spacing=10,
             ),
-            height=40,
+            height=48,
             alignment=ft.Alignment(0, 0),
-            bgcolor=apply_opacity(0.02, SURFACE),
-            border_radius=8,
-            margin=ft.Margin.only(bottom=8),
+            bgcolor=apply_opacity(0.03, CYAN),
+            border=ft.Border.all(1, apply_opacity(0.08, CYAN)),
+            border_radius=12,
+            margin=ft.Margin.only(bottom=12),
         )
 
     def _build_bottom_ghost(self) -> ft.Control:
         return ft.Container(
             content=ft.Row(
                 [
-                    ft.Icon(ft.Icons.KEYBOARD_DOUBLE_ARROW_DOWN_ROUNDED, color=apply_opacity(0.3, CYAN), size=14),
-                    ft.Text("Scroll down for next page", color=DIM, size=11, weight=ft.FontWeight.W_500),
-                    ft.Icon(ft.Icons.KEYBOARD_DOUBLE_ARROW_DOWN_ROUNDED, color=apply_opacity(0.3, CYAN), size=14),
+                    ft.Icon(ft.Icons.KEYBOARD_DOUBLE_ARROW_DOWN_ROUNDED, color=CYAN, size=16),
+                    ft.Text("Swipe on pagination bar or tap arrows to load next page", color=TEXT, size=11, weight=ft.FontWeight.W_500),
+                    ft.Icon(ft.Icons.KEYBOARD_DOUBLE_ARROW_DOWN_ROUNDED, color=CYAN, size=16),
                 ],
                 alignment=ft.MainAxisAlignment.CENTER,
-                spacing=8,
+                spacing=10,
             ),
-            height=40,
+            height=48,
             alignment=ft.Alignment(0, 0),
-            bgcolor=apply_opacity(0.02, SURFACE),
-            border_radius=8,
-            margin=ft.Margin.only(top=8),
+            bgcolor=apply_opacity(0.03, CYAN),
+            border=ft.Border.all(1, apply_opacity(0.08, CYAN)),
+            border_radius=12,
+            margin=ft.Margin.only(top=12),
         )
 
     def _update_pagination_ui(self):
         total = max(1, self.total_pages)
         self._page_label.value = f"Page {self.current_page + 1} of {total}"
-        
         self._prev_page_btn.disabled = self.current_page <= 0
         self._prev_page_btn.icon_color = DIM if self.current_page <= 0 else CYAN
-        
         self._next_page_btn.disabled = self.current_page >= self.total_pages - 1
-        self._next_page_btn.icon_color = DIM if self.current_page >= self.total_pages - 1 else CYAN
-        
         self._pagination_bar.visible = self.total_pages > 1
         self.try_update(self._pagination_bar)
 
     def _on_list_scroll(self, e: ft.OnScrollEvent):
+        # Position-tracking only; no auto-advance on boundary. Pagination is
+        # explicit via the pagination bar (tap arrows or swipe horizontally),
+        # mirroring LibraryView.
         if self._is_changing_page or getattr(self, "_is_programmatic_scroll", False):
             return
-        current_pixels = e.pixels
-        direction = current_pixels - getattr(self, "_last_scroll_pixels", 0)
-        self._last_scroll_pixels = current_pixels
-        
-        import time
-        now = time.time()
-        
-        # Bottom Boundary check (scroll down to next page)
-        if e.max_scroll_extent > 0 and current_pixels >= e.max_scroll_extent - 10:
-            if direction > 0:
-                if not getattr(self, "_at_bottom_boundary", False):
-                    self._at_bottom_boundary = True
-                    self._bottom_boundary_time = now
-                elif now - getattr(self, "_bottom_boundary_time", 0) > 0.28:
-                    self._at_bottom_boundary = False
-                    if self.current_page < self.total_pages - 1:
-                        self.page.run_task(self.change_page, self.current_page + 1, scroll_to_bottom=False)
-        else:
-            if direction < 0:
-                self._at_bottom_boundary = False
-                
-        # Top Boundary check (scroll up to prev page)
-        if current_pixels <= 5:
-            if direction < 0:
-                if not getattr(self, "_at_top_boundary", False):
-                    self._at_top_boundary = True
-                    self._top_boundary_time = now
-                elif now - getattr(self, "_top_boundary_time", 0) > 0.28:
-                    self._at_top_boundary = False
-                    if self.current_page > 0:
-                        self.page.run_task(self.change_page, self.current_page - 1, scroll_to_bottom=True)
-        else:
-            if direction > 0:
-                self._at_top_boundary = False
+        self._last_scroll_pixels = e.pixels
+
+    def _on_pagination_swipe(self, e):
+        """Switch pages on horizontal swipe of the pagination bar. Same
+        velocity threshold and direction mapping as LibraryView so the two
+        pages feel identical."""
+        if self._is_changing_page or getattr(self, "_is_programmatic_scroll", False):
+            return
+        vx = getattr(e, "primary_velocity", 0) or 0
+        if abs(vx) < 300:
+            return
+        if vx < 0:  # swipe left → next
+            if self.current_page < self.total_pages - 1:
+                self.page.run_task(self.change_page, self.current_page + 1)
+        else:       # swipe right → previous
+            if self.current_page > 0:
+                self.page.run_task(self.change_page, self.current_page - 1, scroll_to_bottom=True)
 
     async def change_page(self, new_page: int, scroll_to_bottom: bool = False):
         if self._is_changing_page or new_page < 0 or new_page >= self.total_pages:
@@ -1554,10 +1546,18 @@ class SearchView:
 
     # ── search logic ────────────────────────────────────────────────────────
     def _clear_search(self, _e=None):
+        # Bump current_search_id so any in-flight searcher.search callback
+        # fails its id-equality guard in _on_results and gets dropped.
+        # Without this, an in-flight callback that resolves *after* the user
+        # taps X will repopulate cached_results and the list — effectively
+        # re-running the search the user just dismissed.
+        self.current_search_id += 1
+
         def _mutate():
             self._stop_skeleton_pulse()
             self._search_field.value = ""
             self._clear_btn.visible  = False
+            self._search_indicator.visible = False
             self._results_list.controls.clear()
             self._empty_label.visible = False
             self.cached_results = {"track": [], "album": [], "artist": []}
@@ -7052,6 +7052,20 @@ class StreamripFletApp:
 
     async def open_auto_playlist_dialog(self, playlist_id):
         logger.info(f"Opening Playlist Creation dialog for playlist {playlist_id}")
+        # Mood dropdown drives selection. Options are MOOD_KEYWORDS so a
+        # change here doesn't drift from what the assistant recognises.
+        from utils.assistant_intent import MOOD_KEYWORDS
+        mood_dropdown = ft.Dropdown(
+            label="Mood",
+            value="chill",
+            options=[ft.dropdown.Option(m) for m in MOOD_KEYWORDS],
+            bgcolor=SURFACE2,
+            border_color=BORDER,
+            focused_border_color=CYAN,
+            text_style=ft.TextStyle(color=TEXT, size=13),
+            label_style=ft.TextStyle(color=CYAN, size=11),
+            border_radius=10,
+        )
         # Length slider: 5-50 tracks. Default 20; long enough to feel like a
         # real playlist while still fitting on screen.
         length_slider = ft.Slider(
@@ -7065,58 +7079,47 @@ class StreamripFletApp:
         )
 
         async def _generate():
-            from utils.dsp import FEATURES_VERSION
-            from utils.auto_playlist import generate_knn_playlist
+            from utils.auto_playlist import generate_mood_playlist
             gen_btn.disabled = True
+            mood_dropdown.disabled = True
             length_slider.disabled = True
             loading_indicator.visible = True
             self.page.update()
 
             try:
-                # Use the assistant's library-wide DSP sweep — we no longer
-                # run a per-dialog hot-set analyse loop. If features are
-                # missing, point the user at the Jarvis rescan flow and bail.
-                ready = await self.db_manager.get_tracks_with_features(
-                    FEATURES_VERSION
-                )
-                if not ready:
-                    self.show_snackbar(
-                        "No DSP-analysed tracks yet. Open Jarvis and accept "
-                        "the rescan prompt, then try again.",
-                        color="#FF4444",
-                    )
-                    return
-                if len(ready) < 2:
-                    self.show_snackbar(
-                        "Need at least 2 analysed tracks. Run a rescan via "
-                        "Jarvis to populate features for the rest of the library.",
-                        color="#FF4444",
-                    )
+                mood = (mood_dropdown.value or "").strip().lower()
+                if not mood:
+                    self.show_snackbar("Pick a mood first.", color="#FF4444")
                     return
 
-                # Pick a random seed from the analysed library.
-                import random
-                seed_track = random.choice(ready)
-                seed_path = seed_track["path"]
-
-                # KNN selection is a handful of numpy ops on the library
-                # feature matrix (no matrix-power convergence); cheap enough
-                # to run on the asyncio loop for typical libraries.
                 target_length = int(length_slider.value)
-                magic_paths = generate_knn_playlist(seed_path, ready, target_length)
+                tracks = await generate_mood_playlist(
+                    self.db_manager, mood, target_length
+                )
+                if not tracks:
+                    # Either unknown mood (shouldn't happen — dropdown is
+                    # constrained) or no analysed tracks. Point at the rescan
+                    # flow either way.
+                    self.show_snackbar(
+                        "Not enough analysed tracks for this mood. Open Jarvis "
+                        "and accept the rescan prompt, then try again.",
+                        color="#FF4444",
+                    )
+                    return
 
-                # Persist into the chosen playlist.
-                for path in magic_paths:
-                    await self.db_manager.add_track_to_playlist(playlist_id, path)
+                for t in tracks:
+                    await self.db_manager.add_track_to_playlist(
+                        playlist_id, t["path"]
+                    )
 
                 self.show_snackbar(
-                    f"Generated {len(magic_paths)} tracks!",
+                    f"Generated {len(tracks)} {mood} tracks!",
                     icon=ft.Icons.CHECK_CIRCLE, color=CYAN,
                 )
                 await self.library_view.load_library()
 
             except Exception as ex:
-                logger.exception("Magic Generation failed")
+                logger.exception("Mood playlist generation failed")
                 self.show_snackbar(f"Generation failed: {ex}", color="#FF4444")
             finally:
                 dlg.open = False
@@ -7134,13 +7137,16 @@ class StreamripFletApp:
             ),
             content=ft.Column([
                 ft.Text(
-                    "K-nearest-neighbour selection over the full library's "
-                    "DSP feature vectors picks the tracks closest to a random "
-                    "seed and orders them into a smooth listening arc. Tracks "
-                    "without features are skipped — run a rescan via Jarvis "
-                    "to analyse the rest of your library.",
+                    "Mood-driven selection ranks every DSP-analysed track in "
+                    "your library against the chosen mood profile (z-scored, "
+                    "weighted dot product) and orders the top picks into a "
+                    "smooth listening arc. Tracks without features are skipped "
+                    "— run a rescan via Jarvis to analyse the rest of your library.",
                     size=12, color=DIM,
                 ),
+                ft.Container(height=10),
+                ft.Text("Mood", size=13, weight=ft.FontWeight.W_600),
+                mood_dropdown,
                 ft.Container(height=10),
                 ft.Text("Playlist length", size=13, weight=ft.FontWeight.W_600),
                 length_slider,

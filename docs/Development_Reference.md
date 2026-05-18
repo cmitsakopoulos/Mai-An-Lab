@@ -22,18 +22,40 @@ To prevent the Android OS from killing the Python process during background play
 
 ## 2. DSP & PCM Extraction Pipeline
 
-The "Playlist Creation" engine requires precise acoustic features, which are extracted directly on the Android device using hardware-accelerated codecs.
+The "Playlist Creation" engine requires precise acoustic features to construct similarity matrices. While the engine includes a fully functional on-device extraction pipeline (useful as a fallback for new single downloads), running DSP across an entire library is impractically slow on mobile CPUs (~10+ seconds per track). 
 
-### Native Decoding Flow
-1. **Request**; Python sends a `decode_pcm` request with a file path to the Kotlin bridge.
-2. **MediaExtractor**; the Kotlin layer uses `MediaExtractor` to identify the track's format and locate the audio stream.
-3. **MediaCodec**; the hardware decoder (`MediaCodec`) extracts raw PCM samples at a target sample rate of **22,050 Hz**.
-4. **PCM File**; samples are written to `appContext.cacheDir/dsp_pcm/<hash>.pcm` (the app's private internal storage, always accessible to Python in the same process). The bridge returns the absolute path, not the bytes themselves; this avoids serialising ~4 MB of audio across the Dart↔Python event channel for every track.
-5. **Feature Extraction**; Python (via `numpy`) memory-maps the PCM file and extracts the 38D feature vector (BPM, Energy, MFCCs, Chroma).
+To resolve this, Mai-An Lab implements a hybrid workflow that offloads library-wide analysis to a host laptop.
 
-### Performance Considerations
-- **Hardware-Accelerated**; by using `MediaCodec`, decoding is significantly faster and more battery-efficient than software-based decoders like FFmpeg.
-- **Batched Processing**; to avoid UI stutter, DSP analysis is performed on a background thread in Kotlin and a separate `asyncio` task in Python.
+### 2.1 Native On-Device Decoding Flow (Fallback)
+1. **Request**: Python sends a `decode_pcm` request with a file path to the Kotlin bridge.
+2. **MediaExtractor**: The Kotlin layer uses `MediaExtractor` to identify the track's format and locate the audio stream.
+3. **MediaCodec**: The hardware decoder (`MediaCodec`) extracts raw PCM samples at a target sample rate of **22,050 Hz** from the middle 120s of the track.
+4. **PCM File**: Samples are written to `appContext.cacheDir/dsp_pcm/<hash>.pcm` (the app's private internal storage, always accessible to Python in the same process). The bridge returns the absolute path, not the bytes themselves, avoiding serializing ~4 MB of audio across Dart ↔ Python channels.
+5. **Feature Extraction**: Python (via pure-NumPy `StreamripApp/utils/dsp.py`) memory-maps the PCM file and extracts the **60D feature vector** (consisting of a 52D packed timbre/chroma profile BLOB and 8 scalar descriptors, detailed in `docs/Auto_Playlist_Engine.md`).
+
+### 2.2 Performance Considerations
+- **Hardware-Accelerated**: Using `MediaCodec` keeps on-device decoding battery-efficient and fast compared to native mobile software-based decoding.
+- **Batched Processing**: To avoid UI stutter, on-device analysis is handled via Kotlin worker threads and separate `asyncio` tasks in Python.
+
+### 2.3 The Laptop-Offload Pipeline (`tools/dsp_offload.py` / `tools/auto_offload.sh`)
+To make bulk ingestion feasible, the companion script `tools/dsp_offload.py` offloads feature extraction to the user's computer, running at **~200 ms per track** (a 50x speedup). 
+
+> [!IMPORTANT]
+> **ADB USB Debugging Requirement**: For the laptop-offload script to interact with your device over ADB, you must unlock and enable **USB Debugging** in Android's developer settings, connect the phone to your laptop, and authorize the laptop's connection key on the phone's screen. See [Auto-Playlist Engine Guide](./Auto_Playlist_Engine.md#5-laptop-offload-analysis-pipeline) for full setup instructions.
+
+> [!TIP]
+> **One-Touch Offload Script (`tools/auto_offload.sh`)**: During development, you can automate this entire round-trip (pulling live databases directly from Android private app storage `/data/user/0/com.mitsakopoulos.maianlab.mai_an_lab/app_flutter`, running the offloader, stopping the app, and writing back the database) using `./tools/auto_offload.sh`.
+
+The offloader is designed with several production engineering optimizations:
+- **Zero Math Duplication**: It directly imports and shares the app's native NumPy feature pipeline (`StreamripApp/utils/dsp.py` via `sys.path` injection), ensuring that feature extraction models written on the host are exactly identical to what the app expects (`FEATURES_VERSION = 3`).
+- **ADB Tar Streaming**: Instead of executing `adb pull` for every track—which pays a 50–200 ms handshake penalty per file—the script bundles track lists into batches of 100 and streams them in a single command (`adb exec-out tar -cf - -T <list>`). This amortizes connection overhead and saves minutes on large libraries.
+- **Parallel CPU Ingestion**: Decodes audio using multi-process `ffmpeg` pipelines and extracts features using a Python `ThreadPoolExecutor`. Because both `ffmpeg` spawns and heavy NumPy/FFT operations release the Python GIL, workers scale linearly across all CPU cores.
+- **Transactional SQLite WAL Batching**: Features are upserted into the SQLite database in single-transaction chunks inside a `BEGIN/COMMIT` boundary. This is orders of magnitude faster than single-row commits and guarantees database integrity—if interrupted, the script resumes from the last completed chunk.
+- **Persistent Double Cache**: The script maintains a local `--workdir` containing:
+  - `audio_cache/`: A local mirror of the phone's music library structure, preventing redownloading files.
+  - `<audio_file>.pcm`: Decoded mono PCM frames, ensuring that if you tweak the feature-extraction pipeline parameters, you can re-run the extraction step instantly without re-decoding.
+- **Defensive Migrations**: The script inspects the bundle DB and automatically runs `ALTER TABLE play_counts ADD COLUMN` migrations if a pre-v3 bundle is provided, making the tool backward-compatible with any exported app state.
+
 
 ### Cross-Thread Method Channel Reply (gotcha)
 Kotlin runs `decodePcm` on a `Executors.newSingleThreadExecutor()` background thread so the foreground codec is not blocked. Flutter's `MethodChannel.Result` callbacks **must** be delivered on the main looper — calling `result.success(...)` from the worker thread silently drops the reply on some Android builds. The symptom is misleading: the Kotlin log shows a clean decode, the PCM file is written, but the Dart side receives `null`. The Dart wrapper at `_runDecode` then emits a `decode_complete` event with no `ok` key, which the Python correlator surfaces as `RuntimeError("decode failed")` for every track.

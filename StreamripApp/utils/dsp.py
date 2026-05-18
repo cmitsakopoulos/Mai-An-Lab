@@ -79,7 +79,11 @@ def _trace(msg: str) -> None:
 # v1: 13-dim MFCC mean only (timbre BLOB = 13 floats).
 # v2: 38-dim sound profile (mfcc_mean[13] + mfcc_std[13] + chroma[12]) plus
 #     spectral_rolloff and beat_strength scalars. 90 s decode window (was 60).
-FEATURES_VERSION = 2
+# v3: HPSS-clean chroma + MFCC, MFCC deltas instead of std, +3 scalars
+#     (spectral_flatness, spectral_contrast, key_index). 120 s decode window.
+#     Destructive change — every track requires a re-analyse via the offload
+#     script. No backwards-compat read path.
+FEATURES_VERSION = 3
 
 # Frame parameters. n_fft=2048 / hop=512 at 22050 Hz → ~93 ms windows hopping
 # every ~23 ms (~43 frames/sec). These are the conventional defaults from
@@ -87,12 +91,20 @@ FEATURES_VERSION = 2
 # (enough for spectral centroid + mel) with onset time accuracy.
 N_FFT = 2048
 HOP = 512
-N_MELS = 40
-N_MFCC = 13
+N_MELS = 64       # v3: was 40; finer mel resolution → cleaner MFCC
+N_MFCC = 20       # v3: was 13; more spectral envelope detail
 N_CHROMA = 12
-# Total length of the packed sound-profile BLOB (mfcc_mean + mfcc_std + chroma).
-# Stored as float32 little-endian; kept as a single BLOB rather than three
-# columns so adding a new descriptor only touches FEATURES_VERSION.
+# Decode window in seconds. Pulled by the offload script's ffmpeg call. Now
+# that DSP runs on the laptop, the per-track wall-clock cost of a longer
+# window is negligible (extra ~700 ms/track on laptop CPU) and stabilises
+# every statistic noticeably.
+MAX_SECONDS = 120
+# Total length of the packed sound-profile BLOB. v3 layout:
+#   [0 : N_MFCC)              mfcc_mean       (20 floats)
+#   [N_MFCC : 2*N_MFCC)       mfcc_delta_mean (20 floats)
+#   [2*N_MFCC : ...)          chroma          (12 floats)
+# Stored as float32 little-endian; one BLOB so adding a new descriptor only
+# requires touching FEATURES_VERSION + the embedding layout.
 EMBED_DIMS = N_MFCC + N_MFCC + N_CHROMA
 TARGET_SAMPLE_RATE = 22050  # must match the Kotlin decoder's TARGET_SAMPLE_RATE
 
@@ -111,20 +123,23 @@ class Features:
     brightness: float          # [0, 1] mean spectral centroid / Nyquist
     rolloff: float             # [0, 1] mean 85-percentile rolloff / Nyquist
     beat_strength: float       # [0, 1] prominence of the chosen tempo peak
-    mfcc_mean: np.ndarray      # (N_MFCC,) timbre; average MFCC across frames
-    mfcc_std: np.ndarray       # (N_MFCC,) timbral dynamics; frame-to-frame variance
-    chroma: np.ndarray         # (N_CHROMA,) mean pitch-class energy → harmonic profile
+    spectral_flatness: float   # [0, 1] tonal (low) vs noisy (high), Wiener entropy
+    spectral_contrast: float   # [0, 1] mean peak-to-valley across sub-bands
+    key_index: int             # 0..11 = C..B major, 12..23 = C..B minor
+    mfcc_mean: np.ndarray      # (N_MFCC,) mean MFCC over HPSS-harmonic content
+    mfcc_delta: np.ndarray     # (N_MFCC,) mean MFCC first derivative (Δ)
+    chroma: np.ndarray         # (N_CHROMA,) mean pitch-class profile (HPSS-harmonic)
 
     def timbre_blob(self) -> bytes:
-        """Pack mfcc_mean + mfcc_std + chroma into a single float32 LE BLOB.
+        """Pack mfcc_mean + mfcc_delta + chroma into a single float32 LE BLOB.
 
-        Layout (38 × 4 = 152 bytes):
-            [ 0:13)  mfcc_mean
-            [13:26)  mfcc_std
-            [26:38)  chroma
+        v3 layout (52 × 4 = 208 bytes):
+            [ 0:20)  mfcc_mean
+            [20:40)  mfcc_delta
+            [40:52)  chroma
         """
         return (
-            np.concatenate([self.mfcc_mean, self.mfcc_std, self.chroma])
+            np.concatenate([self.mfcc_mean, self.mfcc_delta, self.chroma])
             .astype("<f4")
             .tobytes()
         )
@@ -133,9 +148,9 @@ class Features:
 def unpack_timbre(blob: bytes | None) -> np.ndarray | None:
     """Inverse of Features.timbre_blob. Returns None for missing/malformed.
 
-    Returns the full 38-dim vector. Callers that need the individual groups
-    can use `unpack_embedding_groups`. The single-vector form is what the
-    auto_playlist KNN selector consumes; it slices internally.
+    Returns the full EMBED_DIMS vector. Callers that need the individual
+    groups can use `unpack_embedding_groups`. The single-vector form is what
+    the auto_playlist KNN selector consumes; it slices internally.
     """
     if not blob or len(blob) != EMBED_DIMS * 4:
         return None
@@ -143,7 +158,7 @@ def unpack_timbre(blob: bytes | None) -> np.ndarray | None:
 
 
 def unpack_embedding_groups(blob: bytes | None):
-    """Returns (mfcc_mean, mfcc_std, chroma) or None for missing/malformed."""
+    """Returns (mfcc_mean, mfcc_delta, chroma) or None for missing/malformed."""
     v = unpack_timbre(blob)
     if v is None:
         return None
@@ -210,13 +225,15 @@ async def _decode_pcm_ffmpeg(path: str) -> tuple[str, int]:
     out_path = os.path.join(cache_dir, f"{abs(hash(path))}.pcm")
 
     # We don't know the duration up front without an extra ffprobe call. Just
-    # ask ffmpeg to skip 15s and read 40s; for short tracks this still
-    # does the right thing (it just reads to EOF). The window
-    # matches the Kotlin path's MAX_SECONDS.
+    # ask ffmpeg to skip 15s and read MAX_SECONDS; for short tracks this
+    # still does the right thing (it just reads to EOF). MAX_SECONDS is the
+    # canonical window used by the offload script; v3 set it to 120 s
+    # because the laptop-side compute cost is trivial and longer windows
+    # stabilise BPM/MFCC statistics meaningfully.
     cmd = [
         ffmpeg, "-hide_banner", "-loglevel", "error",
         "-ss", "15",                     # skip first 15s (intro)
-        "-t", "40",                      # cap at 40s; matches Kotlin
+        "-t", str(MAX_SECONDS),
         "-i", path,
         "-f", "s16le",
         "-acodec", "pcm_s16le",
@@ -491,7 +508,7 @@ def _mfcc_per_frame(mag: np.ndarray, sr: int) -> np.ndarray:
 
     Pipeline: power spectrum → mel filterbank → log → DCT-II → drop coeff 0
     (overall loudness, already captured by `energy`) → take coeffs [1, N_MFCC].
-    The caller computes mean and std along axis 0; keeping per-frame around
+    The caller computes mean and delta along axis 0; keeping per-frame around
     lets us derive both descriptors from a single FFT pass.
     """
     power = mag * mag
@@ -503,8 +520,177 @@ def _mfcc_per_frame(mag: np.ndarray, sr: int) -> np.ndarray:
     return mfcc_full[:, 1:].astype(np.float32)  # drop coeff 0
 
 
+def _mfcc_delta(mfcc: np.ndarray, width: int = 9) -> np.ndarray:
+    """First-order temporal derivative of an MFCC matrix (per coefficient).
+
+    Standard formula (Sahidullah 2012 / HTK convention):
+        Δ[t] = Σ n·(x[t+n] − x[t−n])  /  2·Σ n²       for n in 1..N
+
+    where N = width//2 (half-window). Implemented as a centred weighted sum
+    via a sliding-window view along the time axis. Padded with edge
+    replication so the result has the same shape as the input.
+
+    Captures *how* timbre evolves frame-to-frame — strictly more informative
+    than raw std (which can't distinguish a smooth drift from rapid
+    oscillation between two stable timbres).
+    """
+    if mfcc.shape[0] < width:
+        return np.zeros_like(mfcc)
+    N = width // 2
+    weights = np.arange(-N, N + 1, dtype=np.float32)
+    norm = 2.0 * float((weights[weights > 0] ** 2).sum())
+    pad = ((N, N), (0, 0))
+    padded = np.pad(mfcc, pad, mode="edge")
+    # sliding_window_view along axis 0 appends a trailing axis of length=width.
+    windows = np.lib.stride_tricks.sliding_window_view(padded, window_shape=width, axis=0)
+    # windows shape: (n_frames, n_coeffs, width). Weight along the last axis.
+    return (windows * weights).sum(axis=-1).astype(np.float32) / norm
+
+
+# ─── HPSS (harmonic / percussive separation) ───────────────────────────────
+
+# Median-filter kernel sizes (Fitzgerald 2010). The standard librosa
+# defaults; chosen so the time kernel spans ~400 ms (suppresses sustained
+# tones when looking for transients) and the frequency kernel spans ~180 Hz
+# (suppresses narrow harmonic ridges when looking for broadband transients).
+_HPSS_KERNEL_TIME = 17
+_HPSS_KERNEL_FREQ = 17
+
+
+def _median_filter_axis(x: np.ndarray, axis: int, size: int) -> np.ndarray:
+    """Sliding-window median along `axis`. Pure-numpy replacement for
+    `scipy.signal.medfilt2d` — we deliberately avoid scipy as a dependency
+    because it has no usable Android wheel and we want one DSP path that
+    works on every host. Memory is fine at our sizes (~1000 bins × ~5000
+    frames × 17 trailing window = ~340 MB peak inside a view, then a per-
+    window sort + median which numpy does in place)."""
+    pad = size // 2
+    pad_width = [(0, 0)] * x.ndim
+    pad_width[axis] = (pad, pad)
+    padded = np.pad(x, pad_width, mode="reflect")
+    windows = np.lib.stride_tricks.sliding_window_view(
+        padded, window_shape=size, axis=axis,
+    )
+    # sliding_window_view appends a trailing axis of length=size.
+    return np.median(windows, axis=-1).astype(x.dtype, copy=False)
+
+
+def _hpss(mag: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Harmonic / percussive source separation via median filtering.
+
+    Returns (H_mag, P_mag), same shape as input. Harmonic content is
+    sustained in time (large H from time-axis median); percussive content
+    is broadband in frequency (large P from frequency-axis median). A
+    soft Wiener-style mask splits the original magnitude spectrogram.
+
+    Used downstream so chroma + MFCC see only sustained harmonic content
+    (cleaner pitch / timbre estimates) and onset detection sees only
+    transients (much better BPM estimates, especially for slow / sparse
+    tracks where drum bleed used to drag chroma toward the kick's pitch).
+    """
+    H = _median_filter_axis(mag, axis=0, size=_HPSS_KERNEL_TIME)
+    P = _median_filter_axis(mag, axis=1, size=_HPSS_KERNEL_FREQ)
+    eps = np.float32(1e-10)
+    H_sq = H * H
+    P_sq = P * P
+    denom = H_sq + P_sq + eps
+    return (mag * (H_sq / denom)).astype(np.float32), \
+           (mag * (P_sq / denom)).astype(np.float32)
+
+
+# ─── New scalar descriptors (v3) ───────────────────────────────────────────
+
+def _spectral_flatness(mag: np.ndarray) -> float:
+    """Per-frame Wiener entropy averaged across frames.
+
+    Flatness = geometric_mean(|X|) / arithmetic_mean(|X|). Pure tones
+    approach 0 (peaked spectrum); white noise approaches 1 (flat). Music
+    typically sits in [0.05, 0.3]; metal/distorted pushes higher, sparse
+    acoustic / piano stays lower.
+    """
+    safe = mag + 1e-10
+    geom = np.exp(np.log(safe).mean(axis=1))
+    arith = safe.mean(axis=1)
+    return float((geom / arith).mean())
+
+
+def _spectral_contrast(mag: np.ndarray, n_bands: int = 6) -> float:
+    """Mean peak-to-valley contrast across `n_bands` frequency sub-bands,
+    in dB, then normalised to roughly [0, 1] by a 40 dB ceiling.
+
+    For each band, take the 80th-percentile magnitude as the "peak" and the
+    20th as the "valley"; the dB difference is the contrast. High contrast
+    (clear tonal peaks above a low noise floor) means melodic / tonal;
+    low contrast (peaks and valleys both close) means noisy / textured.
+    Complements `spectral_flatness` — flatness is per-frame entropy,
+    contrast is per-band dynamic range.
+    """
+    n_bins = mag.shape[1]
+    edges = np.linspace(0, n_bins, n_bands + 1, dtype=int)
+    contrasts = []
+    for i in range(n_bands):
+        lo, hi = edges[i], edges[i + 1]
+        if hi <= lo + 1:
+            continue
+        band = mag[:, lo:hi] + 1e-10
+        peak = np.percentile(band, 80, axis=1)
+        valley = np.percentile(band, 20, axis=1)
+        contrasts.append(20.0 * np.log10(peak / valley))
+    if not contrasts:
+        return 0.0
+    return float(np.clip(np.mean(contrasts) / 40.0, 0.0, 1.0))
+
+
+# Krumhansl–Schmuckler (1982) key-profile templates. Probe-tone rating
+# averages for the major and natural minor modes; the 12 values represent
+# the relative "fit" of each chromatic pitch class in the key.
+_KS_MAJOR = np.array(
+    [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88],
+    dtype=np.float32,
+)
+_KS_MINOR = np.array(
+    [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17],
+    dtype=np.float32,
+)
+
+
+def _estimate_key(chroma: np.ndarray) -> int:
+    """Returns key_index in [0, 23]:
+       0..11  → C, C#/Db, D, D#/Eb, E, F, F#/Gb, G, G#/Ab, A, A#/Bb, B major
+       12..23 → same pitch classes, minor
+
+    Correlates the track's mean chroma vector against 24 rotated templates
+    (12 keys × 2 modes); argmax is the best fit. Cheap (negligible vs MFCC
+    cost) and accurate enough to support 'play minor' / 'play in same key'
+    queries in the mood layer.
+    """
+    if chroma.sum() < 1e-6:
+        return 0  # silent / unkeyed track; default to C major
+    c = chroma - chroma.mean()
+    norm_c = float(np.linalg.norm(c)) + 1e-9
+    best_score = -np.inf
+    best_idx = 0
+    for mode_idx, template in enumerate((_KS_MAJOR, _KS_MINOR)):
+        t = template - template.mean()
+        norm_t = float(np.linalg.norm(t)) + 1e-9
+        for root in range(12):
+            rotated = np.roll(t, root)
+            score = float(np.dot(c, rotated)) / (norm_c * norm_t)
+            if score > best_score:
+                best_score = score
+                best_idx = mode_idx * 12 + root
+    return int(best_idx)
+
+
 def extract_features_from_pcm(pcm_path: str, sr: int) -> Features:
-    """Run the full feature pipeline on a decoded PCM file.
+    """Run the v3 feature pipeline on a decoded PCM file.
+
+    Pipeline:
+        decode → STFT → HPSS split → {
+            energy / brightness / rolloff / flatness / contrast  on full mag
+            chroma + key + MFCC                                   on harmonic
+            onset envelope + BPM                                  on percussive
+        }
 
     All numpy work is synchronous; callers should `asyncio.to_thread` this if
     they're on the main loop.
@@ -515,29 +701,34 @@ def extract_features_from_pcm(pcm_path: str, sr: int) -> Features:
     t1 = time.perf_counter()
     mag, freqs = _stft_magnitude(x, sr)
     t2 = time.perf_counter()
-    energy = _energy_db(x)
+    H_mag, P_mag = _hpss(mag)
     t3 = time.perf_counter()
+
+    energy = _energy_db(x)
     brightness = _brightness(mag, freqs, sr)
-    t4 = time.perf_counter()
     rolloff = _spectral_rolloff(mag, freqs, sr)
+    flatness = _spectral_flatness(mag)
+    contrast = _spectral_contrast(mag)
+    t4 = time.perf_counter()
+
+    chroma = _chroma_mean(H_mag, freqs)
+    key_idx = _estimate_key(chroma)
     t5 = time.perf_counter()
-    chroma = _chroma_mean(mag, freqs)
-    t6 = time.perf_counter()
-    onset_env = _onset_envelope(mag)
-    t7 = time.perf_counter()
+
+    onset_env = _onset_envelope(P_mag)
     bpm, beat_strength = _estimate_bpm(onset_env, sr)
-    t8 = time.perf_counter()
-    mfcc = _mfcc_per_frame(mag, sr)
-    t9 = time.perf_counter()
+    t6 = time.perf_counter()
+
+    mfcc = _mfcc_per_frame(H_mag, sr)
     mfcc_mean = mfcc.mean(axis=0).astype(np.float32)
-    mfcc_std = mfcc.std(axis=0).astype(np.float32)
-    t10 = time.perf_counter()
+    mfcc_delta_frames = _mfcc_delta(mfcc, width=9)
+    mfcc_delta_mean = mfcc_delta_frames.mean(axis=0).astype(np.float32)
+    t7 = time.perf_counter()
 
     _trace(
         f"  EXTRACT STEPS: load={t1 - t0:.3f}s, stft={t2 - t1:.3f}s, "
-        f"energy={t3 - t2:.3f}s, brightness={t4 - t3:.3f}s, rolloff={t5 - t4:.3f}s, "
-        f"chroma={t6 - t5:.3f}s, onset={t7 - t6:.3f}s, bpm={t8 - t7:.3f}s, "
-        f"mfcc={t9 - t8:.3f}s, stats={t10 - t9:.3f}s"
+        f"hpss={t3 - t2:.3f}s, scalars={t4 - t3:.3f}s, "
+        f"chroma+key={t5 - t4:.3f}s, bpm={t6 - t5:.3f}s, mfcc+delta={t7 - t6:.3f}s"
     )
 
     return Features(
@@ -546,8 +737,11 @@ def extract_features_from_pcm(pcm_path: str, sr: int) -> Features:
         brightness=brightness,
         rolloff=rolloff,
         beat_strength=beat_strength,
+        spectral_flatness=flatness,
+        spectral_contrast=contrast,
+        key_index=key_idx,
         mfcc_mean=mfcc_mean,
-        mfcc_std=mfcc_std,
+        mfcc_delta=mfcc_delta_mean,
         chroma=chroma,
     )
 

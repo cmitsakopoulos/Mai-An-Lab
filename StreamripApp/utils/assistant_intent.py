@@ -70,6 +70,8 @@ MOOD_KEYWORDS = (
     "fast", "quick", "slow", "lazy",
     "dark", "moody", "bright",
     "ambient",
+    # v3 timbre-based moods (driven by spectral_flatness / spectral_contrast)
+    "tonal", "melodic", "noisy", "textured", "acoustic",
 )
 
 
@@ -160,13 +162,17 @@ _PATTERNS: list[tuple[str, re.Pattern]] = [
     )),
 
     # ── Playlist ops ────────────────────────────────────────────────────────
-    # Magic/smart/auto playlist — KNN over the library's DSP features. Must
-    # come BEFORE INTENT_PLAYLIST_CREATE so "create a magic playlist called
-    # X" doesn't get claimed by the plain create-empty pattern.
+    # Mood-driven playlist: "create a chill playlist called X", "make an
+    # energetic playlist named Late Night", etc. The mood word is captured
+    # as `mood`, the name as `q`. Must come BEFORE INTENT_PLAYLIST_CREATE
+    # so the qualified phrasing wins. Also matches the older "magic" /
+    # "smart" wording when paired with a mood adjective for backwards
+    # familiarity ("create a magic chill playlist called X").
     (INTENT_PLAYLIST_AUTO, re.compile(
-        r"^\s*(?:create|make|generate|build)\s+(?:a\s+|an\s+)?(?:new\s+)?"
-        r"(?:magic|smart|auto|automatic|knn)\s+playlist"
-        r"(?:\s+(?:called|named|titled))?\s+(?P<q>.+?)\s*$",
+        rf"^\s*(?:create|make|generate|build)\s+(?:a\s+|an\s+)?(?:new\s+)?"
+        rf"(?:(?:magic|smart|auto|automatic|knn)\s+)?"
+        rf"(?P<mood>{_MOOD_ALT})\s+playlist"
+        rf"(?:\s+(?:called|named|titled))?\s+(?P<q>.+?)\s*$",
         re.I,
     )),
     (INTENT_PLAYLIST_CREATE, re.compile(

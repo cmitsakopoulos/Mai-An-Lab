@@ -32,10 +32,13 @@ class FletAudioServicePlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         // cutting PCM size: 2x vs 44.1k. 22050 Hz is also the librosa default,
         // so any reference checks line up.
         private const val TARGET_SAMPLE_RATE = 22050
-        // Decode at most this many seconds from the middle of the track.
-        // 40s is the optimal window size: it keeps tempo and timbre extremely
-        // stable, while slashing the processing cost per track by more than half.
-        private const val MAX_SECONDS = 40
+        // Decode window. v3 set this to 120 s to match the offload script's
+        // canonical window (utils/dsp.py:MAX_SECONDS). On-device decode is
+        // no longer the primary feature-extraction path — the laptop
+        // offload script owns that — but we keep this constant in sync so
+        // any fallback / interactive analyse on-device produces features
+        // comparable to offload output.
+        private const val MAX_SECONDS = 120
         private const val DECODE_TIMEOUT_US = 10_000L
     }
 
