@@ -95,6 +95,23 @@ Python's `logging` output from the `dsp` module is not routed to logcat in relea
 - Python `logger.warning("FAS: …")` on the `flet_audio_service` logger — visible under the `serious_python` tag.
 - A direct file write to `/sdcard/Download/<name>.log` if the app has `MANAGE_EXTERNAL_STORAGE` (which it does); pull with `adb pull /sdcard/Download/<name>.log`. This bypasses the logging layer entirely and is the most reliable diagnostic channel on a non-debuggable release APK.
 
+### 2.3 Artwork Caching & Temporary Storage Pipeline
+
+To guarantee smooth, lag-free list scrolling on low-spec Android devices and avoid storage bloat, the app deploys an integrated artwork caching and isolation pipeline.
+
+#### 1. Secure Sandboxed Temp Directory & `.nomedia` Isolation
+All transient JPEGs and metadata preview covers are mapped to a dedicated sandboxed subdirectory (`StreamripApp/temp/`) under the app's secure internal storage.
+* **Initialization**: The helper `get_temp_artwork_dir()` resolves this path, dynamically creating it if missing.
+* **Gallery Isolation**: Immediately places a blank `.nomedia` file inside this directory. This signals Android's scanner to ignore the directory entirely, ensuring transient album covers do not pollute the user's Google Photos or native Gallery apps.
+
+#### 2. Thread-Safe LRU Cache Eviction & Physical Pruning
+An in-memory cache `ArtworkCache` (`_ARTWORK_CACHE`) keeps up to **50** hot artwork file paths active.
+* **Disk Eviction Loop**: When a 51st track's artwork is cached, the LRU algorithm pops the oldest item. Unlike standard lazy caches, the popped item's file path is immediately processed using `os.remove` inside `ArtworkCache.put`.
+* **Thread Safety**: All mutations (`get`, `put`, `clear`) are bound by a threading `Lock` context, preventing race conditions during asynchronous scroll-triggered fetches.
+
+#### 3. Graceful Shutdown Sweep
+To prevent progressive filesystem bloating from accumulated cache metadata, the application registers a sweep task in the `on_disconnect` hook. On exit, the routine iterates over the sandboxed `temp` folder and physically erases all temporary files while carefully keeping the `.nomedia` file intact for the next launch.
+
 ---
 
 ## 3. Streaming & Search Implementation

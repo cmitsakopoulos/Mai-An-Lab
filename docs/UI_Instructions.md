@@ -22,7 +22,6 @@ The Library supports four distinct view modes, accessible via tabs at the top:
 - **Real-time Filtering**: The search bar at the top of the Library view filters the current list in real-time.
 - **Debounced Input**: Search queries are debounced by **300ms** to ensure UI responsiveness on large libraries.
 - **Clear Search**: A close icon ('X') appears when text is present, allowing for instant clearing of the filter.
-- **Automatic Collapse**: When the search query changes, all expanded nodes (Artists/Albums) are automatically collapsed to maintain a clean view.
 
 ### 1.4 Sorting
 The Sort menu (accessible via the Sort icon) provides context-aware options:
@@ -32,7 +31,7 @@ The Sort menu (accessible via the Sort icon) provides context-aware options:
 
 ### 1.5 High-Performance Page Pagination & Snappy Gestures
 To keep Flet’s widget tree extremely tiny and guarantee memory-safe, ultra-fluid library navigation even on massive multi-thousand-song catalogs:
-- **Active Slicing**: Library listings (Tracks, Albums, Artists) are sliced into dynamic pages (typically **50 items per page**), rendering only one active page at a time.
+- **Active Slicing**: Library listings (Tracks, Albums, Artists) are sliced into dynamic pages (typically **35 items per page**), rendering only one active page at a time.
 - **Snappy Slide-In Carousel**: Switching pages initiates a lightning-fast hardware-accelerated **Slide-In Offset and Fade Animation** (optimized down to **120ms**), delivering a premium tactile feel.
 - **Tactile Pagination Bar**: An elegant, glassmorphic pagination bar is rendered at the bottom of the screen.
 - **Dual-Control Navigation**:
@@ -54,11 +53,11 @@ The Search view intentionally replicates the Library's aesthetic:
 
 ### 2.2 Source Integration & High-Performance Page Pagination
 - **Default Source**: Qobuz is currently the primary search provider.
-- **Scroll Boundary Pagination**: Removed all rigid per-instance limits. Results are structured into dynamic, paginated lists. Scrolling past the bottom boundary automatically loads the next page, while scrolling to the top boundary transitions back to the previous page.
-- **Slide-In Animation**: To deliver a premium tactile feel, swapping pages instantly teleports the scroll position off-screen and glides the new page into view using a hardware-accelerated **Slide-In Offset Animation**.
-- **Tree-Containment Performance**: By rendering only one active page at a time (typically 20 items) rather than appending thousands of search cards, the Flet widget tree remains tiny, completely preventing memory leaks, layout lag, or battery drain.
+- **Tactile Page Pagination**: To completely prevent infinite-scroll layout lag, battery drain, or memory leaks, search results are structured into discrete pages (typically **35 items per page**), rendering only one active page at a time.
+- **Unified Pagination Bar**: An elegant, glassmorphic pagination bar is rendered at the bottom of the Search results list, featuring a page index (e.g. "Page 1 of 4") and chevrons for forward/backward page navigation.
+- **Boundary Ghost Cards**: Custom glassmorphic boundary ghost cards appear at the top and bottom of the list when scrolled to the limits, directing the user to navigate pages.
+- **Hardware-Accelerated Slide-In**: Swapping pages triggers a hardware-accelerated **Slide-In Offset and Fade Animation** (gliding the new page into view in **250ms**), keeping the transition snappy and premium.
 - **Safe Ceiling Protection**: A general max results ceiling is actively enforced under the hood to secure local memory, preventing the DOM from choking during extremely deep searches.
-- **Credentials**: If Qobuz credentials are missing, a "Setup Required" prompt directs the user to Settings.
 - **Search History**: Recent searches are stored in `recent_searches.json` and can be accessed via a history sheet.
 
 ### 2.3 Audio Previews & Downloads
@@ -128,4 +127,34 @@ Jarvis integrates advanced gesture-based push-to-talk microphone interactions to
 - **Scroll Tracking**:
   * Chat lists leverage native GPU-accelerated scrolling. The viewport smoothly tracks and slides down for new messages *only* if the user is currently at the bottom.
   * If browsing history, new updates append silently in the background, preserving historical reading positions without aggressive snapping.
+
+---
+
+## 5. Onboarding & First-Use Experience
+
+To ensure a premium, friendly first-use experience for new users, Mai-An Lab features explicit onboarding empty states, setup prompts, and voice assistant help:
+
+### 5.1 Library View Empty States
+When a user launches the app for the first time with an unindexed database, the Library view displays highly tailored, context-specific placeholders:
+* **Tracks / Albums / Artists Tabs**: 
+  * Displays a large, faded `LIBRARY_MUSIC_OUTLINED` icon in cyan.
+  * Header: *"It's empty in here."*
+  * Subtitle: *"Index your folders to start listening."*
+  * **Onboarding Action**: Guides the user to tap the **INDEX LIBRARY** button or the Refresh icon in the top-right to initiate a recursive scan of their music folders.
+* **Playlists Tab**:
+  * Displays a faded `QUEUE_MUSIC_ROUNDED` icon in amber.
+  * Header: *"No playlists yet."*
+  * Subtitle: *"Create your first playlist below."*
+
+### 5.2 Search View "Setup Required" Prompt
+If the user navigates to the Search tab without Qobuz credentials configured in their settings:
+* The view replaces the search list with a secure onboarding card featuring a `LOCK_OUTLINE_ROUNDED` icon in cyan.
+* Header: *"Setup Required"*
+* Subtitle: *"Please enter your Qobuz credentials in Settings to enable search."*
+* **Onboarding Action**: Provides an integrated **Refresh** button next to instructions to help the user easily navigate to Settings, enter their token/session details, and instantly activate the search tab without restarting the app.
+
+### 5.3 Context-Aware Jarvis Assistant Alerts
+If a new user activates the Jarvis Voice Assistant (e.g. by swiping open the assistant chat or using PTT) and asks to play music while the catalog is still unindexed:
+* **Vocal Reply**: Jarvis politely and deterministically vocalizes: *"Your library is currently empty, sir. Please configure your music folder first."*
+* **Display Output**: Appends an on-screen chat bubble: *"Library is empty — cannot play a random track."* to keep the user clearly informed of the setup requirements.
 
