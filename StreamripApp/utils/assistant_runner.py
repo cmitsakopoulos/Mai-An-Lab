@@ -742,7 +742,8 @@ class AssistantRunner:
             "*   **Playback**: `play [song/artist]`, `pause`, `resume`, `skip`, `prev`, `shuffle`\n"
             "*   **Acoustic Moods**: `play chill`, `play upbeat`, `play energetic`\n"
             "*   **Similarity Graph**: `play similar`, `more like this`, `more by this artist`\n"
-            "*   **Playlists**: `create playlist [name]`, `add this to [playlist]`\n"
+            "*   **Playlists**: `create playlist [name]`, `create magic playlist [name]` "
+            "(KNN over your DSP features), `add this to [playlist]`\n"
             "*   **Sub-systems**: `rescan dsp`, `clear queue`, `download [song]`"
         )
         return AssistantResponse(spoken=spoken_msg, displayed=displayed_msg)
@@ -767,6 +768,72 @@ class AssistantRunner:
                 displayed=f"Playlist **{name}** already exists.",
                 success=False,
             )
+
+    async def _handle_playlist_auto(self, intent: ai.Intent) -> AssistantResponse:
+        """Magic/smart/auto playlist: create the playlist row, then populate
+        it with a KNN selection over the library's DSP features. Uses the
+        same feature store the assistant's library sweep writes into, so any
+        track Jarvis has already analysed is fair game without re-running
+        DSP. Tracks without features are skipped — the user is told to run
+        a rescan if too few are available."""
+        from utils.dsp import FEATURES_VERSION
+        from utils.auto_playlist import generate_knn_playlist
+        import random
+
+        name = (intent.query or "").strip()
+        if not name:
+            return AssistantResponse(
+                spoken="What should I name the playlist, sir?",
+                displayed="Please specify a playlist name.",
+                success=False,
+            )
+
+        ready = await self.db.get_tracks_with_features(FEATURES_VERSION)
+        if len(ready) < 2:
+            return AssistantResponse(
+                spoken=(
+                    "I don't have enough analysed tracks yet. Run a rescan "
+                    "first, sir."
+                ),
+                displayed=(
+                    "Magic playlist needs at least 2 DSP-analysed tracks. "
+                    "Ask me to **rescan** the library first."
+                ),
+                success=False,
+            )
+
+        try:
+            playlist_id = await self.db.create_playlist(name)
+        except Exception:
+            return AssistantResponse(
+                spoken=f"It seems a playlist called '{name}' already exists, sir.",
+                displayed=f"Playlist **{name}** already exists.",
+                success=False,
+            )
+
+        seed = random.choice(ready)
+        # Default to 20 tracks; matches the UI dialog's default. The voice
+        # path doesn't expose a length slider — the user can ask Jarvis to
+        # extend the playlist via subsequent intents if they want more.
+        paths = generate_knn_playlist(seed["path"], ready, target_length=20)
+        for p in paths:
+            try:
+                await self.db.add_track_to_playlist(playlist_id, p)
+            except Exception as ex:
+                logger.warning("playlist_auto: add_track failed for %s: %s", p, ex)
+
+        return AssistantResponse(
+            spoken=(
+                f"{self._say('affirmative')} I've built '{name}' with "
+                f"{len(paths)} tracks, anchored on {seed.get('title') or 'a random pick'}."
+            ),
+            displayed=(
+                f"Created **{name}** with **{len(paths)}** tracks via KNN "
+                f"over the library's DSP features (seed: "
+                f"**{seed.get('title') or seed['path']}**)."
+            ),
+            extras={"playlist_id": playlist_id, "queued": len(paths)},
+        )
 
     async def _handle_playlist_add(self, intent: ai.Intent) -> AssistantResponse:
         playlist_name = intent.extras.get("playlist")
@@ -948,6 +1015,7 @@ AssistantRunner._INTENT_DISPATCH = {
     ai.INTENT_NOW_PLAYING:   AssistantRunner._handle_now_playing,
     ai.INTENT_RESCAN_DSP:    AssistantRunner._handle_rescan_dsp,
     ai.INTENT_PLAYLIST_CREATE: AssistantRunner._handle_playlist_create,
+    ai.INTENT_PLAYLIST_AUTO:   AssistantRunner._handle_playlist_auto,
     ai.INTENT_PLAYLIST_ADD:    AssistantRunner._handle_playlist_add,
     ai.INTENT_PLAYLIST_PLAY:   AssistantRunner._handle_playlist_play,
     ai.INTENT_HELP:          AssistantRunner._handle_help,
