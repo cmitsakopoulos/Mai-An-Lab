@@ -732,12 +732,20 @@ class AssistantRunner:
         )
 
     async def _handle_help(self, _intent: ai.Intent) -> AssistantResponse:
-        msg = (
-            "I can: play a track, add to queue, play similar, more by this artist, "
-            "skip, go back, pause, resume, shuffle, clear the queue, or download "
-            "something. Try: 'play stairway', 'add radiohead to queue', 'more like this'."
+        spoken_msg = (
+            "I can manage your playback, queue tracks, navigate by mood, create playlists, "
+            "or walk the acoustic similarity graph, sir. Just say 'play some chill music' "
+            "or 'more by this artist' to begin."
         )
-        return AssistantResponse(spoken=msg, displayed=msg)
+        displayed_msg = (
+            "### Jarvis System Capabilities\n\n"
+            "*   **Playback**: `play [song/artist]`, `pause`, `resume`, `skip`, `prev`, `shuffle`\n"
+            "*   **Acoustic Moods**: `play chill`, `play upbeat`, `play energetic`\n"
+            "*   **Similarity Graph**: `play similar`, `more like this`, `more by this artist`\n"
+            "*   **Playlists**: `create playlist [name]`, `add this to [playlist]`\n"
+            "*   **Sub-systems**: `rescan dsp`, `clear queue`, `download [song]`"
+        )
+        return AssistantResponse(spoken=spoken_msg, displayed=displayed_msg)
 
     async def _handle_playlist_create(self, intent: ai.Intent) -> AssistantResponse:
         name = (intent.query or "").strip()

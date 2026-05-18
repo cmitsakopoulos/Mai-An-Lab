@@ -58,7 +58,9 @@ The `AndroidManifest.xml` must include the following permissions for full functi
 | `FOREGROUND_SERVICE_MEDIA_PLAYBACK` | Specific service type required for background media playback. | 14+ |
 | `POST_NOTIFICATIONS` | Required to show playback controls in the notification shade. | 13+ |
 | `WAKE_LOCK` | Prevents the CPU from sleeping during high-fidelity downloads. | All |
+| `RECORD_AUDIO` | Mandatory permission required for the Jarvis Voice Assistant speech recognizer. | All |
 | `READ_EXTERNAL_STORAGE` | Legacy filesystem access (superseded by `READ_MEDIA_AUDIO`). | < 13 |
+| `WRITE_EXTERNAL_STORAGE` | Legacy filesystem write access for older devices. | < 10 |
 
 ---
 

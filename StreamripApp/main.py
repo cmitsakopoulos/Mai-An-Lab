@@ -30,6 +30,21 @@ def get_app_dir() -> str:
     # Fallback to temp dir
     return tempfile.gettempdir()
 
+def get_temp_artwork_dir() -> str:
+    """Returns the dedicated directory for temporary artwork, creating it and a .nomedia file if missing."""
+    dir_path = os.path.join(get_app_dir(), "temp")
+    try:
+        os.makedirs(dir_path, exist_ok=True)
+        # Create .nomedia file to exclude from Android's Media Store / Gallery
+        nomedia_file = os.path.join(dir_path, ".nomedia")
+        if not os.path.exists(nomedia_file):
+            with open(nomedia_file, "w") as f:
+                pass
+    except Exception:
+        # Fallback to get_app_dir if temp subdirectory creation fails
+        return get_app_dir()
+    return dir_path
+
 # CRITICAL: SET THESE BEFORE ANY OTHER IMPORTS
 DATA_DIR = get_app_dir()
 os.environ["HOME"] = DATA_DIR
@@ -163,13 +178,25 @@ class ArtworkCache:
                 self._access_order.remove(key)
             elif len(self._cache) >= self._max_size:
                 oldest = self._access_order.pop(0)
+                evicted_path = self._cache[oldest]
                 del self._cache[oldest]
+                try:
+                    if evicted_path and os.path.exists(evicted_path):
+                        os.remove(evicted_path)
+                except Exception as exc:
+                    logger.warning("Failed to delete evicted artwork: %s", exc)
             
             self._cache[key] = path
             self._access_order.append(key)
         
     def clear(self):
         with self._lock:
+            for path in self._cache.values():
+                try:
+                    if path and os.path.exists(path):
+                        os.remove(path)
+                except Exception:
+                    pass
             self._cache.clear()
             self._access_order.clear()
 
@@ -900,7 +927,7 @@ class SearchView:
         # Pagination variables
         self.current_page = 0
         self.total_pages = 1
-        self.items_per_page = 50
+        self.items_per_page = 35
         self._is_changing_page = False
         self._is_programmatic_scroll = False
         self._at_bottom_boundary = False
@@ -2419,7 +2446,7 @@ class LibraryView:
 
         # Pagination variables for tracks view mode
         self.current_page = 0
-        self.items_per_page = 50
+        self.items_per_page = 35
         self.total_pages = 1
         self._flat_rows = []
         self._is_changing_page = False
@@ -6110,7 +6137,7 @@ class AssistantView:
             if not audio_active:
                 await self._append_bubble(
                     "assistant",
-                    "⚠️ *Audio engine not active. Running edge linkage in offline developer mode...*",
+                    "*Audio engine not active. Running edge linkage in offline developer mode...*",
                 )
 
             try:
@@ -6126,7 +6153,7 @@ class AssistantView:
                 self._init_cancel = False
                 await self._append_bubble(
                     "assistant",
-                    "🔊 *Sir, please ensure a song is playing (even at 0 volume) in the background. "
+                    "*Sir, please ensure a song is playing (even at 0 volume) in the background. "
                     "This activates Android's keep-alive service, preventing the OS from killing "
                     "our background DSP worker thread while we work!*",
                     speak=True,
@@ -6658,7 +6685,7 @@ class MetadataEditorDialog:
                     if raw:
                         ext      = "png" if raw.startswith(b"\x89PNG") else "jpg"
                         ph       = hashlib.md5(path.encode()).hexdigest()
-                        tmp_path = os.path.join(tempfile.gettempdir(), f"meta_art_{ph}.{ext}")
+                        tmp_path = os.path.join(get_temp_artwork_dir(), f"meta_art_{ph}.{ext}")
                         with open(tmp_path, "wb") as fh:
                             fh.write(raw)
                         art_image.src     = get_asset_path(tmp_path)
@@ -7623,7 +7650,7 @@ class StreamripFletApp:
         def _worker():
             try:
                 ph  = hashlib.md5(img_url.encode()).hexdigest()
-                tmp = os.path.join(tempfile.gettempdir(), f"streamrip_art_{ph}.jpg")
+                tmp = os.path.join(get_temp_artwork_dir(), f"streamrip_art_{ph}.jpg")
                 if not os.path.exists(tmp):
                     urllib.request.urlretrieve(img_url, tmp)
                 _ARTWORK_CACHE.put(img_url, tmp)
@@ -7681,7 +7708,7 @@ class StreamripFletApp:
                 except Exception:
                     data = raw_bytes
                 ph = hashlib.md5(path.encode()).hexdigest()
-                art_path = os.path.join(tempfile.gettempdir(), f"streamrip_art_{ph}.jpg")
+                art_path = os.path.join(get_temp_artwork_dir(), f"streamrip_art_{ph}.jpg")
                 try:
                     with open(art_path, "wb") as fh:
                         fh.write(data)

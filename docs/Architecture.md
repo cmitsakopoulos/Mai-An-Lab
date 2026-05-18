@@ -39,6 +39,48 @@ The data layer is optimized for fast hierarchical browsing and prefix-based sear
 | `playlist_tracks` | Junction table for playlist membership. | `playlist_id`, `track_path`, `order_index` |
 | `play_counts` | Persistence for history and playback-driven features. | `track_path`, `count`, `last_played` |
 
+### Database Structure & Design: Composition vs. Inheritance
+
+While the catalog schema draws high-level structural inspiration from hierarchical data representation models in bioinformatics (e.g. mapping parents to nested features), it is implemented as a highly optimized, precise relational system.
+
+#### 1. Composition over Inheritance
+In database modeling, attempting to represent entities via inheritance (e.g. subclassing) leads to complex table structures and sparse tables containing many NULL columns. 
+
+Instead, this schema strictly implements **Composition** (*Part-Of* relationships):
+* An `Artist` **composes** multiple `Albums` (`1` to `many` relationship).
+* An `Album` **composes** multiple `Tracks` (`1` to `many` relationship).
+* All parent-child relationships are strictly bound via foreign keys (`artist_id` in `albums`, `album_id` in `tracks`) using strong constraints (`ON DELETE CASCADE`). Deleting an artist immediately cascades down to delete its albums and tracks, ensuring that no orphan tracks remain to corrupt the database index.
+
+```mermaid
+classDiagram
+    direction LR
+    class Artist {
+        +id : int
+        +name : str
+        +album_count : int
+        +track_count : int
+    }
+    class Album {
+        +id : int
+        +artist_id : int
+        +title : str
+        +year : int
+    }
+    class Track {
+        +id : int
+        +album_id : int
+        +title : str
+        +path : str
+    }
+    Artist "1" *-- "0..*" Album : Composition
+    Album "1" *-- "1..*" Track : Composition
+```
+
+#### 2. Trigger-Based Aggregate Counters (Pre-Computed Denormalization)
+Rather than executing expensive nested `SELECT COUNT` joins at runtime when the user navigates the library, the catalog uses pre-computed aggregate columns (`artists.album_count`, `artists.track_count`, and `albums.track_count`).
+
+These fields are kept in sync by database triggers (`trg_tracks_insert_counts`, `trg_tracks_delete_counts`, etc.) on every insert, delete, or update. This guarantees $O(1)$ read latency during scroll and navigation updates.
+
 ### Search & Indexing (FTS5)
 - **`fts_search`**; a virtual table using the FTS5 module. It indexes `title`, `album`, and `artist` from the tracks table.
 - **`unicode61` Tokenizer**; configured with `remove_diacritics=1` to ensure searching "Daft" also matches "Däft".
@@ -51,17 +93,17 @@ The data layer is optimized for fast hierarchical browsing and prefix-based sear
 To achieve a stable 60 FPS UI on Android while running a full CPython backend, several Android-specific optimizations were implemented:
 
 - **Targeted UI Refreshes**; the app bypasses Flet's global `page.update()` for the high-frequency playback heartbeat. By refreshing only the specific player controls, we reduce background CPU spikes by ~60%.
-- **Throttled Position Heartbeat**; playback position mirroring is strictly throttled to **1.0s** intervals. This minimizes bridge chatter and preserves battery life.
+- **Throttled Position Heartbeat**; playback position mirroring is strictly throttled to **1.5s** intervals. This minimizes Python/Dart bridge chatter and preserves battery life.
 - **Zero-Cost Indicators**; heavy Python-driven animation loops were replaced with static or GPU-accelerated native indicators, keeping the background CPU baseline to a minimum.
 - **Active UI Containment**; to prevent memory bloat or WebSocket choking under long sessions, high-volume control arrays (like the Jarvis chat history bubble tree) are strictly capped at **50** active items, dynamically popping older nodes.
-- **High-Performance Carousel Slide-In Pagination**; rather than appending thousands of result cards in a massive flat list that bloats Flet's control tree and chokes the mobile memory buffer, both LibraryView and SearchView render only **one active page at a time** (typically 50 and 20 items respectively). Swapping pages teleports the scroll offset off-screen instantly and triggers a highly optimized, snappy, hardware-accelerated **Slide-In and Fade Offset Animation** (tuned to **120ms**), keeping the widget tree tiny and UI rendering at a rock-solid 60 FPS.
+- **High-Performance Carousel Slide-In Pagination**; rather than appending thousands of result cards in a massive flat list that bloats Flet's control tree and chokes the mobile memory buffer, both LibraryView and SearchView render only **one active page at a time** (typically **35** and **20** items respectively). Swapping pages teleports the scroll offset off-screen instantly and triggers a highly optimized, snappy, hardware-accelerated **Slide-In and Fade Offset Animation** (tuned to **120ms**), keeping the widget tree tiny and UI rendering at a rock-solid 60 FPS.
 
 ## Artwork Caching & Temporary Storage
 
 To minimize disk I/O and prevent UI lag during list scrolling, the app utilizes a multi-tiered artwork caching system.
 
 ### In-Memory LRU Cache
-A Python-level **Least Recently Used (LRU)** cache (`_ARTWORK_CACHE`) stores up to **50** decoded artwork paths.
+A Python-level **Least Recently Used (LRU)** cache (`_ARTWORK_CACHE`) stores up to **50** cached artwork paths.
 - **Fast Path**; if a track or album is displayed and its artwork is in the cache, the path is returned instantly without checking the disk or re-extracting from the audio file.
 
 ### Persistent Temporary Storage

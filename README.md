@@ -13,6 +13,19 @@ Mai-An Lab brings the full **[streamrip](https://github.com/nathom/streamrip)** 
 
 ---
 
+## Headline Features
+
+> [!IMPORTANT]
+> **Streamrip on Mobile**; this project is a custom-patched port of `streamrip 2.1.0`. We've stripped the `aiodns` C-extensions and relaxed dependency bounds to make the entire stack survive the Flutter/Android build process. Qobuz is supported natively out of the box.
+
+- **Jarvis Hands-Free Voice Assistant**; a state-of-the-art on-device voice assistant powered by Android's highly optimized, native Speech-to-Text (`SpeechRecognizer`) and Text-to-Speech (`TextToSpeech`) hardware engines. Features boundary-anchored local NLP, tactile Push-to-Talk hold gestures, recursive voice hesitation stripping, and priority audio focus ducking to control queues, walk similarity graphs, and queue offline downloads completely hands-free.
+- **Lightweight, customizable player**; a glassmorphic Flet UI with micro-animations and a modular design-token system you can re-skin without touching layout code.
+- **Fast indexing and search**; recursive library scans use hierarchical in-memory caches and a bulk-import mode that drops triggers during ingest, indexing 10k+ tracks in seconds.
+- **Efficient SQL database**; a single `aiosqlite` connection with WAL journaling and a 64 MB page cache ensures the UI never blocks on heavy indexing tasks.
+- **Personalized UI**; choose your default startup page, re-skin with a single accent color, and manage advanced Streamrip TOML settings directly in-app.
+
+---
+
 ## Documentation (Wiki)
 
 For detailed information on the internals of Mai-An Lab, please refer to the following documentation:
@@ -31,7 +44,8 @@ This application has been strictly tested and verified on the following hardware
 - **Device**: Google Pixel 8
 - **OS**: Android 16 (Developer Preview)
 - **Build Number**: CP1A.260405.005
-- **Baseline Performance**: ~15-20% CPU usage during active FLAC playback.
+
+**Baseline Performance**: ~20% baseline CPU usage, pagination in library and streamrip search views leads to minimal CPU spikes; in edge cases, CPU usage spikes up to 50% with excessive / forced constant scrolling through UI.
 
 ---
 
@@ -44,19 +58,6 @@ This application has been strictly tested and verified on the following hardware
 | **Audio Engine** | [Just Audio](https://pub.dev/packages/just_audio) + ExoPlayer |
 | **Persistence** | [AioSQLite](https://github.com/omnilib/aiosqlite) (SQLite + FTS5) |
 | **Analytics** | [NumPy](https://numpy.org/) (Pure-Python DSP) |
-
----
-
-## Headline Features
-
-> [!IMPORTANT]
-> **Streamrip on Mobile**; this project is a custom-patched port of `streamrip 2.1.0`. We've stripped the `aiodns` C-extensions and relaxed dependency bounds to make the entire stack survive the Flutter/Android build process. Qobuz is supported natively out of the box.
-
-- **Jarvis Hands-Free Voice Assistant**; a state-of-the-art on-device voice assistant powered by Android's highly optimized, native Speech-to-Text (`SpeechRecognizer`) and Text-to-Speech (`TextToSpeech`) hardware engines. Features boundary-anchored local NLP, tactile Push-to-Talk hold gestures, recursive voice hesitation stripping, and priority audio focus ducking to control queues, walk similarity graphs, and queue offline downloads completely hands-free.
-- **Lightweight, customizable player**; a glassmorphic Flet UI with micro-animations and a modular design-token system you can re-skin without touching layout code.
-- **Fast indexing and search**; recursive library scans use hierarchical in-memory caches and a bulk-import mode that drops triggers during ingest, indexing 10k+ tracks in seconds.
-- **Efficient SQL database**; a single `aiosqlite` connection with WAL journaling and a 64 MB page cache ensures the UI never blocks on heavy indexing tasks.
-- **Personalized UI**; choose your default startup page, re-skin with a single accent color, and manage advanced Streamrip TOML settings directly in-app.
 
 ---
 
