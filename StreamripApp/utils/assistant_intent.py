@@ -49,7 +49,8 @@ INTENT_NOW_PLAYING    = "now_playing"     # what's playing
 INTENT_PLAY_MOOD      = "play_mood"       # play something <mood>; DSP-driven
 INTENT_PLAY_RANDOM    = "play_random"     # play a random song and shuffle
 INTENT_RESCAN_DSP     = "rescan_dsp"      # run analyser for missing tracks
-INTENT_PLAYLIST_CREATE = "playlist_create"  # create playlist X
+INTENT_PLAYLIST_CREATE = "playlist_create"  # create playlist X (empty)
+INTENT_PLAYLIST_AUTO   = "playlist_auto"    # create + KNN-populate playlist X
 INTENT_PLAYLIST_ADD    = "playlist_add"     # add track X to playlist Y
 INTENT_PLAYLIST_PLAY   = "playlist_play"    # play playlist X
 INTENT_AFFIRMATIVE    = "affirmative"     # yes / yeah / do it (confirmation)
@@ -159,6 +160,15 @@ _PATTERNS: list[tuple[str, re.Pattern]] = [
     )),
 
     # ── Playlist ops ────────────────────────────────────────────────────────
+    # Magic/smart/auto playlist — KNN over the library's DSP features. Must
+    # come BEFORE INTENT_PLAYLIST_CREATE so "create a magic playlist called
+    # X" doesn't get claimed by the plain create-empty pattern.
+    (INTENT_PLAYLIST_AUTO, re.compile(
+        r"^\s*(?:create|make|generate|build)\s+(?:a\s+|an\s+)?(?:new\s+)?"
+        r"(?:magic|smart|auto|automatic|knn)\s+playlist"
+        r"(?:\s+(?:called|named|titled))?\s+(?P<q>.+?)\s*$",
+        re.I,
+    )),
     (INTENT_PLAYLIST_CREATE, re.compile(
         r"^\s*(?:create|make|generate)\s+(?:a\s+)?(?:new\s+)?playlist\s+(?:called\s+)?(?P<q>.+?)\s*$",
         re.I,
@@ -354,6 +364,7 @@ __all__ = [
     "INTENT_PLAY_RANDOM",
     "INTENT_RESCAN_DSP",
     "INTENT_PLAYLIST_CREATE",
+    "INTENT_PLAYLIST_AUTO",
     "INTENT_PLAYLIST_ADD",
     "INTENT_PLAYLIST_PLAY",
     "INTENT_AFFIRMATIVE",

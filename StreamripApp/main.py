@@ -7053,8 +7053,7 @@ class StreamripFletApp:
     async def open_auto_playlist_dialog(self, playlist_id):
         logger.info(f"Opening Playlist Creation dialog for playlist {playlist_id}")
         # Length slider: 5-50 tracks. Default 20; long enough to feel like a
-        # real playlist, short enough that lazy DSP analysis on the hot set
-        # finishes in a reasonable time on a phone.
+        # real playlist while still fitting on screen.
         length_slider = ft.Slider(
             min=5, max=50, value=20, divisions=45, label="{value} tracks", active_color=CYAN,
         )
@@ -7066,123 +7065,47 @@ class StreamripFletApp:
         )
 
         async def _generate():
-            from utils.dsp import (
-                FEATURES_VERSION, analyze_track, unpack_timbre,
-            )
+            from utils.dsp import FEATURES_VERSION
             from utils.auto_playlist import generate_knn_playlist
             gen_btn.disabled = True
             length_slider.disabled = True
             loading_indicator.visible = True
             self.page.update()
 
-            # Track whether we paused playback so the `finally` block can
-            # resume it whether the run succeeds, fails, or hits an
-            # uncaught exception during selection.
-            was_playing = False
-
             try:
-                # 1. Fetch Hot Set (may include tracks without features yet).
-                hot_set = await self.db_manager.get_autoplaylist_hot_set()
-                if not hot_set:
-                    self.show_snackbar("Not enough data. Play some music first!", color="#FF4444")
-                    dlg.open = False
-                    self.page.update()
-                    return
-
-                # 2. Run DSP on any hot-set entry whose features are missing
-                #    or stale. We do this here (lazy) instead of at index time
-                #    because the analyser only needs to see ~tens of tracks,
-                #    not the whole library.
-                stale = [
-                    t for t in hot_set
-                    if (
-                        t.get("features_version", 0) != FEATURES_VERSION
-                        or unpack_timbre(t.get("timbre")) is None
-                        or not (t.get("bpm") or 0) > 0
-                    )
-                ]
-                audio_service = audio_engine.audio_service
-                # Pause foreground playback for the duration of the DSP loop:
-                # just_audio holds a hardware MediaCodec while playing, and
-                # on most devices `MediaCodec.createDecoderByType` for our
-                # DSP path will fail with a resource error (the
-                # `Failed to query component interface … : 6` log) until
-                # that codec is released. Pausing frees the slot.
-                if audio_engine.is_playing:
-                    was_playing = True
-                    audio_engine.pause()
-                    # Give the framework a beat to actually release the
-                    # codec; pause() is async at the Dart layer.
-                    await asyncio.sleep(0.4)
-
-                failures = 0
-                if stale:
-                    progress_label.value = f"Analyzing 0 / {len(stale)} tracks…"
-                    self.page.update()
-                    for i, t in enumerate(stale, 1):
-                        try:
-                            features = await analyze_track(audio_service, t["path"])
-                        except Exception as ex:
-                            failures += 1
-                            # One bad file shouldn't kill the whole run; log
-                            # and skip; the selector drops featureless entries.
-                            logger.warning(f"DSP analyse failed for {t['path']}: {ex}")
-                            progress_label.value = (
-                                f"Analyzing {i} / {len(stale)} tracks "
-                                f"({failures} failed)…"
-                            )
-                            self.page.update()
-                            continue
-                        blob = features.timbre_blob()
-                        await self.db_manager.update_track_features(
-                            t["path"],
-                            features.bpm, features.energy, features.brightness,
-                            features.rolloff, features.beat_strength,
-                            blob, FEATURES_VERSION,
-                        )
-                        # Reflect into the in-memory hot_set so the selector
-                        # sees the just-computed features without a re-fetch.
-                        t["bpm"] = features.bpm
-                        t["energy"] = features.energy
-                        t["brightness"] = features.brightness
-                        t["rolloff"] = features.rolloff
-                        t["beat_strength"] = features.beat_strength
-                        t["timbre"] = blob
-                        t["features_version"] = FEATURES_VERSION
-                        suffix = f" ({failures} failed)" if failures else ""
-                        progress_label.value = (
-                            f"Analyzing {i} / {len(stale)} tracks{suffix}…"
-                        )
-                        self.page.update()
-                    progress_label.value = "Selecting…"
-                    self.page.update()
-
-                # 3. Drop entries that still lack features after analysis.
-                ready = [
-                    t for t in hot_set
-                    if (t.get("bpm") or 0) > 0 and unpack_timbre(t.get("timbre")) is not None
-                ]
+                # Use the assistant's library-wide DSP sweep — we no longer
+                # run a per-dialog hot-set analyse loop. If features are
+                # missing, point the user at the Jarvis rescan flow and bail.
+                ready = await self.db_manager.get_tracks_with_features(
+                    FEATURES_VERSION
+                )
                 if not ready:
                     self.show_snackbar(
-                        "Could not extract features for any hot-set track.",
+                        "No DSP-analysed tracks yet. Open Jarvis and accept "
+                        "the rescan prompt, then try again.",
+                        color="#FF4444",
+                    )
+                    return
+                if len(ready) < 2:
+                    self.show_snackbar(
+                        "Need at least 2 analysed tracks. Run a rescan via "
+                        "Jarvis to populate features for the rest of the library.",
                         color="#FF4444",
                     )
                     return
 
-                # 4. Pick a random seed from the entries that actually have
-                #    features (otherwise the selector would return [seed]).
+                # Pick a random seed from the analysed library.
                 import random
                 seed_track = random.choice(ready)
                 seed_path = seed_track["path"]
 
-                # 5. KNN selection runs synchronously on the asyncio loop;
-                #    it's a handful of numpy ops on a small hot-set matrix
-                #    (no matrix-power convergence) and finishes in single-
-                #    digit milliseconds for typical hot-set sizes.
+                # KNN selection is a handful of numpy ops on the library
+                # feature matrix (no matrix-power convergence); cheap enough
+                # to run on the asyncio loop for typical libraries.
                 target_length = int(length_slider.value)
                 magic_paths = generate_knn_playlist(seed_path, ready, target_length)
 
-                # 6. Persist into the chosen playlist.
+                # Persist into the chosen playlist.
                 for path in magic_paths:
                     await self.db_manager.add_track_to_playlist(playlist_id, path)
 
@@ -7196,14 +7119,6 @@ class StreamripFletApp:
                 logger.exception("Magic Generation failed")
                 self.show_snackbar(f"Generation failed: {ex}", color="#FF4444")
             finally:
-                # Always resume playback if we paused it for the DSP loop;
-                # even if selection or DB writes raised; so the user
-                # doesn't end up silently paused after a failed generation.
-                if was_playing:
-                    try:
-                        audio_engine.play()
-                    except Exception:
-                        pass
                 dlg.open = False
                 self.page.update()
 
@@ -7219,9 +7134,11 @@ class StreamripFletApp:
             ),
             content=ft.Column([
                 ft.Text(
-                    "K-nearest-neighbour selection over the hot set's DSP "
-                    "feature vectors picks the tracks closest to a random "
-                    "seed and orders them into a smooth listening arc.",
+                    "K-nearest-neighbour selection over the full library's "
+                    "DSP feature vectors picks the tracks closest to a random "
+                    "seed and orders them into a smooth listening arc. Tracks "
+                    "without features are skipped — run a rescan via Jarvis "
+                    "to analyse the rest of your library.",
                     size=12, color=DIM,
                 ),
                 ft.Container(height=10),

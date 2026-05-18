@@ -1,23 +1,27 @@
 """
-KNN-based playlist generator over the hot set's DSP features.
+KNN-based playlist generator over the library's DSP features.
 
 Replaces the previous MCL clustering pipeline (Markov Clustering with
-string-similarity blending). MCL gave coherent buckets but was overkill for
-the small hot set we operate on — it spent most of its runtime on matrix
+string-similarity blending). MCL spent most of its runtime on matrix
 powers + column-stochastic normalisation that boiled down to "find the K
 nearest neighbours of the seed and order them smoothly". This module does
 exactly that, in a few numpy ops, with no convergence loop.
 
+Inputs are the rows returned by `db_manager.get_tracks_with_features` —
+every track in the library that's been DSP-analysed. The assistant's
+library-wide sweep is the only producer of those features, so the playlist
+generator and the assistant share one source of truth.
+
 Pipeline:
-  1. Encode hot-set tracks into a single weighted z-scored feature vector
-     per track (BPM, dynamics, MFCC mean/std, chroma).
+  1. Encode tracks into a single weighted z-scored feature vector per
+     track (BPM, dynamics, MFCC mean/std, chroma).
   2. Take the K = target_length nearest tracks to the seed by Euclidean
      distance in that weighted space.
   3. Order the K via greedy nearest-neighbour walk anchored at the seed so
      adjacent tracks in the playlist sound close to each other.
 
-Per-track cost on a 200-row hot set: ~3 ms encode, <1 ms distance, <1 ms
-walk. Memory: a single (N, 43) float64 matrix.
+Per-track cost on a 2000-row library: ~30 ms encode, <5 ms distance, <5 ms
+walk. Memory: a single (N, 43) float64 matrix (≈680 KB at 2000 rows).
 """
 from __future__ import annotations
 
@@ -41,12 +45,12 @@ _W_MFCC_STD = 1.0
 _W_CHROMA = 1.5
 
 
-def _encode(hot_set: list[dict]) -> tuple[list[str], np.ndarray]:
+def _encode(tracks: list[dict]) -> tuple[list[str], np.ndarray]:
     """Returns (paths, weighted_z_scored_matrix). Entries without features
     are silently dropped — callers should pre-filter for clarity."""
     paths: list[str] = []
     rows: list[list[float]] = []
-    for d in hot_set:
+    for d in tracks:
         groups = unpack_embedding_groups(d.get("timbre"))
         if groups is None:
             continue
@@ -105,21 +109,23 @@ def _greedy_sequence(seed_path: str,
 
 
 def generate_knn_playlist(seed_path: str,
-                           hot_set_data: list[dict],
+                           tracks: list[dict],
                            target_length: int = 20) -> list[str]:
     """Return up to `target_length` paths, starting at `seed_path`, picked as
     its K nearest neighbours in the weighted feature space and ordered by a
     greedy nearest-neighbour walk for a smooth flow.
 
-    Robust to missing seeds / short input: returns [seed_path] when there's
-    not enough usable data to form a meaningful selection. Callers can
-    fall back to a single-track playlist in that case.
+    `tracks` is the analysed-library pool — typically the full output of
+    `db_manager.get_tracks_with_features(FEATURES_VERSION)`. Robust to
+    missing seeds / short input: returns [seed_path] when there's not
+    enough usable data to form a meaningful selection. Callers can fall
+    back to a single-track playlist in that case.
     """
-    if not hot_set_data or target_length <= 0:
+    if not tracks or target_length <= 0:
         return [seed_path]
 
     usable = [
-        d for d in hot_set_data
+        d for d in tracks
         if (d.get("bpm") or 0) > 0 and unpack_timbre(d.get("timbre")) is not None
     ]
     if not usable:
