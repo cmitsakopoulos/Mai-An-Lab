@@ -6,6 +6,8 @@
 [![Built with Flet](https://img.shields.io/badge/Built%20with-Flet-blue.svg)](https://flet.dev)
 [![Engine: Streamrip](https://img.shields.io/badge/Engine-Streamrip-orange.svg)](https://github.com/nathom/streamrip)
 
+[**Somewhat-Stable-Version**](https://github.com/cmitsakopoulos/Mai-An-Lab/releases/latest)
+
 Mai-An Lab brings the full **[streamrip](https://github.com/nathom/streamrip)** download engine to Android. It is the first port of streamrip to a real mobile runtime, wrapped in a lightweight, glassmorphic player built on [Flet](https://flet.dev/); complete with the state-of-the-art Jarvis hands-free voice assistant featuring tactile Push-to-Talk gestures and local recursive NLP parsing, a fast indexer, a triggers-driven SQLite/FTS5 search layer, a customizable player, and an experimental auto-playlist engine borrowed from bioinformatics clustering.
 
 <p align="center">
