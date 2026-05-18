@@ -8,6 +8,10 @@
 
 Mai-An Lab brings the full **[streamrip](https://github.com/nathom/streamrip)** download engine to Android. It is the first port of streamrip to a real mobile runtime, wrapped in a lightweight, glassmorphic player built on [Flet](https://flet.dev/); complete with the state-of-the-art Jarvis hands-free voice assistant featuring tactile Push-to-Talk gestures and local recursive NLP parsing, a fast indexer, a triggers-driven SQLite/FTS5 search layer, a customizable player, and an experimental auto-playlist engine borrowed from bioinformatics clustering.
 
+<p align="center">
+  <img src="assets/ui_preview.gif" width="340" alt="Mai-An Lab UI Preview" style="border-radius: 16px; box-shadow: 0 12px 40px rgba(0, 0, 0, 0.65); border: 1px solid rgba(255, 255, 255, 0.1);">
+</p>
+
 > [!NOTE]
 > I am a bioinformatician by training, not a professional software engineer. This is a non-professionally driven passion project; please take this into consideration when encountering any issues or bugs. Any advice or willingness to contribute is greatly appreciated.
 
