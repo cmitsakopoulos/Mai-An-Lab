@@ -144,17 +144,25 @@ class DatabaseManager:
                             await conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} REAL DEFAULT 0")
                         except:
                             pass # Column already exists
-                # Sound-profile vector: float32 MFCC mean + std + chroma packed
-                # as a single BLOB. `features_version` invalidates cached
-                # values when the extractor's output semantics change; older
-                # versions are simply ignored at read time.
-                # rolloff and beat_strength are scalar descriptors stored
-                # alongside bpm/energy/brightness for cheap WHERE filters.
+                # Sound-profile vector: float32 MFCC mean + delta + chroma
+                # packed as a single BLOB (v3 layout, see utils/dsp.py).
+                # `features_version` invalidates cached values when the
+                # extractor's output semantics change; older versions are
+                # simply ignored at read time. Other columns are scalar
+                # descriptors stored alongside bpm/energy/brightness for
+                # cheap WHERE filters and direct mood-profile scoring.
+                #
+                # v3 additions: spectral_flatness (tonal vs noisy),
+                # spectral_contrast (peak-to-valley dynamic range), and
+                # key_index (Krumhansl-Schmuckler key estimate, 0-23).
                 for col, ddl in [
                     ("timbre", "BLOB"),
                     ("features_version", "INTEGER DEFAULT 0"),
                     ("rolloff", "REAL DEFAULT 0"),
                     ("beat_strength", "REAL DEFAULT 0"),
+                    ("spectral_flatness", "REAL DEFAULT 0"),
+                    ("spectral_contrast", "REAL DEFAULT 0"),
+                    ("key_index", "INTEGER DEFAULT 0"),
                 ]:
                     try:
                         await conn.execute(
@@ -1034,6 +1042,9 @@ class DatabaseManager:
                    pc.bpm, pc.energy, pc.brightness,
                    COALESCE(pc.rolloff, 0)         AS rolloff,
                    COALESCE(pc.beat_strength, 0)   AS beat_strength,
+                   COALESCE(pc.spectral_flatness, 0) AS spectral_flatness,
+                   COALESCE(pc.spectral_contrast, 0) AS spectral_contrast,
+                   COALESCE(pc.key_index, 0)         AS key_index,
                    pc.timbre,
                    COALESCE(pc.features_version, 0) AS features_version,
                    pc.count,
@@ -1059,30 +1070,37 @@ class DatabaseManager:
         brightness: float,
         rolloff: float,
         beat_strength: float,
+        spectral_flatness: float,
+        spectral_contrast: float,
+        key_index: int,
         timbre_blob: bytes,
         features_version: int,
     ):
-        """Persist DSP features for a hot-set track. Upserts on track_path
-        so the row exists even if increment_play_count hasn't fired yet
-        (defensive: in practice analysis only runs for already-hot tracks)."""
+        """Persist v3 DSP features. Upserts on track_path so the row exists
+        even if increment_play_count hasn't fired yet."""
         async with self._write_lock:
             conn = await self.get_connection()
             await conn.execute(
                 '''
                 INSERT INTO play_counts
                     (track_path, count, last_played, bpm, energy, brightness,
-                     rolloff, beat_strength, timbre, features_version)
-                VALUES (?, 0, strftime('%s','now'), ?, ?, ?, ?, ?, ?, ?)
+                     rolloff, beat_strength, spectral_flatness,
+                     spectral_contrast, key_index, timbre, features_version)
+                VALUES (?, 0, strftime('%s','now'), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(track_path) DO UPDATE SET
                     bpm = EXCLUDED.bpm,
                     energy = EXCLUDED.energy,
                     brightness = EXCLUDED.brightness,
                     rolloff = EXCLUDED.rolloff,
                     beat_strength = EXCLUDED.beat_strength,
+                    spectral_flatness = EXCLUDED.spectral_flatness,
+                    spectral_contrast = EXCLUDED.spectral_contrast,
+                    key_index = EXCLUDED.key_index,
                     timbre = EXCLUDED.timbre,
                     features_version = EXCLUDED.features_version
                 ''',
                 (path, bpm, energy, brightness, rolloff, beat_strength,
+                 spectral_flatness, spectral_contrast, key_index,
                  timbre_blob, features_version),
             )
             await conn.commit()
@@ -1102,6 +1120,9 @@ class DatabaseManager:
                    COALESCE(pc.energy, 0)        AS energy,
                    COALESCE(pc.rolloff, 0)       AS rolloff,
                    COALESCE(pc.beat_strength, 0) AS beat_strength,
+                   COALESCE(pc.spectral_flatness, 0) AS spectral_flatness,
+                   COALESCE(pc.spectral_contrast, 0) AS spectral_contrast,
+                   COALESCE(pc.key_index, 0)         AS key_index,
                    t.title, t.duration,
                    ar.name  AS artist,
                    al.title AS album

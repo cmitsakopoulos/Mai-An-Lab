@@ -39,7 +39,7 @@ For detailed information on the internals of Mai-An Lab, please refer to the fol
 
 - [System Architecture & Database Design](./docs/Architecture.md)
 - [Jarvis Voice Assistant & Background Pipelines](./docs/Development_Reference.md#5-jarvis-voice-assistant--background-pipelines)
-- [Auto-Playlist Engine & DSP Deep-Dive](./docs/Auto_Playlist_Engine.md)
+- [Auto-Playlist Engine & DSP Deep-Dive](./docs/Auto_Playlist_Engine.md) — includes the laptop-side **DSP Offload** workflow (`tools/dsp_offload.py`), which moves library-wide feature extraction off the phone and onto your computer over ADB.
 - [UI Instructions: Library & Search](./docs/UI_Instructions.md)
 - [Build & Deployment Guide](#build-and-deployment)
 

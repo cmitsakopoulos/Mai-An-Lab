@@ -338,14 +338,28 @@ MOOD_PROFILES: dict[str, dict[str, float]] = {
 
     # Timbre / spectrum
     "dark":      {"brightness": -1.5, "rolloff": -1.0},
-    "moody":     {"brightness": -1.0, "energy": -0.5},
+    "moody":     {"brightness": -1.0, "energy": -0.5, "spectral_flatness": -0.5},
     "bright":    {"brightness": 1.5, "rolloff": 1.0},
+
+    # v3 scalars: tonal/noisy axis (spectral_flatness, spectral_contrast).
+    # Flatness rises with noise; contrast rises with clear tonal peaks.
+    "tonal":     {"spectral_flatness": -1.5, "spectral_contrast": 1.0},
+    "melodic":   {"spectral_flatness": -1.0, "spectral_contrast": 1.0, "brightness": 0.3},
+    "noisy":     {"spectral_flatness": 1.5},
+    "textured":  {"spectral_flatness": 1.0, "spectral_contrast": -0.5},
+    "acoustic":  {"spectral_flatness": -1.0, "energy": -0.5, "beat_strength": -0.3},
 }
 
 # Feature columns participating in mood scoring. Order matters: weights and
 # the z-scored matrix are aligned to this list. Adding a column here means
-# every profile may optionally include it.
-_MOOD_FEATURES = ("bpm", "brightness", "energy", "rolloff", "beat_strength")
+# every profile may optionally include it. NOTE: key_index is deliberately
+# excluded — it's a categorical value where direction-based z-scoring is
+# meaningless; key-aware filtering is handled separately (TODO: future
+# 'play in <key>' intent).
+_MOOD_FEATURES = (
+    "bpm", "brightness", "energy", "rolloff", "beat_strength",
+    "spectral_flatness", "spectral_contrast",
+)
 
 
 async def tracks_by_mood(
@@ -455,6 +469,8 @@ async def bulk_analyze_library(
                 path,
                 features.bpm, features.energy, features.brightness,
                 features.rolloff, features.beat_strength,
+                features.spectral_flatness, features.spectral_contrast,
+                features.key_index,
                 features.timbre_blob(), features_version,
             )
             analysed += 1

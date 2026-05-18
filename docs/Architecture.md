@@ -33,11 +33,15 @@ The data layer is optimized for fast hierarchical browsing and prefix-based sear
 | Table | Description | Key Fields |
 |-------|-------------|------------|
 | `artists` | Stores unique artist names and aggregate counts. | `id`, `name`, `album_count`, `track_count` |
-| `albums` | Maps artists to their respective releases. | `id`, `artist_id`, `title`, `year`, `genre` |
-| `tracks` | The primary music index. | `id`, `album_id`, `title`, `path`, `bpm`, `energy`, `timbre` (BLOB) |
-| `playlists` | User-defined and imported collections. | `id`, `name`, `date_created` |
+| `albums` | Maps artists to their respective releases. | `id`, `artist_id`, `title`, `year`, `genre`, `track_count` |
+| `tracks` | The primary music index. | `id`, `album_id`, `title`, `track_num`, `duration`, `path`, `format`, `added_date`, `bitrate`, `bpm`, `energy`, `brightness` |
+| `playlists` | User-defined and imported collections. | `id`, `name`, `created`, `color` |
 | `playlist_tracks` | Junction table for playlist membership. | `playlist_id`, `track_path`, `order_index` |
-| `play_counts` | Persistence for history and playback-driven features. | `track_path`, `count`, `last_played` |
+| `play_counts` | Extended sound profile, feature space, and play history. | `track_path`, `count`, `last_played`, `bpm`, `energy`, `brightness`, `rolloff`, `beat_strength`, `spectral_flatness`, `spectral_contrast`, `key_index`, `timbre` (52D BLOB), `features_version` |
+| `track_neighbors` | Sparse adjacency table representing the $k$-NN acoustic/metadata graph. | `track_path`, `neighbor_path`, `weight`, `edge_kind` |
+
+> [!NOTE]
+> **Sound Profile BLOB Layout (v3)**; The high-dimensional feature profile is packed as a single 52-float, little-endian binary BLOB inside the `play_counts.timbre` column (208 bytes total) to keep database size minimal and query speeds fast. The BLOB contains the 20D MFCC Mean, 20D MFCC First-Order Derivative (Delta Mean), and 12D Chroma Pitch Profile. A `features_version` column acts as a schema version, letting the engine dynamically invalidate and re-analyze features if extraction logic evolves.
 
 ### Database Structure & Design: Composition vs. Inheritance
 

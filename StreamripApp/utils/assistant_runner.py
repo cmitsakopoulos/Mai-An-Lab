@@ -742,8 +742,10 @@ class AssistantRunner:
             "*   **Playback**: `play [song/artist]`, `pause`, `resume`, `skip`, `prev`, `shuffle`\n"
             "*   **Acoustic Moods**: `play chill`, `play upbeat`, `play energetic`\n"
             "*   **Similarity Graph**: `play similar`, `more like this`, `more by this artist`\n"
-            "*   **Playlists**: `create playlist [name]`, `create magic playlist [name]` "
-            "(KNN over your DSP features), `add this to [playlist]`\n"
+            "*   **Playlists**: `create playlist [name]`, "
+            "`create [mood] playlist called [name]` (library-wide DSP-ranked, "
+            "e.g. *create a chill playlist called Late Night*), "
+            "`add this to [playlist]`\n"
             "*   **Sub-systems**: `rescan dsp`, `clear queue`, `download [song]`"
         )
         return AssistantResponse(spoken=spoken_msg, displayed=displayed_msg)
@@ -770,34 +772,48 @@ class AssistantRunner:
             )
 
     async def _handle_playlist_auto(self, intent: ai.Intent) -> AssistantResponse:
-        """Magic/smart/auto playlist: create the playlist row, then populate
-        it with a KNN selection over the library's DSP features. Uses the
-        same feature store the assistant's library sweep writes into, so any
-        track Jarvis has already analysed is fair game without re-running
-        DSP. Tracks without features are skipped — the user is told to run
-        a rescan if too few are available."""
-        from utils.dsp import FEATURES_VERSION
-        from utils.auto_playlist import generate_knn_playlist
-        import random
+        """Mood-driven playlist: create the playlist row, then populate it
+        with the top library-wide matches for the requested mood profile.
+        Uses the same DSP feature store the assistant's library sweep
+        writes into, so any track Jarvis has already analysed is fair
+        game without re-running DSP. Tracks without features are skipped
+        — the user is told to run a rescan if too few are available."""
+        from utils.auto_playlist import generate_mood_playlist
+        from utils import track_graph as tg
 
         name = (intent.query or "").strip()
+        mood = (intent.extras.get("mood") or "").strip().lower()
+
         if not name:
             return AssistantResponse(
                 spoken="What should I name the playlist, sir?",
                 displayed="Please specify a playlist name.",
                 success=False,
             )
-
-        ready = await self.db.get_tracks_with_features(FEATURES_VERSION)
-        if len(ready) < 2:
+        if not mood or mood not in tg.MOOD_PROFILES:
             return AssistantResponse(
                 spoken=(
-                    "I don't have enough analysed tracks yet. Run a rescan "
-                    "first, sir."
+                    "Which mood should the playlist be, sir? Try chill, "
+                    "energetic, dark, bright, fast, slow, and so on."
                 ),
                 displayed=(
-                    "Magic playlist needs at least 2 DSP-analysed tracks. "
-                    "Ask me to **rescan** the library first."
+                    "Tell me the mood too — e.g. *create a chill playlist "
+                    "called Late Night*. Known moods: "
+                    f"{', '.join(sorted(tg.MOOD_PROFILES.keys()))}."
+                ),
+                success=False,
+            )
+
+        tracks = await generate_mood_playlist(self.db, mood, target_length=20)
+        if not tracks:
+            return AssistantResponse(
+                spoken=(
+                    "I don't have enough analysed tracks yet. Ask me to "
+                    "rescan the library first, sir."
+                ),
+                displayed=(
+                    "Mood-driven playlist needs DSP-analysed tracks. Ask me "
+                    "to **rescan** the library first."
                 ),
                 success=False,
             )
@@ -811,28 +827,27 @@ class AssistantRunner:
                 success=False,
             )
 
-        seed = random.choice(ready)
-        # Default to 20 tracks; matches the UI dialog's default. The voice
-        # path doesn't expose a length slider — the user can ask Jarvis to
-        # extend the playlist via subsequent intents if they want more.
-        paths = generate_knn_playlist(seed["path"], ready, target_length=20)
-        for p in paths:
+        for t in tracks:
             try:
-                await self.db.add_track_to_playlist(playlist_id, p)
+                await self.db.add_track_to_playlist(playlist_id, t["path"])
             except Exception as ex:
-                logger.warning("playlist_auto: add_track failed for %s: %s", p, ex)
+                logger.warning(
+                    "playlist_auto: add_track failed for %s: %s", t["path"], ex
+                )
 
+        first = tracks[0]
         return AssistantResponse(
             spoken=(
                 f"{self._say('affirmative')} I've built '{name}' with "
-                f"{len(paths)} tracks, anchored on {seed.get('title') or 'a random pick'}."
+                f"{len(tracks)} {mood} tracks, opening with "
+                f"{first.get('title') or 'the top match'}."
             ),
             displayed=(
-                f"Created **{name}** with **{len(paths)}** tracks via KNN "
-                f"over the library's DSP features (seed: "
-                f"**{seed.get('title') or seed['path']}**)."
+                f"Created **{name}** with **{len(tracks)}** {mood} tracks "
+                f"ranked over the library's DSP features. Opening with "
+                f"**{first.get('title') or first['path']}**."
             ),
-            extras={"playlist_id": playlist_id, "queued": len(paths)},
+            extras={"playlist_id": playlist_id, "queued": len(tracks), "mood": mood},
         )
 
     async def _handle_playlist_add(self, intent: ai.Intent) -> AssistantResponse:

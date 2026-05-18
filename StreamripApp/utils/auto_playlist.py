@@ -32,16 +32,16 @@ from utils.dsp import N_MFCC, N_CHROMA, unpack_embedding_groups, unpack_timbre
 # Per-axis weights. Same shape as the old AutoPlaylistEngine defaults; the
 # user explicitly wanted sound-profile (MFCC + chroma) to dominate, BPM to
 # be a strong secondary, and the four dynamics descriptors to barely move
-# the needle. Squared contribution per group:
-#   BPM:        1 dim × 4.0² = 16.0
-#   dynamics:   4 dims × 0.5² =  1.0   (energy, brightness, rolloff, beat)
-#   MFCC mean: 13 dims × 1.5² = 29.25
-#   MFCC std:  13 dims × 1.0² = 13.0
-#   chroma:    12 dims × 1.5² = 27.0
+# the needle. Squared contribution per group (v3 layout):
+#   BPM:         1 dim  × 4.0² = 16.0
+#   dynamics:    4 dims × 0.5² =  1.0   (energy, brightness, rolloff, beat)
+#   MFCC mean:  20 dims × 1.5² = 45.0
+#   MFCC delta: 20 dims × 1.0² = 20.0   (temporal evolution, replaces std)
+#   chroma:     12 dims × 1.5² = 27.0
 _W_BPM = 4.0
 _W_DYNAMICS = 0.5
 _W_MFCC_MEAN = 1.5
-_W_MFCC_STD = 1.0
+_W_MFCC_DELTA = 1.0
 _W_CHROMA = 1.5
 
 
@@ -54,7 +54,7 @@ def _encode(tracks: list[dict]) -> tuple[list[str], np.ndarray]:
         groups = unpack_embedding_groups(d.get("timbre"))
         if groups is None:
             continue
-        mfcc_mean, mfcc_std, chroma = groups
+        mfcc_mean, mfcc_delta, chroma = groups
         paths.append(d["path"])
         rows.append(
             [float(d.get("bpm", 0) or 0),
@@ -63,7 +63,7 @@ def _encode(tracks: list[dict]) -> tuple[list[str], np.ndarray]:
              float(d.get("rolloff", 0) or 0),
              float(d.get("beat_strength", 0) or 0)]
             + mfcc_mean.tolist()
-            + mfcc_std.tolist()
+            + mfcc_delta.tolist()
             + chroma.tolist()
         )
 
@@ -78,7 +78,7 @@ def _encode(tracks: list[dict]) -> tuple[list[str], np.ndarray]:
     weights[1:1 + n_dynamics] = _W_DYNAMICS
     s = 1 + n_dynamics
     weights[s:s + N_MFCC] = _W_MFCC_MEAN
-    weights[s + N_MFCC:s + 2 * N_MFCC] = _W_MFCC_STD
+    weights[s + N_MFCC:s + 2 * N_MFCC] = _W_MFCC_DELTA
     weights[s + 2 * N_MFCC:s + 2 * N_MFCC + N_CHROMA] = _W_CHROMA
     return paths, z * weights
 
@@ -106,6 +106,53 @@ def _greedy_sequence(seed_path: str,
         current_vec = vectors[nxt]
         remaining.remove(nxt)
     return ordered
+
+
+async def generate_mood_playlist(db_manager,
+                                  mood: str,
+                                  target_length: int = 20) -> list[dict]:
+    """Library-wide mood-driven playlist generator.
+
+    Pipeline:
+      1. `track_graph.tracks_by_mood` ranks every analysed track by the
+         mood profile (z-scored, weighted dot product) and returns the top
+         `target_length` rows.
+      2. Encode those rows into the same weighted feature space the KNN
+         selector uses, then greedily re-order them anchored at the
+         highest-ranked track so adjacent tracks in the final playlist
+         sound close to each other (the mood ranking only handles *what*
+         to include — not the *order*).
+
+    Returns the ordered list of full track-row dicts (path + metadata),
+    not just paths, so callers can both persist them and surface their
+    titles in confirmation messages without a second DB round-trip.
+
+    Returns [] for unknown moods, libraries with < 2 analysed tracks, or
+    when ranking produces nothing usable. Callers should check the length.
+    """
+    from utils import track_graph as tg
+
+    if mood not in tg.MOOD_PROFILES:
+        return []
+
+    ranked = await tg.tracks_by_mood(db_manager, mood, limit=max(target_length, 2))
+    if len(ranked) < 2:
+        return ranked  # nothing to order; caller decides whether 1 track is useful
+
+    # Re-use the KNN selector's encoding so the sequencing step operates in
+    # the same weighted space the mood ranker effectively scored over.
+    paths, vectors = _encode(ranked)
+    if not paths:
+        return ranked
+
+    # Anchor the greedy walk at the highest-ranked track (index 0 of
+    # `ranked` corresponds to the first surviving entry in `paths`; if a
+    # track was dropped by `_encode` for missing features, we anchor on
+    # whichever survived first).
+    seed_path = paths[0]
+    ordered_paths = _greedy_sequence(seed_path, paths, vectors)
+    by_path = {r["path"]: r for r in ranked}
+    return [by_path[p] for p in ordered_paths if p in by_path]
 
 
 def generate_knn_playlist(seed_path: str,
