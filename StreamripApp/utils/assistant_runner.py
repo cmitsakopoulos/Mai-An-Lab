@@ -24,7 +24,7 @@ from __future__ import annotations
 import logging
 import random
 from dataclasses import dataclass, field
-from typing import Optional, List
+from typing import Optional, List, Callable
 
 from utils import assistant_intent as ai
 from utils import track_graph
@@ -65,6 +65,7 @@ class PendingConfirmation:
     on_yes_action: Optional[str] = None   # AssistantResponse.action to emit
     on_yes_msg: str = "On it."
     on_no_msg: str = "Understood. Standing by."
+    on_yes_callback: Optional[Callable] = None
 
 
 @dataclass
@@ -243,6 +244,16 @@ class AssistantRunner:
         if pending is not None:
             if intent.name == ai.INTENT_AFFIRMATIVE:
                 self._pending = None
+                if pending.on_yes_callback is not None:
+                    try:
+                        return await pending.on_yes_callback()
+                    except Exception as e:
+                        logger.exception("PendingConfirmation: on_yes_callback failed")
+                        return AssistantResponse(
+                            spoken="I had trouble processing that, sir.",
+                            displayed=f"Error executing callback: {e}",
+                            success=False,
+                        )
                 return AssistantResponse(
                     spoken=pending.on_yes_msg,
                     displayed=pending.on_yes_msg,
@@ -1215,6 +1226,45 @@ class AssistantRunner:
             deferred_play=True,
         )
 
+    async def _handle_greet(self, _intent: ai.Intent) -> AssistantResponse:
+        try:
+            tracks = await self.db.get_most_played(limit=20)
+        except Exception:
+            tracks = []
+
+        if tracks and random.random() < 0.5:
+            async def play_the_usual() -> AssistantResponse:
+                track = random.choice(tracks)
+                engine_track = _to_engine_track(track)
+                self.engine.set_queue([engine_track], start_index=0)
+                self._remember(engine_track["path"])
+                
+                title = track.get("title") or "Unknown Song"
+                artist = track.get("artist") or "Unknown Artist"
+                return AssistantResponse(
+                    spoken=f"Very good, sir. Queuing up {title} by {artist}, one of your favorites.",
+                    displayed=f"Playing the usual: **{title}** — {artist}",
+                    deferred_play=True,
+                )
+
+            self.queue_confirmation(
+                PendingConfirmation(
+                    prompt="Good to see you, sir. Shall I queue up the usual?",
+                    on_yes_callback=play_the_usual,
+                    on_no_msg="Understood. Let me know if you need anything, sir.",
+                )
+            )
+            return AssistantResponse(
+                spoken="Good to see you, sir. Shall I queue up the usual?",
+                displayed="Good to see you, sir. Shall I queue up the usual?",
+            )
+
+        phrase = self._say("greeting")
+        return AssistantResponse(
+            spoken=phrase,
+            displayed=phrase,
+        )
+
     async def _handle_unknown(self, intent: ai.Intent) -> AssistantResponse:
         # Last-resort fallback: treat the whole utterance as a library search.
         text = (intent.raw or "").strip()
@@ -1274,6 +1324,7 @@ AssistantRunner._INTENT_DISPATCH = {
     ai.INTENT_PLAYLIST_AUTO:   AssistantRunner._handle_playlist_auto,
     ai.INTENT_PLAYLIST_ADD:    AssistantRunner._handle_playlist_add,
     ai.INTENT_PLAYLIST_PLAY:   AssistantRunner._handle_playlist_play,
+    ai.INTENT_GREET:           AssistantRunner._handle_greet,
     ai.INTENT_HELP:          AssistantRunner._handle_help,
     ai.INTENT_UNKNOWN:       AssistantRunner._handle_unknown,
 }
