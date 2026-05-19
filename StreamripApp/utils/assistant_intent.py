@@ -25,8 +25,11 @@ Design notes:
 from __future__ import annotations
 
 import re
+import logging
 from dataclasses import dataclass, field
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 
 # Intent constants — keep aligned with assistant_runner.dispatch().
@@ -56,6 +59,7 @@ INTENT_PLAYLIST_PLAY   = "playlist_play"    # play playlist X
 INTENT_AFFIRMATIVE    = "affirmative"     # yes / yeah / do it (confirmation)
 INTENT_NEGATIVE       = "negative"        # no / later / not now (cancel pending)
 INTENT_NAME_ENTITY    = "name_entity"     # call it X / name it X
+INTENT_GREET          = "greet"
 INTENT_HELP           = "help"
 INTENT_UNKNOWN        = "unknown"
 
@@ -130,6 +134,10 @@ _PATTERNS: list[tuple[str, re.Pattern]] = [
         re.I)),
 
     # ── Verbless single-word commands first ─────────────────────────────────
+    (INTENT_GREET,        re.compile(
+        r"^\s*(?:hello|hi|hey|good\s+(?:morning|afternoon|evening)|greetings|yo)\s*(?:jarvis)?\s*[.!]?\s*$",
+        re.I
+    )),
     (INTENT_HELP,         re.compile(r"^\s*(?:help|what can you do|commands?|what can i say|show help|info)\s*\??\s*$", re.I)),
     (INTENT_NOW_PLAYING,  re.compile(r"^\s*(?:what(?:'s| is)\s+(?:this|playing|on)|now\s+playing|current\s+(?:song|track))\s*\??\s*$", re.I)),
     (INTENT_SKIP,         re.compile(r"^\s*(?:skip|next|fwd|forward|next\s+track|next\s+song)\s*$", re.I)),
@@ -194,24 +202,25 @@ _PATTERNS: list[tuple[str, re.Pattern]] = [
     # "smart" wording when paired with a mood adjective for backwards
     # familiarity ("create a magic chill playlist called X").
     (INTENT_PLAYLIST_AUTO, re.compile(
-        rf"^\s*(?:create|make|generate|build)\s+(?:a\s+|an\s+)?(?:new\s+)?"
+        rf"^\s*(?:create|make|generate|build)\s+(?:a\s+|an\s+)?(?:brand\s+new\s+|new\s+)?"
         rf"(?:(?:magic|smart|auto|automatic|knn)\s+)?"
         rf"(?P<mood>{_MOOD_ALT})\s+playlist"
         rf"(?:\s+(?:called|named|titled))?\s+(?P<q>.+?)\s*$",
         re.I,
     )),
     (INTENT_PLAYLIST_AUTO, re.compile(
-        rf"^\s*(?:create|make|generate|build)\s+(?:a\s+|an\s+)?(?:new\s+)?"
+        rf"^\s*(?:create|make|generate|build)\s+(?:a\s+|an\s+)?(?:brand\s+new\s+|new\s+)?"
         rf"(?:(?:magic|smart|auto|automatic|knn)\s+)?"
         rf"(?P<mood>{_MOOD_ALT})\s+playlist\s*$",
         re.I,
     )),
     (INTENT_PLAYLIST_CREATE, re.compile(
-        r"^\s*(?:create|make|generate|build)\s+(?:a\s+)?(?:new\s+)?playlist\s+(?:called\s+)?(?P<q>.+?)\s*$",
+        r"^\s*(?:create|make|generate|build)\s+(?:a\s+)?(?:brand\s+new\s+|new\s+)?playlist"
+        r"(?:\s+(?:called|named|titled))?\s+(?P<q>.+?)\s*$",
         re.I,
     )),
     (INTENT_PLAYLIST_CREATE, re.compile(
-        r"^\s*(?:create|make|generate|build)\s+(?:a\s+)?(?:new\s+)?playlist\s*$",
+        r"^\s*(?:create|make|generate|build)\s+(?:a\s+)?(?:brand\s+new\s+|new\s+)?playlist\s*$",
         re.I,
     )),
     (INTENT_PLAYLIST_ADD, re.compile(
@@ -353,6 +362,12 @@ def parse(text: str) -> Intent:
     runner uses that as the cue to either ask for clarification or to
     fall back to a free-text library search."""
     raw = text or ""
+    
+    # Direct raw match for greetings/wake-word-only prompts to prevent _normalise from tearing them apart
+    _GREET_LEAD = r"hello|hi|hey|good\s+(?:morning|afternoon|evening)|greetings|yo|jarvis"
+    if re.match(rf"^\s*(?:{_GREET_LEAD})\s*(?:{_GREET_LEAD})?\s*[.!?\s]*$", raw, re.I):
+        return Intent(name=INTENT_GREET, raw=raw)
+
     normalised = _normalise(raw)
     if not normalised:
         return Intent(name=INTENT_UNKNOWN, raw=raw)
@@ -378,7 +393,60 @@ def parse(text: str) -> Intent:
             extras=extras,
         )
 
+    # --- SEMANTIC FALLBACK GATEWAY ---
+    # If the syntactic regex loop misses, we fall back to our local BGE Vector Space Model!
+    # Bypassing semantic fallback for purely numeric parameters or very short utterances
+    # to prevent structural misclassification of dialog slot-filling parameters (like '5').
+    if normalised.isdigit() or len(normalised) < 3:
+        return Intent(name=INTENT_UNKNOWN, raw=raw)
+
+    import time
+    start_time = time.perf_counter()
+    try:
+        classifier = get_semantic_classifier()
+        match = classifier.classify(normalised, threshold=0.50)
+        duration_ms = (time.perf_counter() - start_time) * 1000.0
+        
+        # Calculate simulated Android bounds
+        # Fast Android (2x faster due to a modern octa-core mobile CPU vs older PC CPU)
+        # Slow Android (2x slower due to standard mobile power-throttling/emulation overhead)
+        android_fast_ms = duration_ms / 2.0
+        android_slow_ms = duration_ms * 2.0
+        
+        if match:
+            intent_name, anchor_phrase, score = match
+            extracted_query = classifier.extract_slots(raw, intent_name)
+            
+            return Intent(
+                name=intent_name,
+                query=extracted_query,
+                raw=raw,
+                extras={
+                    "semantic": True,
+                    "score": score,
+                    "anchor": anchor_phrase,
+                    "compute_time_windows_ms": round(duration_ms, 2),
+                    "simulated_android_fast_ms": round(android_fast_ms, 2),
+                    "simulated_android_slow_ms": round(android_slow_ms, 2),
+                }
+            )
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        logger.error(f"Semantic fallback failed: {e}", exc_info=True)
+
     return Intent(name=INTENT_UNKNOWN, raw=raw)
+
+
+_SEMANTIC_CLASSIFIER = None
+
+def get_semantic_classifier():
+    """Lazy-loaded module-level singleton for the semantic classifier."""
+    global _SEMANTIC_CLASSIFIER
+    if _SEMANTIC_CLASSIFIER is None:
+        from utils.semantic_intent import SemanticIntentClassifier
+        _SEMANTIC_CLASSIFIER = SemanticIntentClassifier()
+    return _SEMANTIC_CLASSIFIER
 
 
 __all__ = [
@@ -411,6 +479,7 @@ __all__ = [
     "INTENT_AFFIRMATIVE",
     "INTENT_NEGATIVE",
     "INTENT_NAME_ENTITY",
+    "INTENT_GREET",
     "INTENT_HELP",
     "INTENT_UNKNOWN",
     "MOOD_KEYWORDS",

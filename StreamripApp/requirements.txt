@@ -9,4 +9,5 @@ certifi
 tinytag
 aiofiles
 serious-python
+numpy
 -e ../flet_audio_service
