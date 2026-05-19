@@ -49,7 +49,7 @@ class AudioEngine:
         self.duration       = 0.0
         self.is_playing     = False
         self.is_shuffle     = False
-        self.repeat_mode    = "none"
+        self._repeat_mode   = "none"
 
         self.queue: list[dict] = []
         self.current_index: int = 0
@@ -68,6 +68,20 @@ class AudioEngine:
 
         self._observers: dict[str, list] = {}
         self._obs_lock = threading.Lock()
+        self._native_lock = None
+
+    @property
+    def repeat_mode(self) -> str:
+        return self._repeat_mode
+
+    @repeat_mode.setter
+    def repeat_mode(self, mode: str):
+        if mode not in ("none", "one", "all"):
+            return
+        self._repeat_mode = mode
+        self.dispatch("repeat_mode", mode)
+        if self._audio and self._page:
+            self._page.run_task(self._audio.set_repeat_mode, mode)
 
     # ── Initialisation ────────────────────────────────────────────────────────
 
@@ -99,6 +113,8 @@ class AudioEngine:
             self._page.services.append(self._audio)
             self._page.update()
             logger.warning("ADB_AUDIO: AudioServiceControl added to services")
+            if self._repeat_mode != "none":
+                self._page.run_task(self._audio.set_repeat_mode, self._repeat_mode)
 
     @property
     def audio_service(self) -> "AudioServiceControl | None":
@@ -162,6 +178,13 @@ class AudioEngine:
         the native player owns advancement, notification skip, and background
         continuation. Atomic: set_playlist takes start_index, so there's no
         race between source-load and a follow-up skip."""
+        import asyncio
+        if self._native_lock is None:
+            self._native_lock = asyncio.Lock()
+        async with self._native_lock:
+            await self._push_queue_native_unlocked(start_index, autoplay)
+
+    async def _push_queue_native_unlocked(self, start_index: int = 0, autoplay: bool = True):
         self._ensure_audio()
         if not self._audio:
             logger.error("ADB_AUDIO: Audio control not available.")
@@ -495,26 +518,30 @@ class AudioEngine:
         (network race, Dart side not yet ready), at which point the user
         will see the legacy 'restart on resume' behaviour for that one
         mutation — better than a silently dropped queue insert."""
-        self._ensure_audio()
-        if not self._audio:
-            return
-        item = self._track_to_playlist_item(track)
-        if item is None:
-            return
-        try:
-            await self._audio.add_queue_item(
-                src=item["src"],
-                title=item["title"],
-                artist=item["artist"],
-                album_art=item.get("album_art"),
-                index=index,
-            )
-        except Exception as exc:
-            logger.warning("ADB_AUDIO: add_queue_item failed; falling back to "
-                           "set_playlist (will reset position): %s", exc)
-            await self._push_queue_native(
-                start_index=self.current_index, autoplay=False
-            )
+        import asyncio
+        if self._native_lock is None:
+            self._native_lock = asyncio.Lock()
+        async with self._native_lock:
+            self._ensure_audio()
+            if not self._audio:
+                return
+            item = self._track_to_playlist_item(track)
+            if item is None:
+                return
+            try:
+                await self._audio.add_queue_item(
+                    src=item["src"],
+                    title=item["title"],
+                    artist=item["artist"],
+                    album_art=item.get("album_art"),
+                    index=index,
+                )
+            except Exception as exc:
+                logger.warning("ADB_AUDIO: add_queue_item failed; falling back to "
+                               "set_playlist (will reset position): %s", exc)
+                await self._push_queue_native_unlocked(
+                    start_index=self.current_index, autoplay=False
+                )
 
     def play_track_at(self, index: int):
         if not (0 <= index < len(self.queue)) or not self._audio or not self._page:
@@ -550,17 +577,21 @@ class AudioEngine:
     async def _native_remove_queue_item(self, index: int):
         """Non-destructive removal via Dart's removeQueueItemAt. Falls back
         to a full rebuild if the native call fails."""
-        self._ensure_audio()
-        if not self._audio:
-            return
-        try:
-            await self._audio.remove_queue_item(index)
-        except Exception as exc:
-            logger.warning("ADB_AUDIO: remove_queue_item failed; falling back "
-                           "to set_playlist: %s", exc)
-            await self._push_queue_native(
-                start_index=self.current_index, autoplay=False
-            )
+        import asyncio
+        if self._native_lock is None:
+            self._native_lock = asyncio.Lock()
+        async with self._native_lock:
+            self._ensure_audio()
+            if not self._audio:
+                return
+            try:
+                await self._audio.remove_queue_item(index)
+            except Exception as exc:
+                logger.warning("ADB_AUDIO: remove_queue_item failed; falling back "
+                               "to set_playlist: %s", exc)
+                await self._push_queue_native_unlocked(
+                    start_index=self.current_index, autoplay=False
+                )
 
     def move_queue_item(self, old_index: int, new_index: int):
         if not (0 <= old_index < len(self.queue) and 0 <= new_index < len(self.queue)):
@@ -580,17 +611,21 @@ class AudioEngine:
     async def _native_move_queue_item(self, old_index: int, new_index: int):
         """Non-destructive reorder via Dart's ConcatenatingAudioSource.move.
         Position is preserved even when the active source is moved."""
-        self._ensure_audio()
-        if not self._audio:
-            return
-        try:
-            await self._audio.move_queue_item(old_index, new_index)
-        except Exception as exc:
-            logger.warning("ADB_AUDIO: move_queue_item failed; falling back "
-                           "to set_playlist: %s", exc)
-            await self._push_queue_native(
-                start_index=self.current_index, autoplay=False
-            )
+        import asyncio
+        if self._native_lock is None:
+            self._native_lock = asyncio.Lock()
+        async with self._native_lock:
+            self._ensure_audio()
+            if not self._audio:
+                return
+            try:
+                await self._audio.move_queue_item(old_index, new_index)
+            except Exception as exc:
+                logger.warning("ADB_AUDIO: move_queue_item failed; falling back "
+                               "to set_playlist: %s", exc)
+                await self._push_queue_native_unlocked(
+                    start_index=self.current_index, autoplay=False
+                )
 
     def clear_queue(self):
         self.stop()

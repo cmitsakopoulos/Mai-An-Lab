@@ -74,6 +74,7 @@ class FletAudioService extends FletService with WidgetsBindingObserver {
   // default which is the right behaviour for short assistant utterances on
   // top of a paused player.
   static FlutterTts? _tts;
+  static Completer<void>? _ttsCompleter;
   // 0.5 is the flutter_tts default, but on Android the system TTS engine
   // tends to interpret it as 'fast' (especially Google TTS on Pixel/Samsung
   // devices). 0.4 is a comfortable narration pace for short assistant
@@ -206,6 +207,15 @@ class FletAudioService extends FletService with WidgetsBindingObserver {
         final index = (a['index'] as num?)?.toInt() ?? 0;
         _handler?.skipToQueueItem(index);
 
+      case 'set_repeat_mode':
+        final mode = a['mode'] as String? ?? 'none';
+        final repeatMode = const {
+          'one': AudioServiceRepeatMode.one,
+          'all': AudioServiceRepeatMode.all,
+          'none': AudioServiceRepeatMode.none,
+        }[mode] ?? AudioServiceRepeatMode.none;
+        _handler?.setRepeatMode(repeatMode);
+
       case 'show_progress_notification':
         final title = (a['title'] as String?) ?? '';
         final content = (a['content'] as String?) ?? '';
@@ -294,6 +304,22 @@ class FletAudioService extends FletService with WidgetsBindingObserver {
   Future<FlutterTts> _ensureTts() async {
     if (_tts != null) return _tts!;
     final tts = FlutterTts();
+
+    tts.setCompletionHandler(() {
+      if (_ttsCompleter != null && !_ttsCompleter!.isCompleted) {
+        _ttsCompleter!.complete();
+      }
+    });
+    tts.setErrorHandler((msg) {
+      if (_ttsCompleter != null && !_ttsCompleter!.isCompleted) {
+        _ttsCompleter!.completeError(msg);
+      }
+    });
+    tts.setCancelHandler(() {
+      if (_ttsCompleter != null && !_ttsCompleter!.isCompleted) {
+        _ttsCompleter!.complete();
+      }
+    });
     // Force Android to wait for the utterance to finish (otherwise speak()
     // returns immediately and the assistant's completion event would fire
     // before the user hears anything).
@@ -377,7 +403,23 @@ class FletAudioService extends FletService with WidgetsBindingObserver {
     }
     try {
       final tts = await _ensureTts();
+      // Complete any existing completer to prevent leaks/hangs
+      if (_ttsCompleter != null && !_ttsCompleter!.isCompleted) {
+        _ttsCompleter!.complete();
+      }
+      _ttsCompleter = Completer<void>();
       await tts.speak(text);
+      
+      // Await actual speech completion on non-Android platforms, where
+      // tts.speak() resolves instantly upon queueing rather than completion.
+      if (!Platform.isAndroid) {
+        try {
+          await _ttsCompleter!.future.timeout(const Duration(seconds: 30));
+        } catch (e) {
+          debugPrint("FletAudioService: TTS speech completion wait exception/timeout: $e");
+        }
+      }
+      
       control.triggerEvent('tts_complete', jsonEncode({
         'request_id': requestId, 'ok': true,
       }));
@@ -393,6 +435,9 @@ class FletAudioService extends FletService with WidgetsBindingObserver {
     try {
       await _tts!.stop();
     } catch (_) {}
+    if (_ttsCompleter != null && !_ttsCompleter!.isCompleted) {
+      _ttsCompleter!.complete();
+    }
   }
 
   Future<SpeechToText> _ensureStt() async {
@@ -747,6 +792,12 @@ class AudioPlayerHandler extends BaseAudioHandler with QueueHandler, SeekHandler
 
   /// androidCompactActionIndices [0, 1, 3] = previous, play/pause, next
   PlaybackState _transformEvent(PlaybackEvent event) {
+    final repeatMode = const {
+      LoopMode.off: AudioServiceRepeatMode.none,
+      LoopMode.one: AudioServiceRepeatMode.one,
+      LoopMode.all: AudioServiceRepeatMode.all,
+    }[_player.loopMode] ?? AudioServiceRepeatMode.none;
+
     return PlaybackState(
       controls: [
         MediaControl.skipToPrevious,
@@ -758,6 +809,7 @@ class AudioPlayerHandler extends BaseAudioHandler with QueueHandler, SeekHandler
         MediaAction.seek,
         MediaAction.skipToPrevious,
         MediaAction.skipToNext,
+        MediaAction.setRepeatMode,
       },
       androidCompactActionIndices: const [0, 1, 3],
       processingState: const {
@@ -773,6 +825,7 @@ class AudioPlayerHandler extends BaseAudioHandler with QueueHandler, SeekHandler
       bufferedPosition: event.bufferedPosition,
       speed: _player.speed,
       queueIndex: event.currentIndex,
+      repeatMode: repeatMode,
     );
   }
 
@@ -810,6 +863,16 @@ class AudioPlayerHandler extends BaseAudioHandler with QueueHandler, SeekHandler
   @override
   Future<void> skipToQueueItem(int index) =>
       _player.seek(Duration.zero, index: index);
+
+  @override
+  Future<void> setRepeatMode(AudioServiceRepeatMode repeatMode) async {
+    final loopMode = const {
+      AudioServiceRepeatMode.none: LoopMode.off,
+      AudioServiceRepeatMode.one: LoopMode.one,
+      AudioServiceRepeatMode.all: LoopMode.all,
+    }[repeatMode] ?? LoopMode.off;
+    await _player.setLoopMode(loopMode);
+  }
 
   Future<void> setPlaylist(List<MediaItem> items, [int startIndex = 0]) async {
     final sources = items

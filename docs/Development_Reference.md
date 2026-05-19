@@ -138,14 +138,39 @@ To prevent progressive filesystem bloating from accumulated cache metadata, the 
 
 ## 3. Streaming & Search Implementation
 
-Mai-An Lab integrates a modified version of **Streamrip 2.1.0** to handle remote metadata and downloads.
+Mai-An Lab integrates a highly optimized, custom search client using elements of **Streamrip 2.1.0** to handle remote metadata queries and downloads.
 
-### Qobuz Integration
-- **Direct API Access**; the app communicates directly with Qobuz's REST API using `aiohttp`.
-- **Token Management**; user IDs and tokens are stored in the local `recent_searches.json` and `config.toml`, allowing for persistent sessions without storing plaintext passwords.
-- **Concurrent Fetching**; search results for Tracks, Albums, and Artists are fetched in parallel using `asyncio.gather` to minimize network latency.
+### 3.1 Overhauled Search & Connection Architecture (`StreamripSearcher`)
 
-### Download Architecture
+To guarantee an ultra-responsive user experience, prevent socket leaks, and protect mobile battery/memory limits, the search infrastructure leverages a state-of-the-art background worker and lifecycle manager:
+
+#### 1. Persistent Daemon Worker Thread (`StreamripSearcherWorker`)
+* **Dedicated Loop**: The search engine maintains a single class-level event loop (`_loop`) running continuously on a dedicated, daemonized background thread named `StreamripSearcherWorker`.
+* **Thread-Safe Dispatches**: All asynchronous metadata and search methods are dispatched thread-safely to this background loop using `asyncio.run_coroutine_threadsafe`. This completely isolates network I/O from Flet’s main UI execution context, ensuring zero stutter during page swaps.
+
+#### 2. Class-Level Cached Client & Async Locks
+* **Single Session**: To avoid costly connection renegotiations and socket exhaustion, a single `QobuzClient` session is cached at the class level (`StreamripSearcher._client`).
+* **Lock Synchronization**: Access to the cached client and session setup is strictly governed by an asynchronous loop lock (`StreamripSearcher._client_lock`). This prevents race conditions or duplicate session initialization when concurrent API calls are triggered.
+
+#### 3. Dynamic Credentials Hot-Reloading
+* When settings are mutated, the searcher detects modifications in the Qobuz credentials configuration on the subsequent request. It gracefully shuts down the active `aiohttp.ClientSession` and dynamically re-authenticates with the new credentials in-place without requiring an application restart.
+
+#### 4. Metadata-Based Search Deduplication
+* Qobuz search results frequently contain duplicate tracks and albums due to single releases, standard/deluxe editions, and varied compilations.
+* To clean up the UI, search results undergo an insertion-order-preserving deduplication pass:
+  - **Tracks and Albums**: Deduplicated strictly by a composite key of `(media_type, title, artist)`.
+  - **Other Items (Artists, Playlists)**: Deduplicated by `(media_type, title)`.
+* This eliminates redundant result rows while maintaining absolute priority for the most relevant search hits.
+
+#### 5. 5-Minute Inactivity Automated Timeout Lifecycle
+* **Active Poll**: A background coroutine monitor (`_inactivity_monitor`) sleeps in 15-second intervals and checks the elapsed time since the last active search or dropdown expansion.
+* **Graceful Session Pruning**: If no activity occurs for **5 minutes (300.0s)**:
+  - The monitor locks the client session and closes the active `aiohttp.ClientSession` cleanly.
+  - The background event loop is stopped (`cls._loop.stop()`), which gracefully terminates the `StreamripSearcherWorker` thread.
+  - All class-level references (`_loop`, `_thread`, `_client`, `_client_lock`) are reset to `None` for garbage collection.
+* **On-Demand Resurrection**: The very next search or dropdown expansion automatically and seamlessly spins up a fresh event loop, thread, and lock context—restarting the inactivity timer from zero.
+
+### 3.2 Download Architecture
 - **Worker Thread**; downloads are executed on a dedicated background thread to prevent blocking the Flet event loop.
 - **Atomic Renames**; tracks are downloaded to a `.tmp` file and only renamed to their final `.flac` or `.mp3` extension after a successful checksum verification and metadata tag injection.
 - **Automatic Indexing**; once a download completes, the `LibraryScanner` is triggered to immediately add the new track to the local SQLite database.
@@ -183,20 +208,49 @@ Jarvis is a zero-latency vocal command center that operates entirely on-device, 
    - **Android Native STT (`SpeechRecognizer`)**: Speech-to-Text leverages Android's highly optimized native **on-device Speech Services** via Kotlin method channels. By utilizing local neural models and hardware-level audio codecs, voice translation is completed with near-zero latency, minimal battery footprint, and 100% user privacy (no audio data is transmitted over the internet).
    - **Android Native TTS (`TextToSpeech`)**: Text-to-Speech utilizes Android’s hardware-optimized **native system synthesizer**. It leverages pre-installed high-fidelity language packages and native audio session focus managers to seamlessly duck playback volume during vocal replies without external library overhead.
 
-2. **Conversational NLP & Normalisation (`assistant_intent.py`)**:
-   - **Grammatical Anchoring**: Processes free-form user speech using compiled, boundary-anchored regular expressions. This ensures perfect deterministic reliability without any internet dependencies or heavy machine learning weights.
+2. **TTS Playback Synchronization Safeguard (Dart `Completer` Blocking)**:
+   - **The Challenge**: On several platforms, native TTS plugins return instantly as soon as a text string is successfully *enqueued* in the system's speech queue, rather than waiting for the physical utterance to *finish*. This caused Python's `_append_bubble()` to resolve instantly and launch song playback (via `audio_engine.play()`) directly on top of Jarvis's speaking voice.
+   - **The Architecture**:
+     * **Completer Locking Pattern**: Inside [flet_audio_service.dart](file:///Users/chrismitsacopoulos/Desktop/Mai-An-Lab/flet_audio_service/src/flutter/flet_audio_service/lib/flet_audio_service.dart), a static `Completer<void>? _ttsCompleter` acts as a thread block.
+     * **Event Hooks**: Native event handlers (`setCompletionHandler`, `setErrorHandler`, `setCancelHandler`) are configured on `_ensureTts()` to complete the active `_ttsCompleter` whenever speech completes, cancels, or encounters an error.
+     * **Channel Blocking**: When Python calls `tts_speak(...)`, the Dart plugin initiates `tts.speak(text)` and blocks the MethodChannel response:
+       ```dart
+       _ttsCompleter = Completer<void>();
+       await _ttsCompleter!.future.timeout(Duration(seconds: 30), onTimeout: () {
+           _ttsCompleter?.complete();
+       });
+       ```
+     * **Abortion Safety**: Any invoke-channel call to `tts_stop()` immediately completes the active completer, avoiding thread hangs during manual stops.
+     * **Result**: Playback wait safeguards work perfectly; the music is guaranteed to stay paused or ducked until Jarvis has physically finished saying his lines.
+
+3. **Immediate Speech Interruption (Mic Tap Intercept)**:
+   - To deliver a fluid, highly responsive conversational loop, Jarvis supports **active speech interruption**.
+   - Clicking or tapping the microphone button triggers an immediate `on_tap_down` gesture. The application intercepts this event and runs `service.tts_stop()` asynchronously before starting the voice-capture STT listener.
+   - Jarvis instantly cuts off mid-sentence the millisecond the user touches the mic button, ensuring a silent environment for speech-to-text recording without requiring the user to talk over him.
+
+4. **Conversational NLP & Normalisation (`assistant_intent.py` & `semantic_intent.py`)**:
+   - **Spelling Auto-Correction (Levenshtein Distance)**: Speech recognition is prone to minor errors and dictation drift. The upgraded classifier calculates Levenshtein Edit Distance on all OOV (out-of-vocabulary) terms against key command tokens (`"skip"`, `"pause"`, `"resume"`, `"mute"`, `"unmute"`, `"queue"`, `"playlist"`, `"download"`):
+     $$D(i, j) = \min \begin{cases} D(i-1, j) + 1 \\ D(i, j-1) + 1 \\ D(i-1, j-1) + \text{cost} \end{cases}$$
+     If edit distance $D \le 1$, the token is automatically corrected (e.g. *"skup"* $\rightarrow$ *"skip"*, *"downloaded"* $\rightarrow$ *"download"*), preserving command integrity.
+   - **Synonym & Slang Translation Map**: Normalizes colloquial voice inputs to their semantic command equivalents using a deterministic vocabulary dictionary (e.g. *"banger"* / *"beats"* $\rightarrow$ *"song"*, *"blast"* / *"spin"* $\rightarrow$ *"play"*, *"shove"* $\rightarrow$ *"add"*, *"quiet"* $\rightarrow$ *"mute"*, *"resume"* $\rightarrow$ *"play"*).
+   - **Inverse Document Frequency (IDF) Weighting**: Standard bag-of-words vector space models fail when generic particles (like `"play"`, `"the"`, `"me"`) overwhelm high-value verbs. The classifier applies dynamic IDF scaling weights:
+     * Noise particles/connectors carry low weight ($\approx 0.1$ - $0.5$).
+     * Primary intent verbs (`"skip"`, `"pause"`, `"unmute"`, `"download"`, `"shuffle"`, `"similarity"`) carry massive weight ($\approx 1.8$ - $2.8$).
+     This ensures critical actions always dominate the Cosine Similarity metric during query-anchor classification.
    - **Recursive Fixed-Point Peeling**: Employs a recursive peeling loop (`_normalise` and `_clean_query`) to dynamically strip out voice hesitation layers, politeness noise, and auxiliary verbs (e.g. *"Yo, um, Jarvis, could you please... please"*), isolating the core query perfectly.
    - **Homophone Protections**: Integrates custom vocabulary mappings to capture homophone slips (e.g. treating *"cue"* and *"queue"* identically).
 
-3. **Core Capabilities & Dispatch Table (`assistant_runner.py`)**:
-   - **Playback Control**: Instantly skip, reverse, pause, resume, mute, unmute, or shuffle the playback queue.
-   - **Context-Aware Queue Mutations**: Commands like *"play next"* or *"add to queue"* resolve metadata titles against the local SQLite database and splice the selected tracks dynamically into the active audio pipeline.
-   - **Acoustic Mood Selection**: Matches moods (e.g., *"play something dark"* or *"play happy tracks"*) directly to the 43-dimensional DSP similarity graph attractors.
-   - **Similarity Walkers**: Vocal commands like *"play more like this"* trigger real-time metadata and acoustic similarity edge navigations to queue related music automatically.
-   - **Stateful Pending Confirmations**: Supports full recursive confirmation trees (e.g., prompting the user before initiating heavy library re-indexing or graph rescans, running callback state machines on *"yes"* or *"no"* replies).
+5. **Proactive Sandboxed Chat Persistence & Lazy 15-Minute Expiration (`utils/chat_memory.py`)**:
+   - **Lite JSON Architecture**: To bypass heavy, slow local database wrappers on Android, the chat memory is modeled as a sandboxed JSON storage backend. Read and write access completes in **under 0.2 milliseconds** with a footprint **less than 50 KB**.
+   - **Proactive Memory Cap (50 items)**: To protect Android's UI buffer and WebSocket sync channel from sluggish serialization lag during deep chat histories, the memory strictly caps the chat list at **50 messages**, shifting out older entries dynamically.
+   - **Lazy Inactivity Expiration**: When the user opens the Jarvis panel or resumes the app, `load_session()` checks the time delta since the last active interaction against a **15-minute inactivity threshold** (900 seconds).
+     * If the time delta is under 15 minutes, the existing chat history and greeting states are re-hydrated seamlessly.
+     * If the threshold is breached, the storage file is lazily cleared, resetting variables and scheduling a fresh, time-of-day aware greeting bubble.
 
-4. **Vocal Pipeline Integration (`main.py`)**:
-   - **TTS Priority Ducking**: The runner coordinates with Flet's system audio services to temporarily dim or pause active music during vocal replies, resuming background playback automatically after Jarvis finishes speaking.
+6. **OS Process Lifecycle Integration**:
+   - The application hooks into Flet's system event loop via `on_app_lifecycle_state_change`:
+     * **Background / Suspend** (`hidden`, `inactive`, `detached`): Proactively calls `handle_app_background()` to write the final active timestamp to disk, guaranteeing that if the Android OS kills the suspended process to free up system memory, the inactivity duration is preserved accurately.
+     * **Resume / Foreground** (`resumed`): Calls `handle_app_resume()`. If the 15-minute inactivity limit was breached during background suspension, it immediately resets UI controls and triggers the initial hello greeting bubble.
 
 ### 5.2 Comprehensive Skillset & Commands
 
