@@ -55,6 +55,7 @@ INTENT_PLAYLIST_ADD    = "playlist_add"     # add track X to playlist Y
 INTENT_PLAYLIST_PLAY   = "playlist_play"    # play playlist X
 INTENT_AFFIRMATIVE    = "affirmative"     # yes / yeah / do it (confirmation)
 INTENT_NEGATIVE       = "negative"        # no / later / not now (cancel pending)
+INTENT_NAME_ENTITY    = "name_entity"     # call it X / name it X
 INTENT_HELP           = "help"
 INTENT_UNKNOWN        = "unknown"
 
@@ -98,6 +99,12 @@ _MOOD_ALT = "|".join(MOOD_KEYWORDS)
 
 
 _PATTERNS: list[tuple[str, re.Pattern]] = [
+    # ── Naming / Entity Specification ───────────────────────────────────────
+    (INTENT_NAME_ENTITY, re.compile(
+        r"^\s*(?:call\s+(?:the\s+)?playlist|name\s+(?:the\s+)?playlist|call\s+it|name\s+it|make\s+it|called|named|titled)\s+(?P<q>.+?)\s*$",
+        re.I
+    )),
+
     # ── Confirmation routine (highest priority) ─────────────────────────────
     # Match these BEFORE play/queue so a bare "yes" or "no" during a
     # pending-confirmation turn doesn't get misread as a search query.
@@ -136,28 +143,46 @@ _PATTERNS: list[tuple[str, re.Pattern]] = [
     (INTENT_UNMUTE,       re.compile(r"^\s*(?:unmute|restore\s+volume)\s*$", re.I)),
 
     # ── Similarity / artist navigation ──────────────────────────────────────
-    (INTENT_PLAY_SIMILAR, re.compile(r"^\s*(?:play\s+)?(?:something|stuff|tracks?|songs?)\s+(?:like|similar\s+to)\s+(?:this|that|current)\s*$", re.I)),
-    (INTENT_PLAY_SIMILAR, re.compile(r"^\s*more\s+(?:like\s+)?(?:this|that)\s*$", re.I)),
+    (INTENT_PLAY_SIMILAR, re.compile(
+        r"^\s*(?P<verb>play|start|put\s+on|add|queue|enqueue|put)?\s*"
+        r"(?:a\s+|some\s+|something\s+|stuff\s+|tracks?\s+|songs?\s+|music\s+|tunes?\s+)?"
+        r"(?:more\s+)?similar"
+        r"(?:\s+(?:songs?|tracks?|music|tunes?|stuff))?"
+        r"(?:\s+(?:like|similar\s+to|to)\s+(?:this|that|current))?\s*$",
+        re.I
+    )),
+    (INTENT_PLAY_SIMILAR, re.compile(
+        r"^\s*(?P<verb>play|start|put\s+on|add|queue|enqueue|put)?\s*"
+        r"(?:more\s+)?like\s+(?:this|that|current)\s*$",
+        re.I
+    )),
     (INTENT_PLAY_MORE_BY, re.compile(r"^\s*(?:play\s+)?more\s+(?:by|from)\s+(?:this|that|the)\s+artist\s*$", re.I)),
-    (INTENT_PLAY_RANDOM,  re.compile(r"^\s*(?:play\s+)?(?:a\s+)?random\s*(?:song|track|music|tunes?)?\s*$", re.I)),
-    (INTENT_PLAY_RANDOM,  re.compile(r"^\s*(?:shuffle\s+play|play\s+(?:anything|something\s+random|some\s+random\s*(?:songs?|tracks?|music|tunes?))|surprise\s+me)\s*$", re.I)),
+    (INTENT_PLAY_RANDOM,  re.compile(
+        r"^\s*(?:play|start|put\s+on)?\s*"
+        r"(?:a\s+|some\s+)?(?:random\s+)?\s*"
+        r"(?:song|songs|track|tracks|music|tune|tunes|stuff|anything|something)\s*$",
+        re.I
+    )),
+    (INTENT_PLAY_RANDOM,  re.compile(r"^\s*(?:shuffle\s+play|surprise\s+me)\s*$", re.I)),
 
     # ── Mood (DSP-driven) ───────────────────────────────────────────────────
     # Restricted to MOOD_KEYWORDS so we don't steal "play something <artist>"
     # phrasings. The captured word IS the mood; it's matched against
     # track_graph.MOOD_PROFILES at dispatch time.
     (INTENT_PLAY_MOOD, re.compile(
-        rf"^\s*(?:play\s+)?(?:me\s+)?(?:some|any|something|anything|stuff|tracks?|songs?|music|tunes?)\s+"
+        rf"^\s*(?P<verb>play|start|put\s+on|add|queue|enqueue|put)?\s*"
+        rf"(?:me\s+)?"
+        rf"(?:a\s+|some\s+|any\s+|something\s+|anything\s+|stuff\s+|tracks?\s+|songs?\s+|music\s+|tunes?\s+)?"
         rf"(?P<q>{_MOOD_ALT})"
-        rf"(?:\s+(?:music|tracks?|songs?|tunes?|stuff))?\s*$",
+        rf"(?:\s+(?:music|tracks?|songs?|tunes?|stuff))?"
+        rf"(?:\s+(?:to|in)\s+(?:the\s+)?queue)?\s*$",
         re.I,
     )),
     (INTENT_PLAY_MOOD, re.compile(
-        rf"^\s*(?:play\s+)?(?P<q>{_MOOD_ALT})\s+(?:music|tracks?|songs?|tunes?)\s*$",
-        re.I,
-    )),
-    (INTENT_PLAY_MOOD, re.compile(
-        rf"^\s*(?:i\s+(?:want|need|feel\s+like))\s+(?:some\s+|something\s+)?(?P<q>{_MOOD_ALT})\s*(?:music|tracks?|songs?)?\s*$",
+        rf"^\s*(?:i\s+(?:want|need|feel\s+like))\s+"
+        rf"(?P<verb>play|queue|add)?\s*"
+        rf"(?:some\s+|something\s+|a\s+)?(?P<q>{_MOOD_ALT})"
+        rf"\s*(?:music|tracks?|songs?|tunes?|stuff)?\s*$",
         re.I,
     )),
 
@@ -175,8 +200,18 @@ _PATTERNS: list[tuple[str, re.Pattern]] = [
         rf"(?:\s+(?:called|named|titled))?\s+(?P<q>.+?)\s*$",
         re.I,
     )),
+    (INTENT_PLAYLIST_AUTO, re.compile(
+        rf"^\s*(?:create|make|generate|build)\s+(?:a\s+|an\s+)?(?:new\s+)?"
+        rf"(?:(?:magic|smart|auto|automatic|knn)\s+)?"
+        rf"(?P<mood>{_MOOD_ALT})\s+playlist\s*$",
+        re.I,
+    )),
     (INTENT_PLAYLIST_CREATE, re.compile(
-        r"^\s*(?:create|make|generate)\s+(?:a\s+)?(?:new\s+)?playlist\s+(?:called\s+)?(?P<q>.+?)\s*$",
+        r"^\s*(?:create|make|generate|build)\s+(?:a\s+)?(?:new\s+)?playlist\s+(?:called\s+)?(?P<q>.+?)\s*$",
+        re.I,
+    )),
+    (INTENT_PLAYLIST_CREATE, re.compile(
+        r"^\s*(?:create|make|generate|build)\s+(?:a\s+)?(?:new\s+)?playlist\s*$",
         re.I,
     )),
     (INTENT_PLAYLIST_ADD, re.compile(
@@ -375,6 +410,7 @@ __all__ = [
     "INTENT_PLAYLIST_PLAY",
     "INTENT_AFFIRMATIVE",
     "INTENT_NEGATIVE",
+    "INTENT_NAME_ENTITY",
     "INTENT_HELP",
     "INTENT_UNKNOWN",
     "MOOD_KEYWORDS",
