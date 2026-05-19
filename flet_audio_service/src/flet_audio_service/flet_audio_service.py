@@ -308,6 +308,11 @@ class AudioServiceControl(Service):
         await self._wait_ready()
         await self._invoke_method("skip_to_index", {"index": index})
 
+    async def set_repeat_mode(self, mode: str):
+        """Sets the repeat mode: 'none', 'one', or 'all'."""
+        await self._wait_ready()
+        await self._invoke_method("set_repeat_mode", {"mode": mode})
+
     async def decode_pcm(self, path: str) -> dict[str, Any]:
         """Decode an audio file to mono 16-bit little-endian PCM via the
         platform's hardware codec. Returns a dict with keys:

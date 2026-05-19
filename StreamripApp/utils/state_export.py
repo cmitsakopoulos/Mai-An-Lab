@@ -124,6 +124,25 @@ def export_state(
         except OSError:
             pass
 
+    # Auto-prune older state bundles to prevent disk bloat (keep newest 5)
+    try:
+        state_files = []
+        for name in os.listdir(out_dir):
+            if name.startswith("mai_an_lab_state_") and name.endswith(".zip"):
+                full = os.path.join(out_dir, name)
+                if os.path.isfile(full):
+                    state_files.append((os.path.getmtime(full), full))
+        state_files.sort(reverse=True)
+        if len(state_files) > 5:
+            for _, path_to_delete in state_files[5:]:
+                try:
+                    os.remove(path_to_delete)
+                    logger.info("Auto-pruned older state bundle: %s", path_to_delete)
+                except OSError as ex:
+                    logger.warning("Failed to auto-prune %s: %s", path_to_delete, ex)
+    except Exception as ex:
+        logger.warning("Error running state bundle auto-pruning: %s", ex)
+
     return out_path
 
 

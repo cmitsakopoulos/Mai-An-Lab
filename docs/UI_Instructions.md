@@ -29,15 +29,15 @@ The Sort menu (accessible via the Sort icon) provides context-aware options:
 - **Playlists**: Sort by Name (A–Z) or Date Created.
 - **Albums/Tracks**: Sort by Date Added, Artist (A–Z), Album (A–Z), or Track (A–Z).
 
-### 1.5 High-Performance Page Pagination & Snappy Gestures
+### 1.5 High-Performance Page Pagination & Snappy Transitions
 To keep Flet’s widget tree extremely tiny and guarantee memory-safe, ultra-fluid library navigation even on massive multi-thousand-song catalogs:
 - **Active Slicing**: Library listings (Tracks, Albums, Artists) are sliced into dynamic pages (typically **35 items per page**), rendering only one active page at a time.
-- **Snappy Slide-In Carousel**: Switching pages initiates a lightning-fast hardware-accelerated **Slide-In Offset and Fade Animation** (optimized down to **120ms**), delivering a premium tactile feel.
+- **Snappy Slide-In Carousel**: Switching pages initiates a lightning-fast hardware-accelerated **Slide-In Offset and Fade Animation** (optimized to a snappier **100ms** with a layout sleep delay of **80ms**), delivering a premium tactile feel.
 - **Tactile Pagination Bar**: An elegant, glassmorphic pagination bar is rendered at the bottom of the screen.
-- **Dual-Control Navigation**:
-  - **Button Taps**: Tap the left or right chevron arrow buttons to change pages.
-  - **Swipe-to-Turn**: Swipe horizontally (left or right) directly on the bottom pagination bar container to change pages.
-- **Boundary Ghost Cards**: Custom glassmorphic boundary ghost cards appear at the top and bottom of the list when scrolled to the limits, seamlessly directing the user to swipe the pagination bar or tap chevrons to continue.
+- **Interactive Navigation**:
+  - **Button Taps**: Tap the left or right chevron arrow buttons on the pagination bar to change pages.
+  - **Interactive Boundary Ghost Cards**: Custom glassmorphic boundary ghost cards appear at the top and bottom of the list when scrolled to the limits. These cards are fully interactive and clickable—clicking the top ghost card instantly navigates to the previous page, and clicking the bottom ghost card instantly navigates to the next page.
+  - *Note*: Horizontal swipe gestures for page turning are explicitly removed to prevent accidental or uncontrollable page switching during standard scrolling.
 
 ---
 
@@ -55,8 +55,12 @@ The Search view intentionally replicates the Library's aesthetic:
 - **Default Source**: Qobuz is currently the primary search provider.
 - **Tactile Page Pagination**: To completely prevent infinite-scroll layout lag, battery drain, or memory leaks, search results are structured into discrete pages (typically **35 items per page**), rendering only one active page at a time.
 - **Unified Pagination Bar**: An elegant, glassmorphic pagination bar is rendered at the bottom of the Search results list, featuring a page index (e.g. "Page 1 of 4") and chevrons for forward/backward page navigation.
-- **Boundary Ghost Cards**: Custom glassmorphic boundary ghost cards appear at the top and bottom of the list when scrolled to the limits, directing the user to navigate pages.
-- **Hardware-Accelerated Slide-In**: Swapping pages triggers a hardware-accelerated **Slide-In Offset and Fade Animation** (gliding the new page into view in **250ms**), keeping the transition snappy and premium.
+- **Interactive Boundary Ghost Cards**: Custom glassmorphic boundary ghost cards appear at the top and bottom of the list when scrolled to the limits. These cards are fully interactive: clicking the top card instantly transitions to the previous page, and clicking the bottom card transitions to the next page.
+- **Hardware-Accelerated Slide-In**: Swapping pages triggers a hardware-accelerated **Slide-In Offset and Fade Animation** (gliding the new page into view in **100ms** with a dynamic **80ms** layout sleep/redraw interval), keeping the transition snappy and premium.
+- **Hierarchical Dropdown Pagination**: When expanding a search node (e.g. expanding an artist to see their albums), child items are loaded asynchronously and nested directly under the expanded node at an increased layout depth (using custom indentations).
+  - **Nested Load More**: If there are more albums/tracks to load, a custom *"Load More"* button is placed strictly *inside* the bottom of the dropdown list (under the loaded children) rather than outside of it.
+  - **Exhausted State**: When all items are successfully paginated, a quiet *"All albums loaded"* label completes the nested list.
+  - **Collapsing Cleanups**: Collapsing a parent node instantly discards the cached expansion state for all nested child nodes and prunes all child cards from the flat UI control tree in one single atomic operation, maintaining an exceptionally lightweight widget hierarchy.
 - **Safe Ceiling Protection**: A general max results ceiling is actively enforced under the hood to secure local memory, preventing the DOM from choking during extremely deep searches.
 - **Search History**: Recent searches are stored in `recent_searches.json` and can be accessed via a history sheet.
 
@@ -115,11 +119,12 @@ The full-screen player supports intuitive touch controls for navigation:
 - **Quick Removal**: The **Minus icon** allows for instant removal of a track from the playlist without rebuilding the entire library list.
 
 ### 4.4 Gesture-Driven Push-to-Talk (PTT) Voice System
-Jarvis integrates advanced gesture-based push-to-talk microphone interactions to deliver a tactile and conversational experience:
+Jarvis integrates advanced gesture-based push-to-talk microphone interactions to deliver a highly responsive, premium, and conversational user experience:
 - **Press & Hold (Tap Down)**:
-  * Triggers the microphone voice input engine.
+  * Triggers the microphone voice input engine immediately.
+  * **Speech Interruption**: If Jarvis is currently speaking (TTS), tapping the mic button instantly interrupts his voice synthesis, silencing him completely so you do not have to speak over him.
   * The mic icon immediately turns **vibrant red** (`#FF4444`) with the tooltip changing to *"Release to Send"*.
-  * A pulsating, animated *"Listening, sir..."* bubble is appended at the bottom of the chat list, keeping active focus on current input.
+  * A pulsating, glassmorphic *"Listening, sir..."* bubble is appended at the bottom of the chat list to indicate active capture.
 - **Release (Tap Up / Cancel)**:
   * Instantly halts the voice capturing engine.
   * Automatically finishes the Speech-to-Text session, packages the transcribed phrase, submits it to Jarvis, and resets the icon back to a sleek, passive cyan.
@@ -127,6 +132,15 @@ Jarvis integrates advanced gesture-based push-to-talk microphone interactions to
 - **Scroll Tracking**:
   * Chat lists leverage native GPU-accelerated scrolling. The viewport smoothly tracks and slides down for new messages *only* if the user is currently at the bottom.
   * If browsing history, new updates append silently in the background, preserving historical reading positions without aggressive snapping.
+- **Dynamic Time-of-Day Aware Greetings**:
+  * Upon starting a new session or returning after a period of inactivity, Jarvis greets the user dynamically based on the local system time, varying his intro sentences with a warm *"Good morning"*, *"Good afternoon"*, or *"Good evening"*.
+- **Integrated System Status Display**:
+  * Under a quiet greeting (such as when the music library is fully analyzed), Jarvis appends a subtle italicized system status sub-caption (e.g. `*System status: 1420 tracks mapped, 5210 graph edges active.*`) below his chat bubble, providing essential library metrics at a glance without cluttering the screen.
+- **Conversational Re-hydration & 15-Minute Lazy Expiration**:
+  * Your conversation with Jarvis is persistently saved in private storage. Switching between tabs or backgrounding the app does *not* erase your history. 
+  * If you return within 15 minutes, the entire thread is seamlessly restored. If you remain away for more than 15 minutes, the chat lazily clears on open to offer you a fresh, clean greeting.
+- **Manual Thread Purging**:
+  * A dedicated trash bin **IconButton** (`self._clear_btn`) is located in the Jarvis header. Tapping it instantly clears the on-screen chat list and permanently wipes the session history from disk, returning the view to the initial clean empty state.
 
 ---
 

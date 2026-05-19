@@ -386,16 +386,17 @@ class NotificationSystem:
 
 
 class AnimatedEntry(ft.Container):
-    def __init__(self, content, target_height=56, **kwargs):
+    def __init__(self, content, target_height=56, depth=0, **kwargs):
         super().__init__(
             content=content,
             height=target_height,
             opacity=1.0,
-            animate=ft.Animation(450, ft.AnimationCurve.EASE_OUT_EXPO),
-            animate_opacity=ft.Animation(450, ft.AnimationCurve.EASE_OUT_EXPO),
+            animate=ft.Animation(200, ft.AnimationCurve.EASE_OUT_EXPO),
+            animate_opacity=ft.Animation(200, ft.AnimationCurve.EASE_OUT_EXPO),
             **kwargs
         )
         self.target_height = target_height
+        self.depth = depth
 
     def hide(self):
         """Trigger the slide-out animation."""
@@ -937,10 +938,6 @@ class SearchView:
             expand=True,
             spacing=8,
             padding=ft.Padding.only(left=12, right=12, top=4, bottom=20),
-            animate_opacity=ft.Animation(300, ft.AnimationCurve.EASE_OUT_EXPO),
-            opacity=1,
-            offset=ft.Offset(0, 0),
-            animate_offset=ft.Animation(400, ft.AnimationCurve.EASE_OUT_EXPO),
             on_scroll=self._on_list_scroll,
         )
 
@@ -949,8 +946,8 @@ class SearchView:
             expand=True,
             offset=ft.Offset(0, 0),
             opacity=1.0,
-            animate_offset=ft.Animation(250, ft.AnimationCurve.EASE_OUT),
-            animate_opacity=ft.Animation(200, ft.AnimationCurve.EASE_OUT),
+            animate_offset=ft.Animation(100, ft.AnimationCurve.EASE_OUT_QUAD),
+            animate_opacity=ft.Animation(100, ft.AnimationCurve.EASE_OUT_QUAD),
         )
 
         # Pagination bar styled and behaving identically to LibraryView:
@@ -979,17 +976,14 @@ class SearchView:
             weight=ft.FontWeight.W_700,
         )
         self._pagination_bar = ft.Container(
-            content=ft.GestureDetector(
-                content=ft.Row(
-                    [
-                        self._prev_page_btn,
-                        self._page_label,
-                        self._next_page_btn,
-                    ],
-                    alignment=ft.MainAxisAlignment.CENTER,
-                    spacing=20,
-                ),
-                on_horizontal_drag_end=self._on_pagination_swipe,
+            content=ft.Row(
+                [
+                    self._prev_page_btn,
+                    self._page_label,
+                    self._next_page_btn,
+                ],
+                alignment=ft.MainAxisAlignment.CENTER,
+                spacing=20,
             ),
             bgcolor=apply_opacity(0.1, SURFACE),
             border_radius=12,
@@ -1237,7 +1231,7 @@ class SearchView:
             content=ft.Row(
                 [
                     ft.Icon(ft.Icons.KEYBOARD_DOUBLE_ARROW_UP_ROUNDED, color=CYAN, size=16),
-                    ft.Text("Swipe on pagination bar or tap arrows to load previous page", color=TEXT, size=11, weight=ft.FontWeight.W_500),
+                    ft.Text("Tap here to load previous page", color=TEXT, size=11, weight=ft.FontWeight.W_500),
                     ft.Icon(ft.Icons.KEYBOARD_DOUBLE_ARROW_UP_ROUNDED, color=CYAN, size=16),
                 ],
                 alignment=ft.MainAxisAlignment.CENTER,
@@ -1249,6 +1243,7 @@ class SearchView:
             border=ft.Border.all(1, apply_opacity(0.08, CYAN)),
             border_radius=12,
             margin=ft.Margin.only(bottom=12),
+            on_click=lambda e: self.page.run_task(self.change_page, self.current_page - 1, scroll_to_bottom=True),
         )
 
     def _build_bottom_ghost(self) -> ft.Control:
@@ -1256,7 +1251,7 @@ class SearchView:
             content=ft.Row(
                 [
                     ft.Icon(ft.Icons.KEYBOARD_DOUBLE_ARROW_DOWN_ROUNDED, color=CYAN, size=16),
-                    ft.Text("Swipe on pagination bar or tap arrows to load next page", color=TEXT, size=11, weight=ft.FontWeight.W_500),
+                    ft.Text("Tap here to load next page", color=TEXT, size=11, weight=ft.FontWeight.W_500),
                     ft.Icon(ft.Icons.KEYBOARD_DOUBLE_ARROW_DOWN_ROUNDED, color=CYAN, size=16),
                 ],
                 alignment=ft.MainAxisAlignment.CENTER,
@@ -1268,6 +1263,7 @@ class SearchView:
             border=ft.Border.all(1, apply_opacity(0.08, CYAN)),
             border_radius=12,
             margin=ft.Margin.only(top=12),
+            on_click=lambda e: self.page.run_task(self.change_page, self.current_page + 1, scroll_to_bottom=False),
         )
 
     def _update_pagination_ui(self):
@@ -1318,8 +1314,8 @@ class SearchView:
             self._animated_results_wrapper.opacity = 0.0
             self.try_update(self._animated_results_wrapper)
             
-            # Wait for transition animation to finish
-            await asyncio.sleep(0.18)
+            # Wait for transition animation to finish (snappy 80ms)
+            await asyncio.sleep(0.08)
             
             # 2. Update page index and instantiate new controls
             self.current_page = new_page
@@ -1352,22 +1348,24 @@ class SearchView:
             self._animated_results_wrapper.offset = entry_offset
             self.try_update(self._animated_results_wrapper, self._results_list)
             
-            # Wait 0.08s for Flet to repaint
-            self._is_programmatic_scroll = True
-            await asyncio.sleep(0.08)
+            # Wait a tiny tick for layout (snappy 40ms)
+            await asyncio.sleep(0.04)
             
             # 4. Scroll to target offset safely
-            if scroll_to_bottom:
-                target_offset = 3250
-            else:
-                target_offset = 45
-            
-            await self._results_list.scroll_to(offset=target_offset, duration=0)
-            self._last_scroll_pixels = target_offset
-            
-            # Wait another 0.05s for scroll to finalize
-            await asyncio.sleep(0.05)
-            self._is_programmatic_scroll = False
+            self._is_programmatic_scroll = True
+            try:
+                if scroll_to_bottom:
+                    target_offset = 3250
+                else:
+                    target_offset = 45 if self.current_page > 0 else 0
+                
+                await self._results_list.scroll_to(offset=target_offset, duration=0)
+                self._last_scroll_pixels = target_offset
+            except Exception:
+                pass
+            finally:
+                await asyncio.sleep(0.03)
+                self._is_programmatic_scroll = False
             
             # 5. Slide In the new view from the other side
             self._animated_results_wrapper.offset = ft.Offset(0, 0)
@@ -1376,8 +1374,9 @@ class SearchView:
             
         except Exception as ex:
             logger.error(f"Error in SearchView.change_page: {ex}")
-            self._is_programmatic_scroll = False
         finally:
+            # Cooldown to let scroll physics settle fully (snappy 150ms)
+            await asyncio.sleep(0.15)
             self._is_changing_page = False
 
 
@@ -1650,7 +1649,7 @@ class SearchView:
                 self.page.update()
                 return
 
-            for r in results:
+            async def _check_library(r):
                 m_type = r.get("media_type", "track")
                 title = strip_markup(r.get("ui_title", r.get("name", "")))
                 artist = strip_markup(r.get("ui_subtitle", r.get("artist", "")))
@@ -1659,6 +1658,8 @@ class SearchView:
                 else:
                     exists = await self.app.db_manager.get_album_by_meta(title, artist)
                 r["is_in_library"] = bool(exists)
+
+            await asyncio.gather(*[_check_library(r) for r in results])
 
             # Full search: route every result into its typed bucket
             self.cached_results = {"track": [], "album": [], "artist": []}
@@ -1765,14 +1766,15 @@ class SearchView:
         m_type = r.get("media_type", "track")
         
         if m_type == "load_more_artist":
-            return self._build_load_more_button(r, depth)
+            return AnimatedEntry(self._build_load_more_button(r, depth), target_height=64, data=r, depth=depth)
         
         if m_type == "search_exhausted":
-            return ft.Container(
+            card = ft.Container(
                 content=ft.Text("; End of Discography ;", color=DIM, size=11, weight=ft.FontWeight.W_500),
                 alignment=ft.alignment.center,
-                padding=ft.padding.only(left=20 * depth, top=16, bottom=16),
+                padding=ft.Padding.only(left=20 * depth, top=16, bottom=16),
             )
+            return AnimatedEntry(card, target_height=48, data=r, depth=depth)
             
         node_id = f"{m_type}_{r.get('id')}"
         is_expanded = node_id in self.expanded_nodes
@@ -1871,7 +1873,7 @@ class SearchView:
             on_click=preview_click if m_type == "track" else toggle_node,
         )
 
-        return AnimatedEntry(tile, target_height=64, data=r)
+        return AnimatedEntry(tile, target_height=64, data=r, depth=depth)
 
     def _build_load_more_button(self, r: dict, depth: int) -> ft.Control:
         artist_id = r.get("id")
@@ -1886,7 +1888,7 @@ class SearchView:
             bgcolor=apply_opacity(0.1, CYAN),
             border=ft.Border.all(1, apply_opacity(0.3, CYAN)),
             border_radius=12,
-            padding=ft.padding.symmetric(horizontal=16, vertical=10),
+            padding=ft.Padding.symmetric(horizontal=16, vertical=10),
             on_click=lambda e: on_click_handler(e),
         )
         
@@ -1961,7 +1963,7 @@ class SearchView:
                 async def _process():
                     # Process and insert children...
                     # (Logic remains same, just ensuring we swap the icon back)
-                    for c in children:
+                    async def _check_child(c):
                         title = strip_markup(c.get("ui_title", c.get("name", "")))
                         artist = strip_markup(c.get("ui_subtitle", c.get("artist", "")))
                         if c.get("media_type") == "track":
@@ -1969,6 +1971,8 @@ class SearchView:
                         else: # album
                             exists = await self.app.db_manager.get_album_by_meta(title, artist)
                         c["is_in_library"] = bool(exists)
+
+                    await asyncio.gather(*[_check_child(c) for c in children])
                     
                     def _insert():
                         try:
@@ -2021,15 +2025,14 @@ class SearchView:
             while idx < len(parent_list):
                 child_entry = parent_list[idx]
                 if not isinstance(child_entry, AnimatedEntry): break
-                child_tile = child_entry.content
-                if isinstance(child_tile.leading, ft.Row):
-                    child_depth = int(child_tile.leading.controls[0].width / 20)
-                    if child_depth > depth:
-                        # Also discard child's expanded state if any
+                child_depth = getattr(child_entry, "depth", 0)
+                if child_depth > depth:
+                    # Also discard child's expanded state if any
+                    if child_entry.data and isinstance(child_entry.data, dict):
                         c_id = f"{child_entry.data.get('media_type')}_{child_entry.data.get('id')}"
                         self.expanded_nodes.discard(c_id)
-                        parent_list.pop(idx)
-                        continue
+                    parent_list.pop(idx)
+                    continue
                 break
             self._results_list.update()
 
@@ -2471,8 +2474,8 @@ class LibraryView:
             expand=True,
             opacity=1.0,
             offset=ft.Offset(0, 0),
-            animate_opacity=ft.Animation(120, ft.AnimationCurve.EASE_OUT_QUAD),
-            animate_offset=ft.Animation(120, ft.AnimationCurve.EASE_OUT_QUAD),
+            animate_opacity=ft.Animation(100, ft.AnimationCurve.EASE_OUT_QUAD),
+            animate_offset=ft.Animation(100, ft.AnimationCurve.EASE_OUT_QUAD),
         )
 
         # Glassmorphic premium pagination bar
@@ -2499,17 +2502,14 @@ class LibraryView:
             weight=ft.FontWeight.W_700,
         )
         self._pagination_bar = ft.Container(
-            content=ft.GestureDetector(
-                content=ft.Row(
-                    [
-                        self._prev_page_btn,
-                        self._page_label,
-                        self._next_page_btn,
-                    ],
-                    alignment=ft.MainAxisAlignment.CENTER,
-                    spacing=20,
-                ),
-                on_horizontal_drag_end=self._on_pagination_swipe,
+            content=ft.Row(
+                [
+                    self._prev_page_btn,
+                    self._page_label,
+                    self._next_page_btn,
+                ],
+                alignment=ft.MainAxisAlignment.CENTER,
+                spacing=20,
             ),
             bgcolor=apply_opacity(0.1, SURFACE),
             border_radius=12,
@@ -2840,6 +2840,8 @@ class LibraryView:
                 self.page.run_task(self.change_page, self.current_page - 1, scroll_to_bottom=True)
 
     def _on_list_scroll(self, e: ft.OnScrollEvent):
+        if self._is_changing_page or getattr(self, "_is_programmatic_scroll", False):
+            return
         if self.view_mode in ("tracks", "albums", "artists"):
             self._last_scroll_pixels = e.pixels
             return
@@ -2876,7 +2878,7 @@ class LibraryView:
             content=ft.Row(
                 [
                     ft.Icon(ft.Icons.KEYBOARD_DOUBLE_ARROW_UP_ROUNDED, color=CYAN, size=16),
-                    ft.Text("Swipe on pagination bar or tap arrows to load previous page", color=TEXT, size=11, weight=ft.FontWeight.W_500),
+                    ft.Text("Tap here to load previous page", color=TEXT, size=11, weight=ft.FontWeight.W_500),
                     ft.Icon(ft.Icons.KEYBOARD_DOUBLE_ARROW_UP_ROUNDED, color=CYAN, size=16),
                 ],
                 alignment=ft.MainAxisAlignment.CENTER,
@@ -2888,6 +2890,7 @@ class LibraryView:
             border=ft.Border.all(1, apply_opacity(0.08, CYAN)),
             border_radius=12,
             margin=ft.Margin.only(bottom=12),
+            on_click=lambda e: self.page.run_task(self.change_page, self.current_page - 1, scroll_to_bottom=True),
         )
 
     def _build_bottom_ghost(self) -> ft.Control:
@@ -2895,7 +2898,7 @@ class LibraryView:
             content=ft.Row(
                 [
                     ft.Icon(ft.Icons.KEYBOARD_DOUBLE_ARROW_DOWN_ROUNDED, color=CYAN, size=16),
-                    ft.Text("Swipe on pagination bar or tap arrows to load next page", color=TEXT, size=11, weight=ft.FontWeight.W_500),
+                    ft.Text("Tap here to load next page", color=TEXT, size=11, weight=ft.FontWeight.W_500),
                     ft.Icon(ft.Icons.KEYBOARD_DOUBLE_ARROW_DOWN_ROUNDED, color=CYAN, size=16),
                 ],
                 alignment=ft.MainAxisAlignment.CENTER,
@@ -2907,6 +2910,7 @@ class LibraryView:
             border=ft.Border.all(1, apply_opacity(0.08, CYAN)),
             border_radius=12,
             margin=ft.Margin.only(top=12),
+            on_click=lambda e: self.page.run_task(self.change_page, self.current_page + 1, scroll_to_bottom=False),
         )
 
     def _update_pagination_ui(self):
@@ -3009,6 +3013,7 @@ class LibraryView:
                 else:
                     target_offset = 45 if self.current_page > 0 else 0
                 await self._library_list.scroll_to(offset=target_offset, duration=0)
+                self._last_scroll_pixels = target_offset
             except Exception:
                 pass
             finally:
@@ -3796,34 +3801,27 @@ class LibraryView:
             _close()
             title = meta.get("track_title", "")
             artist = meta.get("artist_name", "")
-            album = meta.get("album_title", "")
             
-            # Construct a precise search query using all available metadata
-            query_parts = [title]
+            # Construct a clean search query using title and artist for maximum match rate
+            query_parts = []
+            if title:
+                query_parts.append(title)
             if artist and artist != "Unknown":
                 query_parts.append(artist)
-            if album and album != "Unknown":
-                query_parts.append(album)
                 
             query = " ".join(query_parts).strip()
             if not query: return
             
-            self.app.show_snackbar(f"Searching for '{query}'...", color=CYAN)
+            # Switch to Search tab (index 0)
+            self.app._switch_tab(0)
             
-            def _on_found(results):
-                if not results or isinstance(results, dict):
-                    self.app.safe_update(lambda: self.app.show_snackbar("Track not found on remote source.", color="#F44336"))
-                    return
-                    
-                track_results = [r for r in results if r.get("media_type") == "track"]
-                if not track_results:
-                    self.app.safe_update(lambda: self.app.show_snackbar("Track not found on remote source.", color="#F44336"))
-                    return
-                    
-                # Pass the first search result to the QualitySelectorSheet
-                self.app.safe_update(lambda: self.app.quality_selector_sheet.show(track_results[0]))
-                
-            self.app.search_view.searcher.search(query, "qobuz", _on_found, media_types=["track"], limit=10)
+            # Set search query, set view mode to "tracks"
+            self.app.search_view._search_field.value = query
+            self.app.search_view.view_mode = "tracks"
+            self.app.search_view._update_view_tabs()
+            
+            # Start search using standard async task runner on the main thread
+            self.page.run_task(self.app.search_view.start_search)
 
         bs = ft.BottomSheet(
             content=ft.Container(
@@ -4377,26 +4375,30 @@ class SettingsView:
 
     def _build_advanced_group(self):
         return ft.Column([
-            ft.Text("Maintenance", weight=ft.FontWeight.BOLD, color=DIM),
-            ft.Row([
-                ft.TextButton("Clear Cache", icon=ft.Icons.DELETE_SWEEP, on_click=lambda _: self.app.clear_preview_cache()),
-                ft.TextButton("Wipe DB", icon=ft.Icons.DELETE_FOREVER, icon_color="#FF4444", on_click=lambda _: self._on_wipe_db_click()),
-            ]),
-            ft.Divider(color=BORDER, height=40),
-            ft.Text("Raw Configuration (TOML)", weight=ft.FontWeight.BOLD, color=DIM),
-            ft.Text("Directly edit the Streamrip TOML configuration file for advanced control.", color=DIM, size=12),
-            self._config_editor,
-            OnyxButton("SAVE CONFIG FILE", ft.Icons.TERMINAL, on_tap=lambda _: self._save_config()),
-            ft.Container(height=10),
-            ft.TextButton("Debug: Populate Play Counts", icon=ft.Icons.BUG_REPORT_ROUNDED, on_click=self._on_debug_populate_click),
-            ft.Divider(color=BORDER, height=40),
-            ft.Text("Debug: App State Bundle", weight=ft.FontWeight.BOLD, color=DIM),
-            ft.Text(
-                "Package the library DB (with DSP features), Streamrip config "
-                "and search history into a single ZIP. Pick any folder to "
-                "export into; pick the .zip back on another build to skip the "
-                "DSP sweep and folder setup.",
-                color=DIM, size=12,
+            ft.Text("State Backup & Migration (Import / Export)", weight=ft.FontWeight.BOLD, color=CYAN),
+            ft.Container(
+                content=ft.Column([
+                    ft.Row([
+                        ft.Icon(ft.Icons.LOCK_PERSON_ROUNDED, color=CYAN, size=20),
+                        ft.Text(
+                            "Android Release Build Sandbox Security",
+                            weight=ft.FontWeight.BOLD,
+                            color=TEXT,
+                            size=13,
+                        ),
+                    ], spacing=6),
+                    ft.Text(
+                        "Because this application runs as a secure production release build, Android isolates all internal databases, config profiles, and search histories inside a restricted sandbox (/data/data/...). Direct file system access via developer tools like ADB is completely blocked.\n\n"
+                        "This Import/Export state system is your exclusive gateway to back up, restore, or migrate your library and custom settings. "
+                        "You can also use this system to offload heavy DSP feature computations: export the state ZIP here, run the parallelised desktop offloading script on your PC/Mac, and import the bundle back to instantly sync your track features.",
+                        color=DIM,
+                        size=12,
+                    ),
+                ], spacing=6),
+                padding=12,
+                bgcolor=SURFACE2,
+                border_radius=8,
+                border=ft.Border.all(1, BORDER),
             ),
             ft.Row([
                 ft.TextButton(
@@ -4410,6 +4412,19 @@ class SettingsView:
                     on_click=self._on_import_state_click,
                 ),
             ]),
+            ft.Divider(color=BORDER, height=40),
+            ft.Text("Maintenance", weight=ft.FontWeight.BOLD, color=DIM),
+            ft.Row([
+                ft.TextButton("Clear Cache", icon=ft.Icons.DELETE_SWEEP, on_click=lambda _: self.app.clear_preview_cache()),
+                ft.TextButton("Wipe DB", icon=ft.Icons.DELETE_FOREVER, icon_color="#FF4444", on_click=lambda _: self._on_wipe_db_click()),
+            ]),
+            ft.Divider(color=BORDER, height=40),
+            ft.Text("Raw Configuration (TOML)", weight=ft.FontWeight.BOLD, color=DIM),
+            ft.Text("Directly edit the Streamrip TOML configuration file for advanced control.", color=DIM, size=12),
+            self._config_editor,
+            OnyxButton("SAVE CONFIG FILE", ft.Icons.TERMINAL, on_tap=lambda _: self._save_config()),
+            ft.Container(height=10),
+            ft.TextButton("Debug: Populate Play Counts", icon=ft.Icons.BUG_REPORT_ROUNDED, on_click=self._on_debug_populate_click),
         ], spacing=15)
 
     def _build_about_group(self):
@@ -5826,6 +5841,10 @@ class AssistantView:
         self._init_cancel = False
         self._analysing_library = False
 
+        from utils.chat_memory import ChatMemoryManager
+        self.chat_memory = ChatMemoryManager()
+        self._history_list = []
+
     def _ensure_initialized(self):
         if self._initialized:
             return
@@ -5887,6 +5906,13 @@ class AssistantView:
             on_click=lambda _e: self._toggle_tts(),
         )
 
+        self._clear_btn = ft.IconButton(
+            icon=ft.Icons.DELETE_OUTLINE_ROUNDED,
+            icon_color=CYAN,
+            tooltip="Clear conversation history",
+            on_click=lambda _e: self.clear_chat_manually(),
+        )
+
         # Initialisation banner: hidden once the graph is ready.
         self._init_label = ft.Text(
             "Preparing your music network…", color=DIM, size=12,
@@ -5898,25 +5924,19 @@ class AssistantView:
             visible=False,
         )
 
-        empty_state = ft.Container(
-            content=ft.Column(
-                [
-                    ft.Icon(ft.Icons.AUTO_AWESOME_ROUNDED, color=CYAN, size=42),
-                    ft.Text("Jarvis", color=TEXT, size=20,
-                            weight=ft.FontWeight.W_900,
-                            text_align=ft.TextAlign.CENTER),
-                    ft.Text(
-                        "Try: 'play stairway', 'more like this', "
-                        "'add radiohead to queue', or 'help'.",
-                        color=DIM, size=12, text_align=ft.TextAlign.CENTER,
-                    ),
-                ],
-                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                spacing=8,
-            ),
-            padding=ft.Padding.all(24),
-        )
-        self._messages.controls = [empty_state]
+        # Load session history
+        session = self.chat_memory.load_session()
+        self._init_greeted = session["init_greeted"]
+        self._history_list = session["messages"]
+
+        restored_controls = []
+        for msg in self._history_list:
+            restored_controls.append(self._build_bubble_row(msg["sender"], msg["text"]))
+
+        if restored_controls:
+            self._messages.controls = restored_controls
+        else:
+            self._messages.controls = [self._build_empty_state()]
 
         self.layout = ft.Column(
             [
@@ -5926,6 +5946,7 @@ class AssistantView:
                         [
                             ft.Text("JARVIS", color=TEXT, size=13,
                                     weight=ft.FontWeight.W_700, expand=True),
+                            self._clear_btn,
                             self._tts_toggle,
                         ],
                         alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
@@ -6004,10 +6025,15 @@ class AssistantView:
         await asyncio.sleep(0.2)
 
         if getattr(self, "_analysing_library", False):
-            await self._append_bubble(
-                "assistant",
-                "I am currently busy analyzing the music library and rebuilding the DSP graph, sir. I will notify you as soon as I am done.",
+            has_busy_msg = any(
+                msg["sender"] == "assistant" and "busy analyzing the music library" in msg["text"]
+                for msg in self._history_list
             )
+            if not has_busy_msg:
+                await self._append_bubble(
+                    "assistant",
+                    "I am currently busy analyzing the music library and rebuilding the DSP graph, sir. I will notify you as soon as I am done.",
+                )
             return
 
         self._set_banner(visible=True, message="Checking your library…", determinate=None)
@@ -6043,11 +6069,17 @@ class AssistantView:
             self._set_banner(visible=False)
             if not self._init_greeted:
                 self._init_greeted = True
-                await self._append_bubble(
-                    "assistant",
-                    "Your library looks empty. Scan a music folder in "
-                    "Library → Scan, then ask me to 'rescan my library'.",
+                self.chat_memory.save_session(self._history_list, self._init_greeted)
+                has_empty_msg = any(
+                    msg["sender"] == "assistant" and "Your library looks empty" in msg["text"]
+                    for msg in self._history_list
                 )
+                if not has_empty_msg:
+                    await self._append_bubble(
+                        "assistant",
+                        "Your library looks empty. Scan a music folder in "
+                        "Library → Scan, then ask me to 'rescan my library'.",
+                    )
             return
 
         # Count tracks that the analyser would touch — drives both the
@@ -6085,27 +6117,28 @@ class AssistantView:
         # Now ask the user about any DSP work. Never auto-run.
         if missing_count > 0:
             self._set_banner(visible=False)
-            self._runner.queue_confirmation(PendingConfirmation(
-                prompt="rescan",
-                on_yes_action="rebuild_graph",
-                on_yes_msg=f"Acknowledged. Analysing {missing_count} tracks now.",
-                on_no_msg="Understood. I'll work with what I have for now.",
-            ))
-            await self._append_bubble(
-                "assistant",
-                (
-                    f"I notice **{missing_count}** of your **{status['total_tracks']}** "
-                    "tracks haven't been DSP-analysed yet. Without features they "
-                    "won't appear in mood searches or 'play similar' walks. "
-                    "Should I run the analyser now? Reply **yes** or **no**, "
-                    "or say 'rescan' later to trigger it manually."
-                ),
-                speak=True,
-                speak_text=(
-                    f"I notice {missing_count} of your tracks haven't been analysed yet. "
-                    "Should I run the analyser now, sir?"
-                ),
-            )
+            if not self._init_greeted:
+                self._init_greeted = True
+                self.chat_memory.save_session(self._history_list, self._init_greeted)
+                has_dsp_prompt = any(
+                    msg["sender"] == "assistant" and any(k in msg["text"] for k in ["DSP", "analys", "unindexed", "profile", "acoustic"])
+                    for msg in self._history_list
+                )
+                if not has_dsp_prompt:
+                    self._runner.queue_confirmation(PendingConfirmation(
+                        prompt="rescan",
+                        on_yes_action="rebuild_graph",
+                        on_yes_msg=f"Acknowledged. Analysing {missing_count} tracks now.",
+                        on_no_msg="Understood. I'll work with what I have for now.",
+                    ))
+                    dsp_text = self._runner._say("dsp_prompt", missing=missing_count, total=status['total_tracks'])
+                    dsp_speak = self._runner._say("dsp_prompt_speak", missing=missing_count, total=status['total_tracks'])
+                    await self._append_bubble(
+                        "assistant",
+                        dsp_text,
+                        speak=True,
+                        speak_text=dsp_speak,
+                    )
             return
 
         # Everything's built and analysed. Show a quiet "ready" bubble (no TTS;
@@ -6114,13 +6147,16 @@ class AssistantView:
         self._set_banner(visible=False)
         if not self._init_greeted:
             self._init_greeted = True
-            edge_total = (status["acoustic_edges"]
-                          + status["artist_edges"] + status["album_edges"])
-            await self._append_bubble(
-                "assistant",
-                self._runner._say("greeting") +
-                f" ({status['total_tracks']} tracks, {edge_total} graph edges)",
-            )
+            self.chat_memory.save_session(self._history_list, self._init_greeted)
+            if not self._history_list:
+                edge_total = (status["acoustic_edges"]
+                              + status["artist_edges"] + status["album_edges"])
+                greeting_text = self._runner._say("greeting")
+                status_line = f"\n\n*System status: {status['total_tracks']} tracks mapped, {edge_total} graph edges active.*"
+                await self._append_bubble(
+                    "assistant",
+                    greeting_text + status_line,
+                )
 
     async def _do_graph_rebuild(self):
         """Long-running operation: run the analyser for any tracks lacking
@@ -6293,6 +6329,13 @@ class AssistantView:
         service = getattr(audio_engine, "audio_service", None)
         is_mock = (service is None)
 
+        # Stop any active TTS immediately when the user starts speaking/listening
+        if service is not None:
+            try:
+                await service.tts_stop()
+            except Exception as ex:
+                logger.warning(f"Failed to stop TTS at start of listening: {ex}")
+
         # First tap: ensure mic permission (skip if mock mode)
         if not is_mock:
             try:
@@ -6451,38 +6494,15 @@ class AssistantView:
         speak: bool = False,
         speak_text: str | None = None,
     ):
-        is_user = (sender == "user")
-        if is_user:
-            bubble_content = ft.Text(
-                text,
-                color="#FFFFFF",
-                size=13,
-                selectable=True,
-            )
-        else:
-            bubble_content = ft.Markdown(
-                value=text,
-                selectable=True,
-                extension_set=ft.MarkdownExtensionSet.GITHUB_FLAVORED,
-                code_theme="github-dark",
-                auto_follow_links=True,
-            )
+        row = self._build_bubble_row(sender, text)
 
-        bubble = ft.Container(
-            content=bubble_content,
-            padding=ft.Padding.symmetric(horizontal=14, vertical=10),
-            bgcolor=CYAN if is_user else SURFACE2,
-            border_radius=14,
-            # Use conditional width to simulate max_width for wrap support
-            width=350 if len(text) > 35 else None,
-        )
-        row = ft.Row(
-            [bubble],
-            alignment=(
-                ft.MainAxisAlignment.END if is_user
-                else ft.MainAxisAlignment.START
-            ),
-        )
+        # Update in-memory history list
+        self._history_list.append({"sender": sender, "text": text})
+        if len(self._history_list) > 50:
+            self._history_list.pop(0)
+
+        # Save to disk
+        self.chat_memory.save_session(self._history_list, self._init_greeted)
 
         def _mutate():
             # Drop the empty-state on first real message.
@@ -6511,6 +6531,89 @@ class AssistantView:
                         audio_engine.play()
                 except Exception as exc:
                     logger.warning("AssistantView: TTS speak failed: %s", exc)
+
+    def _build_bubble_row(self, sender: str, text: str) -> ft.Row:
+        is_user = (sender == "user")
+        if is_user:
+            bubble_content = ft.Text(
+                text,
+                color="#FFFFFF",
+                size=13,
+                selectable=True,
+            )
+        else:
+            bubble_content = ft.Markdown(
+                value=text,
+                selectable=True,
+                extension_set=ft.MarkdownExtensionSet.GITHUB_FLAVORED,
+                code_theme="github-dark",
+                auto_follow_links=True,
+            )
+
+        bubble = ft.Container(
+            content=bubble_content,
+            padding=ft.Padding.symmetric(horizontal=14, vertical=10),
+            bgcolor=CYAN if is_user else SURFACE2,
+            border_radius=14,
+            width=350 if len(text) > 35 else None,
+        )
+        return ft.Row(
+            [bubble],
+            alignment=(
+                ft.MainAxisAlignment.END if is_user
+                else ft.MainAxisAlignment.START
+            ),
+        )
+
+    def _build_empty_state(self) -> ft.Container:
+        return ft.Container(
+            content=ft.Column(
+                [
+                    ft.Icon(ft.Icons.AUTO_AWESOME_ROUNDED, color=CYAN, size=42),
+                    ft.Text("Jarvis", color=TEXT, size=20,
+                            weight=ft.FontWeight.W_900,
+                            text_align=ft.TextAlign.CENTER),
+                    ft.Text(
+                        "Try: 'play stairway', 'more like this', "
+                        "'add radiohead to queue', or 'help'.",
+                        color=DIM, size=12, text_align=ft.TextAlign.CENTER,
+                    ),
+                ],
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                spacing=8,
+            ),
+            padding=ft.Padding.all(24),
+        )
+
+    def clear_chat_manually(self):
+        """Wipes the session history on disk and clears it in the UI."""
+        self._history_list = []
+        self._init_greeted = False
+        self.chat_memory.clear_session()
+        
+        def _mutate():
+            self._messages.controls = [self._build_empty_state()]
+        self.app.safe_update(_mutate)
+
+    def handle_app_background(self):
+        """Invoked when the app is backgrounded to write the latest timestamp."""
+        self.chat_memory.touch_session()
+
+    def handle_app_resume(self):
+        """Invoked when returning to foreground. If expired, clears UI and re-triggers greet."""
+        session = self.chat_memory.load_session()
+        # If the session was expired, load_session cleared it, returning empty lists
+        if not session["messages"] and self._history_list:
+            logger.info("Chat Memory: Inactivity timeout reached. Resetting conversation.")
+            self._history_list = []
+            self._init_greeted = False
+            
+            def _mutate():
+                self._messages.controls = [self._build_empty_state()]
+            self.app.safe_update(_mutate)
+            
+            # Re-trigger initialisation/greeting flow
+            self.page.run_task(self._init_assistant)
 
 
 # ─── Quality Selector Sheet ────────────────────────────────────────────────────
@@ -6836,8 +6939,12 @@ class StreamripFletApp:
         if self.is_background != was_bg:
             if self.is_background:
                 logger.info(f"App lifecycle: {e.data} - Suspending UI updates")
+                if hasattr(self, "assistant_view") and self.assistant_view:
+                    self.assistant_view.handle_app_background()
             else:
                 logger.info(f"App lifecycle: {e.data} - Resuming UI updates")
+                if hasattr(self, "assistant_view") and self.assistant_view:
+                    self.assistant_view.handle_app_resume()
                 # Force-sync current highlights when returning to foreground
                 if hasattr(self, "library_view"):
                     self.library_view.refresh_now_playing()
@@ -7374,12 +7481,8 @@ class StreamripFletApp:
             except: pass
         asyncio.create_task(asyncio.to_thread(_warmup_tabs))
         
-        # Swipe detector wraps only the content area
-        self._swipe_content = ft.GestureDetector(
-            content=self._tab_content,
-            on_horizontal_drag_end=self._on_swipe,
-            expand=True,
-        )
+        # Content area (removed swipe detector GestureDetector to prevent accidental tab switching)
+        self._swipe_content = self._tab_content
 
         # Navigation bar
         self._nav = ft.NavigationBar(

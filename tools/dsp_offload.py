@@ -103,30 +103,37 @@ def _adb_pull_chunk(
     # ARG_MAX is small and tracks have long paths.
     list_remote = f"/sdcard/.dsp_offload_pull_list_{chunk_idx}.txt"
     list_local = os.path.join(audio_cache, f".pull_list_{chunk_idx}.txt")
-    with open(list_local, "w", encoding="utf-8") as fh:
-        for p in remote_paths:
-            fh.write(p + "\n")
-    push = subprocess.run(
-        _adb_args(adb, serial, "push", list_local, list_remote),
-        capture_output=True, text=True,
-    )
-    if push.returncode != 0:
-        log.warning("adb push of pull-list failed: %s", push.stderr.strip())
-        return {}
+    try:
+        with open(list_local, "w", encoding="utf-8") as fh:
+            for p in remote_paths:
+                fh.write(p + "\n")
+        push = subprocess.run(
+            _adb_args(adb, serial, "push", list_local, list_remote),
+            capture_output=True, text=True,
+        )
+        if push.returncode != 0:
+            log.warning("adb push of pull-list failed: %s", push.stderr.strip())
+            return {}
 
-    # `adb exec-out` avoids the shell's stdout line-ending munging that
-    # `adb shell` does; safe to pipe binary data through it.
-    tar_cmd = _adb_args(
-        adb, serial, "exec-out",
-        "sh", "-c", f"tar -cf - -T {list_remote} 2>/dev/null",
-    )
-    tar_extract = subprocess.run(
-        ["tar", "-xf", "-", "-C", audio_cache],
-        input=subprocess.run(tar_cmd, capture_output=True, check=False).stdout,
-        capture_output=True,
-    )
-    if tar_extract.returncode != 0:
-        log.warning("local tar extract failed: %s", tar_extract.stderr.decode(errors="replace").strip())
+        # `adb exec-out` avoids the shell's stdout line-ending munging that
+        # `adb shell` does; safe to pipe binary data through it.
+        tar_cmd = _adb_args(
+            adb, serial, "exec-out",
+            "sh", "-c", f"tar -cf - -T {list_remote} 2>/dev/null",
+        )
+        tar_extract = subprocess.run(
+            ["tar", "-xf", "-", "-C", audio_cache],
+            input=subprocess.run(tar_cmd, capture_output=True, check=False).stdout,
+            capture_output=True,
+        )
+        if tar_extract.returncode != 0:
+            log.warning("local tar extract failed: %s", tar_extract.stderr.decode(errors="replace").strip())
+    finally:
+        # Clean up local pull list file immediately
+        try:
+            os.remove(list_local)
+        except OSError:
+            pass
 
     # Best-effort cleanup of the device-side list file.
     subprocess.run(
@@ -392,6 +399,31 @@ def _upsert_chunk(db_path: str, results: list[tuple[str, object]], cache_db_path
             cache_conn.close()
 
 
+def _upsert_single_to_laptop_cache(cache_db_path: str, path: str, feats: object) -> None:
+    """Commit a single computed feature set to the laptop's permanent cache database
+    immediately to ensure progress isn't lost if the script finishes abruptly."""
+    conn = sqlite3.connect(cache_db_path)
+    try:
+        t_blob = feats.timbre if isinstance(feats, CachedFeatures) else feats.timbre_blob()
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO feature_cache
+                (track_path, bpm, energy, brightness, rolloff, beat_strength,
+                 spectral_flatness, spectral_contrast, key_index, timbre, features_version)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (path, feats.bpm, feats.energy, feats.brightness,
+             feats.rolloff, feats.beat_strength,
+             feats.spectral_flatness, feats.spectral_contrast,
+             feats.key_index, t_blob, FEATURES_VERSION)
+        )
+        conn.commit()
+    except Exception as ex:
+        log.warning("Failed to save single result to laptop computation cache: %s", ex)
+    finally:
+        conn.close()
+
+
 # Mutex lock to serialize SQLite writes and stats updates across parallel workers
 _state_lock = threading.Lock()
 
@@ -453,55 +485,63 @@ def main() -> int:
         return 0
     log.info("found %d tracks needing DSP analysis", len(missing))
 
-    # Initialize Laptop's feature cache
-    cache_db_path = None
+    # Initialize Laptop's feature cache (always active, defaults to tools/offload_cache)
     if args.workdir:
         cache_db_path = os.path.join(args.workdir, "feature_cache.db")
-        _init_feature_cache(cache_db_path)
-        
-        # Check which missing tracks already exist in the laptop's feature cache
-        conn = sqlite3.connect(cache_db_path)
-        cached_results = []
+    else:
+        cache_dir = os.path.join(str(_HERE), "offload_cache")
         try:
-            cursor = conn.cursor()
-            cursor.execute("SELECT track_path, bpm, energy, brightness, rolloff, beat_strength, spectral_flatness, spectral_contrast, key_index, timbre FROM feature_cache WHERE features_version = ?", (FEATURES_VERSION,))
-            cached_map = {row[0]: row for row in cursor.fetchall()}
-            
-            for path in missing:
-                if path in cached_map:
-                    row = cached_map[path]
-                    feats = CachedFeatures(
-                        bpm=row[1], energy=row[2], brightness=row[3], rolloff=row[4],
-                        beat_strength=row[5], spectral_flatness=row[6], spectral_contrast=row[7],
-                        key_index=row[8], timbre=row[9]
-                    )
-                    cached_results.append((path, feats))
-        except Exception as ex:
-            log.warning("Failed to read laptop computation cache: %s", ex)
-        finally:
-            conn.close()
+            os.makedirs(cache_dir, exist_ok=True)
+        except OSError:
+            cache_dir = os.path.join(os.path.expanduser("~"), ".cache", "mai_an_lab")
+            os.makedirs(cache_dir, exist_ok=True)
+        cache_db_path = os.path.join(cache_dir, "feature_cache.db")
+    
+    _init_feature_cache(cache_db_path)
+    
+    # Check which missing tracks already exist in the laptop's feature cache
+    conn = sqlite3.connect(cache_db_path)
+    cached_results = []
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT track_path, bpm, energy, brightness, rolloff, beat_strength, spectral_flatness, spectral_contrast, key_index, timbre FROM feature_cache WHERE features_version = ?", (FEATURES_VERSION,))
+        cached_map = {row[0]: row for row in cursor.fetchall()}
+        
+        for path in missing:
+            if path in cached_map:
+                row = cached_map[path]
+                feats = CachedFeatures(
+                    bpm=row[1], energy=row[2], brightness=row[3], rolloff=row[4],
+                    beat_strength=row[5], spectral_flatness=row[6], spectral_contrast=row[7],
+                    key_index=row[8], timbre=row[9]
+                )
+                cached_results.append((path, feats))
+    except Exception as ex:
+        log.warning("Failed to read laptop computation cache: %s", ex)
+    finally:
+        conn.close()
 
-        if cached_results:
-            log.info("found %d tracks already processed and cached in laptop's computation cache! Ingesting immediately...", len(cached_results))
-            _upsert_chunk(db_path, cached_results)
-            # Remove cached tracks from the missing list
-            cached_paths = {p for p, _ in cached_results}
-            missing = [p for p in missing if p not in cached_paths]
-            
-            if not missing:
-                log.info("all outstanding tracks successfully populated from laptop's computation cache!")
-                log.info("repackaging → %s", out_bundle)
-                _bundle_rebuild(bundle, extracted_dir, out_bundle)
-                log.info("done. enjoy the vibe!")
-                return 0
+    if cached_results:
+        log.info("found %d tracks already processed and cached in laptop's computation cache! Ingesting immediately...", len(cached_results))
+        _upsert_chunk(db_path, cached_results)
+        # Remove cached tracks from the missing list
+        cached_paths = {p for p, _ in cached_results}
+        missing = [p for p in missing if p not in cached_paths]
+        
+        if not missing:
+            log.info("all outstanding tracks successfully populated from laptop's computation cache!")
+            log.info("repackaging → %s", out_bundle)
+            _bundle_rebuild(bundle, extracted_dir, out_bundle)
+            log.info("done. enjoy the vibe!")
+            return 0
 
     started = time.perf_counter()
     stats = {"succeeded": 0, "failed": 0, "processed": 0}
     chunk_size = max(1, args.chunk_size)
     chunks = [missing[i:i + chunk_size] for i in range(0, len(missing), chunk_size)]
-    log.info("processing %d chunks of up to %d tracks each using 4 parallel workers", len(chunks), chunk_size)
+    log.info("processing %d chunks of up to %d tracks each sequentially (using process pool with %d workers)", len(chunks), chunk_size, args.concurrency)
 
-    def process_chunk(chunk_idx, chunk):
+    def process_chunk(chunk_idx, chunk, process_pool):
         chunk_started = time.perf_counter()
 
         # Skip files that are already cached from an earlier run; only pull
@@ -528,22 +568,23 @@ def main() -> int:
         ok_results: list[tuple[str, object]] = []
         local_succeeded = local_failed = local_processed = 0
 
-        # Decode and process using a fast inner ThreadPoolExecutor
-        with cf.ThreadPoolExecutor(max_workers=2) as inner_pool:
-            futures = {
-                inner_pool.submit(_decode_and_extract, ffmpeg, remote, local): remote
-                for remote, local in pulled.items()
-            }
-            for fut in cf.as_completed(futures):
-                remote, feats, msg = fut.result()
-                local_processed += 1
-                if feats is None:
-                    local_failed += 1
-                    log.warning("  FAIL %s (%s)", os.path.basename(remote), msg)
-                else:
-                    local_succeeded += 1
-                    ok_results.append((remote, feats))
-                    log.info("  OK   %s (%s)", os.path.basename(remote), msg)
+        # Decode and process using a fast ProcessPoolExecutor
+        futures = {
+            process_pool.submit(_decode_and_extract, ffmpeg, remote, local): remote
+            for remote, local in pulled.items()
+        }
+        for fut in cf.as_completed(futures):
+            remote, feats, msg = fut.result()
+            local_processed += 1
+            if feats is None:
+                local_failed += 1
+                log.warning("  FAIL %s (%s)", os.path.basename(remote), msg)
+            else:
+                local_succeeded += 1
+                ok_results.append((remote, feats))
+                log.info("  OK   %s (%s)", os.path.basename(remote), msg)
+                if cache_db_path:
+                    _upsert_single_to_laptop_cache(cache_db_path, remote, feats)
 
         # Handle adb pull failures
         for remote in chunk:
@@ -552,27 +593,35 @@ def main() -> int:
                 local_processed += 1
                 log.warning("  FAIL %s (adb pull missed)", os.path.basename(remote))
 
-        # Lock database write and stats update
-        with _state_lock:
-            if ok_results:
-                try:
-                    _upsert_chunk(db_path, ok_results)
-                except Exception as ex:
-                    log.error("[chunk %d/%d] db upsert failed for %d tracks: %s",
-                              chunk_idx, len(chunks), len(ok_results), ex)
-            
-            stats["succeeded"] += local_succeeded
-            stats["failed"] += local_failed
-            stats["processed"] += local_processed
+        if ok_results:
+            try:
+                _upsert_chunk(db_path, ok_results, cache_db_path)
+            except Exception as ex:
+                log.error("[chunk %d/%d] db upsert failed for %d tracks: %s",
+                          chunk_idx, len(chunks), len(ok_results), ex)
+        
+        stats["succeeded"] += local_succeeded
+        stats["failed"] += local_failed
+        stats["processed"] += local_processed
 
         log.info("[chunk %d/%d] done in %.1fs — %d processed in this chunk",
                  chunk_idx, len(chunks), time.perf_counter() - chunk_started,
                  local_processed)
 
-    # Execute chunks in parallel across 4 outer workers
-    with cf.ThreadPoolExecutor(max_workers=4) as outer_pool:
-        # Wrap enumerate in a lambda to safely pass variables to map
-        outer_pool.map(lambda item: process_chunk(item[0], item[1]), enumerate(chunks, 1))
+    try:
+        # Execute chunks sequentially, using a single shared ProcessPoolExecutor for parallel feature-extraction
+        with cf.ProcessPoolExecutor(max_workers=args.concurrency) as process_pool:
+            for idx, chunk in enumerate(chunks, 1):
+                process_chunk(idx, chunk, process_pool)
+    finally:
+        # Clean up any device-side pull list files
+        try:
+            subprocess.run(
+                _adb_args(adb, args.serial, "shell", "rm", "-f", "/sdcard/.dsp_offload_pull_list_*.txt"),
+                capture_output=True,
+            )
+        except Exception:
+            pass
 
     succeeded = stats["succeeded"]
     failed = stats["failed"]

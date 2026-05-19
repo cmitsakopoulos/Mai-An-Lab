@@ -14,123 +14,186 @@ _SOURCE_COLORS = {
 _DEFAULT_COLOR = "#FFFFFF"
 
 class StreamripSearcher:
+    _loop = None
+    _thread = None
+    _client = None
+    _client_lock = None
+    _last_activity = 0.0
+    _cleanup_task = None
+    _inactivity_timeout = 300.0  # 5 minutes inactivity timeout in seconds
+
+    @classmethod
+    def _get_loop(cls):
+        if cls._loop is None:
+            cls._loop = asyncio.new_event_loop()
+            cls._thread = threading.Thread(
+                target=cls._loop.run_forever,
+                name="StreamripSearcherWorker",
+                daemon=True,
+            )
+            cls._thread.start()
+        cls._update_activity()
+        return cls._loop
+
+    @classmethod
+    def _update_activity(cls):
+        import time
+        cls._last_activity = time.time()
+        if cls._loop is not None:
+            if cls._cleanup_task is None or cls._cleanup_task.done():
+                cls._cleanup_task = asyncio.run_coroutine_threadsafe(
+                    cls._inactivity_monitor(),
+                    cls._loop
+                )
+
+    @classmethod
+    async def _inactivity_monitor(cls):
+        import time
+        while True:
+            await asyncio.sleep(15)  # Check every 15 seconds
+            if cls._loop is None:
+                break
+            elapsed = time.time() - cls._last_activity
+            if elapsed >= cls._inactivity_timeout:
+                logger.info("StreamripSearcher: Inactivity timeout reached (%ds). Cleaning up network sessions...", cls._inactivity_timeout)
+                
+                # 1. Close active Qobuz client session
+                if cls._client_lock is not None:
+                    async with cls._client_lock:
+                        if cls._client is not None:
+                            try:
+                                if cls._client.session and not cls._client.session.closed:
+                                    await cls._client.session.close()
+                            except Exception as e:
+                                logger.error("Error closing client session: %s", e)
+                            cls._client = None
+                
+                # 2. Stop event loop and thread
+                if cls._loop is not None:
+                    cls._loop.stop()
+                
+                cls._loop = None
+                cls._thread = None
+                cls._client_lock = None
+                cls._cleanup_task = None
+                break
+
     def __init__(self, config_path=None):
         from .streamrip_api import get_config_path
         self.config_path = config_path or get_config_path()
 
-    def get_artist_albums(self, artist_id: str, callback, limit: int = 30, offset: int = 0) -> None:
-        threading.Thread(
-            target=self._run_artist_albums,
-            args=(artist_id, callback, limit, offset),
-            daemon=True,
-        ).start()
+    async def _get_client(self):
+        if StreamripSearcher._client_lock is None:
+            StreamripSearcher._client_lock = asyncio.Lock()
+            
+        async with StreamripSearcher._client_lock:
+            from .config import Config
+            config = Config(self.config_path)
+            
+            # Reset client if credentials changed in the configuration
+            if StreamripSearcher._client is not None:
+                old_c = StreamripSearcher._client.config.session.qobuz
+                new_c = config.session.qobuz
+                if (old_c.email_or_userid != new_c.email_or_userid or 
+                    old_c.password_or_token != new_c.password_or_token):
+                    logger.info("Qobuz credentials changed, resetting client session.")
+                    if StreamripSearcher._client.session and not StreamripSearcher._client.session.closed:
+                        await StreamripSearcher._client.session.close()
+                    StreamripSearcher._client = None
 
-    def _run_artist_albums(self, artist_id, callback, limit, offset):
+            if StreamripSearcher._client is None or getattr(StreamripSearcher._client, "session", None) is None or StreamripSearcher._client.session.closed:
+                from .qobuz import QobuzClient
+                StreamripSearcher._client = QobuzClient(config)
+                await StreamripSearcher._client.login()
+            return StreamripSearcher._client
+
+    def get_artist_albums(self, artist_id: str, callback, limit: int = 30, offset: int = 0) -> None:
+        loop = self._get_loop()
+        asyncio.run_coroutine_threadsafe(
+            self._run_artist_albums_wrapper(artist_id, callback, limit, offset),
+            loop
+        )
+
+    async def _run_artist_albums_wrapper(self, artist_id, callback, limit, offset):
         try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            results = loop.run_until_complete(self._get_artist_albums_async(artist_id, limit, offset))
-            loop.close()
+            results = await self._get_artist_albums_async(artist_id, limit, offset)
         except Exception as exc:
             logger.error("Get artist albums failed: %s", exc)
             results = []
         callback(results)
 
     async def _get_artist_albums_async(self, artist_id, limit, offset):
-        from .config import Config
-        from .qobuz import QobuzClient
-        config = Config(self.config_path)
-        client = QobuzClient(config)
-        try:
-            await client.login()
-            resp = await client.get_metadata(artist_id, "artist", limit=limit, offset=offset)
+        client = await self._get_client()
+        resp = await client.get_metadata(artist_id, "artist", limit=limit, offset=offset)
+        
+        albums_data = resp.get("albums", {})
+        raw_albums = albums_data.get("items", [])
+        
+        raw_albums = raw_albums[:limit]
+        
+        for a in raw_albums:
+            a["_media_type"] = "album"
             
-            albums_data = resp.get("albums", {})
-            raw_albums = albums_data.get("items", [])
-            # Support both nested 'total' and top-level 'albums_count' from Qobuz metadata
-            total_albums = albums_data.get("total", resp.get("albums_count", 0))
+        parsed = self._parse_results(raw_albums, "qobuz")
+        
+        if len(raw_albums) > 0:
+            # Always offer load more if we just got results (User preference for reliability)
+            parsed.append({
+                "media_type": "load_more_artist",
+                "id": artist_id,
+                "offset": offset + limit,
+                "limit": limit,
+                "ui_title": "Load More",
+                "name": "Load More"
+            })
+        elif offset > 0:
+            # Only show exhausted if we actually tried to paginate and got nothing back
+            parsed.append({
+                "media_type": "search_exhausted",
+                "ui_title": "All albums loaded",
+                "name": "Exhausted"
+            })
             
-            raw_albums = raw_albums[:limit]
-            
-            for a in raw_albums:
-                a["_media_type"] = "album"
-                
-            parsed = self._parse_results(raw_albums, "qobuz")
-            
-            if len(raw_albums) > 0:
-                # Always offer load more if we just got results (User preference for reliability)
-                parsed.append({
-                    "media_type": "load_more_artist",
-                    "id": artist_id,
-                    "offset": offset + limit,
-                    "limit": limit,
-                    "ui_title": "Load More",
-                    "name": "Load More"
-                })
-            elif offset > 0:
-                # Only show exhausted if we actually tried to paginate and got nothing back
-                parsed.append({
-                    "media_type": "search_exhausted",
-                    "ui_title": "All albums loaded",
-                    "name": "Exhausted"
-                })
-                
-            return parsed
-        finally:
-            if hasattr(client, "session") and client.session:
-                await client.session.close()
+        return parsed
 
     def get_album_tracks(self, album_id: str, callback) -> None:
-        threading.Thread(
-            target=self._run_album_tracks,
-            args=(album_id, callback),
-            daemon=True,
-        ).start()
+        loop = self._get_loop()
+        asyncio.run_coroutine_threadsafe(
+            self._run_album_tracks_wrapper(album_id, callback),
+            loop
+        )
 
-    def _run_album_tracks(self, album_id, callback):
+    async def _run_album_tracks_wrapper(self, album_id, callback):
         try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            results = loop.run_until_complete(self._get_album_tracks_async(album_id))
-            loop.close()
+            results = await self._get_album_tracks_async(album_id)
         except Exception as exc:
             logger.error("Get album tracks failed: %s", exc)
             results = []
         callback(results)
 
     async def _get_album_tracks_async(self, album_id):
-        from .config import Config
-        from .qobuz import QobuzClient
-        config = Config(self.config_path)
-        client = QobuzClient(config)
-        try:
-            await client.login()
-            resp = await client.get_metadata(album_id, "album")
-            raw_tracks = resp.get("tracks", {}).get("items", [])
-            for t in raw_tracks:
-                t["_media_type"] = "track"
-            return self._parse_results(raw_tracks, "qobuz")
-        finally:
-            if hasattr(client, "session") and client.session:
-                await client.session.close()
+        client = await self._get_client()
+        resp = await client.get_metadata(album_id, "album")
+        raw_tracks = resp.get("tracks", {}).get("items", [])
+        for t in raw_tracks:
+            t["_media_type"] = "track"
+        return self._parse_results(raw_tracks, "qobuz")
 
     def search(self, query: str, source: str, callback, media_types=None, limit: int = 50, offset: int = 0) -> None:
         if source.lower() != "qobuz":
             callback({"error": f"Source '{source}' is not supported in this minimal build."})
             return
         
-        threading.Thread(
-            target=self._run_search,
-            args=(query, source, callback, media_types or ["track", "album"], limit, offset),
-            daemon=True,
-        ).start()
+        query = query.strip()
+        loop = self._get_loop()
+        asyncio.run_coroutine_threadsafe(
+            self._run_search_wrapper(query, media_types or ["track", "album"], limit, offset, callback),
+            loop
+        )
 
-    def _run_search(self, query, source, callback, media_types, limit=50, offset=0):
+    async def _run_search_wrapper(self, query, media_types, limit, offset, callback):
         try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            results = loop.run_until_complete(self._search_async(query, media_types, limit, offset))
-            loop.close()
+            results = await self._search_async(query, media_types, limit, offset)
         except Exception as exc:
             logger.error("Search failed: %s", exc, exc_info=True)
             results = {"error": str(exc)}
@@ -138,10 +201,8 @@ class StreamripSearcher:
 
     async def _search_async(self, query: str, media_types: list, limit: int = 50, offset: int = 0) -> list:
         from .exceptions import MissingCredentialsError, AuthenticationError
-        config = Config(self.config_path)
-        client = QobuzClient(config)
         try:
-            await client.login()
+            client = await self._get_client()
         except MissingCredentialsError:
             raise Exception("Qobuz credentials are missing. Please enter your User ID and Token in the Settings tab.")
         except AuthenticationError:
@@ -163,16 +224,10 @@ class StreamripSearcher:
                 logger.warning("Qobuz search %s: %s", m_type, exc)
                 return []
 
+        results_per_type = await asyncio.gather(*[_fetch_type(m) for m in media_types])
         raw = []
-        try:
-            # Dispatch all media-type requests concurrently; total wait time is now
-            # bounded by the slowest single request rather than the sequential sum.
-            results_per_type = await asyncio.gather(*[_fetch_type(m) for m in media_types])
-            for items in results_per_type:
-                raw.extend(items)
-        finally:
-            if hasattr(client, "session") and client.session:
-                await client.session.close()
+        for items in results_per_type:
+            raw.extend(items)
 
         return self._parse_results(raw, "qobuz")
 
@@ -230,14 +285,21 @@ class StreamripSearcher:
             })
 
         # Qobuz returns the same recording wrapped in multiple search hits when
-        # the track exists on a single, an album, and a compilation. They share
-        # the same track ID and therefore the same download URL; clicking
-        # "download" on one would queue identical bytes from each duplicate.
-        # Dedupe by (media_type, id), preserving order of first occurrence.
+        # the track exists on a deluxe album, standard album, single, or compilation.
+        # Deduplicate strictly by metadata (media_type, title, artist) for tracks/albums
+        # and by (media_type, title) for other items, preserving order of first occurrence.
         seen: set = set()
         deduped = []
         for entry in parsed:
-            key = (entry["media_type"], str(entry["id"]))
+            m_type = entry["media_type"]
+            title = str(entry.get("ui_title", entry.get("name", ""))).strip().lower()
+            artist = str(entry.get("ui_subtitle", entry.get("artist", ""))).strip().lower()
+            
+            if m_type in ("track", "album"):
+                key = (m_type, title, artist)
+            else:
+                key = (m_type, title)
+                
             if key in seen:
                 continue
             seen.add(key)
