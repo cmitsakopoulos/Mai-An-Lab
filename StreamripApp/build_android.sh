@@ -3,20 +3,13 @@
 python3 configure_paths.py
 
 # 2. Run build
-echo "Starting Flet build..."
+echo "Starting incremental Flet build..."
 
 # Kill any hung java/gradle processes (Android build locks)
 pkill -9 java || true
 
-# Wipe previous build artifacts and gradle cache to ensure a fresh state
-echo "Wiping previous build directory: $(pwd)/build"
-rm -rf build .gradle
+# Execute Flet build (incremental, reuse existing gradle & build caches)
+flet build apk -v --yes
 
-# Uninstall existing app from connected device to avoid signature mismatches
-adb uninstall com.mitsakopoulos.maianlab.mai_an_lab || true
-
-# Execute Flet build
-flet build apk --clear-cache -v --yes
-
-# Reinstall the fresh APK
-adb install build/apk/mai-an-lab.apk
+# Reinstall the APK, preserving user data and application state
+adb install -r build/apk/mai-an-lab.apk

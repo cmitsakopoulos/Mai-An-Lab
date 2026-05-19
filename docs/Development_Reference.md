@@ -223,10 +223,9 @@ Jarvis is a zero-latency vocal command center that operates entirely on-device, 
      * **Abortion Safety**: Any invoke-channel call to `tts_stop()` immediately completes the active completer, avoiding thread hangs during manual stops.
      * **Result**: Playback wait safeguards work perfectly; the music is guaranteed to stay paused or ducked until Jarvis has physically finished saying his lines.
 
-3. **Immediate Speech Interruption (Mic Tap Intercept)**:
-   - To deliver a fluid, highly responsive conversational loop, Jarvis supports **active speech interruption**.
-   - Clicking or tapping the microphone button triggers an immediate `on_tap_down` gesture. The application intercepts this event and runs `service.tts_stop()` asynchronously before starting the voice-capture STT listener.
-   - Jarvis instantly cuts off mid-sentence the millisecond the user touches the mic button, ensuring a silent environment for speech-to-text recording without requiring the user to talk over him.
+3. **Simultaneous Voice Safety (Active Speech Preservation)**:
+   - To guarantee complete stability and prevent channel-locking glitches between Android's native SpeechRecognizer and TextToSpeech engines, the system allows active voice feedback to run naturally without forced interruption when the microphone is pressed.
+   - A click or hold gesture on the microphone button launches the voice-capturing STT pipeline directly without calling `service.tts_stop()`, avoiding platform-specific codec/channel cancellation conflicts and ensuring robust execution on all mobile builds.
 
 4. **Conversational NLP & Normalisation (`assistant_intent.py` & `semantic_intent.py`)**:
    - **Spelling Auto-Correction (Levenshtein Distance)**: Speech recognition is prone to minor errors and dictation drift. The upgraded classifier calculates Levenshtein Edit Distance on all OOV (out-of-vocabulary) terms against key command tokens (`"skip"`, `"pause"`, `"resume"`, `"mute"`, `"unmute"`, `"queue"`, `"playlist"`, `"download"`):

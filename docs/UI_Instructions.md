@@ -122,7 +122,6 @@ The full-screen player supports intuitive touch controls for navigation:
 Jarvis integrates advanced gesture-based push-to-talk microphone interactions to deliver a highly responsive, premium, and conversational user experience:
 - **Press & Hold (Tap Down)**:
   * Triggers the microphone voice input engine immediately.
-  * **Speech Interruption**: If Jarvis is currently speaking (TTS), tapping the mic button instantly interrupts his voice synthesis, silencing him completely so you do not have to speak over him.
   * The mic icon immediately turns **vibrant red** (`#FF4444`) with the tooltip changing to *"Release to Send"*.
   * A pulsating, glassmorphic *"Listening, sir..."* bubble is appended at the bottom of the chat list to indicate active capture.
 - **Release (Tap Up / Cancel)**:
