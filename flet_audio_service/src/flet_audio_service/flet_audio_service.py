@@ -429,12 +429,8 @@ class AudioServiceControl(Service):
                 "stt_listen", {"request_id": request_id, "timeout": timeout}
             )
             return await asyncio.wait_for(fut, timeout=timeout + 5.0)
-        except asyncio.TimeoutError:
+        finally:
             pending.pop(request_id, None)
-            raise
-        except Exception:
-            pending.pop(request_id, None)
-            raise
 
     async def stt_stop(self) -> None:
         """Manually stop the current STT session. No-op if not listening."""

@@ -453,6 +453,7 @@ class FletAudioService extends FletService with WidgetsBindingObserver {
   }
 
   Future<void> _runSttListen(String requestId, double timeout) async {
+    _activeSttRequestId = requestId;
     try {
       final stt = await _ensureStt();
       // listen() resolves when it successfully starts listening. 
@@ -771,6 +772,8 @@ class AudioPlayerHandler extends BaseAudioHandler with QueueHandler, SeekHandler
     _initAudioSession();
   }
 
+  bool _wasPlayingBeforeInterruption = false;
+
   Future<void> _initAudioSession() async {
     final session = await AudioSession.instance;
     await session.configure(const AudioSessionConfiguration.music());
@@ -780,11 +783,15 @@ class AudioPlayerHandler extends BaseAudioHandler with QueueHandler, SeekHandler
         _player.setVolume(event.begin ? 0.5 : 1.0);
       } else if (event.type == AudioInterruptionType.pause) {
         if (event.begin) {
+          _wasPlayingBeforeInterruption = _player.playing;
           _player.pause();
         } else {
-          _player.play();
+          if (_wasPlayingBeforeInterruption) {
+            _player.play();
+          }
         }
       } else if (event.type == AudioInterruptionType.unknown && event.begin) {
+        _wasPlayingBeforeInterruption = _player.playing;
         _player.pause();
       }
     });

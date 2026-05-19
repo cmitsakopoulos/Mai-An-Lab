@@ -5888,7 +5888,7 @@ class AssistantView:
                 border_radius=20,
             ),
             tooltip="Hold to Speak",
-            # Touch-down starts listening immediately. Release stops it:
+            # Touch-down starts listening immediately. Release stops it.
             #   • short tap   → on_tap_up
             #   • held button → on_long_press_end (Flutter cancels the tap
             #     gesture once long-press wins arbitration, so on_tap_cancel
@@ -5898,6 +5898,7 @@ class AssistantView:
             on_long_press_end=self._on_mic_up,
         )
         self._stt_listening = False
+        self._mic_pressed = False
 
         self._tts_toggle = ft.IconButton(
             icon=ft.Icons.VOLUME_UP_ROUNDED,
@@ -6313,14 +6314,17 @@ class AssistantView:
         self.page.run_task(self._handle_user_text, text)
 
     def _on_mic_down(self, e):
+        self._mic_pressed = True
         self.page.run_task(self._start_listening)
 
     def _on_mic_up(self, e):
+        self._mic_pressed = False
         self.page.run_task(self._stop_listening)
 
     async def _start_listening(self):
         if getattr(self, "_analysing_library", False):
             self.app.show_snackbar("Please wait until library analysis is complete.")
+            self._mic_pressed = False
             return
 
         if self._stt_listening:
@@ -6328,13 +6332,6 @@ class AssistantView:
 
         service = getattr(audio_engine, "audio_service", None)
         is_mock = (service is None)
-
-        # Stop any active TTS immediately when the user starts speaking/listening
-        if service is not None:
-            try:
-                await service.tts_stop()
-            except Exception as ex:
-                logger.warning(f"Failed to stop TTS at start of listening: {ex}")
 
         # First tap: ensure mic permission (skip if mock mode)
         if not is_mock:
@@ -6346,11 +6343,18 @@ class AssistantView:
                         self.app.show_snackbar(
                             "Microphone permission is required for voice commands."
                         )
+                        self._mic_pressed = False
                         return
             except Exception as ex:
                 logger.warning(f"Mic permission check failed: {ex}")
                 self.app.show_snackbar("Couldn't verify microphone permission.")
+                self._mic_pressed = False
                 return
+
+        # Safeguard check: If the user released the button while we were awaiting permissions, abort!
+        if not self._mic_pressed:
+            logger.info("AssistantView: user released mic before initialization completed. Aborting STT start.")
+            return
 
         self._stt_listening = True
         self._mic_icon.color = "#FF4444"
@@ -6358,16 +6362,18 @@ class AssistantView:
         self._mic_icon.update()
         self._mic_btn.update()
 
+        self._listening_icon = ft.Icon(ft.Icons.MIC_ROUNDED, color="#FF4444", size=18)
+        self._listening_text = ft.Text(
+            "Listening (mock mode), sir..." if is_mock else "Listening, sir...",
+            color=DIM, size=13, italic=True
+        )
         self._listening_bubble = ft.Row(
             [
                 ft.Container(
                     content=ft.Row(
                         [
-                            ft.Icon(ft.Icons.MIC_ROUNDED, color="#FF4444", size=18),
-                            ft.Text(
-                                "Listening (mock mode), sir..." if is_mock else "Listening, sir...",
-                                color=DIM, size=13, italic=True
-                            ),
+                            self._listening_icon,
+                            self._listening_text,
                             ft.ProgressRing(width=12, height=12, stroke_width=1.5, color=CYAN),
                         ],
                         spacing=8,
@@ -6396,7 +6402,31 @@ class AssistantView:
             if not is_mock:
                 # 60 s upper bound on a single hold (the plugin still
                 # finalises early when stt_stop() is called on release).
-                res = await service.stt_listen(timeout=60.0)
+                stt_task = asyncio.create_task(service.stt_listen(timeout=60.0))
+                
+                released = False
+                release_time = None
+                while not stt_task.done():
+                    if not self._stt_listening and not released:
+                        released = True
+                        release_time = asyncio.get_running_loop().time()
+                    
+                    if released:
+                        elapsed = asyncio.get_running_loop().time() - release_time
+                        if elapsed > 4.0:
+                            logger.info("AssistantView: Post-release transcription timeout. Cancelling STT task.")
+                            stt_task.cancel()
+                            break
+                    await asyncio.sleep(0.05)
+                
+                if stt_task.done() and not stt_task.cancelled():
+                    try:
+                        res = stt_task.result()
+                    except Exception as e:
+                        logger.warning(f"stt_task failed with exception: {e}")
+                        res = {"ok": False, "error": str(e)}
+                else:
+                    res = {"ok": False, "error": "cancelled"}
             else:
                 # Simulated Speech-to-Text session for offline debugging on macOS
                 # Check if self._stt_listening is flipped to False every 0.05 seconds
@@ -6411,7 +6441,7 @@ class AssistantView:
                 self._input.value = res["text"]
                 self.app.safe_update(lambda: None)
                 self._on_send_click()
-            elif res.get("error") and "cancel" not in res["error"].lower():
+            elif res.get("error") and all(x not in res["error"].lower() for x in ["cancel", "no_match", "no match"]):
                 self.app.show_snackbar(f"Speech error: {res['error']}")
         except asyncio.TimeoutError:
             # No utterance recognised in the listen window; silent no-op.
@@ -6427,6 +6457,8 @@ class AssistantView:
                 if hasattr(self, "_listening_bubble") and self._listening_bubble in self._messages.controls:
                     self._messages.controls.remove(self._listening_bubble)
                     self._messages.update()
+                self._mic_icon.update()
+                self._mic_btn.update()
             self.app.safe_update(_hide_listening)
 
     async def _stop_listening(self):
@@ -6434,6 +6466,24 @@ class AssistantView:
             return
         
         self._stt_listening = False
+        
+        # Instantly update UI on finger lift so microphone looks closed
+        # and Jarvis shows "Thinking..." state during the transcription delay.
+        def _show_processing():
+            self._mic_icon.color = CYAN
+            self._mic_btn.tooltip = "Hold to Speak"
+            self._mic_icon.update()
+            self._mic_btn.update()
+            
+            if hasattr(self, "_listening_icon") and hasattr(self, "_listening_text"):
+                self._listening_icon.name = ft.Icons.AUTO_AWESOME_ROUNDED
+                self._listening_icon.color = CYAN
+                self._listening_text.value = "Thinking..."
+                self._listening_icon.update()
+                self._listening_text.update()
+        
+        self.app.safe_update(_show_processing)
+        
         service = getattr(audio_engine, "audio_service", None)
         if service is not None:
             try:

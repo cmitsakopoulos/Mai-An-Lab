@@ -26,6 +26,7 @@ from .exceptions import (
 )
 from .client import Client
 from .downloadable import BasicDownloadable, Downloadable
+from .ssl_utils import get_aiohttp_connector_kwargs
 
 logger = logging.getLogger("streamrip")
 
