@@ -77,6 +77,14 @@ class PendingPlaylistCreation:
     limit: Optional[int] = None       # None = unasked, int = track count
 
 
+@dataclass
+class PendingMoodCreation:
+    """Conversational state container to track progress during step-by-step
+    custom mood creation."""
+    name: Optional[str] = None
+    exemplars: list[dict] = field(default_factory=list)
+
+
 # ── Track dict shape used by the audio engine ────────────────────────────────
 #
 # Keys the engine consumes: path, track_title, artist_name, album_title,
@@ -126,6 +134,8 @@ class AssistantRunner:
         self._pending: Optional[PendingConfirmation] = None
         # Conversational playlist flow wizard state
         self._playlist_flow: Optional[PendingPlaylistCreation] = None
+        # Conversational custom mood wizard state
+        self._mood_flow: Optional[PendingMoodCreation] = None
 
     def queue_confirmation(self, prompt: PendingConfirmation) -> None:
         """Stage a pending yes/no for the next user turn. Replaces any
@@ -593,6 +603,28 @@ class AssistantRunner:
                 # Process the turn within the slot-filling flow
                 return await self._handle_playlist_flow_step(intent)
 
+        # 2. Intercept for active conversational custom mood wizard
+        if self._mood_flow is not None:
+            # Emergency playback controls override the conversational wizard
+            EMERGENCY_COMMANDS = (
+                ai.INTENT_SKIP, ai.INTENT_PREV, ai.INTENT_PAUSE, 
+                ai.INTENT_RESUME, ai.INTENT_STOP, ai.INTENT_MUTE, 
+                ai.INTENT_UNMUTE, ai.INTENT_SHUFFLE
+            )
+            if intent.name in EMERGENCY_COMMANDS:
+                self._mood_flow = None
+                # Fall through to normal handler dispatch so playback controls execute instantly
+            else:
+                raw_text = (intent.raw or "").strip().lower()
+                if raw_text in ("cancel", "abort", "stop", "nevermind", "forget it", "no"):
+                    self._mood_flow = None
+                    return AssistantResponse(
+                        spoken="Understood. Custom mood creation canceled.",
+                        displayed="Custom mood creation canceled.",
+                    )
+                # Process the turn within the slot-filling flow
+                return await self._handle_mood_flow_step(intent)
+
         # Resolve pending confirmation first.
         pending = self._pending
         if pending is not None:
@@ -799,6 +831,161 @@ class AssistantRunner:
                     displayed=f"Error: {exc}",
                     success=False
                 )
+
+    async def _handle_mood_flow_step(self, intent: ai.Intent) -> AssistantResponse:
+        flow = self._mood_flow
+        if not flow:
+            return AssistantResponse(
+                spoken="Error: custom mood flow is not active.",
+                displayed="Flow inactive.",
+                success=False
+            )
+
+        raw = (intent.raw or "").strip()
+
+        # Step 1: Get Custom Mood Name
+        if flow.name is None:
+            if not raw:
+                return AssistantResponse(
+                    spoken="What should we name the custom mood, sir?",
+                    displayed="Custom mood name cannot be empty. Please specify a name:",
+                )
+            
+            clean_name = raw
+            if intent.name == ai.INTENT_NAME_ENTITY and intent.query:
+                clean_name = intent.query
+            else:
+                for prefix in ("call it ", "name it ", "called ", "named ", "titled "):
+                    if clean_name.lower().startswith(prefix):
+                        clean_name = clean_name[len(prefix):].strip()
+            
+            clean_name = clean_name.strip().strip("\"'").strip()
+            
+            # Check duplicate / standard name
+            from utils import track_graph as tg
+            if clean_name.lower() in tg.MOOD_PROFILES:
+                return AssistantResponse(
+                    spoken=f"'{clean_name}' is a standard system mood, sir. Please choose a different name for your custom mood.",
+                    displayed=f"'{clean_name}' is a standard system mood. Choose a different name:",
+                )
+
+            flow.name = clean_name
+            return AssistantResponse(
+                spoken=f"Understood, sir. Which tracks should define '{flow.name}'? You can say 'use the current track', search for a track, or say 'done' when finished.",
+                displayed=f"Custom mood **{flow.name}** active. Seed it with exemplars (e.g. *use this track* or search for a song):"
+            )
+
+        # Step 2: Add exemplars
+        raw_lower = raw.lower().strip()
+
+        # Check if finishing
+        if raw_lower in ("done", "finished", "save", "that's all", "that is all", "finalize"):
+            if not flow.exemplars:
+                return AssistantResponse(
+                    spoken="We need at least one track to define the mood signature, sir. Please suggest a track first.",
+                    displayed="At least one exemplar track is required to define a mood centroid. Please add a track:"
+                )
+            return await self._finalize_custom_mood(flow)
+
+        # Check if adding current track
+        if any(x in raw_lower for x in ("this track", "this song", "currently playing", "current track", "use current", "add current", "use this track")):
+            track_path = self.engine.current_path
+            if not track_path:
+                return AssistantResponse(
+                    spoken="Nothing is playing right now, sir. Please search for a track or specify one.",
+                    displayed="No current track to use."
+                )
+            
+            row = await self.db.get_track_full(track_path)
+            from utils.dsp import unpack_timbre
+            if not row or unpack_timbre(row.get("timbre")) is None:
+                return AssistantResponse(
+                    spoken="I'm afraid the current track has not been DSP-analysed yet, sir.",
+                    displayed="Current track has no DSP features. Run 'rescan dsp' first."
+                )
+
+            if any(e["path"] == row["path"] for e in flow.exemplars):
+                return AssistantResponse(
+                    spoken=f"'{row.get('title')}' is already registered as an exemplar, sir. Suggest another track, or say 'done' to finish.",
+                    displayed="Track is already in exemplars list."
+                )
+
+            flow.exemplars.append(row)
+            return AssistantResponse(
+                spoken=f"{self._say('affirmative')} Added '{row.get('title')}' by {row.get('artist')} to '{flow.name}'. Suggest another, or say 'done' to save.",
+                displayed=f"Added exemplar: **{row.get('title')}** — {row.get('artist')}. Say **done** to save."
+            )
+
+        # Otherwise, treat input as a track search query
+        hits = await self._resolve_queries(raw, limit=5)
+        if not hits:
+            return AssistantResponse(
+                spoken=f"I couldn't find any track matching '{raw}', sir. Please specify a different track or say 'done' to finish.",
+                displayed=f"No local match for **{raw}**."
+            )
+
+        # Select the first hit as the best guess
+        best_hit = hits[0]
+        # Get full row to access timbre features
+        row = await self.db.get_track_full(best_hit["path"])
+        from utils.dsp import unpack_timbre
+        if not row or unpack_timbre(row.get("timbre")) is None:
+            return AssistantResponse(
+                spoken=f"I found '{best_hit.get('title')}', but it has not been DSP-analysed yet, sir. Please suggest a different track.",
+                displayed=f"**{best_hit.get('title')}** has no DSP features. Please try a different song."
+            )
+
+        if any(e["path"] == row["path"] for e in flow.exemplars):
+            return AssistantResponse(
+                spoken=f"'{row.get('title')}' is already registered as an exemplar, sir. Suggest another track, or say 'done' to finish.",
+                displayed="Track is already in exemplars list."
+            )
+
+        flow.exemplars.append(row)
+        return AssistantResponse(
+            spoken=f"{self._say('affirmative')} Added '{row.get('title')}' by {row.get('artist')} to '{flow.name}'. Suggest another, or say 'done' to save.",
+            displayed=f"Added exemplar: **{row.get('title')}** — {row.get('artist')}. Say **done** to save."
+        )
+
+    async def _finalize_custom_mood(self, flow: PendingMoodCreation) -> AssistantResponse:
+        import numpy as np
+        from utils.dsp import unpack_timbre
+        timbres = []
+        for e in flow.exemplars:
+            v = unpack_timbre(e.get("timbre"))
+            if v is not None:
+                timbres.append(v)
+
+        if not timbres:
+            self._mood_flow = None
+            return AssistantResponse(
+                spoken="I couldn't extract DSP features for those tracks, sir. Mood creation aborted.",
+                displayed="Failed to extract DSP features for exemplars.",
+                success=False
+            )
+
+        centroid = np.mean(timbres, axis=0)
+        centroid_list = [float(x) for x in centroid]
+        exemplar_paths = [e["path"] for e in flow.exemplars]
+
+        try:
+            track_graph.save_custom_mood(flow.name, centroid_list, exemplar_paths)
+            ai.register_dynamic_mood_vocabulary()
+            
+            self._mood_flow = None
+            first_title = flow.exemplars[0].get('title') or "first track"
+            return AssistantResponse(
+                spoken=f"Vibe signature registered, sir! Custom mood '{flow.name}' is active, seeded by {first_title}.",
+                displayed=f"Custom mood **{flow.name}** registered with **{len(flow.exemplars)}** exemplars."
+            )
+        except Exception as exc:
+            self._mood_flow = None
+            logger.exception("Failed to finalize custom mood creation")
+            return AssistantResponse(
+                spoken=f"Failed to finalize custom mood, sir: {exc}",
+                displayed=f"Error finalising custom mood: {exc}",
+                success=False
+            )
 
     async def dispatch_text(self, text: str) -> AssistantResponse:
         """Convenience: parse + dispatch in one call."""
@@ -1349,6 +1536,32 @@ class AssistantRunner:
         )
         return AssistantResponse(spoken=spoken_msg, displayed=displayed_msg)
 
+    async def _handle_create_mood(self, intent: ai.Intent) -> AssistantResponse:
+        name = (intent.query or "").strip()
+        
+        # Check standard moods
+        if name:
+            from utils import track_graph as tg
+            if name.lower() in tg.MOOD_PROFILES:
+                return AssistantResponse(
+                    spoken=f"'{name}' is a standard system mood, sir. Please choose a different name for your custom mood.",
+                    displayed=f"'{name}' is a standard system mood. Choose a different name:",
+                    success=False
+                )
+
+        self._mood_flow = PendingMoodCreation(name=name if name else None)
+
+        if not name:
+            return AssistantResponse(
+                spoken="What should we name the custom mood, sir?",
+                displayed="Please specify a name for the custom mood:"
+            )
+
+        return AssistantResponse(
+            spoken=f"Understood, sir. Which tracks should define '{name}'? We can use the current track.",
+            displayed=f"Creating custom mood **{name}**. Seed it with exemplars (e.g. *use this track* or search for a song):"
+        )
+
     async def _handle_playlist_create(self, intent: ai.Intent) -> AssistantResponse:
         name = (intent.query or "").strip()
         if not name:
@@ -1678,6 +1891,7 @@ AssistantRunner._INTENT_DISPATCH = {
     ai.INTENT_PLAYLIST_AUTO:   AssistantRunner._handle_playlist_auto,
     ai.INTENT_PLAYLIST_ADD:    AssistantRunner._handle_playlist_add,
     ai.INTENT_PLAYLIST_PLAY:   AssistantRunner._handle_playlist_play,
+    ai.INTENT_CREATE_MOOD:     AssistantRunner._handle_create_mood,
     ai.INTENT_GREET:           AssistantRunner._handle_greet,
     ai.INTENT_HELP:          AssistantRunner._handle_help,
     ai.INTENT_UNKNOWN:       AssistantRunner._handle_unknown,
