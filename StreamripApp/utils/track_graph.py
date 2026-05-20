@@ -25,6 +25,8 @@ from __future__ import annotations
 
 import logging
 import random
+import json
+import os
 from typing import Optional
 
 import numpy as np
@@ -35,8 +37,34 @@ from utils.dsp import (
     analyze_track,
     unpack_timbre,
 )
+from utils.config import APP_DIR
 
 logger = logging.getLogger(__name__)
+
+CUSTOM_MOODS_PATH = os.path.join(APP_DIR, "custom_moods.json")
+
+def load_custom_moods() -> dict:
+    if not os.path.exists(CUSTOM_MOODS_PATH):
+        return {}
+    try:
+        with open(CUSTOM_MOODS_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        logger.error("Failed to load custom moods: %s", e)
+        return {}
+
+def save_custom_mood(name: str, centroid: list[float], exemplars: list[str]):
+    moods = load_custom_moods()
+    moods[name.lower().strip()] = {
+        "centroid": centroid,
+        "exemplars": exemplars
+    }
+    try:
+        with open(CUSTOM_MOODS_PATH, "w", encoding="utf-8") as f:
+            json.dump(moods, f, indent=4)
+    except Exception as e:
+        logger.error("Failed to save custom mood %s: %s", name, e)
+
 
 # Top-K acoustic neighbours stored per track. 20 is enough for both 'most
 # similar' lookups and short random walks; bigger K eats DB rows without
@@ -311,43 +339,43 @@ async def walk(
 
 MOOD_PROFILES: dict[str, dict[str, float]] = {
     # Calm / low-energy
-    "chill":     {"bpm": -1.0, "energy": -1.0, "brightness": -0.5, "beat_strength": -0.5},
-    "chilled":   {"bpm": -1.0, "energy": -1.0, "brightness": -0.5, "beat_strength": -0.5},
-    "relaxed":   {"bpm": -1.0, "energy": -1.0, "brightness": -0.5},
-    "relaxing":  {"bpm": -1.0, "energy": -1.0, "brightness": -0.5},
-    "calm":      {"bpm": -1.0, "energy": -1.0, "brightness": -0.5},
-    "mellow":    {"bpm": -0.7, "energy": -0.7, "brightness": -0.5},
-    "soft":      {"energy": -1.5, "brightness": -0.5},
-    "ambient":   {"bpm": -1.5, "energy": -1.5, "beat_strength": -1.5},
+    "chill":     {"bpm": 0.20, "energy": 0.20, "brightness": 0.30, "beat_strength": 0.30},
+    "chilled":   {"bpm": 0.20, "energy": 0.20, "brightness": 0.30, "beat_strength": 0.30},
+    "relaxed":   {"bpm": 0.20, "energy": 0.20, "brightness": 0.30},
+    "relaxing":  {"bpm": 0.20, "energy": 0.20, "brightness": 0.30},
+    "calm":      {"bpm": 0.15, "energy": 0.15, "brightness": 0.30},
+    "mellow":    {"bpm": 0.30, "energy": 0.30, "brightness": 0.30},
+    "soft":      {"energy": 0.10, "brightness": 0.30},
+    "ambient":   {"bpm": 0.10, "energy": 0.10, "beat_strength": 0.05},
 
     # High-energy
-    "upbeat":    {"bpm": 1.0, "energy": 1.0, "brightness": 0.5},
-    "energetic": {"bpm": 1.0, "energy": 1.5, "beat_strength": 1.0},
-    "intense":   {"energy": 2.0, "beat_strength": 1.5, "brightness": 0.5},
-    "hard":      {"energy": 1.5, "beat_strength": 1.5},
-    "heavy":     {"energy": 1.5, "rolloff": 0.5, "brightness": -0.3},
-    "powerful":  {"energy": 1.5, "beat_strength": 1.0},
-    "happy":     {"bpm": 0.8, "brightness": 1.0, "energy": 0.5},
-    "uplifting": {"bpm": 0.8, "brightness": 1.0, "energy": 0.8},
+    "upbeat":    {"bpm": 0.75, "energy": 0.75, "brightness": 0.70},
+    "energetic": {"bpm": 0.80, "energy": 0.85, "beat_strength": 0.75},
+    "intense":   {"energy": 0.95, "beat_strength": 0.90, "brightness": 0.75},
+    "hard":      {"energy": 0.90, "beat_strength": 0.90},
+    "heavy":     {"energy": 0.85, "rolloff": 0.75, "brightness": 0.35},
+    "powerful":  {"energy": 0.85, "beat_strength": 0.80},
+    "happy":     {"bpm": 0.70, "brightness": 0.85, "energy": 0.70},
+    "uplifting": {"bpm": 0.70, "brightness": 0.85, "energy": 0.80},
 
     # Tempo-specific
-    "fast":      {"bpm": 2.0},
-    "quick":     {"bpm": 2.0},
-    "slow":      {"bpm": -2.0},
-    "lazy":      {"bpm": -1.5, "energy": -1.0},
+    "fast":      {"bpm": 0.90},
+    "quick":     {"bpm": 0.90},
+    "slow":      {"bpm": 0.10},
+    "lazy":      {"bpm": 0.20, "energy": 0.30},
 
     # Timbre / spectrum
-    "dark":      {"brightness": -1.5, "rolloff": -1.0},
-    "moody":     {"brightness": -1.0, "energy": -0.5, "spectral_flatness": -0.5},
-    "bright":    {"brightness": 1.5, "rolloff": 1.0},
+    "dark":      {"brightness": 0.10, "rolloff": 0.15},
+    "moody":     {"brightness": 0.20, "energy": 0.35, "spectral_flatness": 0.25},
+    "bright":    {"brightness": 0.90, "rolloff": 0.85},
 
     # v3 scalars: tonal/noisy axis (spectral_flatness, spectral_contrast).
     # Flatness rises with noise; contrast rises with clear tonal peaks.
-    "tonal":     {"spectral_flatness": -1.5, "spectral_contrast": 1.0},
-    "melodic":   {"spectral_flatness": -1.0, "spectral_contrast": 1.0, "brightness": 0.3},
-    "noisy":     {"spectral_flatness": 1.5},
-    "textured":  {"spectral_flatness": 1.0, "spectral_contrast": -0.5},
-    "acoustic":  {"spectral_flatness": -1.0, "energy": -0.5, "beat_strength": -0.3},
+    "tonal":     {"spectral_flatness": 0.10, "spectral_contrast": 0.90},
+    "melodic":   {"spectral_flatness": 0.20, "spectral_contrast": 0.85, "brightness": 0.65},
+    "noisy":     {"spectral_flatness": 0.90},
+    "textured":  {"spectral_flatness": 0.80, "spectral_contrast": 0.25},
+    "acoustic":  {"spectral_flatness": 0.20, "energy": 0.35, "beat_strength": 0.30},
 }
 
 # Feature columns participating in mood scoring. Order matters: weights and
@@ -372,7 +400,7 @@ async def tracks_by_mood(
     the top `limit`. Returns library rows (with title/artist/album/path)
     ready for the assistant to enqueue.
 
-    The ranking is library-relative: features are z-scored across all
+    The ranking is library-relative: features are scaled to percentiles across all
     analysed tracks before scoring, so the same mood word will pick
     different tracks depending on the library's distribution. This is the
     right behaviour — "energetic" should mean "energetic for this library",
@@ -380,7 +408,40 @@ async def tracks_by_mood(
 
     Returns [] for unknown moods or when fewer than 2 tracks have features.
     """
-    profile = MOOD_PROFILES.get(mood.lower())
+    cleaned_mood = mood.lower().strip()
+
+    # 1. Check if it's a dynamic custom mood
+    custom_moods = load_custom_moods()
+    if cleaned_mood in custom_moods:
+        centroid = np.array(custom_moods[cleaned_mood]["centroid"], dtype=np.float32)
+        rows = await db_manager.get_tracks_with_features(features_version)
+        if len(rows) < 1:
+            return []
+
+        valid_rows = []
+        timbres_list = []
+        for r in rows:
+            t_vec = unpack_timbre(r.get("timbre"))
+            if t_vec is not None:
+                valid_rows.append(r)
+                timbres_list.append(t_vec)
+
+        if not valid_rows:
+            return []
+
+        timbres = np.array(timbres_list, dtype=np.float32)  # (M, 52)
+        dot_prod = np.dot(timbres, centroid)
+        norm_t = np.linalg.norm(timbres, axis=1)
+        norm_c = np.linalg.norm(centroid)
+        scores = dot_prod / (norm_t * norm_c + 1e-8)  # (M,)
+
+        k = min(limit, len(scores))
+        top_unsorted = np.argpartition(-scores, k - 1)[:k]
+        top_ordered = top_unsorted[np.argsort(-scores[top_unsorted])]
+        return [valid_rows[int(i)] for i in top_ordered]
+
+    # 2. Base static mood (Percentile-Based Proximity)
+    profile = MOOD_PROFILES.get(cleaned_mood)
     if profile is None:
         return []
 
@@ -393,22 +454,32 @@ async def tracks_by_mood(
         [[float(r.get(f, 0) or 0) for f in _MOOD_FEATURES] for r in rows],
         dtype=np.float32,
     )
-    mu = matrix.mean(axis=0, keepdims=True)
-    sd = matrix.std(axis=0, keepdims=True)
-    sd = np.where(sd < 1e-8, 1.0, sd)
-    Z = (matrix - mu) / sd
+    
+    # Calculate column-wise percentile ranks for all analysed tracks
+    N = len(rows)
+    percentiles = np.zeros_like(matrix)
+    for col in range(matrix.shape[1]):
+        ranks = np.argsort(np.argsort(matrix[:, col]))
+        percentiles[:, col] = ranks / float(N - 1) if N > 1 else 0.0
 
-    weights = np.array(
+    target_percentiles = np.array(
         [profile.get(f, 0.0) for f in _MOOD_FEATURES],
         dtype=np.float32,
     )
-    scores = Z @ weights  # (N,)
+    
+    # Active feature masking
+    mask = np.array([f in profile for f in _MOOD_FEATURES], dtype=bool)
+    
+    # Calculate Euclidean distance on active features in percentile space
+    dist_sq = np.sum((percentiles[:, mask] - target_percentiles[mask]) ** 2, axis=1)
+    distances = np.sqrt(dist_sq)
+    scores = -distances
 
     k = min(limit, len(scores))
-    # argpartition gives the top-K (unordered), argsort orders them by score.
     top_unsorted = np.argpartition(-scores, k - 1)[:k]
     top_ordered = top_unsorted[np.argsort(-scores[top_unsorted])]
     return [rows[int(i)] for i in top_ordered]
+
 
 
 async def bulk_analyze_library(

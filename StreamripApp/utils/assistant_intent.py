@@ -61,6 +61,7 @@ INTENT_NEGATIVE       = "negative"        # no / later / not now (cancel pending
 INTENT_NAME_ENTITY    = "name_entity"     # call it X / name it X
 INTENT_GREET          = "greet"
 INTENT_HELP           = "help"
+INTENT_CREATE_MOOD    = "create_mood"     # create a custom mood called X
 INTENT_UNKNOWN        = "unknown"
 
 
@@ -96,169 +97,205 @@ class Intent:
 #
 # Order matters: more specific patterns first.
 
-# Built once: a constrained alternation over the known mood vocabulary so
-# the mood pattern can claim "play something chill" without swallowing
-# "play something radiohead" (which is a play_now query, not a mood).
-_MOOD_ALT = "|".join(MOOD_KEYWORDS)
+def _build_patterns(mood_keywords: list[str]) -> list[tuple[str, re.Pattern]]:
+    mood_alt = "|".join(re.escape(k) for k in mood_keywords)
+    return [
+        # ── Naming / Entity Specification ───────────────────────────────────────
+        (INTENT_NAME_ENTITY, re.compile(
+            r"^\s*(?:call\s+(?:the\s+)?playlist|name\s+(?:the\s+)?playlist|call\s+it|name\s+it|make\s+it|called|named|titled)\s+(?P<q>.+?)\s*$",
+            re.I
+        )),
 
+        # ── Confirmation routine (highest priority) ─────────────────────────────
+        # Match these BEFORE play/queue so a bare "yes" or "no" during a
+        # pending-confirmation turn doesn't get misread as a search query.
+        (INTENT_AFFIRMATIVE,  re.compile(
+            r"^\s*(?:yes|yeah|yep|yup|sure|ok|okay|do\s+it|go\s+ahead|please\s+do|"
+            r"confirm|affirmative|sounds\s+good|alright)\s*[.!]?\s*$", re.I)),
+        (INTENT_NEGATIVE,     re.compile(
+            r"^\s*(?:no|nope|nah|not\s+now|later|cancel|stop|forget\s+it|"
+            r"negative|never\s+mind|nevermind)\s*[.!]?\s*$", re.I)),
 
-_PATTERNS: list[tuple[str, re.Pattern]] = [
-    # ── Naming / Entity Specification ───────────────────────────────────────
-    (INTENT_NAME_ENTITY, re.compile(
-        r"^\s*(?:call\s+(?:the\s+)?playlist|name\s+(?:the\s+)?playlist|call\s+it|name\s+it|make\s+it|called|named|titled)\s+(?P<q>.+?)\s*$",
-        re.I
-    )),
+        # ── Custom Mood Wizard (Pillar 3) ───────────────────────────────────────
+        (INTENT_CREATE_MOOD, re.compile(
+            r"^\s*(?:create|make|build|register)\s+(?:a\s+)?custom\s+mood"
+            r"(?:\s+(?:called|named|titled))?\s+(?P<q>.+?)\s*$",
+            re.I
+        )),
+        (INTENT_CREATE_MOOD, re.compile(
+            r"^\s*(?:create|make|build|register)\s+(?:a\s+)?custom\s+mood\s*$",
+            re.I
+        )),
 
-    # ── Confirmation routine (highest priority) ─────────────────────────────
-    # Match these BEFORE play/queue so a bare "yes" or "no" during a
-    # pending-confirmation turn doesn't get misread as a search query.
-    (INTENT_AFFIRMATIVE,  re.compile(
-        r"^\s*(?:yes|yeah|yep|yup|sure|ok|okay|do\s+it|go\s+ahead|please\s+do|"
-        r"confirm|affirmative|sounds\s+good|alright)\s*[.!]?\s*$", re.I)),
-    (INTENT_NEGATIVE,     re.compile(
-        r"^\s*(?:no|nope|nah|not\s+now|later|cancel|stop|forget\s+it|"
-        r"negative|never\s+mind|nevermind)\s*[.!]?\s*$", re.I)),
+        # ── Manual graph maintenance ────────────────────────────────────────────
+        # Verb-only: "rescan", "reindex", "reanalyse".
+        (INTENT_RESCAN_DSP,   re.compile(
+            r"^\s*(?:rescan|re-?scan|reindex|re-?index|re-?analy[sz]e)\s*$",
+            re.I)),
+        # Verb + object: covers most natural phrasings, including modifiers
+        # like "new" ("analyse new tracks") and "the/my" ("scan the library").
+        (INTENT_RESCAN_DSP,   re.compile(
+            r"^\s*(?:rescan|re-?scan|reindex|re-?index|analy[sz]e|"
+            r"rebuild|refresh|update|scan)\s+"
+            r"(?:(?:my|the|new|for\s+new|all)\s+)*"
+            r"(?:library|graph|music|tracks?|songs?|dsp|features?)\s*$",
+            re.I)),
 
-    # ── Manual graph maintenance ────────────────────────────────────────────
-    # Verb-only: "rescan", "reindex", "reanalyse".
-    (INTENT_RESCAN_DSP,   re.compile(
-        r"^\s*(?:rescan|re-?scan|reindex|re-?index|re-?analy[sz]e)\s*$",
-        re.I)),
-    # Verb + object: covers most natural phrasings, including modifiers
-    # like "new" ("analyse new tracks") and "the/my" ("scan the library").
-    (INTENT_RESCAN_DSP,   re.compile(
-        r"^\s*(?:rescan|re-?scan|reindex|re-?index|analy[sz]e|"
-        r"rebuild|refresh|update|scan)\s+"
-        r"(?:(?:my|the|new|for\s+new|all)\s+)*"
-        r"(?:library|graph|music|tracks?|songs?|dsp|features?)\s*$",
-        re.I)),
+        # ── Verbless single-word commands first ─────────────────────────────────
+        (INTENT_GREET,        re.compile(
+            r"^\s*(?:hello|hi|hey|good\s+(?:morning|afternoon|evening)|greetings|yo)\s*(?:jarvis)?\s*[.!]?\s*$",
+            re.I
+        )),
+        (INTENT_HELP,         re.compile(r"^\s*(?:help|what can you do|commands?|what can i say|show help|info)\s*\??\s*$", re.I)),
+        (INTENT_NOW_PLAYING,  re.compile(r"^\s*(?:what(?:'s| is)\s+(?:this|playing|on)|now\s+playing|current\s+(?:song|track))\s*\??\s*$", re.I)),
+        (INTENT_SKIP,         re.compile(r"^\s*(?:skip|next|fwd|forward|next\s+track|next\s+song)\s*$", re.I)),
+        (INTENT_PREV,         re.compile(r"^\s*(?:previous|prev|back|last|previous\s+track|previous\s+song)\s*$", re.I)),
+        (INTENT_PAUSE,        re.compile(r"^\s*(?:pause|hold|wait)\s*$", re.I)),
+        (INTENT_RESUME,       re.compile(r"^\s*(?:resume|continue|unpause|keep\s+going|play)\s*$", re.I)),
+        (INTENT_STOP,         re.compile(r"^\s*stop\s*(?:playing|music)?\s*$", re.I)),
+        (INTENT_CLEAR_QUEUE,  re.compile(r"^\s*(?:clear|empty|wipe)\s+(?:the\s+)?queue\s*$", re.I)),
+        (INTENT_SHUFFLE,      re.compile(r"^\s*(?:shuffle|randomi[sz]e)(?:\s+the\s+queue)?\s*$", re.I)),
+        (INTENT_MUTE,         re.compile(r"^\s*(?:mute|silence|be\s+quiet)\s*$", re.I)),
+        (INTENT_UNMUTE,       re.compile(r"^\s*(?:unmute|restore\s+volume)\s*$", re.I)),
 
-    # ── Verbless single-word commands first ─────────────────────────────────
-    (INTENT_GREET,        re.compile(
-        r"^\s*(?:hello|hi|hey|good\s+(?:morning|afternoon|evening)|greetings|yo)\s*(?:jarvis)?\s*[.!]?\s*$",
-        re.I
-    )),
-    (INTENT_HELP,         re.compile(r"^\s*(?:help|what can you do|commands?|what can i say|show help|info)\s*\??\s*$", re.I)),
-    (INTENT_NOW_PLAYING,  re.compile(r"^\s*(?:what(?:'s| is)\s+(?:this|playing|on)|now\s+playing|current\s+(?:song|track))\s*\??\s*$", re.I)),
-    (INTENT_SKIP,         re.compile(r"^\s*(?:skip|next|fwd|forward|next\s+track|next\s+song)\s*$", re.I)),
-    (INTENT_PREV,         re.compile(r"^\s*(?:previous|prev|back|last|previous\s+track|previous\s+song)\s*$", re.I)),
-    (INTENT_PAUSE,        re.compile(r"^\s*(?:pause|hold|wait)\s*$", re.I)),
-    (INTENT_RESUME,       re.compile(r"^\s*(?:resume|continue|unpause|keep\s+going|play)\s*$", re.I)),
-    (INTENT_STOP,         re.compile(r"^\s*stop\s*(?:playing|music)?\s*$", re.I)),
-    (INTENT_CLEAR_QUEUE,  re.compile(r"^\s*(?:clear|empty|wipe)\s+(?:the\s+)?queue\s*$", re.I)),
-    (INTENT_SHUFFLE,      re.compile(r"^\s*(?:shuffle|randomi[sz]e)(?:\s+the\s+queue)?\s*$", re.I)),
-    (INTENT_MUTE,         re.compile(r"^\s*(?:mute|silence|be\s+quiet)\s*$", re.I)),
-    (INTENT_UNMUTE,       re.compile(r"^\s*(?:unmute|restore\s+volume)\s*$", re.I)),
+        # ── Similarity / artist navigation ──────────────────────────────────────
+        (INTENT_PLAY_SIMILAR, re.compile(
+            r"^\s*(?P<verb>play|start|put\s+on|add|queue|enqueue|put)?\s*"
+            r"(?:a\s+|some\s+|something\s+|stuff\s+|tracks?\s+|songs?\s+|music\s+|tunes?\s+)?"
+            r"(?:more\s+)?similar"
+            r"(?:\s+(?:songs?|tracks?|music|tunes?|stuff))?"
+            r"(?:\s+(?:like|similar\s+to|to)\s+(?:this|that|current))?\s*$",
+            re.I
+        )),
+        (INTENT_PLAY_SIMILAR, re.compile(
+            r"^\s*(?P<verb>play|start|put\s+on|add|queue|enqueue|put)?\s*"
+            r"(?:more\s+)?like\s+(?:this|that|current)\s*$",
+            re.I
+        )),
+        (INTENT_PLAY_MORE_BY, re.compile(r"^\s*(?:play\s+)?more\s+(?:by|from)\s+(?:this|that|the)\s+artist\s*$", re.I)),
+        (INTENT_PLAY_RANDOM,  re.compile(
+            r"^\s*(?:play|start|put\s+on)?\s*"
+            r"(?:a\s+|some\s+)?(?:random\s+)?\s*"
+            r"(?:song|songs|track|tracks|music|tune|tunes|stuff|anything|something)\s*$",
+            re.I
+        )),
+        (INTENT_PLAY_RANDOM,  re.compile(r"^\s*(?:shuffle\s+play|surprise\s+me)\s*$", re.I)),
 
-    # ── Similarity / artist navigation ──────────────────────────────────────
-    (INTENT_PLAY_SIMILAR, re.compile(
-        r"^\s*(?P<verb>play|start|put\s+on|add|queue|enqueue|put)?\s*"
-        r"(?:a\s+|some\s+|something\s+|stuff\s+|tracks?\s+|songs?\s+|music\s+|tunes?\s+)?"
-        r"(?:more\s+)?similar"
-        r"(?:\s+(?:songs?|tracks?|music|tunes?|stuff))?"
-        r"(?:\s+(?:like|similar\s+to|to)\s+(?:this|that|current))?\s*$",
-        re.I
-    )),
-    (INTENT_PLAY_SIMILAR, re.compile(
-        r"^\s*(?P<verb>play|start|put\s+on|add|queue|enqueue|put)?\s*"
-        r"(?:more\s+)?like\s+(?:this|that|current)\s*$",
-        re.I
-    )),
-    (INTENT_PLAY_MORE_BY, re.compile(r"^\s*(?:play\s+)?more\s+(?:by|from)\s+(?:this|that|the)\s+artist\s*$", re.I)),
-    (INTENT_PLAY_RANDOM,  re.compile(
-        r"^\s*(?:play|start|put\s+on)?\s*"
-        r"(?:a\s+|some\s+)?(?:random\s+)?\s*"
-        r"(?:song|songs|track|tracks|music|tune|tunes|stuff|anything|something)\s*$",
-        re.I
-    )),
-    (INTENT_PLAY_RANDOM,  re.compile(r"^\s*(?:shuffle\s+play|surprise\s+me)\s*$", re.I)),
+        # ── Mood (DSP-driven) ───────────────────────────────────────────────────
+        # Restricted to mood_alt so we don't steal "play something <artist>"
+        # phrasings. The captured word IS the mood; it's matched against
+        # track_graph.MOOD_PROFILES at dispatch time.
+        (INTENT_PLAY_MOOD, re.compile(
+            rf"^\s*(?P<verb>play|start|put\s+on|add|queue|enqueue|put)?\s*"
+            rf"(?:me\s+)?"
+            rf"(?:a\s+|some\s+|any\s+|something\s+|anything\s+|stuff\s+|tracks?\s+|songs?\s+|music\s+|tunes?\s+)?"
+            rf"(?P<q>{mood_alt})"
+            rf"(?:\s+(?:music|tracks?|songs?|tunes?|stuff))?"
+            rf"(?:\s+(?:to|in)\s+(?:the\s+)?queue)?\s*$",
+            re.I,
+        )),
+        (INTENT_PLAY_MOOD, re.compile(
+            rf"^\s*(?:i\s+(?:want|need|feel\s+like))\s+"
+            rf"(?P<verb>play|queue|add)?\s*"
+            rf"(?:some\s+|something\s+|a\s+)?(?P<q>{mood_alt})"
+            rf"\s*(?:music|tracks?|songs?|tunes?|stuff)?\s*$",
+            re.I,
+        )),
 
-    # ── Mood (DSP-driven) ───────────────────────────────────────────────────
-    # Restricted to MOOD_KEYWORDS so we don't steal "play something <artist>"
-    # phrasings. The captured word IS the mood; it's matched against
-    # track_graph.MOOD_PROFILES at dispatch time.
-    (INTENT_PLAY_MOOD, re.compile(
-        rf"^\s*(?P<verb>play|start|put\s+on|add|queue|enqueue|put)?\s*"
-        rf"(?:me\s+)?"
-        rf"(?:a\s+|some\s+|any\s+|something\s+|anything\s+|stuff\s+|tracks?\s+|songs?\s+|music\s+|tunes?\s+)?"
-        rf"(?P<q>{_MOOD_ALT})"
-        rf"(?:\s+(?:music|tracks?|songs?|tunes?|stuff))?"
-        rf"(?:\s+(?:to|in)\s+(?:the\s+)?queue)?\s*$",
-        re.I,
-    )),
-    (INTENT_PLAY_MOOD, re.compile(
-        rf"^\s*(?:i\s+(?:want|need|feel\s+like))\s+"
-        rf"(?P<verb>play|queue|add)?\s*"
-        rf"(?:some\s+|something\s+|a\s+)?(?P<q>{_MOOD_ALT})"
-        rf"\s*(?:music|tracks?|songs?|tunes?|stuff)?\s*$",
-        re.I,
-    )),
+        # ── Playlist ops ────────────────────────────────────────────────────────
+        # Mood-driven playlist: "create a chill playlist called X", "make an
+        # energetic playlist named Late Night", etc. The mood word is captured
+        # as `mood`, the name as `q`. Must come BEFORE INTENT_PLAYLIST_CREATE
+        # so the qualified phrasing wins. Also matches the older "magic" /
+        # "smart" wording when paired with a mood adjective for backwards
+        # familiarity ("create a magic chill playlist called X").
+        (INTENT_PLAYLIST_AUTO, re.compile(
+            rf"^\s*(?:create|make|generate|build)\s+(?:a\s+|an\s+)?(?:brand\s+new\s+|new\s+)?"
+            rf"(?:(?:magic|smart|auto|automatic|knn)\s+)?"
+            rf"(?P<mood>{mood_alt})\s+playlist"
+            rf"(?:\s+(?:called|named|titled))?\s+(?P<q>.+?)\s*$",
+            re.I,
+        )),
+        (INTENT_PLAYLIST_AUTO, re.compile(
+            rf"^\s*(?:create|make|generate|build)\s+(?:a\s+|an\s+)?(?:brand\s+new\s+|new\s+)?"
+            rf"(?:(?:magic|smart|auto|automatic|knn)\s+)?"
+            rf"(?P<mood>{mood_alt})\s+playlist\s*$",
+            re.I,
+        )),
+        (INTENT_PLAYLIST_CREATE, re.compile(
+            r"^\s*(?:create|make|generate|build)\s+(?:a\s+)?(?:brand\s+new\s+|new\s+)?playlist"
+            r"(?:\s+(?:called|named|titled))?\s+(?P<q>.+?)\s*$",
+            re.I,
+        )),
+        (INTENT_PLAYLIST_CREATE, re.compile(
+            r"^\s*(?:create|make|generate|build)\s+(?:a\s+)?(?:brand\s+new\s+|new\s+)?playlist\s*$",
+            re.I,
+        )),
+        (INTENT_PLAYLIST_ADD, re.compile(
+            r"^\s*(?:add|put|queue|enqueue)\s+(?:this|the\s+current)\s*(?:song|track)?\s+(?:to|in)\s+(?:playlist\s+)?(?P<playlist>.+?)\s*$",
+            re.I,
+        )),
+        (INTENT_PLAYLIST_ADD, re.compile(
+            r"^\s*(?:add|put|queue|enqueue)\s+(?P<track>.+?)\s+(?:to|in)\s+(?:playlist\s+)?(?P<playlist>.+?)\s*$",
+            re.I,
+        )),
+        (INTENT_PLAYLIST_PLAY, re.compile(
+            r"^\s*(?:play|load|start)\s+(?:my\s+)?playlist\s+(?P<q>.+?)\s*$",
+            re.I,
+        )),
+        (INTENT_PLAYLIST_PLAY, re.compile(
+            r"^\s*(?:play|load|start)\s+(?P<q>.+?)\s+playlist\s*$",
+            re.I,
+        )),
 
-    # ── Playlist ops ────────────────────────────────────────────────────────
-    # Mood-driven playlist: "create a chill playlist called X", "make an
-    # energetic playlist named Late Night", etc. The mood word is captured
-    # as `mood`, the name as `q`. Must come BEFORE INTENT_PLAYLIST_CREATE
-    # so the qualified phrasing wins. Also matches the older "magic" /
-    # "smart" wording when paired with a mood adjective for backwards
-    # familiarity ("create a magic chill playlist called X").
-    (INTENT_PLAYLIST_AUTO, re.compile(
-        rf"^\s*(?:create|make|generate|build)\s+(?:a\s+|an\s+)?(?:brand\s+new\s+|new\s+)?"
-        rf"(?:(?:magic|smart|auto|automatic|knn)\s+)?"
-        rf"(?P<mood>{_MOOD_ALT})\s+playlist"
-        rf"(?:\s+(?:called|named|titled))?\s+(?P<q>.+?)\s*$",
-        re.I,
-    )),
-    (INTENT_PLAYLIST_AUTO, re.compile(
-        rf"^\s*(?:create|make|generate|build)\s+(?:a\s+|an\s+)?(?:brand\s+new\s+|new\s+)?"
-        rf"(?:(?:magic|smart|auto|automatic|knn)\s+)?"
-        rf"(?P<mood>{_MOOD_ALT})\s+playlist\s*$",
-        re.I,
-    )),
-    (INTENT_PLAYLIST_CREATE, re.compile(
-        r"^\s*(?:create|make|generate|build)\s+(?:a\s+)?(?:brand\s+new\s+|new\s+)?playlist"
-        r"(?:\s+(?:called|named|titled))?\s+(?P<q>.+?)\s*$",
-        re.I,
-    )),
-    (INTENT_PLAYLIST_CREATE, re.compile(
-        r"^\s*(?:create|make|generate|build)\s+(?:a\s+)?(?:brand\s+new\s+|new\s+)?playlist\s*$",
-        re.I,
-    )),
-    (INTENT_PLAYLIST_ADD, re.compile(
-        r"^\s*(?:add|put|queue|enqueue)\s+(?:this|the\s+current)\s*(?:song|track)?\s+(?:to|in)\s+(?:playlist\s+)?(?P<playlist>.+?)\s*$",
-        re.I,
-    )),
-    (INTENT_PLAYLIST_ADD, re.compile(
-        r"^\s*(?:add|put|queue|enqueue)\s+(?P<track>.+?)\s+(?:to|in)\s+(?:playlist\s+)?(?P<playlist>.+?)\s*$",
-        re.I,
-    )),
-    (INTENT_PLAYLIST_PLAY, re.compile(
-        r"^\s*(?:play|load|start)\s+(?:my\s+)?playlist\s+(?P<q>.+?)\s*$",
-        re.I,
-    )),
-    (INTENT_PLAYLIST_PLAY, re.compile(
-        r"^\s*(?:play|load|start)\s+(?P<q>.+?)\s+playlist\s*$",
-        re.I,
-    )),
+        # ── Queue ops with query ────────────────────────────────────────────────
+        (INTENT_QUEUE_NEXT, re.compile(
+            r"^\s*(?:play\s+)?(?P<q>.+?)\s+next\s*$", re.I
+        )),
+        (INTENT_QUEUE_ADD, re.compile(
+            r"^\s*(?:add|queue|enqueue|put)\s+(?P<q>.+?)(?:\s+(?:to|in)\s+(?:the\s+)?queue)?\s*$",
+            re.I,
+        )),
 
-    # ── Queue ops with query ────────────────────────────────────────────────
-    (INTENT_QUEUE_NEXT, re.compile(
-        r"^\s*(?:play\s+)?(?P<q>.+?)\s+next\s*$", re.I
-    )),
-    (INTENT_QUEUE_ADD, re.compile(
-        r"^\s*(?:add|queue|enqueue|put)\s+(?P<q>.+?)(?:\s+(?:to|in)\s+(?:the\s+)?queue)?\s*$",
-        re.I,
-    )),
+        # ── Download ────────────────────────────────────────────────────────────
+        (INTENT_DOWNLOAD, re.compile(
+            r"^\s*(?:download|get|grab|fetch|save)\s+(?P<q>.+?)\s*$", re.I
+        )),
 
-    # ── Download ────────────────────────────────────────────────────────────
-    (INTENT_DOWNLOAD, re.compile(
-        r"^\s*(?:download|get|grab|fetch|save)\s+(?P<q>.+?)\s*$", re.I
-    )),
+        # ── Play X (catch-all for non-trivial 'play ...' phrasings) ────────────
+        (INTENT_PLAY_NOW, re.compile(
+            r"^\s*(?:play|start|put\s+on)\s+(?P<q>.+?)\s*$", re.I
+        )),
+    ]
 
-    # ── Play X (catch-all for non-trivial 'play ...' phrasings) ────────────
-    (INTENT_PLAY_NOW, re.compile(
-        r"^\s*(?:play|start|put\s+on)\s+(?P<q>.+?)\s*$", re.I
-    )),
-]
+_PATTERNS = _build_patterns(list(MOOD_KEYWORDS))
+
+def register_dynamic_mood_vocabulary():
+    """Load custom moods from disk and dynamically recompile the intent patterns with the new vocabulary."""
+    global _PATTERNS
+    try:
+        from utils.track_graph import load_custom_moods
+        custom_moods = load_custom_moods()
+    except Exception as e:
+        logger.error("Failed to load custom moods for intent compilation: %s", e)
+        custom_moods = {}
+
+    active_keywords = list(MOOD_KEYWORDS)
+    for mood_name in custom_moods.keys():
+        m_clean = mood_name.lower().strip()
+        if m_clean and m_clean not in active_keywords:
+            active_keywords.append(m_clean)
+
+    active_keywords.sort(key=len, reverse=True)
+    _PATTERNS = _build_patterns(active_keywords)
+    logger.info("Dynamic mood vocabulary registered. Total active moods: %d", len(active_keywords))
+
+# Load dynamic vocabulary at module import time
+try:
+    register_dynamic_mood_vocabulary()
+except Exception as e:
+    logger.warning("Could not initialize dynamic mood vocabulary on module load: %s", e)
+
 
 
 # Common politeness / filler trailing tokens. Stripped post-match so
@@ -384,11 +421,18 @@ def parse(text: str) -> Intent:
         if groups:
             for k, v in groups.items():
                 if k != "q" and v is not None:
-                    extras[k] = _clean_query(v)
+                    val = _clean_query(v)
+                    if k == "mood":
+                        val = val.lower()
+                    extras[k] = val
                     
+        query_val = _clean_query(q) if q else None
+        if name == INTENT_PLAY_MOOD and query_val:
+            query_val = query_val.lower()
+
         return Intent(
             name=name,
-            query=_clean_query(q) if q else None,
+            query=query_val,
             raw=raw,
             extras=extras,
         )
@@ -452,6 +496,7 @@ def get_semantic_classifier():
 __all__ = [
     "Intent",
     "parse",
+    "register_dynamic_mood_vocabulary",
     # Intent constants exported so the runner can match against them by name.
     "INTENT_PLAY_NOW",
     "INTENT_QUEUE_ADD",
@@ -481,6 +526,7 @@ __all__ = [
     "INTENT_NAME_ENTITY",
     "INTENT_GREET",
     "INTENT_HELP",
+    "INTENT_CREATE_MOOD",
     "INTENT_UNKNOWN",
     "MOOD_KEYWORDS",
 ]

@@ -151,7 +151,7 @@ class SemanticIntentClassifier:
         
         self.anchors = {
             "play_now": [
-                "play some music", "start playing a track", "put on a song", 
+                "play some music", "start playing a track", "put on a song", "play something", "play anything",
                 "listen to some tunes", "crank up some tracks", "blast this banger",
                 "spin some tunes", "crank this song", "gimme some music", "put on some tracks"
             ],
@@ -162,7 +162,8 @@ class SemanticIntentClassifier:
             ],
             "playlist_create": [
                 "create a new playlist", "make a new playlist", "generate a blank playlist",
-                "build an empty playlist", "start a blank playlist"
+                "build an empty playlist", "start a blank playlist", "make a playlist",
+                "create playlist", "new playlist", "add a playlist"
             ],
             "playlist_auto": [
                 "create a smart mood playlist", "make a chill playlist", "build an upbeat playlist",
