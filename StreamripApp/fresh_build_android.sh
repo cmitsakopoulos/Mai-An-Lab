@@ -12,11 +12,11 @@ pkill -9 java || true
 echo "Wiping previous build directory: $(pwd)/build"
 rm -rf build .gradle
 
-# Uninstall existing app from connected device to avoid signature mismatches
-adb uninstall com.mitsakopoulos.maianlab.mai_an_lab || true
-
 # Execute Flet build
 flet build apk --clear-cache -v --yes
+
+# Uninstall existing app from connected device to avoid signature mismatches
+adb uninstall com.mitsakopoulos.maianlab.mai_an_lab || true
 
 # Reinstall the fresh APK
 adb install build/apk/mai-an-lab.apk
