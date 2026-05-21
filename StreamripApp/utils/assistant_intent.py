@@ -65,20 +65,24 @@ INTENT_CREATE_MOOD    = "create_mood"     # create a custom mood called X
 INTENT_UNKNOWN        = "unknown"
 
 
-# Mood vocabulary handled by INTENT_PLAY_MOOD. Adding a new word requires a
-# matching entry in track_graph.MOOD_PROFILES — otherwise the runner falls
-# back to a "I don't know that mood" reply. Kept here (not in track_graph)
-# so the regex is built from the same source of truth.
-MOOD_KEYWORDS = (
-    "chill", "chilled", "relaxed", "relaxing", "calm", "mellow", "soft",
-    "upbeat", "energetic", "intense", "hard", "heavy", "powerful",
-    "happy", "uplifting",
-    "fast", "quick", "slow", "lazy",
-    "dark", "moody", "bright",
-    "ambient",
-    # v3 timbre-based moods (driven by spectral_flatness / spectral_contrast)
-    "tonal", "melodic", "noisy", "textured", "acoustic",
-)
+# Mood vocabulary handled by INTENT_PLAY_MOOD. The canonical source of
+# truth lives in utils.track_graph.MOODS — adding a mood there
+# (or appending an alias to an existing spec) automatically extends the
+# regex. Falls back to a static list if track_graph isn't importable yet
+# (rare: only during isolated unit tests of this module).
+try:
+    from utils.track_graph import MOOD_KEYWORDS as _TG_MOOD_KEYWORDS
+    MOOD_KEYWORDS = tuple(_TG_MOOD_KEYWORDS)
+except Exception:  # pragma: no cover — defensive fallback
+    MOOD_KEYWORDS = (
+        "chill", "chilled", "relaxed", "relaxing", "calm", "mellow", "soft",
+        "upbeat", "energetic", "intense", "hard", "heavy", "powerful",
+        "happy", "uplifting",
+        "fast", "quick", "slow", "lazy",
+        "dark", "moody", "bright",
+        "ambient",
+        "tonal", "melodic", "noisy", "textured", "acoustic",
+    )
 
 
 @dataclass
