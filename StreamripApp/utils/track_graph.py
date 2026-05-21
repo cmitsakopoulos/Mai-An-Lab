@@ -68,6 +68,15 @@ logger = logging.getLogger(__name__)
 
 CUSTOM_MOODS_PATH = os.path.join(APP_DIR, "custom_moods.json")
 
+# Islet membership defaults. Cosine similarity on raw timbre vectors against
+# the islet's centroid: tracks at or above the threshold are members, ranked
+# by similarity descending, capped at ISLET_MAX. ISLET_MIN guards against
+# islets too sparse to feel meaningful (an outlier exemplar with no neighbours
+# returns an empty result rather than a one-track "group").
+ISLET_THRESHOLD = 0.93
+ISLET_MAX = 50
+ISLET_MIN = 3
+
 def load_custom_moods() -> dict:
     if not os.path.exists(CUSTOM_MOODS_PATH):
         return {}
@@ -78,17 +87,79 @@ def load_custom_moods() -> dict:
         logger.error("Failed to load custom moods: %s", e)
         return {}
 
-def save_custom_mood(name: str, centroid: list[float], exemplars: list[str]):
+def save_custom_mood(
+    name: str,
+    centroid: list[float],
+    exemplar_path: str,
+    threshold: float = ISLET_THRESHOLD,
+):
+    """Save a user-named islet seeded by one exemplar track.
+
+    The exemplar's timbre vector becomes the centroid; membership is computed
+    on demand by `tracks_in_islet` against `threshold`. Per-islet threshold
+    lets us tune sparse-library cases later without touching saved data.
+    """
     moods = load_custom_moods()
     moods[name.lower().strip()] = {
         "centroid": centroid,
-        "exemplars": exemplars
+        "exemplar_path": exemplar_path,
+        "threshold": float(threshold),
     }
     try:
         with open(CUSTOM_MOODS_PATH, "w", encoding="utf-8") as f:
             json.dump(moods, f, indent=4)
     except Exception as e:
         logger.error("Failed to save custom mood %s: %s", name, e)
+
+
+def update_custom_mood(old_name: str, new_name: str, threshold: float) -> bool:
+    """Rename an islet and/or change its threshold. Centroid and exemplar_path
+    are preserved. Returns True if the islet existed and was updated. If
+    `new_name` is already used by a different islet, the rename is rejected
+    and the function returns False without writing anything.
+    """
+    old = old_name.lower().strip()
+    new = new_name.lower().strip()
+    if not new:
+        return False
+    moods = load_custom_moods()
+    if old not in moods:
+        return False
+    if old != new and new in moods:
+        return False
+    entry = dict(moods[old])
+    entry["threshold"] = float(threshold)
+    if old != new:
+        del moods[old]
+    moods[new] = entry
+    try:
+        with open(CUSTOM_MOODS_PATH, "w", encoding="utf-8") as f:
+            json.dump(moods, f, indent=4)
+    except Exception as e:
+        logger.error("Failed to update custom mood %s -> %s: %s", old_name, new_name, e)
+        return False
+    return True
+
+
+def delete_custom_mood(name: str) -> bool:
+    """Remove an islet by name. Returns True if it existed and was removed."""
+    cleaned = name.lower().strip()
+    moods = load_custom_moods()
+    if cleaned not in moods:
+        return False
+    del moods[cleaned]
+    try:
+        with open(CUSTOM_MOODS_PATH, "w", encoding="utf-8") as f:
+            json.dump(moods, f, indent=4)
+    except Exception as e:
+        logger.error("Failed to delete custom mood %s: %s", name, e)
+        return False
+    return True
+
+
+def list_islets() -> list[str]:
+    """Names of all user-saved islets, alphabetised."""
+    return sorted(load_custom_moods().keys())
 
 
 # Top-K acoustic neighbours stored per track. 20 is enough for both 'most
@@ -610,46 +681,36 @@ MOODS: dict[str, MoodSpec] = {
                           {"bpm": 0.75, "energy": 0.75, "brightness": 0.70},
                           camelot_pref="major"),
     "energetic": MoodSpec("energetic",
-                          {"bpm": 0.80, "energy": 0.85, "beat_strength": 0.75}),
-    "intense":   MoodSpec("intense",
-                          {"energy": 0.95, "beat_strength": 0.90, "brightness": 0.75}),
-    "hard":      MoodSpec("hard", {"energy": 0.90, "beat_strength": 0.90}),
-    "heavy":     MoodSpec("heavy",
-                          {"energy": 0.85, "rolloff": 0.75, "brightness": 0.35},
-                          camelot_pref="minor"),
+                          {"bpm": 0.80, "energy": 0.90, "beat_strength": 0.85},
+                          aliases=("intense",)),
+    "hard":      MoodSpec("hard",
+                          {"energy": 0.88, "beat_strength": 0.85, "rolloff": 0.70, "brightness": 0.40},
+                          aliases=("heavy",)),
     "powerful":  MoodSpec("powerful", {"energy": 0.85, "beat_strength": 0.80}),
     "happy":     MoodSpec("happy",
-                          {"bpm": 0.70, "brightness": 0.85, "energy": 0.70},
-                          camelot_pref="major"),
-    "uplifting": MoodSpec("uplifting",
-                          {"bpm": 0.70, "brightness": 0.85, "energy": 0.80},
+                          {"bpm": 0.70, "brightness": 0.85, "energy": 0.75},
+                          aliases=("uplifting",),
                           camelot_pref="major"),
 
-    # Tempo-specific
-    "fast":      MoodSpec("fast", {"bpm": 0.90}),
-    "quick":     MoodSpec("quick", {"bpm": 0.90}),
-    "slow":      MoodSpec("slow", {"bpm": 0.10}, bpm_smooth_weight=1.5),
-    "lazy":      MoodSpec("lazy", {"bpm": 0.20, "energy": 0.30}, bpm_smooth_weight=1.3),
+    # Tempo-specific. Fast/slow gate on tempo AND beat conviction so a
+    # high-BPM ambient drone doesn't bucket into "fast", and a mid-BPM
+    # acoustic ballad with sparse beats can still bucket into "slow".
+    "fast":      MoodSpec("fast",
+                          {"bpm": 0.92, "beat_strength": 0.75},
+                          aliases=("quick",)),
+    "slow":      MoodSpec("slow",
+                          {"bpm": 0.10, "energy": 0.20, "beat_strength": 0.15},
+                          bpm_smooth_weight=1.5),
 
     # Timbre / spectrum
-    "dark":      MoodSpec("dark", {"brightness": 0.10, "rolloff": 0.15},
-                          camelot_pref="minor"),
     "moody":     MoodSpec("moody",
                           {"brightness": 0.20, "energy": 0.35, "spectral_flatness": 0.25},
                           camelot_pref="minor"),
     "bright":    MoodSpec("bright", {"brightness": 0.90, "rolloff": 0.85},
                           camelot_pref="major"),
 
-    # v3 scalars: tonal/noisy axis (spectral_flatness, spectral_contrast).
-    # Flatness rises with noise; contrast rises with clear tonal peaks.
-    "tonal":     MoodSpec("tonal",
-                          {"spectral_flatness": 0.10, "spectral_contrast": 0.90}),
-    "melodic":   MoodSpec("melodic",
-                          {"spectral_flatness": 0.20, "spectral_contrast": 0.85, "brightness": 0.65},
-                          camelot_pref="major"),
+    # v3 scalars: noisy axis (spectral_flatness rises with noise).
     "noisy":     MoodSpec("noisy", {"spectral_flatness": 0.90}),
-    "textured":  MoodSpec("textured",
-                          {"spectral_flatness": 0.80, "spectral_contrast": 0.25}),
     "acoustic":  MoodSpec("acoustic",
                           {"spectral_flatness": 0.20, "energy": 0.35, "beat_strength": 0.30}),
 }
@@ -919,6 +980,57 @@ async def tracks_by_mood(
     top_unsorted = np.argpartition(-scores, k - 1)[:k]
     top_ordered = top_unsorted[np.argsort(-scores[top_unsorted])]
     return [rows[int(i)] for i in top_ordered]
+
+
+async def tracks_in_islet(
+    db_manager,
+    name: str,
+    features_version: int = FEATURES_VERSION,
+    min_count: int = ISLET_MIN,
+) -> list[dict]:
+    """Members of a named islet, ranked by similarity to the centroid.
+
+    Membership rule: cosine(track.timbre, islet.centroid) >= islet.threshold.
+    Returns at most `ISLET_MAX` rows, sorted high-to-low similarity.
+
+    By default returns [] if fewer than `ISLET_MIN` tracks pass — a centroid
+    that doesn't generalise produces no playable queue. Pass `min_count=0`
+    when the caller wants honest below-floor membership (e.g. the Library
+    view, which still needs to render the accordion so the user can loosen
+    a too-tight threshold instead of thinking the islet was deleted).
+    """
+    cm = load_custom_moods().get(name.lower().strip())
+    if cm is None:
+        return []
+    centroid_list = cm.get("centroid") or []
+    if not centroid_list:
+        return []
+    threshold = float(cm.get("threshold", ISLET_THRESHOLD))
+    centroid = np.array(centroid_list, dtype=np.float32)
+
+    rows = await db_manager.get_tracks_with_features(features_version)
+    if not rows:
+        return []
+
+    timbres_list: list[np.ndarray] = []
+    keep_idx: list[int] = []
+    for i, r in enumerate(rows):
+        v = unpack_timbre(r.get("timbre"))
+        if v is not None and v.shape == centroid.shape:
+            timbres_list.append(v)
+            keep_idx.append(i)
+    if not timbres_list:
+        return []
+
+    timbres = np.stack(timbres_list, axis=0).astype(np.float32)
+    sims = _score_against_centroid(centroid, timbres)
+
+    member_mask = sims >= threshold
+    if int(member_mask.sum()) < min_count:
+        return []
+    member_indices = np.where(member_mask)[0]
+    ordered = member_indices[np.argsort(-sims[member_indices])][:ISLET_MAX]
+    return [rows[keep_idx[int(i)]] for i in ordered]
 
 
 def invalidate_mood_cache() -> None:

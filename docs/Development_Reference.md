@@ -20,6 +20,43 @@ To prevent the Android OS from killing the Python process during background play
 
 ---
 
+## 1.2 The macOS Native Audio Engine (AVFoundation)
+
+On macOS systems, Mai-An Lab bypasses the Android MethodChannel bridge and Dart plugin layers entirely, running a lightweight, direct-in-process native audio engine (`audio_engine_macos.py`) backed by Apple's AVFoundation framework.
+
+### 1. Architectural Components & Dynamic Importing
+* **Dynamic Import Guard**: The macOS engine executes entirely in the CPython interpreter space. It dynamically queries `sys.platform == "darwin"` and imports the native Objective-C bindings at startup:
+  ```python
+  from Foundation import NSURL
+  from AVFoundation import AVAudioPlayer
+  ```
+  This keeps the same codebase 100% build-compatible with Windows and Linux build-hosts, preventing import failures when compiling or testing on non-Apple environments.
+* **In-Process CoreAudio Execution**: By calling Objective-C runtime bindings via `pyobjc-framework-AVFoundation`, the player directly instantiates `AVAudioPlayer` and loads tracks via native `NSURL.fileURLWithPath_` formats. Playback occurs inside the app's process heap, eliminating external decoder dependencies.
+
+### 2. Thread-Safety & Reentrant Synchronization
+Playback controls (Play, Pause, Seek, and Queue alterations) can be triggered asynchronously by user clicks, Jarvis voice intents, or background event loop ticks. 
+* **`threading.RLock`**: To guarantee thread-safety and prevent race conditions (such as concurrent calls to initiate playback of different files), the engine encapsulates all state, index, and player control methods within a reentrant lock:
+  ```python
+  self._lock = threading.RLock()
+  ```
+* **Thread-Safe Queue Mutation**: Inserting, removing, or reordering tracks in the queue utilizes Flet's standard list sequence, protected entirely by the reentrant lock to ensure index pointers remain consistent.
+
+### 3. Decoupled Throttled Polling & End-of-Track Detection
+Unlike Flutter's ExoPlayer wrapper, AVAudioPlayer's standard end-of-track delegate (`audioPlayerDidFinishPlaying:successfully:`) requires an active macOS system `NSRunLoop` to be running on the listener's thread. Since Python and Flet execute inside their own event loops, the engine deploys a custom background monitoring thread:
+* **Background Polling Loop**: On playback start, the engine spawns a background daemon thread (`_poll_thread`) running a 10 Hz query loop:
+  ```python
+  while not stop_event.is_set():
+      pos = float(player.currentTime())
+      playing = bool(player.isPlaying())
+      ...
+      time.sleep(0.10)
+  ```
+* **Decoupled Position Updates**: The internal engine state is updated instantly (`self.position = pos`) on every single iteration to ensure sub-millisecond precision for seeking and track resume functions.
+* **UI Dispatch Throttle**: To prevent saturating Flet's rendering pipeline and causing interface stutter during high-speed polling, the observer notification (`self.dispatch("position", pos)`) is throttled to a maximum rate of 5 Hz (once every `0.20` seconds).
+* **End-of-Track Auto-Advance**: If the polling thread detects that `player.isPlaying()` has returned `False` while the stop event has not been signaled, it handles the end-of-track transition by scheduling a thread-safe task (`self.next()`) on Flet's main event queue.
+
+---
+
 ## 2. DSP & PCM Extraction Pipeline
 
 The "Playlist Creation" engine requires precise acoustic features to construct similarity matrices. While the engine includes a fully functional on-device extraction pipeline (useful as a fallback for new single downloads), running DSP across an entire library is impractically slow on mobile CPUs (~10+ seconds per track). 
@@ -48,9 +85,9 @@ To make bulk ingestion feasible, the companion script `tools/dsp_offload.py` off
 
 The offloader is designed with several production engineering optimizations:
 - **Zero Math Duplication**: It directly imports and shares the app's native NumPy feature pipeline (`StreamripApp/utils/dsp.py` via `sys.path` injection), ensuring that feature extraction models written on the host are exactly identical to what the app expects (`FEATURES_VERSION = 3`).
-- **ADB Tar Streaming**: Instead of executing `adb pull` for every track—which pays a 50–200 ms handshake penalty per file—the script bundles track lists into batches of 100 and streams them in a single command (`adb exec-out tar -cf - -T <list>`). This amortizes connection overhead and saves minutes on large libraries.
+- **ADB Tar Streaming**: Instead of executing `adb pull` for every track; which pays a 50–200 ms handshake penalty per file; the script bundles track lists into batches of 100 and streams them in a single command (`adb exec-out tar -cf - -T <list>`). This amortizes connection overhead and saves minutes on large libraries.
 - **Parallel CPU Ingestion**: Decodes audio using multi-process `ffmpeg` pipelines and extracts features using a Python `ThreadPoolExecutor`. Because both `ffmpeg` spawns and heavy NumPy/FFT operations release the Python GIL, workers scale linearly across all CPU cores.
-- **Transactional SQLite WAL Batching**: Features are upserted into the SQLite database in single-transaction chunks inside a `BEGIN/COMMIT` boundary. This is orders of magnitude faster than single-row commits and guarantees database integrity—if interrupted, the script resumes from the last completed chunk.
+- **Transactional SQLite WAL Batching**: Features are upserted into the SQLite database in single-transaction chunks inside a `BEGIN/COMMIT` boundary. This is orders of magnitude faster than single-row commits and guarantees database integrity; if interrupted, the script resumes from the last completed chunk.
 - **Persistent Double Cache**: The script maintains a local `--workdir` containing:
   - `audio_cache/`: A local mirror of the phone's music library structure, preventing redownloading files.
   - `<audio_file>.pcm`: Decoded mono PCM frames, ensuring that if you tweak the feature-extraction pipeline parameters, you can re-run the extraction step instantly without re-decoding.
@@ -58,7 +95,7 @@ The offloader is designed with several production engineering optimizations:
 
 
 ### Cross-Thread Method Channel Reply (gotcha)
-Kotlin runs `decodePcm` on a `Executors.newSingleThreadExecutor()` background thread so the foreground codec is not blocked. Flutter's `MethodChannel.Result` callbacks **must** be delivered on the main looper — calling `result.success(...)` from the worker thread silently drops the reply on some Android builds. The symptom is misleading: the Kotlin log shows a clean decode, the PCM file is written, but the Dart side receives `null`. The Dart wrapper at `_runDecode` then emits a `decode_complete` event with no `ok` key, which the Python correlator surfaces as `RuntimeError("decode failed")` for every track.
+Kotlin runs `decodePcm` on a `Executors.newSingleThreadExecutor()` background thread so the foreground codec is not blocked. Flutter's `MethodChannel.Result` callbacks **must** be delivered on the main looper; calling `result.success(...)` from the worker thread silently drops the reply on some Android builds. The symptom is misleading: the Kotlin log shows a clean decode, the PCM file is written, but the Dart side receives `null`. The Dart wrapper at `_runDecode` then emits a `decode_complete` event with no `ok` key, which the Python correlator surfaces as `RuntimeError("decode failed")` for every track.
 
 The fix is to marshal the reply back via a `Handler(Looper.getMainLooper())`:
 
@@ -83,7 +120,7 @@ ImportError: dlopen failed: library "libc++_shared.so" not found:
   needed by …/numpy/fft/_pocketfft_umath.cpython-312.so
 ```
 
-Because this fires inside an `asyncio.to_thread` worker, the only UI-visible signal is the `(N failed)` counter on the assistant rescan banner / Magic Playlist progress label — there is no other clue.
+Because this fires inside an `asyncio.to_thread` worker, the only UI-visible signal is the `(N failed)` counter on the assistant rescan banner / Magic Playlist progress label; there is no other clue.
 
 **Resolution.** Bundle `libc++_shared.so` for every ABI the app ships into the `flet_audio_service` plugin's `jniLibs` tree:
 
@@ -108,13 +145,13 @@ where `<triple>` maps to the Android ABI:
 
 The Android Gradle Plugin auto-merges `jniLibs/<abi>/*.so` into every APK that depends on the plugin, so no further build configuration is needed. If a second plugin also ships its own copy, add `packagingOptions { pickFirst 'lib/**/libc++_shared.so' }` to the plugin's `build.gradle`.
 
-This same bundling step is required for any future native dependency that links against the C++ runtime (e.g. SciPy, PyTorch Mobile, ONNX Runtime). Keep the libs pinned to the NDK version used to compile the wheels — mixing NDK 25 wheels with NDK 28 `libc++_shared.so` is normally safe (it is forward-compatible), but a major NDK jump is worth verifying.
+This same bundling step is required for any future native dependency that links against the C++ runtime (e.g. SciPy, PyTorch Mobile, ONNX Runtime). Keep the libs pinned to the NDK version used to compile the wheels; mixing NDK 25 wheels with NDK 28 `libc++_shared.so` is normally safe (it is forward-compatible), but a major NDK jump is worth verifying.
 
 ### Diagnosing future decode failures
 Python's `logging` output from the `dsp` module is not routed to logcat in release builds. The proven-visible channels are:
 
-- Kotlin `Log.d(TAG, …)` under tag `FletAudioServiceDsp` — visible via `adb logcat`.
-- Python `logger.warning("FAS: …")` on the `flet_audio_service` logger — visible under the `serious_python` tag.
+- Kotlin `Log.d(TAG, …)` under tag `FletAudioServiceDsp`; visible via `adb logcat`.
+- Python `logger.warning("FAS: …")` on the `flet_audio_service` logger; visible under the `serious_python` tag.
 - A direct file write to `/sdcard/Download/<name>.log` if the app has `MANAGE_EXTERNAL_STORAGE` (which it does); pull with `adb pull /sdcard/Download/<name>.log`. This bypasses the logging layer entirely and is the most reliable diagnostic channel on a non-debuggable release APK.
 
 ### 2.3 Artwork Caching & Temporary Storage Pipeline
@@ -168,7 +205,7 @@ To guarantee an ultra-responsive user experience, prevent socket leaks, and prot
   - The monitor locks the client session and closes the active `aiohttp.ClientSession` cleanly.
   - The background event loop is stopped (`cls._loop.stop()`), which gracefully terminates the `StreamripSearcherWorker` thread.
   - All class-level references (`_loop`, `_thread`, `_client`, `_client_lock`) are reset to `None` for garbage collection.
-* **On-Demand Resurrection**: The very next search or dropdown expansion automatically and seamlessly spins up a fresh event loop, thread, and lock context—restarting the inactivity timer from zero.
+* **On-Demand Resurrection**: The very next search or dropdown expansion automatically and seamlessly spins up a fresh event loop, thread, and lock context; restarting the inactivity timer from zero.
 
 ### 3.2 Download Architecture
 - **Worker Thread**; downloads are executed on a dedicated background thread to prevent blocking the Flet event loop.
@@ -260,9 +297,10 @@ Jarvis supports an exhaustive range of hands-free vocal commands and functions:
 | **Play Song / Artist** | Immediately plays a matched track, artist catalog, or album from your library. | *"play Stairway to Heaven"*, *"play Radiohead"*, *"start playing Homework"* |
 | **Play Next** | Inserts the matched track, artist, or album directly after the currently playing song in the queue. | *"play Stairway next"*, *"put Radiohead next"* |
 | **Add to Queue** | Appends the matched track, artist, or album to the end of the global playback queue. | *"add Stairway to the queue"*, *"put Homework in the queue"*, *"enqueue Daft Punk"* |
-| **Acoustic Moods** | Triggers bioinformatics-driven Markov Clustering on the 43D DSP graph matching the chosen mood profile. | *"play something chill"*, *"I want intense music"*, *"play some upbeat tunes"* |
+| **Acoustic Moods** | Triggers library-relative percentile-Euclidean scoring and high-dimensional similarity matching against the chosen mood profile. | *"play something chill"*, *"I want intense music"*, *"play some upbeat tunes"* |
 | **Acoustic Similarity Walk** | Traverses acoustic and metadata similarity edges from the current track to sequence a smooth related arc. | *"play something similar to this"*, *"more like this song"*, *"play tracks similar to Daft Punk"* |
 | **Artist Similarity Walk** | Traverses relationship links to play more tracks from the currently playing artist. | *"play more by this artist"*, *"more songs from them"* |
+| **Create Islet (Custom Mood)** | Saves the currently playing track as a named custom mood (Acoustic Islet). | *"save this as Chillout"*, *"name this islet Night Vibes"*, *"create a custom mood called Focus"* |
 | **Remote Download** | Invokes the background Streamrip thread to search Qobuz, download, and auto-index the target track or album. | *"download Stairway to Heaven"*, *"get Daft Punk Homework"*, *"fetch and save track X"* |
 | **Surprise Me (Random)** | Selects a random track from the local library, shuffles the playback pool, and begins playback. | *"surprise me"*, *"play something random"*, *"shuffle play"* |
 | **Playback Control** | Standard controls to manipulate active audio player states. | *"pause"*, *"resume"*, *"stop"*, *"skip"*, *"previous track"* |

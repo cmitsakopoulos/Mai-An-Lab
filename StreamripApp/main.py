@@ -578,7 +578,8 @@ class HubSettingItem(ScaleButton):
         )
 
 class AccordionCard(ft.Column):
-    def __init__(self, icon: str, title: str, subtitle: str, content_controls: list):
+    def __init__(self, icon: str, title: str, subtitle: str, content_controls: list,
+                 header_actions: list | None = None):
         self.is_open = False
         self.content_area = ft.Container(
             content=ft.Column(content_controls, spacing=6),
@@ -586,7 +587,9 @@ class AccordionCard(ft.Column):
             padding=ft.Padding.only(left=16, right=16, bottom=14, top=4),
         )
         self.chevron = ft.Icon(ft.Icons.CHEVRON_RIGHT, color=DIM, opacity=0.35, size=18)
-        header = ft.Container(
+        # Click target is the toggle_zone only; header_actions live outside it
+        # so clicking edit/delete doesn't also toggle the accordion.
+        toggle_zone = ft.Container(
             content=ft.Row([
                 ft.Icon(icon, color=CYAN, size=22),
                 ft.Column([
@@ -597,7 +600,18 @@ class AccordionCard(ft.Column):
             ], spacing=16),
             padding=ft.Padding.symmetric(horizontal=16, vertical=12),
             on_click=self.toggle,
+            expand=True,
         )
+        if header_actions:
+            header = ft.Row(
+                [toggle_zone, ft.Container(
+                    content=ft.Row(header_actions, spacing=2, tight=True),
+                    padding=ft.Padding.only(right=8),
+                )],
+                spacing=0,
+            )
+        else:
+            header = toggle_zone
         super().__init__(
             controls=[ft.Container(content=ft.Column([header, self.content_area], spacing=0), bgcolor="#0DFFFFFF", border_radius=14)],
             spacing=0,
@@ -1772,7 +1786,7 @@ class SearchView:
         if m_type == "search_exhausted":
             card = ft.Container(
                 content=ft.Text("; End of Discography ;", color=DIM, size=11, weight=ft.FontWeight.W_500),
-                alignment=ft.alignment.center,
+                alignment=ft.Alignment(0, 0),
                 padding=ft.Padding.only(left=20 * depth, top=16, bottom=16),
             )
             return AnimatedEntry(card, target_height=48, data=r, depth=depth)
@@ -1797,10 +1811,11 @@ class SearchView:
         detail   = strip_markup(r.get("ui_detail",   ""))
         
         # Highlight if currently playing
-        is_playing = (audio_engine.current_track == title and audio_engine.current_artist == subtitle)
         expected_preview_title = f"(Preview) {title}"
-        if audio_engine.current_track == expected_preview_title:
-             is_playing = True
+        is_playing = (
+            (audio_engine.current_track == title or audio_engine.current_track == expected_preview_title)
+            and audio_engine.current_artist == subtitle
+        )
 
         # In Library Awareness
         is_in_library = r.get("is_in_library", False)
@@ -1866,7 +1881,8 @@ class SearchView:
                     icon=download_icon,
                     icon_color=download_color,
                     icon_size=20,
-                    on_click=on_download if not is_in_library else None,
+                    tooltip="Redownload" if is_in_library else "Download",
+                    on_click=on_download,
                 ) if m_type in ("track", "album") else ft.Container(),
                 expand_icon if expand_icon else ft.Container(),
             ], tight=True, spacing=0),
@@ -2367,8 +2383,9 @@ class LibraryView:
 
         # Partition calculation caches to prevent stupid startup recomputations.
         self._cached_moods: dict[str, list[dict]] | None = None
-        self._cached_islets: list[list[dict]] | None = None
-        self._cached_isolated: list[dict] | None = None
+        # islet_name -> list of member tracks. Populated lazily by computing
+        # membership against each saved islet's centroid via tg.tracks_in_islet.
+        self._cached_islets: dict[str, list[dict]] | None = None
         self._cached_unanalysed: list[dict] | None = None
 
         # ── Controls ───────────────────────────────────────────────────────
@@ -2433,7 +2450,7 @@ class LibraryView:
             visible=False,
             padding=ft.Padding.symmetric(vertical=4),
         )
-        self._view_tabs_row = ft.Row(spacing=8, scroll=ft.ScrollMode.AUTO)
+        self._view_tabs_row = ft.Row(spacing=6)
         self._update_view_tabs()
         self._update_partition_tabs_ui()
 
@@ -2548,10 +2565,7 @@ class LibraryView:
                     ft.Container(height=10),
                     ft.TextButton(
                         content=ft.Row([ft.Icon(ft.Icons.SETTINGS_ROUNDED, size=16), ft.Text("ENTER PATHS", size=13)], spacing=6),
-                        on_click=lambda e: (
-                            self.app._switch_tab(3),
-                            self.app.settings_view._show_sub_page("Storage", self.app.settings_view._build_storage_group())
-                        ),
+                        on_click=self._on_enter_paths_click,
                         style=ft.ButtonStyle(color=CYAN)
                     )
                 ],
@@ -2606,6 +2620,16 @@ class LibraryView:
             expand=True,
             spacing=0,
         )
+
+    async def _on_enter_paths_click(self, e):
+        is_cached = 3 in self.app._view_cache
+        if not is_cached:
+            self.app.settings_view.initial_subpage = "Storage"
+            self.app._switch_tab(3)
+        else:
+            self.app._switch_tab(3)
+            await asyncio.sleep(0.1)
+            self.app.settings_view._show_sub_page("Storage", self.app.settings_view._build_storage_group())
 
     def build(self) -> ft.Control:
         self.page.run_task(self.load_library)
@@ -2672,7 +2696,7 @@ class LibraryView:
         self.page.run_task(self.load_library)
 
     def _refresh_partitions_click(self, e):
-        self.app.show_snackbar("Recalculating Mood Subsets and Acoustic Islets...")
+        self.app.show_snackbar("Recalculating Mood Subsets...")
         self.page.run_task(self.recalculate_partitions_worker)
 
     async def recalculate_partitions_worker(self):
@@ -2725,69 +2749,23 @@ class LibraryView:
                     if best_mood is not None:
                         mood_assignments[track["path"]] = best_mood
             
-            # --- Compute Acoustic Islets ---
-            conn = await db.get_connection()
-            async with conn.execute("SELECT track_path, neighbor_path FROM track_neighbors WHERE edge_kind = 'acoustic'") as cursor:
-                edges = await cursor.fetchall()
-                
-            from collections import defaultdict
-            adj = defaultdict(set)
-            for u, v in edges:
-                adj[u].add(v)
-                adj[v].add(u)
-                
-            visited = set()
-            components = []
-            all_nodes = list(adj.keys())
-            for node in all_nodes:
-                if node not in visited:
-                    comp = []
-                    queue = [node]
-                    visited.add(node)
-                    while queue:
-                        curr = queue.pop(0)
-                        comp.append(curr)
-                        for neighbor in adj[curr]:
-                            if neighbor not in visited:
-                                visited.add(neighbor)
-                                queue.append(neighbor)
-                    components.append(comp)
-                    
-            for p in analysed_paths_all:
-                if p not in adj:
-                    components.append([p])
-            
-            islet_assignments = {}
-            islet_counter = 0
-            for comp in components:
-                comp_existing = [p for p in comp if p in all_paths_to_track]
-                if not comp_existing:
-                    continue
-                if len(comp_existing) >= 3:
-                    for p in comp_existing:
-                        islet_assignments[p] = islet_counter
-                    islet_counter += 1
-                else:
-                    for p in comp_existing:
-                        islet_assignments[p] = -1
-            
-            # Map into list of tuples: (track_path, mood, islet_id)
-            assignments = []
-            for path in all_paths_to_track.keys():
-                mood = mood_assignments.get(path)
-                islet_id = islet_assignments.get(path)
-                if mood is not None or islet_id is not None:
-                    assignments.append((path, mood, islet_id))
-            
+            # Islets are user-driven now (created from the Library "New Islet"
+            # button or via Jarvis "save this as <name>"). Bulk graph-component
+            # clustering removed — track_partitions.islet_id stays NULL.
+            assignments = [
+                (path, mood_assignments.get(path), None)
+                for path in all_paths_to_track.keys()
+                if mood_assignments.get(path) is not None
+            ]
+
             await db.save_partitions(assignments)
-            
+
             # Reset memory caches so next library load pulls fresh DB entries
             self._cached_moods = None
             self._cached_islets = None
-            self._cached_isolated = None
             self._cached_unanalysed = None
-            
-            self.app.show_snackbar("Sonic library partitions generated successfully!")
+
+            self.app.show_snackbar("Mood subsets regenerated.")
             await self.load_library()
         except Exception as ex:
             logger.exception("Failed to recalculate partitions: %s", ex)
@@ -2825,19 +2803,303 @@ class LibraryView:
                     on_tap=lambda e, m=mode: self._set_partition_sub_mode(m)
                 )
             )
-        # Refresh partitions button
+        # "New Islet" only shown when the user is on the islets sub-tab.
+        if self.partition_sub_mode == "islets":
+            tabs.append(
+                ft.IconButton(
+                    icon=ft.Icons.ADD_CIRCLE_OUTLINE_ROUNDED,
+                    icon_color=active_col,
+                    icon_size=18,
+                    tooltip="New Islet",
+                    bgcolor=apply_opacity(0.08, active_col),
+                    on_click=lambda _: self._open_create_islet_dialog(),
+                )
+            )
+        # Refresh partitions button (mood subsets only — islets are user-driven)
         tabs.append(
             ft.IconButton(
                 icon=ft.Icons.REFRESH_ROUNDED,
                 icon_color=active_col,
                 icon_size=18,
-                tooltip="Recalculate Partitions",
+                tooltip="Recalculate Mood Subsets",
                 bgcolor=apply_opacity(0.08, active_col),
                 on_click=self._refresh_partitions_click
             )
         )
         self._partition_tabs.content.controls = tabs
         self.try_update(self._partition_tabs)
+
+    # ── Islet creation dialog ────────────────────────────────────────────────
+    def _open_create_islet_dialog(self):
+        """Open the New Islet modal. Seeds the islet from the currently-playing
+        track (its timbre vector becomes the centroid). Membership is computed
+        on demand against ISLET_THRESHOLD when the library reloads."""
+        current_path = audio_engine.current_path or ""
+        current_title = audio_engine.current_track or ""
+        current_artist = audio_engine.current_artist or ""
+
+        name_field = ft.TextField(
+            label="Islet name",
+            autofocus=True,
+            border_color=LIB_PARTITION_COLOR,
+            cursor_color=LIB_PARTITION_COLOR,
+        )
+
+        if current_path:
+            seed_line = ft.Text(
+                f"Seed: {current_title} — {current_artist}",
+                color=DIM, size=12, max_lines=2,
+            )
+            disabled_reason = ""
+        else:
+            seed_line = ft.Text(
+                "No track is currently playing. Play the exemplar track first, then reopen this dialog.",
+                color="#FF8866", size=12, max_lines=3,
+            )
+            disabled_reason = "Play a track first."
+
+        dlg = ft.AlertDialog(
+            title=ft.Text("New Islet"),
+            content=ft.Container(
+                content=ft.Column(
+                    [name_field, ft.Container(height=6), seed_line],
+                    spacing=4, tight=True,
+                ),
+                padding=ft.Padding.only(top=10),
+                width=360,
+            ),
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+
+        def _close(_e=None):
+            dlg.open = False
+            self.page.update()
+
+        def _on_save(_e):
+            raw_name = (name_field.value or "").strip().strip("\"'").strip()
+            if not raw_name:
+                name_field.error_text = "Name required"
+                self.page.update()
+                return
+            if disabled_reason:
+                self.app.show_snackbar(disabled_reason, icon=ft.Icons.WARNING_AMBER_ROUNDED)
+                return
+            from utils import track_graph as tg
+            if raw_name.lower() in tg.MOOD_PROFILES:
+                name_field.error_text = "Conflicts with a built-in mood"
+                self.page.update()
+                return
+            _close()
+            self.page.run_task(self._save_islet_from_dialog, raw_name, current_path)
+
+        dlg.actions = [
+            ft.TextButton("Cancel", on_click=_close),
+            ft.TextButton("Save", on_click=_on_save),
+        ]
+        self.page.overlay.append(dlg)
+        dlg.open = True
+        self.page.update()
+
+    def _open_edit_islet_dialog(self, name: str):
+        """Rename + retune-threshold for an existing islet. Centroid and
+        exemplar stay locked — to re-seed, delete and create fresh."""
+        from utils import track_graph as tg
+        entry = tg.load_custom_moods().get(name)
+        if entry is None:
+            self.app.show_snackbar(f"Islet '{name}' no longer exists.",
+                                   icon=ft.Icons.ERROR_OUTLINE)
+            return
+        current_threshold = float(entry.get("threshold", tg.ISLET_THRESHOLD))
+
+        name_field = ft.TextField(
+            label="Name",
+            value=name,
+            autofocus=True,
+            border_color=LIB_PARTITION_COLOR,
+            cursor_color=LIB_PARTITION_COLOR,
+        )
+        threshold_label = ft.Text(
+            f"Threshold: {current_threshold:.2f}",
+            color=DIM, size=12,
+        )
+        threshold_slider = ft.Slider(
+            min=0.70, max=0.99, divisions=29, value=current_threshold,
+            active_color=LIB_PARTITION_COLOR,
+            inactive_color=apply_opacity(0.2, LIB_PARTITION_COLOR),
+            on_change=lambda e: (
+                setattr(threshold_label, "value", f"Threshold: {float(e.control.value):.2f}"),
+                self.page.update(),
+            ),
+        )
+
+        dlg = ft.AlertDialog(
+            title=ft.Text("Edit Islet"),
+            content=ft.Container(
+                content=ft.Column(
+                    [
+                        name_field,
+                        ft.Container(height=6),
+                        threshold_label,
+                        threshold_slider,
+                        ft.Text(
+                            "Tighter values keep the islet closer to the seed track. "
+                            "Looser values pull in more distant neighbours.",
+                            color=DIM, size=11, max_lines=3,
+                        ),
+                    ],
+                    spacing=4, tight=True,
+                ),
+                padding=ft.Padding.only(top=10),
+                width=380,
+            ),
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+
+        def _close(_e=None):
+            dlg.open = False
+            self.page.update()
+
+        def _on_save(_e):
+            raw_new = (name_field.value or "").strip().strip("\"'").strip()
+            if not raw_new:
+                name_field.error_text = "Name required"
+                self.page.update()
+                return
+            if raw_new.lower() != name and raw_new.lower() in tg.MOOD_PROFILES:
+                name_field.error_text = "Conflicts with a built-in mood"
+                self.page.update()
+                return
+            ok = tg.update_custom_mood(name, raw_new, float(threshold_slider.value))
+            if not ok:
+                name_field.error_text = "Name already in use"
+                self.page.update()
+                return
+            _close()
+            self._cached_islets = None
+            self.app.show_snackbar(f"Islet '{raw_new}' updated.",
+                                   icon=ft.Icons.CHECK_CIRCLE_OUTLINE)
+            self.page.run_task(self.load_library)
+
+        dlg.actions = [
+            ft.TextButton("Cancel", on_click=_close),
+            ft.TextButton("Save", on_click=_on_save),
+        ]
+        self.page.overlay.append(dlg)
+        dlg.open = True
+        self.page.update()
+
+    def _confirm_delete_islet(self, name: str):
+        """Two-step delete with confirmation dialog. The centroid file gets
+        rewritten without this entry; library reloads to drop the accordion."""
+        from utils import track_graph as tg
+
+        dlg = ft.AlertDialog(
+            title=ft.Text("Delete Islet"),
+            content=ft.Text(
+                f"Remove '{name.title()}'? The exemplar track stays in your library; "
+                "only the islet definition is deleted.",
+                color=TEXT, size=13,
+            ),
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+
+        def _close(_e=None):
+            dlg.open = False
+            self.page.update()
+
+        def _on_delete(_e):
+            _close()
+            if tg.delete_custom_mood(name):
+                self._cached_islets = None
+                self.app.show_snackbar(f"Islet '{name}' deleted.",
+                                       icon=ft.Icons.DELETE_OUTLINE)
+                self.page.run_task(self.load_library)
+            else:
+                self.app.show_snackbar(f"Islet '{name}' was already gone.",
+                                       icon=ft.Icons.ERROR_OUTLINE)
+
+        dlg.actions = [
+            ft.TextButton("Cancel", on_click=_close),
+            ft.TextButton("Delete", on_click=_on_delete),
+        ]
+        self.page.overlay.append(dlg)
+        dlg.open = True
+        self.page.update()
+
+    async def _save_islet_from_dialog(self, name: str, exemplar_path: str):
+        from utils import track_graph as tg
+        from utils.dsp import unpack_timbre
+        try:
+            row = await self.app.db_manager.get_track_full(exemplar_path)
+            timbre = unpack_timbre(row.get("timbre")) if row else None
+            if timbre is None:
+                self.app.show_snackbar(
+                    "Exemplar has no DSP features. Run a rescan first.",
+                    icon=ft.Icons.ERROR_OUTLINE,
+                )
+                return
+            tg.save_custom_mood(
+                name,
+                centroid=[float(x) for x in timbre],
+                exemplar_path=exemplar_path,
+            )
+            self._cached_islets = None  # force rebuild on next load
+            self.app.show_snackbar(f"Islet '{name}' saved.", icon=ft.Icons.CHECK_CIRCLE_OUTLINE)
+            await self.load_library()
+        except Exception as ex:
+            logger.exception("Failed to save islet %s", name)
+            self.app.show_snackbar(f"Failed to save islet: {ex}", icon=ft.Icons.ERROR_OUTLINE)
+
+    def _build_islet_empty_state(self) -> ft.Control:
+        """Shown in the Islets sub-tab when no user islets exist yet."""
+        return ft.Container(
+            content=ft.Column(
+                [
+                    ft.Container(
+                        content=ft.Icon(
+                            ft.Icons.DIVERSITY_3_ROUNDED,
+                            color=LIB_PARTITION_COLOR,
+                            size=40,
+                        ),
+                        bgcolor=apply_opacity(0.1, LIB_PARTITION_COLOR),
+                        border_radius=20,
+                        padding=16,
+                    ),
+                    ft.Text(
+                        "No islets yet",
+                        color=TEXT, size=18, weight=ft.FontWeight.W_700,
+                        text_align=ft.TextAlign.CENTER,
+                    ),
+                    ft.Text(
+                        "Play a track you'd like to anchor a vibe around, then create an "
+                        "islet from it. Tracks acoustically close to that exemplar become "
+                        "members automatically.",
+                        color=DIM, size=13, text_align=ft.TextAlign.CENTER, max_lines=4,
+                    ),
+                    ft.Container(height=8),
+                    ft.Button(
+                        "New Islet",
+                        icon=ft.Icons.ADD_CIRCLE_OUTLINE_ROUNDED,
+                        color=BG,
+                        bgcolor=LIB_PARTITION_COLOR,
+                        on_click=lambda _: self._open_create_islet_dialog(),
+                        style=ft.ButtonStyle(
+                            shape=ft.RoundedRectangleBorder(radius=10),
+                            padding=ft.Padding.symmetric(horizontal=24, vertical=12),
+                        ),
+                    ),
+                ],
+                alignment=ft.MainAxisAlignment.CENTER,
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                spacing=12,
+            ),
+            bgcolor="#0DFFFFFF",
+            border=ft.Border.all(1, apply_opacity(0.1, TEXT)),
+            border_radius=16,
+            padding=32,
+            margin=ft.Margin.symmetric(horizontal=16, vertical=24),
+            alignment=ft.Alignment(0, 0),
+        )
 
     def _update_view_tabs(self):
         icons = {
@@ -2856,9 +3118,11 @@ class LibraryView:
         }
         tabs = []
         for mode, label in [
-            ("playlists", "Playlists"), ("artists", "Artists"),
-            ("albums", "Albums"), ("tracks", "Tracks"),
             ("partitions", "Partitions"),
+            ("playlists", "Playlists"),
+            ("artists", "Artists"),
+            ("albums", "Albums"),
+            ("tracks", "Tracks"),
         ]:
             is_active = (self.view_mode == mode)
             col = accents[mode]
@@ -2869,7 +3133,7 @@ class LibraryView:
                             [
                                 ft.Icon(icons[mode], color=BG if is_active else col, size=18),
                                 ft.Text(label, size=10, weight=ft.FontWeight.W_700,
-                                        color=BG if is_active else TEXT),
+                                        color=BG if is_active else TEXT, no_wrap=True),
                             ],
                             spacing=2,
                             alignment=ft.MainAxisAlignment.CENTER,
@@ -2877,12 +3141,12 @@ class LibraryView:
                         ),
                         bgcolor=col if is_active else apply_opacity(0.08, col),
                         border=ft.Border.all(1, col if is_active else apply_opacity(0.2, col)),
-                        width=88,
                         height=52,
                         border_radius=12,
                         padding=ft.Padding.symmetric(horizontal=4),
                     ),
-                    on_tap=lambda e, m=mode: self._set_view_mode(m)
+                    on_tap=lambda e, m=mode: self._set_view_mode(m),
+                    expand=True,
                 )
             )
         self._view_tabs_row.controls = tabs
@@ -3356,42 +3620,41 @@ class LibraryView:
                 # Fetch saved partitions from SQLite database to avoid expensive recalculation on startup
                 saved_partitions = await db.get_saved_partitions()
                 
-                # Check if partitions cache is empty and populate it if needed
+                # Populate caches if not already warm. Moods come from the
+                # saved track_partitions table (computed by recalculate);
+                # islets come from custom_moods.json + on-demand membership
+                # against each saved centroid.
                 if self._cached_moods is None or self._cached_islets is None:
-                    if not saved_partitions:
-                        # No partitions generated yet! Bypassing memory cache population.
-                        pass
-                    else:
-                        # 1. Get all tracks in the library
-                        all_tracks = await db.get_all_tracks()
-                        all_paths_to_track = {t["path"]: t for t in all_tracks}
-                        
-                        # 2. Rebuild memory cache from SQLite saved partitions
-                        self._cached_moods = {mood: [] for mood in tg.MOODS.keys()}
-                        from collections import defaultdict
-                        islet_groups = defaultdict(list)
-                        self._cached_isolated = []
-                        self._cached_unanalysed = []
-                        
+                    all_tracks = await db.get_all_tracks()
+                    all_paths_to_track = {t["path"]: t for t in all_tracks}
+
+                    self._cached_moods = {mood: [] for mood in tg.MOODS.keys()}
+                    self._cached_unanalysed = []
+
+                    if saved_partitions:
                         for t in all_tracks:
                             path = t["path"]
                             if path in saved_partitions:
-                                assignment = saved_partitions[path]
-                                mood = assignment["mood"]
-                                islet_id = assignment["islet_id"]
-                                
+                                mood = saved_partitions[path].get("mood")
                                 if mood in self._cached_moods:
                                     self._cached_moods[mood].append(t)
-                                    
-                                if islet_id is not None:
-                                    if islet_id >= 0:
-                                        islet_groups[islet_id].append(t)
-                                    elif islet_id == -1:
-                                        self._cached_isolated.append(t)
                             else:
                                 self._cached_unanalysed.append(t)
-                                
-                        self._cached_islets = [islet_groups[k] for k in sorted(islet_groups.keys())]
+                    else:
+                        # No mood partitions saved yet; every track is "unanalysed"
+                        # from the partition view's standpoint.
+                        self._cached_unanalysed = list(all_tracks)
+
+                    # Islets: enumerate user-named islets from custom_moods.json
+                    # and resolve members against the current library state.
+                    # min_count=0 so an islet whose threshold was tightened
+                    # below the floor still renders (with an empty/sparse
+                    # subtitle and a hint to loosen) rather than vanishing.
+                    self._cached_islets = {}
+                    for islet_name in tg.list_islets():
+                        members = await tg.tracks_in_islet(db, islet_name, min_count=0)
+                        members = [m for m in members if m.get("path") in all_paths_to_track]
+                        self._cached_islets[islet_name] = members
 
                 # Filter pre-computed partitions using the search_query (if active)
                 if self.search_query:
@@ -3441,7 +3704,7 @@ class LibraryView:
                                     max_lines=3,
                                 ),
                                 ft.Container(height=8),
-                                ft.ElevatedButton(
+                                ft.Button(
                                     "Partition Library",
                                     icon=ft.Icons.AUTO_AWESOME_ROUNDED,
                                     color=BG,
@@ -3462,7 +3725,7 @@ class LibraryView:
                         border_radius=16,
                         padding=32,
                         margin=ft.Margin.symmetric(horizontal=16, vertical=24),
-                        alignment=ft.alignment.center,
+                        alignment=ft.Alignment(0, 0),
                     )
                     first_chunk.append(setup_card)
                     stats_text = "0 TRACKS"
@@ -3492,49 +3755,58 @@ class LibraryView:
                             first_chunk.append(accordion)
                             
                     else:
-                        # Acoustic islets partition
-                        islets = []
-                        for comp_tracks in (self._cached_islets or []):
-                            filtered_comp = [t for t in comp_tracks if matches_query(t)]
-                            if filtered_comp:
-                                islets.append(filtered_comp)
-                                total_searched_count += len(filtered_comp)
-                                
-                        # Sort islets by size descending
-                        islets.sort(key=len, reverse=True)
-                        
-                        # Build islets
-                        for idx, comp_tracks in enumerate(islets, 1):
-                            artists = [t.get("artist") or "Unknown" for t in comp_tracks]
-                            dominant_artist = Counter(artists).most_common(1)[0][0]
-                            
+                        # User-named islets. Each one is a centroid (the
+                        # exemplar track's timbre) with membership computed
+                        # by cosine >= threshold via tg.tracks_in_islet.
+                        named_islets = []
+                        for name, member_tracks in (self._cached_islets or {}).items():
+                            filtered = [t for t in member_tracks if matches_query(t)]
+                            # Search-mode hides islets with zero matches; in
+                            # no-search mode, keep every saved islet visible so
+                            # over-tightened ones can still be edited.
+                            if filtered or (not self.search_query and not member_tracks):
+                                named_islets.append((name, filtered))
+                                total_searched_count += len(filtered)
+
+                        named_islets.sort(key=lambda x: len(x[1]), reverse=True)
+
+                        for name, member_tracks in named_islets:
+                            if member_tracks:
+                                artists = [t.get("artist") or "Unknown" for t in member_tracks]
+                                dominant_artist = Counter(artists).most_common(1)[0][0]
+                                subtitle = f"{len(member_tracks)} tracks · Featuring {dominant_artist}"
+                            else:
+                                subtitle = "0 tracks · threshold too tight — edit to loosen"
                             content_controls = [
-                                self._build_partition_track_row(t, comp_tracks, depth=1)
-                                for t in comp_tracks
+                                self._build_partition_track_row(t, member_tracks, depth=1)
+                                for t in member_tracks
                             ]
+                            edit_btn = ft.IconButton(
+                                icon=ft.Icons.EDIT_OUTLINED,
+                                icon_color=DIM,
+                                icon_size=18,
+                                tooltip="Edit islet",
+                                on_click=lambda _e, n=name: self._open_edit_islet_dialog(n),
+                            )
+                            del_btn = ft.IconButton(
+                                icon=ft.Icons.DELETE_OUTLINE,
+                                icon_color=DIM,
+                                icon_size=18,
+                                tooltip="Delete islet",
+                                on_click=lambda _e, n=name: self._confirm_delete_islet(n),
+                            )
                             accordion = AccordionCard(
                                 icon=ft.Icons.DIVERSITY_3_ROUNDED,
-                                title=f"Acoustic Islet {idx}",
-                                subtitle=f"{len(comp_tracks)} tracks · Featuring {dominant_artist}",
-                                content_controls=content_controls
+                                title=name.title(),
+                                subtitle=subtitle,
+                                content_controls=content_controls,
+                                header_actions=[edit_btn, del_btn],
                             )
                             first_chunk.append(accordion)
-                            
-                        # Filter isolated tracks
-                        isolated_tracks = [t for t in (self._cached_isolated or []) if matches_query(t)]
-                        if isolated_tracks:
-                            total_searched_count += len(isolated_tracks)
-                            content_controls = [
-                                self._build_partition_track_row(t, isolated_tracks, depth=1)
-                                for t in isolated_tracks
-                            ]
-                            accordion = AccordionCard(
-                                icon=ft.Icons.SCATTER_PLOT_ROUNDED,
-                                title="Isolated Tracks",
-                                subtitle=f"{len(isolated_tracks)} tracks · Component size < 3",
-                                content_controls=content_controls
-                            )
-                            first_chunk.append(accordion)
+
+                        # Empty-state card when no islets exist yet.
+                        if not (self._cached_islets or {}):
+                            first_chunk.append(self._build_islet_empty_state())
                             
                     # 5. Unanalysed Tracks Accordion
                     unanalysed_searched = [t for t in (self._cached_unanalysed or []) if matches_query(t)]
@@ -4255,8 +4527,8 @@ class LibraryView:
             query = " ".join(query_parts).strip()
             if not query: return
             
-            # Switch to Search tab (index 0)
-            self.app._switch_tab(0)
+            # Switch to Search tab (index 1)
+            self.app._switch_tab(1)
             
             # Set search query, set view mode to "tracks"
             self.app.search_view._search_field.value = query
@@ -4453,7 +4725,6 @@ class LibraryView:
     def _on_scan_complete(self, count: int, _skipped: int):
         self._cached_moods = None
         self._cached_islets = None
-        self._cached_isolated = None
         self._cached_unanalysed = None
         self._scan_update_count = 0
         self._is_scanning = False
@@ -4621,7 +4892,19 @@ class SettingsView:
 
     def build(self) -> ft.Control:
         self.refresh()
-        self._show_hub() # Start at the Hub
+        if getattr(self, "initial_subpage", None) == "Storage":
+            self.initial_subpage = None
+            self._scroll_column.controls = [
+                ft.Row([
+                    ft.IconButton(ft.Icons.ARROW_BACK_IOS_NEW_ROUNDED, icon_color=CYAN, icon_size=16, 
+                                  on_click=lambda _: self._show_hub()),
+                    ft.Text("Storage", size=24, weight=ft.FontWeight.W_700, color=TEXT),
+                ], spacing=10),
+                ft.Container(height=20),
+                self._build_storage_group()
+            ]
+        else:
+            self._show_hub() # Start at the Hub
         return self.main_content
 
     def _show_hub(self):
@@ -6622,10 +6905,12 @@ class AssistantView:
         from utils import track_graph as tg
         self._analysing_library = True
         audio_active = bool(audio_engine.audio_service)
+        is_desktop = (sys.platform == "darwin")
+        can_analyze = audio_active or is_desktop
         start_time = time.time()
 
         try:
-            if not audio_active:
+            if not can_analyze:
                 await self._append_bubble(
                     "assistant",
                     "*Audio engine not active. Running edge linkage in offline developer mode...*",
@@ -6639,17 +6924,18 @@ class AssistantView:
                 logger.warning("AssistantView: missing-features check failed: %s", exc)
                 missing = []
 
-            if missing and audio_active:
+            if missing and can_analyze:
                 total = len(missing)
                 self._init_cancel = False
-                await self._append_bubble(
-                    "assistant",
-                    "*Sir, please ensure a song is playing (even at 0 volume) in the background. "
-                    "This activates Android's keep-alive service, preventing the OS from killing "
-                    "our background DSP worker thread while we work!*",
-                    speak=True,
-                    speak_text="Sir, please ensure a song is playing in the background. This activates Android's keep-alive service, preventing the OS from killing our background DSP thread.",
-                )
+                if not is_desktop:
+                    await self._append_bubble(
+                        "assistant",
+                        "*Sir, please ensure a song is playing (even at 0 volume) in the background. "
+                        "This activates Android's keep-alive service, preventing the OS from killing "
+                        "our background DSP worker thread while we work!*",
+                        speak=True,
+                        speak_text="Sir, please ensure a song is playing in the background. This activates Android's keep-alive service, preventing the OS from killing our background DSP thread.",
+                    )
                 self._set_banner(
                     visible=True,
                     message=f"Analysing 1 / {total} tracks…",
@@ -6682,7 +6968,7 @@ class AssistantView:
                         determinate=(done / total_) if total_ else None,
                     )
                     # Keep background process alive and show progress on Android notification
-                    if audio_active:
+                    if audio_active and audio_engine.audio_service:
                         try:
                             await audio_engine.audio_service.show_progress_notification(
                                 title="DSP Analysis Progress",
@@ -6703,7 +6989,7 @@ class AssistantView:
                     logger.info("AssistantView: analyser sweep done: %s", result)
                 except Exception as exc:
                     logger.warning("AssistantView: analyser sweep failed: %s", exc)
-            elif missing and not audio_active:
+            elif missing and not can_analyze:
                 logger.info("AssistantView: skipped bulk feature extraction (no audio service)")
 
             # Rebuild edges — metadata is fast, acoustic depends on new feature
@@ -6722,7 +7008,6 @@ class AssistantView:
             if hasattr(self.app, "library_view") and self.app.library_view:
                 self.app.library_view._cached_moods = None
                 self.app.library_view._cached_islets = None
-                self.app.library_view._cached_isolated = None
                 self.app.library_view._cached_unanalysed = None
 
             await self._append_bubble(
@@ -7998,14 +8283,14 @@ class StreamripFletApp:
             except:
                 startup_name = "Library"
             
-            mapping = {"Search": 0, "Jarvis": 1, "Library": 2, "Settings": 3}
-            self._current_tab = mapping.get(startup_name, 2) # Default to Library (now index 2)
-        
-        # Build views (Search, Jarvis, Library, Settings)
+            mapping = {"Jarvis": 0, "Search": 1, "Library": 2, "Settings": 3}
+            self._current_tab = mapping.get(startup_name, 2) # Default to Library (index 2)
+
+        # Build views (Jarvis, Search, Library, Settings)
         view_builders = [
-            self.search_view.build, 
             self.assistant_view.build,
-            self.library_view.build, 
+            self.search_view.build,
+            self.library_view.build,
             self.settings_view.build
         ]
         
@@ -8037,14 +8322,14 @@ class StreamripFletApp:
             label_behavior=ft.NavigationBarLabelBehavior.ALWAYS_SHOW,
             destinations=[
                 ft.NavigationBarDestination(
-                    icon=ft.Icons.SEARCH_OUTLINED,
-                    selected_icon=ft.Icons.SEARCH,
-                    label="Search",
-                ),
-                ft.NavigationBarDestination(
                     icon=ft.Icons.AUTO_AWESOME_ROUNDED,
                     selected_icon=ft.Icons.AUTO_AWESOME_ROUNDED,
                     label="Jarvis",
+                ),
+                ft.NavigationBarDestination(
+                    icon=ft.Icons.SEARCH_OUTLINED,
+                    selected_icon=ft.Icons.SEARCH,
+                    label="Search",
                 ),
                 ft.NavigationBarDestination(
                     icon=ft.Icons.LIBRARY_MUSIC_OUTLINED,
@@ -8130,20 +8415,20 @@ class StreamripFletApp:
         self._current_tab = index
         
         # Reset labels to standard text
-        labels = ["Search", "Jarvis", "Library"]
+        labels = ["Jarvis", "Search", "Library"]
         for i, dest in enumerate(self._nav.destinations):
             if i < len(labels):
                 dest.label = labels[i]
 
         if index == 0:
-            content = self._view_cache.get(0) or self.search_view.build()
-            self._view_cache[0] = content
-        elif index == 1:
             # Jarvis / Assistant View
-            content = self._view_cache.get(1) or self.assistant_view.build()
-            self._view_cache[1] = content
+            content = self._view_cache.get(0) or self.assistant_view.build()
+            self._view_cache[0] = content
             # Ensure assistant initialisation is triggered
             self.page.run_task(self.assistant_view._init_assistant)
+        elif index == 1:
+            content = self._view_cache.get(1) or self.search_view.build()
+            self._view_cache[1] = content
         elif index == 2:
             # Library View
             content = self._view_cache.get(2)
