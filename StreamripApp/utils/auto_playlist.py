@@ -1,5 +1,6 @@
 """
-KNN-based playlist generator over the library's DSP features.
+KNN-based playlist generator over the library's DSP features, with
+mood-aware harmonic sequencing.
 
 Replaces the previous MCL clustering pipeline (Markov Clustering with
 string-similarity blending). MCL spent most of its runtime on matrix
@@ -14,20 +15,31 @@ generator and the assistant share one source of truth.
 
 Pipeline:
   1. Encode tracks into a single weighted z-scored feature vector per
-     track (BPM, dynamics, MFCC mean/std, chroma).
+     track (BPM, dynamics, MFCC mean/delta, chroma).
   2. Take the K = target_length nearest tracks to the seed by Euclidean
-     distance in that weighted space.
-  3. Order the K via greedy nearest-neighbour walk anchored at the seed so
-     adjacent tracks in the playlist sound close to each other.
+     distance in that weighted space (KNN path) OR pull the top mood-ranked
+     rows from `track_graph.tracks_by_mood` (mood path).
+  3. Greedily order the K with `_greedy_sequence`. The sequencer accepts an
+     optional `transition_cost(a, b)` callable that's added to the raw
+     feature distance; the mood path layers a Camelot harmonic-adjacency
+     penalty + a BPM-smoothness penalty (scaled by the mood spec's
+     `bpm_smooth_weight`) so playlists don't jar between adjacent tracks
+     even when the timbre profile is similar.
+  4. For mood playlists with a `camelot_pref`, the sequencer anchors on
+     the highest-ranked track that matches the requested mode (major /
+     minor) so the playlist's opening sets the harmonic tone.
 
 Per-track cost on a 2000-row library: ~30 ms encode, <5 ms distance, <5 ms
-walk. Memory: a single (N, 43) float64 matrix (≈680 KB at 2000 rows).
+walk. Memory: a single (N, 57) float64 matrix (≈900 KB at 2000 rows).
 """
 from __future__ import annotations
+
+from typing import Callable, Optional
 
 import numpy as np
 
 from utils.dsp import N_MFCC, N_CHROMA, unpack_embedding_groups, unpack_timbre
+from utils.harmonic import camelot_penalty, matches_mode_preference
 
 # Per-axis weights. Same shape as the old AutoPlaylistEngine defaults; the
 # user explicitly wanted sound-profile (MFCC + chroma) to dominate, BPM to
@@ -85,10 +97,18 @@ def _encode(tracks: list[dict]) -> tuple[list[str], np.ndarray]:
 
 def _greedy_sequence(seed_path: str,
                      paths: list[str],
-                     vectors: np.ndarray) -> list[str]:
-    """Order `paths` so each next track is the closest remaining one to the
-    previously-selected track. Produces a smooth listening arc instead of a
-    distance-sorted ramp away from the seed."""
+                     vectors: np.ndarray,
+                     transition_cost: Optional[
+                         Callable[[int, int], float]
+                     ] = None) -> list[str]:
+    """Order `paths` so each next track is the lowest-cost remaining one
+    given the previously-selected track. Produces a smooth listening arc
+    instead of a distance-sorted ramp away from the seed.
+
+    `transition_cost(from_idx, to_idx) -> float` is an optional extra cost
+    added to the feature-space distance. Used by the mood path to layer
+    Camelot-adjacency and BPM-smoothness penalties on top of the timbre
+    distance; defaults to pure feature distance when omitted."""
     if len(paths) <= 1:
         return list(paths)
 
@@ -101,9 +121,16 @@ def _greedy_sequence(seed_path: str,
     while remaining:
         candidates = vectors[remaining]
         dists = np.linalg.norm(candidates - current_vec, axis=1)
+        if transition_cost is not None:
+            extras = np.array(
+                [transition_cost(current_idx, j) for j in remaining],
+                dtype=np.float64,
+            )
+            dists = dists + extras
         nxt = remaining[int(np.argmin(dists))]
         ordered.append(paths[nxt])
         current_vec = vectors[nxt]
+        current_idx = nxt
         remaining.remove(nxt)
     return ordered
 
@@ -115,13 +142,15 @@ async def generate_mood_playlist(db_manager,
 
     Pipeline:
       1. `track_graph.tracks_by_mood` ranks every analysed track by the
-         mood profile (z-scored, weighted dot product) and returns the top
-         `target_length` rows.
+         mood profile (percentile distance + optional centroid + listen
+         feedback) and returns the top `target_length` rows.
       2. Encode those rows into the same weighted feature space the KNN
-         selector uses, then greedily re-order them anchored at the
-         highest-ranked track so adjacent tracks in the final playlist
-         sound close to each other (the mood ranking only handles *what*
-         to include — not the *order*).
+         selector uses, then greedily re-order them with a transition cost
+         that combines timbre distance, Camelot-adjacency penalty, and a
+         BPM-smoothness penalty scaled by the mood's `bpm_smooth_weight`.
+         For moods with a `camelot_pref`, the anchor is biased toward the
+         highest-ranked track in that mode (falling back to plain rank if
+         none survives feature encoding).
 
     Returns the ordered list of full track-row dicts (path + metadata),
     not just paths, so callers can both persist them and surface their
@@ -134,6 +163,7 @@ async def generate_mood_playlist(db_manager,
 
     if mood not in tg.MOOD_PROFILES:
         return []
+    spec = tg._mood_spec(mood) or tg._custom_mood_spec(mood)
 
     ranked = await tg.tracks_by_mood(db_manager, mood, limit=max(target_length, 2))
     if len(ranked) < 2:
@@ -145,13 +175,42 @@ async def generate_mood_playlist(db_manager,
     if not paths:
         return ranked
 
-    # Anchor the greedy walk at the highest-ranked track (index 0 of
-    # `ranked` corresponds to the first surviving entry in `paths`; if a
-    # track was dropped by `_encode` for missing features, we anchor on
-    # whichever survived first).
-    seed_path = paths[0]
-    ordered_paths = _greedy_sequence(seed_path, paths, vectors)
     by_path = {r["path"]: r for r in ranked}
+    # Anchor on the highest-ranked track whose mode matches the mood's
+    # camelot_pref, if any. Falls back to plain rank order if none match.
+    seed_path = paths[0]
+    if spec and spec.camelot_pref:
+        for p in paths:
+            row = by_path.get(p)
+            if row is None:
+                continue
+            if matches_mode_preference(int(row.get("key_index", 0) or 0),
+                                       spec.camelot_pref):
+                seed_path = p
+                break
+
+    # Per-path metadata used by the transition cost. Pre-extracted so the
+    # inner loop is a few dict-lookups, not a re-scan of `ranked`.
+    key_idx = [int(by_path[p].get("key_index", 0) or 0) for p in paths]
+    bpm = [float(by_path[p].get("bpm", 0) or 0) for p in paths]
+    bpm_smooth = spec.bpm_smooth_weight if spec else 1.0
+    # Reference scale: a 50 BPM jump roughly equals one full unit of
+    # additional cost (the timbre distance term sits in ~[0, 5] after
+    # weighting, so 1.0 is significant but not dominant).
+    BPM_REF = 50.0
+    # Harmonic clash penalty cap. Camelot distance ∈ [0, 6] → penalty in
+    # [0, 1] from `camelot_penalty`; scale to roughly the same magnitude as
+    # the BPM term so neither dominates.
+    HARM_SCALE = 1.0
+
+    def _transition_cost(a: int, b: int) -> float:
+        bpm_pen = abs(bpm[a] - bpm[b]) / BPM_REF * bpm_smooth
+        harm_pen = camelot_penalty(key_idx[a], key_idx[b]) * HARM_SCALE
+        return float(bpm_pen + harm_pen)
+
+    ordered_paths = _greedy_sequence(
+        seed_path, paths, vectors, transition_cost=_transition_cost,
+    )
     return [by_path[p] for p in ordered_paths if p in by_path]
 
 

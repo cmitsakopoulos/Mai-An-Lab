@@ -155,6 +155,7 @@ LIB_ARTIST_COLOR   = "#CC00FF"
 LIB_ALBUM_COLOR    = "#00E3FF"
 LIB_TRACK_COLOR    = "#D4B038"
 LIB_PLAYLIST_COLOR = "#9B59B6"
+LIB_PARTITION_COLOR = "#00FF88"
 
 # In-memory artwork path cache: {url-or-path-hash → local tmp path}
 class ArtworkCache:
@@ -2364,6 +2365,12 @@ class LibraryView:
         self._tracks_cache: list[dict] | None = None
         self._tracks_cache_key: tuple | None = None
 
+        # Partition calculation caches to prevent stupid startup recomputations.
+        self._cached_moods: dict[str, list[dict]] | None = None
+        self._cached_islets: list[list[dict]] | None = None
+        self._cached_isolated: list[dict] | None = None
+        self._cached_unanalysed: list[dict] | None = None
+
         # ── Controls ───────────────────────────────────────────────────────
         # ── Library Search Bar (matches SearchView unified design) ───────────
         # The TextField is intentionally borderless; the outer container owns
@@ -2417,8 +2424,18 @@ class LibraryView:
 
         self._stats_label = ft.Text("", color=DIM, size=11, weight=ft.FontWeight.W_700)
 
-        self._view_tabs_row = ft.Row(spacing=8)
+        self.partition_sub_mode = "moods"
+        self._partition_tabs = ft.Container(
+            content=ft.Row(
+                spacing=12,
+                alignment=ft.MainAxisAlignment.CENTER,
+            ),
+            visible=False,
+            padding=ft.Padding.symmetric(vertical=4),
+        )
+        self._view_tabs_row = ft.Row(spacing=8, scroll=ft.ScrollMode.AUTO)
         self._update_view_tabs()
+        self._update_partition_tabs_ui()
 
         # Define the buttons as class variables first
         self._sort_icon_btn = ft.IconButton(icon=ft.Icons.SORT, icon_color=DIM, icon_size=22, on_click=self._open_sort_menu)
@@ -2574,6 +2591,7 @@ class LibraryView:
                             ),
                             ft.Row([self._search_bar_container], spacing=0),
                             self._view_tabs_row,
+                            self._partition_tabs,
                             self._scan_progress_container,
                         ],
                         spacing=10,
@@ -2631,6 +2649,12 @@ class LibraryView:
         elif mode == "playlists" and self.sort_mode not in ("name", "date"):
             self.sort_mode = "date"
         self.expanded_nodes.clear()
+        
+        # Toggle sub-mode tabs and sort button visibility
+        self._partition_tabs.visible = (mode == "partitions")
+        self._sort_icon_btn.visible = (mode != "partitions")
+        self.try_update(self._partition_tabs, self._sort_icon_btn)
+
         self._update_view_tabs()
         self.page.run_task(self.load_library)
 
@@ -2642,23 +2666,199 @@ class LibraryView:
         self._search_spinner.visible = False
         self.page.run_task(self.load_library)
 
+    def _set_partition_sub_mode(self, sub_mode: str):
+        self.partition_sub_mode = sub_mode
+        self._update_partition_tabs_ui()
+        self.page.run_task(self.load_library)
+
+    def _refresh_partitions_click(self, e):
+        self.app.show_snackbar("Recalculating Mood Subsets and Acoustic Islets...")
+        self.page.run_task(self.recalculate_partitions_worker)
+
+    async def recalculate_partitions_worker(self):
+        self.app.safe_update(lambda: setattr(self._search_spinner, "visible", True))
+        try:
+            db = self.app.db_manager
+            import numpy as np
+            from utils import track_graph as tg
+            
+            # 1. Fetch percentile matrix
+            rows, percentile_matrix = await tg._load_percentile_matrix(db, tg.FEATURES_VERSION)
+            
+            # 2. Get all tracks
+            all_tracks = await db.get_all_tracks()
+            all_paths_to_track = {t["path"]: t for t in all_tracks}
+            
+            if not all_tracks:
+                self.app.show_snackbar("No tracks found in library. Scan your music folder first.")
+                return
+            
+            # Separate into analysed and unanalysed
+            analysed_rows = []
+            analysed_indices = []
+            for idx, r in enumerate(rows):
+                if r["path"] in all_paths_to_track:
+                    analysed_rows.append(r)
+                    analysed_indices.append(idx)
+            
+            analysed_paths_all = {r["path"] for r in rows}
+            
+            # --- Compute Mood Assignments ---
+            mood_assignments = {}
+            if analysed_rows and len(analysed_indices) > 0:
+                filtered_percentiles = percentile_matrix[analysed_indices]
+                mood_scores = {}
+                for mood, spec in tg.MOODS.items():
+                    if spec.profile:
+                        mood_scores[mood] = tg._score_against_profile(spec.profile, filtered_percentiles)
+                    else:
+                        mood_scores[mood] = np.full(len(analysed_rows), -np.inf, dtype=np.float32)
+                        
+                for i, track in enumerate(analysed_rows):
+                    best_mood = None
+                    best_score = -np.inf
+                    for mood in tg.MOODS.keys():
+                        score = mood_scores[mood][i]
+                        if score > best_score:
+                            best_score = score
+                            best_mood = mood
+                    if best_mood is not None:
+                        mood_assignments[track["path"]] = best_mood
+            
+            # --- Compute Acoustic Islets ---
+            conn = await db.get_connection()
+            async with conn.execute("SELECT track_path, neighbor_path FROM track_neighbors WHERE edge_kind = 'acoustic'") as cursor:
+                edges = await cursor.fetchall()
+                
+            from collections import defaultdict
+            adj = defaultdict(set)
+            for u, v in edges:
+                adj[u].add(v)
+                adj[v].add(u)
+                
+            visited = set()
+            components = []
+            all_nodes = list(adj.keys())
+            for node in all_nodes:
+                if node not in visited:
+                    comp = []
+                    queue = [node]
+                    visited.add(node)
+                    while queue:
+                        curr = queue.pop(0)
+                        comp.append(curr)
+                        for neighbor in adj[curr]:
+                            if neighbor not in visited:
+                                visited.add(neighbor)
+                                queue.append(neighbor)
+                    components.append(comp)
+                    
+            for p in analysed_paths_all:
+                if p not in adj:
+                    components.append([p])
+            
+            islet_assignments = {}
+            islet_counter = 0
+            for comp in components:
+                comp_existing = [p for p in comp if p in all_paths_to_track]
+                if not comp_existing:
+                    continue
+                if len(comp_existing) >= 3:
+                    for p in comp_existing:
+                        islet_assignments[p] = islet_counter
+                    islet_counter += 1
+                else:
+                    for p in comp_existing:
+                        islet_assignments[p] = -1
+            
+            # Map into list of tuples: (track_path, mood, islet_id)
+            assignments = []
+            for path in all_paths_to_track.keys():
+                mood = mood_assignments.get(path)
+                islet_id = islet_assignments.get(path)
+                if mood is not None or islet_id is not None:
+                    assignments.append((path, mood, islet_id))
+            
+            await db.save_partitions(assignments)
+            
+            # Reset memory caches so next library load pulls fresh DB entries
+            self._cached_moods = None
+            self._cached_islets = None
+            self._cached_isolated = None
+            self._cached_unanalysed = None
+            
+            self.app.show_snackbar("Sonic library partitions generated successfully!")
+            await self.load_library()
+        except Exception as ex:
+            logger.exception("Failed to recalculate partitions: %s", ex)
+            self.app.show_snackbar(f"Failed to generate partitions: {ex}")
+        finally:
+            self.app.safe_update(lambda: setattr(self._search_spinner, "visible", False))
+
+    def _update_partition_tabs_ui(self):
+        tabs = []
+        for mode, label, icon in [
+            ("moods", "Mood Subsets", ft.Icons.EMOJI_EMOTIONS_ROUNDED),
+            ("islets", "Acoustic Islets", ft.Icons.DIVERSITY_3_ROUNDED),
+        ]:
+            is_active = (self.partition_sub_mode == mode)
+            active_col = LIB_PARTITION_COLOR
+            
+            tabs.append(
+                ft.GestureDetector(
+                    content=ft.Container(
+                        content=ft.Row(
+                            [
+                                ft.Icon(icon, color=BG if is_active else active_col, size=16),
+                                ft.Text(label, size=12, weight=ft.FontWeight.W_700,
+                                        color=BG if is_active else TEXT),
+                            ],
+                            spacing=6,
+                            alignment=ft.MainAxisAlignment.CENTER,
+                        ),
+                        bgcolor=active_col if is_active else apply_opacity(0.08, active_col),
+                        border=ft.Border.all(1, active_col if is_active else apply_opacity(0.2, active_col)),
+                        border_radius=12,
+                        padding=ft.Padding.symmetric(horizontal=16, vertical=8),
+                        animate=ft.Animation(150, ft.AnimationCurve.EASE_OUT),
+                    ),
+                    on_tap=lambda e, m=mode: self._set_partition_sub_mode(m)
+                )
+            )
+        # Refresh partitions button
+        tabs.append(
+            ft.IconButton(
+                icon=ft.Icons.REFRESH_ROUNDED,
+                icon_color=active_col,
+                icon_size=18,
+                tooltip="Recalculate Partitions",
+                bgcolor=apply_opacity(0.08, active_col),
+                on_click=self._refresh_partitions_click
+            )
+        )
+        self._partition_tabs.content.controls = tabs
+        self.try_update(self._partition_tabs)
+
     def _update_view_tabs(self):
         icons = {
+            "playlists": ft.Icons.QUEUE_MUSIC_ROUNDED,
             "artists":   ft.Icons.PERSON_ROUNDED,
             "albums":    ft.Icons.ALBUM_ROUNDED,
             "tracks":    ft.Icons.MUSIC_NOTE_ROUNDED,
-            "playlists": ft.Icons.QUEUE_MUSIC_ROUNDED,
+            "partitions": ft.Icons.DIVERSITY_3_ROUNDED,
         }
         accents = {
+            "playlists": LIB_PLAYLIST_COLOR,
             "artists":   LIB_ARTIST_COLOR,
             "albums":    LIB_ALBUM_COLOR,
             "tracks":    LIB_TRACK_COLOR,
-            "playlists": LIB_PLAYLIST_COLOR,
+            "partitions": LIB_PARTITION_COLOR,
         }
         tabs = []
         for mode, label in [
             ("playlists", "Playlists"), ("artists", "Artists"),
             ("albums", "Albums"), ("tracks", "Tracks"),
+            ("partitions", "Partitions"),
         ]:
             is_active = (self.view_mode == mode)
             col = accents[mode]
@@ -2686,6 +2886,7 @@ class LibraryView:
                 )
             )
         self._view_tabs_row.controls = tabs
+        self.try_update(self._view_tabs_row)
 
     def _open_sort_menu(self, _e):
         if self.view_mode == "artists":
@@ -3145,6 +3346,235 @@ class LibraryView:
                     self.page.update()
 
                 self.app.safe_update(finalize_paginated)
+
+            elif self.view_mode == "partitions":
+                import numpy as np
+                from utils import track_graph as tg
+                db = self.app.db_manager
+                from collections import Counter
+                
+                # Fetch saved partitions from SQLite database to avoid expensive recalculation on startup
+                saved_partitions = await db.get_saved_partitions()
+                
+                # Check if partitions cache is empty and populate it if needed
+                if self._cached_moods is None or self._cached_islets is None:
+                    if not saved_partitions:
+                        # No partitions generated yet! Bypassing memory cache population.
+                        pass
+                    else:
+                        # 1. Get all tracks in the library
+                        all_tracks = await db.get_all_tracks()
+                        all_paths_to_track = {t["path"]: t for t in all_tracks}
+                        
+                        # 2. Rebuild memory cache from SQLite saved partitions
+                        self._cached_moods = {mood: [] for mood in tg.MOODS.keys()}
+                        from collections import defaultdict
+                        islet_groups = defaultdict(list)
+                        self._cached_isolated = []
+                        self._cached_unanalysed = []
+                        
+                        for t in all_tracks:
+                            path = t["path"]
+                            if path in saved_partitions:
+                                assignment = saved_partitions[path]
+                                mood = assignment["mood"]
+                                islet_id = assignment["islet_id"]
+                                
+                                if mood in self._cached_moods:
+                                    self._cached_moods[mood].append(t)
+                                    
+                                if islet_id is not None:
+                                    if islet_id >= 0:
+                                        islet_groups[islet_id].append(t)
+                                    elif islet_id == -1:
+                                        self._cached_isolated.append(t)
+                            else:
+                                self._cached_unanalysed.append(t)
+                                
+                        self._cached_islets = [islet_groups[k] for k in sorted(islet_groups.keys())]
+
+                # Filter pre-computed partitions using the search_query (if active)
+                if self.search_query:
+                    sq = self.search_query.lower()
+                    def matches_query(t):
+                        return (
+                            sq in (t.get("title") or "").lower() or
+                            sq in (t.get("artist") or "").lower() or
+                            sq in (t.get("album") or "").lower() or
+                            sq in (t.get("path") or "").lower()
+                        )
+                else:
+                    def matches_query(t):
+                        return True
+
+                first_chunk = []
+                total_searched_count = 0
+                
+                # If partitions have not been generated yet, show the premium glassmorphic setup card
+                if not saved_partitions and self._cached_moods is None:
+                    setup_card = ft.Container(
+                        content=ft.Column(
+                            [
+                                ft.Container(
+                                    content=ft.Icon(
+                                        ft.Icons.DIVERSITY_3_ROUNDED,
+                                        color=LIB_PARTITION_COLOR,
+                                        size=40,
+                                    ),
+                                    bgcolor=apply_opacity(0.1, LIB_PARTITION_COLOR),
+                                    border_radius=20,
+                                    padding=16,
+                                ),
+                                ft.Text(
+                                    "Sonic Library Partitions",
+                                    color=TEXT,
+                                    size=18,
+                                    weight=ft.FontWeight.W_700,
+                                    text_align=ft.TextAlign.CENTER,
+                                ),
+                                ft.Text(
+                                    "Analyze your library's DSP features to segment your music "
+                                    "collection into cohesive Mood Subsets and Acoustic Islets.",
+                                    color=DIM,
+                                    size=13,
+                                    text_align=ft.TextAlign.CENTER,
+                                    max_lines=3,
+                                ),
+                                ft.Container(height=8),
+                                ft.ElevatedButton(
+                                    "Partition Library",
+                                    icon=ft.Icons.AUTO_AWESOME_ROUNDED,
+                                    color=BG,
+                                    bgcolor=LIB_PARTITION_COLOR,
+                                    on_click=lambda _: self.page.run_task(self.recalculate_partitions_worker),
+                                    style=ft.ButtonStyle(
+                                        shape=ft.RoundedRectangleBorder(radius=10),
+                                        padding=ft.Padding.symmetric(horizontal=24, vertical=12),
+                                    )
+                                ),
+                            ],
+                            alignment=ft.MainAxisAlignment.CENTER,
+                            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                            spacing=12,
+                        ),
+                        bgcolor="#0DFFFFFF",
+                        border=ft.Border.all(1, apply_opacity(0.1, TEXT)),
+                        border_radius=16,
+                        padding=32,
+                        margin=ft.Margin.symmetric(horizontal=16, vertical=24),
+                        alignment=ft.alignment.center,
+                    )
+                    first_chunk.append(setup_card)
+                    stats_text = "0 TRACKS"
+                else:
+                    if self.partition_sub_mode == "moods":
+                        # Mood subsets partition
+                        active_moods = []
+                        for mood, tracks in (self._cached_moods or {}).items():
+                            filtered_tracks = [t for t in tracks if matches_query(t)]
+                            if filtered_tracks:
+                                active_moods.append((mood, filtered_tracks))
+                                total_searched_count += len(filtered_tracks)
+                                
+                        active_moods.sort(key=lambda x: len(x[1]), reverse=True)
+                        
+                        for mood, tracks in active_moods:
+                            content_controls = [
+                                self._build_partition_track_row(t, tracks, depth=1)
+                                for t in tracks
+                            ]
+                            accordion = AccordionCard(
+                                icon=ft.Icons.EMOJI_EMOTIONS_ROUNDED,
+                                title=mood.capitalize(),
+                                subtitle=f"{len(tracks)} tracks · Closest match",
+                                content_controls=content_controls
+                            )
+                            first_chunk.append(accordion)
+                            
+                    else:
+                        # Acoustic islets partition
+                        islets = []
+                        for comp_tracks in (self._cached_islets or []):
+                            filtered_comp = [t for t in comp_tracks if matches_query(t)]
+                            if filtered_comp:
+                                islets.append(filtered_comp)
+                                total_searched_count += len(filtered_comp)
+                                
+                        # Sort islets by size descending
+                        islets.sort(key=len, reverse=True)
+                        
+                        # Build islets
+                        for idx, comp_tracks in enumerate(islets, 1):
+                            artists = [t.get("artist") or "Unknown" for t in comp_tracks]
+                            dominant_artist = Counter(artists).most_common(1)[0][0]
+                            
+                            content_controls = [
+                                self._build_partition_track_row(t, comp_tracks, depth=1)
+                                for t in comp_tracks
+                            ]
+                            accordion = AccordionCard(
+                                icon=ft.Icons.DIVERSITY_3_ROUNDED,
+                                title=f"Acoustic Islet {idx}",
+                                subtitle=f"{len(comp_tracks)} tracks · Featuring {dominant_artist}",
+                                content_controls=content_controls
+                            )
+                            first_chunk.append(accordion)
+                            
+                        # Filter isolated tracks
+                        isolated_tracks = [t for t in (self._cached_isolated or []) if matches_query(t)]
+                        if isolated_tracks:
+                            total_searched_count += len(isolated_tracks)
+                            content_controls = [
+                                self._build_partition_track_row(t, isolated_tracks, depth=1)
+                                for t in isolated_tracks
+                            ]
+                            accordion = AccordionCard(
+                                icon=ft.Icons.SCATTER_PLOT_ROUNDED,
+                                title="Isolated Tracks",
+                                subtitle=f"{len(isolated_tracks)} tracks · Component size < 3",
+                                content_controls=content_controls
+                            )
+                            first_chunk.append(accordion)
+                            
+                    # 5. Unanalysed Tracks Accordion
+                    unanalysed_searched = [t for t in (self._cached_unanalysed or []) if matches_query(t)]
+                    if unanalysed_searched:
+                        total_searched_count += len(unanalysed_searched)
+                        content_controls = [
+                            self._build_partition_track_row(t, unanalysed_searched, depth=1)
+                            for t in unanalysed_searched
+                        ]
+                        accordion = AccordionCard(
+                            icon=ft.Icons.HELP_OUTLINE_ROUNDED,
+                            title="Unanalysed Tracks",
+                            subtitle=f"{len(unanalysed_searched)} tracks · Missing DSP features",
+                            content_controls=content_controls
+                        )
+                        first_chunk.append(accordion)
+                        
+                    # 6. Stats label update
+                    stats_text = f"{total_searched_count} TRACKS"
+                
+                if self._load_token != token:
+                    return
+                    
+                def finalize_partitions():
+                    self._stats_label.text = stats_text
+                    self._library_list.controls.extend(first_chunk)
+                    self._search_spinner.visible = False
+                    
+                    is_empty = not first_chunk
+                    if is_empty:
+                        self._empty_label.visible = True
+                        self._empty_label.content.controls[0].name = ft.Icons.LIBRARY_MUSIC_OUTLINED
+                        self._empty_label.content.controls[0].color = apply_opacity(0.3, LIB_PARTITION_COLOR)
+                        self._empty_label.content.controls[1].value = "No partition results found."
+                        self._empty_label.content.controls[2].value = "Try checking your filters or search query."
+                    
+                    self._update_pagination_ui()
+                    self.page.update()
+                    
+                self.app.safe_update(finalize_partitions)
 
             else:
                 # Expandable view modes (artists, playlists) use the original lazy chunk scroll generator
@@ -3762,6 +4192,19 @@ class LibraryView:
         self._path_to_controls.setdefault(path, []).append(res)
         return res
 
+    def _build_partition_track_row(self, t: dict, partition_tracks: list[dict], depth: int = 0) -> ft.Control:
+        res = self._track_row(t, depth=depth)
+        path = t.get("path", "")
+        tile = res.content.content
+        
+        def play_partition_track(_e):
+            self._tracks_cache = partition_tracks
+            self._tracks_cache_key = ("tracks", self.search_query, self.sort_mode)
+            self.page.run_task(self.app.play_track, path, ("library", None))
+            
+        tile.on_click = play_partition_track
+        return res
+
     def _edit_btn(self, edit_type: str, meta: dict, color: str = DIM) -> ft.Control:
         return ft.IconButton(
             icon=ft.Icons.EDIT_OUTLINED,
@@ -4008,6 +4451,10 @@ class LibraryView:
         self.app.safe_update(_apply)
 
     def _on_scan_complete(self, count: int, _skipped: int):
+        self._cached_moods = None
+        self._cached_islets = None
+        self._cached_isolated = None
+        self._cached_unanalysed = None
         self._scan_update_count = 0
         self._is_scanning = False
         self._toggling_nodes = set() # Track nodes currently being expanded/collapsed
@@ -5853,7 +6300,7 @@ class AssistantView:
             expand=True,
             spacing=8,
             padding=ft.Padding.symmetric(horizontal=12, vertical=8),
-            auto_scroll=True,
+            auto_scroll=False,
         )
 
         self._input = ft.TextField(
@@ -6024,6 +6471,13 @@ class AssistantView:
         # Yield to the UI loop for a beat to ensure the Jarvis tab finishes
         # its initial paint before we start the heavy DSP/Graph work.
         await asyncio.sleep(0.2)
+        
+        # Scroll any existing history to bottom on open
+        if hasattr(self, "_messages") and self._messages:
+            try:
+                await self._messages.scroll_to(offset=-1, duration=0)
+            except Exception:
+                pass
 
         if getattr(self, "_analysing_library", False):
             has_busy_msg = any(
@@ -6263,6 +6717,14 @@ class AssistantView:
                 logger.warning("AssistantView: edge rebuild failed: %s", exc)
 
             self._set_banner(visible=False)
+            
+            # Invalidate the partitions cache on LibraryView since edges / features changed
+            if hasattr(self.app, "library_view") and self.app.library_view:
+                self.app.library_view._cached_moods = None
+                self.app.library_view._cached_islets = None
+                self.app.library_view._cached_isolated = None
+                self.app.library_view._cached_unanalysed = None
+
             await self._append_bubble(
                 "assistant",
                 "Analysis complete. Mood search and similarity walks are ready.",
@@ -6397,6 +6859,13 @@ class AssistantView:
             self._messages.controls.append(self._listening_bubble)
             self._messages.update()
         self.app.safe_update(_show_listening)
+        
+        # Smoothly scroll to the bottom after the listening bubble is added
+        await asyncio.sleep(0.06)
+        try:
+            await self._messages.scroll_to(offset=-1, duration=200)
+        except Exception:
+            pass
 
         try:
             if not is_mock:
@@ -6507,10 +6976,23 @@ class AssistantView:
             )
             return
         response = await self._runner.dispatch_text(text)
+        # Build a structured entity dict from the response so future turns
+        # can resolve pronouns without any regex or DB round-trip.
+        _track = response.extras.get("track") or response.extras.get("first")
+        _entities = {
+            "track":  _track,
+            "artist": (
+                _track.get("artist") or _track.get("artist_name")
+                if _track else response.extras.get("artist")
+            ),
+            "playlist": response.extras.get("playlist"),
+            "intent": getattr(response, "_intent_name", None),
+        }
         await self._append_bubble(
             "assistant", response.displayed,
             speak=response.success and bool(response.spoken),
             speak_text=response.spoken,
+            entities=_entities if any(_entities.values()) else None,
         )
         # Playback intents stage the queue but leave engine.play() to us so
         # Jarvis finishes his sentence before the music starts. _append_bubble
@@ -6543,11 +7025,17 @@ class AssistantView:
         text: str,
         speak: bool = False,
         speak_text: str | None = None,
+        entities: dict | None = None,
     ):
         row = self._build_bubble_row(sender, text)
 
-        # Update in-memory history list
-        self._history_list.append({"sender": sender, "text": text})
+        # Update in-memory history list. Persist structured entity data on
+        # assistant messages so _resolve_anaphora can do a plain dict lookup
+        # instead of regex-parsing markdown bold tags.
+        msg: dict = {"sender": sender, "text": text}
+        if entities:
+            msg["entities"] = entities
+        self._history_list.append(msg)
         if len(self._history_list) > 50:
             self._history_list.pop(0)
 
@@ -6566,6 +7054,13 @@ class AssistantView:
             if len(self._messages.controls) > 50:
                 self._messages.controls.pop(0)
         self.app.safe_update(_mutate)
+        
+        # Smoothly scroll to the bottom after the UI has flushed and rendered
+        await asyncio.sleep(0.06)
+        try:
+            await self._messages.scroll_to(offset=-1, duration=200)
+        except Exception:
+            pass
 
         if speak and self._tts_enabled:
             service = getattr(audio_engine, "audio_service", None)

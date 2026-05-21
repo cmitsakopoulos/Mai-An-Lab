@@ -45,6 +45,7 @@ class DatabaseManager:
             # Run playlist schema migration every time we open a fresh connection.
             # CREATE TABLE IF NOT EXISTS is idempotent; safe on existing databases.
             await self._migrate_playlists(self._conn)
+            await self._migrate_partitions(self._conn)
         return self._conn
 
     async def get_total_tracks(self) -> int:
@@ -189,6 +190,43 @@ class DatabaseManager:
                     "CREATE INDEX IF NOT EXISTS idx_neighbors_track "
                     "ON track_neighbors(track_path, edge_kind, weight DESC)"
                 )
+
+                # Persistent playback history. Drives two things:
+                #   1) Long-term avoid set for the assistant's similarity walk
+                #      (in-memory _recent loses everything on app restart).
+                #   2) Listen-signal feedback that re-ranks mood candidates
+                #      (skipped-early tracks sink, completed ones float up).
+                # event ∈ {'played', 'skipped_early', 'completed'}. seed_path
+                # is set when the track was reached via "play similar" so we
+                # can later attribute skips/completions back to the seed for
+                # online edge tuning if we ever want it.
+                await conn.execute('''
+                    CREATE TABLE IF NOT EXISTS playback_history (
+                        track_path TEXT NOT NULL,
+                        played_at  REAL NOT NULL,
+                        event      TEXT NOT NULL,
+                        seed_path  TEXT
+                    )
+                ''')
+                await conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_history_recent "
+                    "ON playback_history(played_at DESC)"
+                )
+                await conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_history_track "
+                    "ON playback_history(track_path, event)"
+                )
+
+                # Track partitions cache table (mood subsets + acoustic islets)
+                await conn.execute('''
+                    CREATE TABLE IF NOT EXISTS track_partitions (
+                        track_path TEXT PRIMARY KEY REFERENCES tracks(path) ON DELETE CASCADE,
+                        mood       TEXT,
+                        islet_id   INTEGER
+                    )
+                ''')
+                await conn.execute("CREATE INDEX IF NOT EXISTS idx_tp_mood ON track_partitions(mood)")
+                await conn.execute("CREATE INDEX IF NOT EXISTS idx_tp_islet_id ON track_partitions(islet_id)")
 
                 await conn.commit()
             except Exception as exc:
@@ -770,6 +808,48 @@ class DatabaseManager:
         )
         await conn.commit()
 
+    # ─── Partition Schema Migration & Helpers ─────────────────────────────────
+
+    async def _migrate_partitions(self, conn):
+        """
+        Idempotent migration: creates the track_partitions table and its indexes
+        if they don't already exist. Called once per fresh connection.
+        """
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS track_partitions (
+                track_path TEXT PRIMARY KEY REFERENCES tracks(path) ON DELETE CASCADE,
+                mood       TEXT,
+                islet_id   INTEGER
+            )
+        ''')
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_tp_mood ON track_partitions(mood)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_tp_islet_id ON track_partitions(islet_id)")
+        await conn.commit()
+
+    async def get_saved_partitions(self) -> dict[str, dict]:
+        """Lock-free read. Returns a dictionary mapping track_path -> {mood, islet_id}."""
+        conn = await self.get_connection()
+        async with conn.execute("SELECT track_path, mood, islet_id FROM track_partitions") as cursor:
+            rows = await cursor.fetchall()
+            return {r["track_path"]: {"mood": r["mood"], "islet_id": r["islet_id"]} for r in rows}
+
+    async def save_partitions(self, assignments: list[tuple[str, str, int]]):
+        """Mutation: Overwrites the partition assignments in the database."""
+        async with self._write_lock:
+            conn = await self.get_connection()
+            try:
+                await conn.execute("DELETE FROM track_partitions")
+                if assignments:
+                    await conn.executemany(
+                        "INSERT INTO track_partitions (track_path, mood, islet_id) VALUES (?, ?, ?)",
+                        assignments
+                    )
+                await conn.commit()
+            except Exception as e:
+                await conn.rollback()
+                logger.error(f"Failed to save partitions: {e}")
+                raise
+
     # ─── Playlist CRUD ─────────────────────────────────────────────────────────
 
     async def get_all_playlists(self, search_query: str = "", sort_mode: str = "date") -> list[dict]:
@@ -1222,6 +1302,117 @@ class DatabaseManager:
         async with conn.execute(sql, params) as cursor:
             row = await cursor.fetchone()
             return row[0] if row else 0
+
+    async def get_neighbors_multi(
+        self,
+        track_path: str,
+        edge_kinds: tuple[str, ...],
+        k: int = 30,
+    ) -> list[dict]:
+        """Pool neighbours across multiple edge_kinds in one query. Returns
+        rows with `path`, `weight`, `edge_kind`, `title`, `artist`, `album`.
+        Caller is responsible for re-weighting by edge_kind and de-duplicating
+        on `path` (the same track can appear in both acoustic and artist tiers).
+        """
+        if not edge_kinds:
+            return []
+        conn = await self.get_connection()
+        placeholders = ",".join("?" * len(edge_kinds))
+        sql = f'''
+            SELECT n.neighbor_path AS path, n.weight, n.edge_kind,
+                   t.title, ar.name AS artist, al.title AS album
+            FROM track_neighbors n
+            LEFT JOIN tracks  t  ON t.path     = n.neighbor_path
+            LEFT JOIN albums  al ON al.id      = t.album_id
+            LEFT JOIN artists ar ON ar.id      = al.artist_id
+            WHERE n.track_path = ? AND n.edge_kind IN ({placeholders})
+            ORDER BY n.weight DESC
+            LIMIT ?
+        '''
+        params = (track_path, *edge_kinds, k)
+        async with conn.execute(sql, params) as cursor:
+            return [dict(r) for r in await cursor.fetchall()]
+
+    async def get_embeddings_for_paths(
+        self, paths: list[str]
+    ) -> dict[str, bytes]:
+        """Bulk-load timbre BLOBs for an arbitrary path list. Used by the
+        walk's MMR diversity term to compute candidate-to-visited similarity
+        without N round-trips. Missing rows are simply absent from the map."""
+        if not paths:
+            return {}
+        conn = await self.get_connection()
+        # SQLite parameter limit is ~999; chunk to be safe at large libraries.
+        out: dict[str, bytes] = {}
+        for i in range(0, len(paths), 500):
+            chunk = paths[i:i + 500]
+            placeholders = ",".join("?" * len(chunk))
+            sql = (
+                "SELECT track_path, timbre FROM play_counts "
+                f"WHERE track_path IN ({placeholders}) AND timbre IS NOT NULL"
+            )
+            async with conn.execute(sql, chunk) as cursor:
+                for r in await cursor.fetchall():
+                    out[r[0]] = r[1]
+        return out
+
+    # ── Playback history (long-term avoid + listen feedback) ────────────────
+
+    async def record_playback(
+        self,
+        path: str,
+        event: str = "played",
+        seed_path: str | None = None,
+    ) -> None:
+        """Append a single playback event. `event` is one of 'played'
+        (track started), 'completed' (played past the listen-signal threshold)
+        or 'skipped_early' (cut off well before completion)."""
+        if not path:
+            return
+        async with self._write_lock:
+            conn = await self.get_connection()
+            await conn.execute(
+                "INSERT INTO playback_history (track_path, played_at, event, seed_path) "
+                "VALUES (?, strftime('%s','now'), ?, ?)",
+                (path, event, seed_path),
+            )
+            await conn.commit()
+
+    async def recent_played_paths(self, window_seconds: int = 7 * 86400) -> set[str]:
+        """Distinct track paths that have a 'played' event within the last
+        `window_seconds`. Used by the assistant as a long-term avoid set so
+        "play similar" doesn't repeat tracks across app restarts."""
+        conn = await self.get_connection()
+        sql = (
+            "SELECT DISTINCT track_path FROM playback_history "
+            "WHERE event = 'played' "
+            "AND played_at >= strftime('%s','now') - ?"
+        )
+        async with conn.execute(sql, (window_seconds,)) as cursor:
+            return {r[0] for r in await cursor.fetchall()}
+
+    async def listen_signal_map(self) -> dict[str, float]:
+        """Returns {path: normalised_signal} in roughly [-1, 1] computed as
+            (completed - skipped_early) / max(plays, 5)
+        Plays are denominator-floored at 5 so a single skip on a brand-new
+        track only pushes its signal to -0.2 rather than -1.0. Tracks with
+        no history are simply absent from the map (the consumer treats
+        absence as zero)."""
+        conn = await self.get_connection()
+        sql = '''
+            SELECT track_path,
+                   SUM(CASE WHEN event = 'completed'     THEN 1 ELSE 0 END) AS done,
+                   SUM(CASE WHEN event = 'skipped_early' THEN 1 ELSE 0 END) AS skip,
+                   SUM(CASE WHEN event = 'played'        THEN 1 ELSE 0 END) AS plays
+            FROM playback_history
+            GROUP BY track_path
+        '''
+        out: dict[str, float] = {}
+        async with conn.execute(sql) as cursor:
+            for r in await cursor.fetchall():
+                denom = max(int(r["plays"] or 0), 5)
+                out[r["track_path"]] = (int(r["done"] or 0) - int(r["skip"] or 0)) / float(denom)
+        return out
 
     async def get_track_full(self, path: str) -> dict | None:
         """Single-row lookup returning title/artist/album/image_url for a path.
