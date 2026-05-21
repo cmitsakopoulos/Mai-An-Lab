@@ -10,4 +10,5 @@ tinytag
 aiofiles
 serious-python
 numpy
+pyobjc-framework-AVFoundation; sys_platform == "darwin"
 -e ../flet_audio_service

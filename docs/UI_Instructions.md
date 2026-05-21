@@ -36,7 +36,7 @@ To keep Flet’s widget tree extremely tiny and guarantee memory-safe, ultra-flu
 - **Tactile Pagination Bar**: An elegant, glassmorphic pagination bar is rendered at the bottom of the screen.
 - **Interactive Navigation**:
   - **Button Taps**: Tap the left or right chevron arrow buttons on the pagination bar to change pages.
-  - **Interactive Boundary Ghost Cards**: Custom glassmorphic boundary ghost cards appear at the top and bottom of the list when scrolled to the limits. These cards are fully interactive and clickable—clicking the top ghost card instantly navigates to the previous page, and clicking the bottom ghost card instantly navigates to the next page.
+  - **Interactive Boundary Ghost Cards**: Custom glassmorphic boundary ghost cards appear at the top and bottom of the list when scrolled to the limits. These cards are fully interactive and clickable; clicking the top ghost card instantly navigates to the previous page, and clicking the bottom ghost card instantly navigates to the next page.
   - *Note*: Horizontal swipe gestures for page turning are explicitly removed to prevent accidental or uncontrollable page switching during standard scrolling.
 
 ---
@@ -169,5 +169,5 @@ If the user navigates to the Search tab without Qobuz credentials configured in 
 ### 5.3 Context-Aware Jarvis Assistant Alerts
 If a new user activates the Jarvis Voice Assistant (e.g. by swiping open the assistant chat or using PTT) and asks to play music while the catalog is still unindexed:
 * **Vocal Reply**: Jarvis politely and deterministically vocalizes: *"Your library is currently empty, sir. Please configure your music folder first."*
-* **Display Output**: Appends an on-screen chat bubble: *"Library is empty — cannot play a random track."* to keep the user clearly informed of the setup requirements.
+* **Display Output**: Appends an on-screen chat bubble: *"Library is empty; cannot play a random track."* to keep the user clearly informed of the setup requirements.
 

@@ -1415,16 +1415,20 @@ class DatabaseManager:
         return out
 
     async def get_track_full(self, path: str) -> dict | None:
-        """Single-row lookup returning title/artist/album/image_url for a path.
-        Used by the assistant when it needs to enqueue or describe a track
-        and only has the path on hand."""
+        """Single-row lookup returning title/artist/album/genre and the DSP
+        timbre BLOB for a path. The LEFT JOIN on play_counts means callers
+        get `row["timbre"]` for free without a second query — used by
+        islet creation (Jarvis + Library dialog) where we need the timbre
+        vector immediately after grabbing the metadata."""
         conn = await self.get_connection()
         sql = '''
             SELECT t.path, t.title, t.duration, t.format,
-                   ar.name AS artist, al.title AS album, al.year, al.genre
+                   ar.name AS artist, al.title AS album, al.year, al.genre,
+                   pc.timbre
             FROM tracks t
-            LEFT JOIN albums  al ON al.id     = t.album_id
-            LEFT JOIN artists ar ON ar.id     = al.artist_id
+            LEFT JOIN albums      al ON al.id          = t.album_id
+            LEFT JOIN artists     ar ON ar.id          = al.artist_id
+            LEFT JOIN play_counts pc ON pc.track_path  = t.path
             WHERE t.path = ?
         '''
         async with conn.execute(sql, (path,)) as cursor:

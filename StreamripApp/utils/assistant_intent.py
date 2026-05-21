@@ -76,12 +76,11 @@ try:
 except Exception:  # pragma: no cover — defensive fallback
     MOOD_KEYWORDS = (
         "chill", "chilled", "relaxed", "relaxing", "calm", "mellow", "soft",
-        "upbeat", "energetic", "intense", "hard", "heavy", "powerful",
-        "happy", "uplifting",
-        "fast", "quick", "slow", "lazy",
-        "dark", "moody", "bright",
+        "upbeat", "energetic", "intense", "hard", "heavy", "powerful", "happy", "uplifting",
+        "fast", "quick", "slow",
+        "moody", "bright",
         "ambient",
-        "tonal", "melodic", "noisy", "textured", "acoustic",
+        "noisy", "acoustic",
     )
 
 
@@ -120,14 +119,35 @@ def _build_patterns(mood_keywords: list[str]) -> list[tuple[str, re.Pattern]]:
             r"^\s*(?:no|nope|nah|not\s+now|later|cancel|stop|forget\s+it|"
             r"negative|never\s+mind|nevermind)\s*[.!]?\s*$", re.I)),
 
-        # ── Custom Mood Wizard (Pillar 3) ───────────────────────────────────────
+        # ── Islet creation (single-shot) ────────────────────────────────────────
+        # The currently-playing track seeds a named islet in one turn — no
+        # multi-turn exemplar collection. Phrases accepted:
+        #   "save this as <name>" / "save this track as <name>"
+        #   "save current as <name>"
+        #   "name this islet <name>" / "create islet <name>" / "make an islet called <name>"
+        #   "create/make/build/register a custom mood <name>"  (legacy wording)
+        (INTENT_CREATE_MOOD, re.compile(
+            r"^\s*save\s+(?:this(?:\s+(?:track|song))?|current(?:\s+track)?|it)"
+            r"\s+as\s+(?:an?\s+)?(?:islet\s+)?"
+            r"(?:called\s+|named\s+|titled\s+)?(?P<q>.+?)\s*$",
+            re.I
+        )),
+        (INTENT_CREATE_MOOD, re.compile(
+            r"^\s*(?:name|label)\s+this\s+(?:islet|mood)\s+(?P<q>.+?)\s*$",
+            re.I
+        )),
+        (INTENT_CREATE_MOOD, re.compile(
+            r"^\s*(?:create|make|build|register)\s+(?:an?\s+)?islet"
+            r"(?:\s+(?:called|named|titled))?\s+(?P<q>.+?)\s*$",
+            re.I
+        )),
         (INTENT_CREATE_MOOD, re.compile(
             r"^\s*(?:create|make|build|register)\s+(?:a\s+)?custom\s+mood"
             r"(?:\s+(?:called|named|titled))?\s+(?P<q>.+?)\s*$",
             re.I
         )),
         (INTENT_CREATE_MOOD, re.compile(
-            r"^\s*(?:create|make|build|register)\s+(?:a\s+)?custom\s+mood\s*$",
+            r"^\s*(?:create|make|build|register)\s+(?:a\s+)?(?:custom\s+mood|islet)\s*$",
             re.I
         )),
 

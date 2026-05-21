@@ -167,7 +167,7 @@ class SemanticIntentClassifier:
             ],
             "playlist_auto": [
                 "create a smart mood playlist", "make a chill playlist", "build an upbeat playlist",
-                "generate a dark mood playlist"
+                "generate a moody playlist"
             ],
             "skip": [
                 "skip this song", "play the next track", "go to the next song", "next please",

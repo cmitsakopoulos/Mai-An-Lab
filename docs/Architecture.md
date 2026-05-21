@@ -8,8 +8,9 @@ This document covers the structural components of Mai-An Lab and the optimizatio
 |-----------|------|
 | [StreamripApp](../StreamripApp) | UI, download queue, library indexer, search, playlist engine. |
 | [db_manager.py](../StreamripApp/utils/db_manager.py) | SQLite + FTS5 layer: schema, triggers, async transactions. |
-| [audio_engine.py](../StreamripApp/utils/audio_engine.py) | Player state, queue management, ExoPlayer workarounds. |
-| [flet_audio_service](../flet_audio_service) | Python ↔ Dart ↔ Kotlin bridge for system-level media controls. |
+| [audio_engine.py](../StreamripApp/utils/audio_engine.py) | Android player state and queue management; ExoPlayer integration. |
+| [audio_engine_macos.py](../StreamripApp/utils/audio_engine_macos.py) | macOS player state and queue management; native AVFoundation integration. |
+| [flet_audio_service](../flet_audio_service) | Python ↔ Dart ↔ Kotlin bridge for system-level media controls on Android. |
 
 ---
 
@@ -92,10 +93,11 @@ These fields are kept in sync by database triggers (`trg_tracks_insert_counts`, 
 
 ---
 
-## Android Performance Tuning
+## Platform Performance Tuning & Architectural Dual-Support
 
-To achieve a stable 60 FPS UI on Android while running a full CPython backend, several Android-specific optimizations were implemented:
+To achieve a stable 60 FPS UI across platforms while running a full CPython backend, the architecture deploys tailored optimizations for each host operating system:
 
+### Android-Specific Optimizations
 - **Targeted UI Refreshes**; the app bypasses Flet's global `page.update()` for the high-frequency playback heartbeat. By refreshing only the specific player controls, we reduce background CPU spikes by ~60%.
 - **Throttled Position Heartbeat**; playback position mirroring is strictly throttled to **1.5s** intervals. This minimizes Python/Dart bridge chatter and preserves battery life.
 - **Zero-Cost Indicators**; heavy Python-driven animation loops were replaced with static or GPU-accelerated native indicators, keeping the background CPU baseline to a minimum.
@@ -103,6 +105,13 @@ To achieve a stable 60 FPS UI on Android while running a full CPython backend, s
 - **High-Performance Carousel Slide-In Pagination**; rather than appending thousands of result cards in a massive flat list that bloats Flet's control tree and chokes the mobile memory buffer, both LibraryView and SearchView render only **one active page at a time** (typically **35** items per page). Swapping pages teleports the scroll offset off-screen instantly and triggers a highly optimized, snappy, hardware-accelerated **Slide-In and Fade Offset Animation** (tuned to **100ms** with a **80ms** sleep redraw interval), keeping the widget tree tiny and UI rendering at a rock-solid 60 FPS.
   - *Gesture-Safe Navigation*: Swipe-to-turn gestures are removed to prevent erratic, accidental page jumps during normal touch-scrolling. Page transitions are driven reliably via explicit pagination chevrons and fully clickable boundary ghost cards at the limits of the scroll view.
 - **Background Search Inactivity Lifecycle (Battery Saver)**; remote search operations rely on an asynchronous worker loop running on a background daemon thread. To eliminate silent battery drain and memory overhead while the app is in the background or active on other tabs, the thread, loop, and Qobuz client session are completely torn down and closed after **5 minutes** of inactivity, and seamlessly recreated on-demand when a new query is executed.
+
+### macOS-Specific Optimizations
+- **Direct-In-Process Native Execution**; rather than using heavy inter-process MethodChannels or launching external players, macOS utilizes `pyobjc-framework-AVFoundation` to play audio within the same CPython process. This keeps memory and startup overhead extremely low.
+- **Lock-Synchronized CoreAudio Pipeline**; a dedicated reentrant thread lock (`threading.RLock`) surrounds all queue mutations, state changes, playback commands, and observer updates. This guarantees absolute thread-safety when async events (like user interface controls) collide with high-frequency background playback heartbeats.
+- **Decoupled Position Updates & UI Throttle**; the high-precision internal position state (`self.position`) is updated instantly at 10 Hz from a custom background polling thread to guarantee precise track resumption and seamless seeking. However, Flet's layout notification pipeline (`self.dispatch`) is throttled to 5 Hz (once every `0.20s`), eliminating UI thread layout congestion while maintaining visual responsiveness.
+- **Automated Subprocess Isolation**; by completely bypassing shell wrappers or command-line subprocess decoders for music playback, the macOS client eliminates the risk of resource leaks, defunct threads, or system-wide zombie processes.
+
 
 ## Artwork Caching & Temporary Storage
 
