@@ -64,7 +64,7 @@ def _row(path, **kwargs):
 class TestMoodVocabulary(unittest.TestCase):
     def test_canonical_resolves_alias(self):
         self.assertEqual(tg.mood_canonical("chilled"), "chill")
-        self.assertEqual(tg.mood_canonical("relaxing"), "relaxed")
+        self.assertEqual(tg.mood_canonical("relaxing"), "chill")
         self.assertEqual(tg.mood_canonical("CHILL"), "chill")
 
     def test_unknown_returns_none(self):
@@ -158,6 +158,15 @@ class TestMoodScoring(unittest.TestCase):
 class TestListenFeedback(unittest.TestCase):
     def setUp(self):
         tg.invalidate_mood_cache()
+        from utils.track_graph import MoodSpec
+        self._old_noisy = tg.MOODS.get("noisy")
+        tg.MOODS["noisy"] = MoodSpec("noisy", {"spectral_flatness": 0.90})
+
+    def tearDown(self):
+        if self._old_noisy is None:
+            tg.MOODS.pop("noisy", None)
+        else:
+            tg.MOODS["noisy"] = self._old_noisy
 
     def test_signal_demotes_skipped_track(self):
         # Use the single-feature "noisy" mood (target spectral_flatness percentile 0.90) so
