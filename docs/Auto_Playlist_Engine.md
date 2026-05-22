@@ -360,6 +360,39 @@ $$\text{mood\_score}_i = \alpha \cdot \text{scalar\_score}_i + (1 - \alpha) \cdo
 
 where $\alpha = 0.50$ represents the default balance parameter (`_MOOD_ALPHA_SCALAR`). The `scalar_score` provides the library-relative percentile-Euclidean distance, and the `centroid_score` provides the raw high-dimensional cosine similarity.
 
+### 4.6 Smart Online Learning (Dynamic Mood Profile Adaptation)
+
+To allow the library's preset and custom moods to dynamically morph and adapt to the listener's tastes over time, the system features a robust **Smart Online Learning** algorithm driven by active track feedback (Likes/Dislikes) in the Mood Subsets pane.
+
+#### A. The Profile Tuning Learning Rule
+When a user provides positive or negative feedback on a track $i$ under mood $M$, the system performs a gradient shift on the mood's target DSP percentiles ($T_f$). 
+Let $P_{i, f} \in [0, 1]$ be the library-relative percentile rank of track $i$ for scalar feature $f$. The target percentile $T_f$ is shifted using a learning rate parameter $\eta = 0.15$:
+
+- **On Like (Positive Reinforcement)**:
+  $$T_f \leftarrow T_f + \eta \cdot (P_{i, f} - T_f)$$
+  This pulls the mood's target profile *closer* to the liked track's features, expanding the mood's boundaries to naturally pull similar tracks in.
+  
+- **On Dislike (Negative Reinforcement)**:
+  $$T_f \leftarrow T_f - \eta \cdot (P_{i, f} - T_f)$$
+  This pushes the mood's target profile *away* from the disliked track's features, narrowing the boundaries to repel similar tracks.
+
+After shifting, the updated target $T_f$ is strictly clamped to the unit interval:
+$$T_f \leftarrow \max(0.0, \min(1.0, T_f))$$
+The adjusted profiles are saved persistently in the `mood_profiles` SQLite table and are loaded dynamically during subsequent scoring runs.
+
+#### B. Likes as Dynamic Pins & Similar Song Walks
+Liking a track does more than tune the DSP profile; it triggers immediate structural graph changes:
+1. **Assignment Pinning**: The track is hard-pinned to that mood subset, bypassing natural scoring requirements during partition routing.
+2. **Short Random Walk Expansion**: The engine executes a short **random walk of length 5** (`tg.walk` using `acoustic` and `artist` edge kinds) starting from the liked track. The walk discovers adjacent sonically-similar songs and automatically propagates positive feedback (Likes) to them, seamlessly grouping them into the same mood.
+
+#### C. Dislikes & Automatic Fallback Routing
+Disliking a track applies a persistent, hard exclusion constraint on the track-mood combination:
+1. **Assignment Exclusion**: The track is blocked from entering that mood subset under all circumstances.
+2. **Second-Best Matching Routing**: The partition calculator re-evaluates the track's score across all remaining moods. It automatically re-routes the track to its next-highest scored matching mood, ensuring the disliked track is instantly removed from the current subset but remains organized within the library.
+
+#### D. The Feedback Reset Hook
+Users can erase all manual adjustments at any time. Activating the reset option deletes all rows from the `mood_feedback` and `mood_profiles` tables and invalidates the cached percentile matrix. This immediately restores all moods to their pristine factory-default profiles and triggers a clean recalculation of all track partition assignments.
+
 ---
 
 ## 5. Harmonic-Aware Sequencing (the Camelot wheel)

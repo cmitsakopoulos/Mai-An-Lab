@@ -2387,6 +2387,8 @@ class LibraryView:
         # membership against each saved islet's centroid via tg.tracks_in_islet.
         self._cached_islets: dict[str, list[dict]] | None = None
         self._cached_unanalysed: list[dict] | None = None
+        self._mood_feedback_map: dict[str, dict[str, int]] = {}
+        self._mood_recalc_pending = False
 
         # ── Controls ───────────────────────────────────────────────────────
         # ── Library Search Bar (matches SearchView unified design) ───────────
@@ -2444,7 +2446,7 @@ class LibraryView:
         self.partition_sub_mode = "moods"
         self._partition_tabs = ft.Container(
             content=ft.Row(
-                spacing=12,
+                spacing=6,
                 alignment=ft.MainAxisAlignment.CENTER,
             ),
             visible=False,
@@ -2553,6 +2555,46 @@ class LibraryView:
             visible=False,
         )
 
+        # Mood selection for partitions page
+        self.selected_mood_index = 0
+        self._prev_mood_btn = ft.IconButton(
+            icon=ft.Icons.CHEVRON_LEFT_ROUNDED,
+            icon_color=LIB_PARTITION_COLOR,
+            icon_size=20,
+            tooltip="Previous Mood",
+            on_click=lambda e: self.page.run_task(self._change_mood, -1)
+        )
+        self._next_mood_btn = ft.IconButton(
+            icon=ft.Icons.CHEVRON_RIGHT_ROUNDED,
+            icon_color=LIB_PARTITION_COLOR,
+            icon_size=20,
+            tooltip="Next Mood",
+            on_click=lambda e: self.page.run_task(self._change_mood, 1)
+        )
+        self._mood_label = ft.Text(
+            "",
+            color=TEXT,
+            size=14,
+            weight=ft.FontWeight.BOLD,
+        )
+        self._mood_pagination_bar = ft.Container(
+            content=ft.Row(
+                [
+                    self._prev_mood_btn,
+                    self._mood_label,
+                    self._next_mood_btn,
+                ],
+                alignment=ft.MainAxisAlignment.CENTER,
+                spacing=20,
+            ),
+            bgcolor=apply_opacity(0.05, LIB_PARTITION_COLOR),
+            border=ft.Border.all(1, apply_opacity(0.15, LIB_PARTITION_COLOR)),
+            border_radius=12,
+            padding=ft.Padding.symmetric(vertical=4, horizontal=16),
+            margin=ft.Margin.only(left=14, right=14, bottom=6),
+            visible=False,
+        )
+
         self._empty_label = ft.Container(
             content=ft.Column(
                 [
@@ -2606,6 +2648,7 @@ class LibraryView:
                             ft.Row([self._search_bar_container], spacing=0),
                             self._view_tabs_row,
                             self._partition_tabs,
+                            self._mood_pagination_bar,
                             self._scan_progress_container,
                         ],
                         spacing=10,
@@ -2695,9 +2738,182 @@ class LibraryView:
         self._update_partition_tabs_ui()
         self.page.run_task(self.load_library)
 
+    async def _change_mood(self, delta: int):
+        if not self._cached_moods:
+            return
+
+        # Gather active sections matching the search query
+        active_moods = []
+        sq = self.search_query.lower() if self.search_query else ""
+        def matches_query(t):
+            if not sq: return True
+            return (
+                sq in (t.get("title") or "").lower() or
+                sq in (t.get("artist") or "").lower() or
+                sq in (t.get("album") or "").lower() or
+                sq in (t.get("path") or "").lower()
+            )
+
+        for mood, tracks in (self._cached_moods or {}).items():
+            filtered = [t for t in tracks if matches_query(t)]
+            if filtered:
+                active_moods.append((mood, filtered))
+
+        active_moods.sort(key=lambda x: len(x[1]), reverse=True)
+
+        unanalysed_searched = [t for t in (self._cached_unanalysed or []) if matches_query(t)]
+
+        active_sections = []
+        for mood, tracks in active_moods:
+            active_sections.append(mood)
+        if unanalysed_searched:
+            active_sections.append("Unanalysed Tracks")
+
+        if not active_sections:
+            return
+
+        # Cycle selected mood index with wrapping
+        self.selected_mood_index = (self.selected_mood_index + delta) % len(active_sections)
+        self.current_page = 0
+        await self.load_library()
+
     def _refresh_partitions_click(self, e):
         self.app.show_snackbar("Recalculating Mood Subsets...")
         self.page.run_task(self.recalculate_partitions_worker)
+
+    async def _toggle_mood_like(self, track_path: str, mood: str, btn: ft.IconButton = None):
+        db = self.app.db_manager
+        from utils import track_graph as tg
+        try:
+            feedback_map = await db.get_mood_feedback()
+            is_liked = feedback_map.get(track_path, {}).get(mood, 0) == 1
+            
+            # Toggle feedback
+            new_fb = 0 if is_liked else 1
+            await db.save_mood_feedback(track_path, mood, new_fb)
+            self._mood_feedback_map.setdefault(track_path, {})[mood] = new_fb
+            
+            feedback_str = "Like removed" if is_liked else "Track pinned to mood"
+            
+            # Optimistic UI update for the clicked button
+            if btn:
+                btn.icon = ft.Icons.THUMB_UP_OUTLINED if is_liked else ft.Icons.THUMB_UP_ROUNDED
+                btn.icon_color = DIM if is_liked else CYAN
+                self.try_update(btn)
+            
+            # Optimistic UI update for any duplicate controls of this track
+            for ctrl in self._path_to_controls.get(track_path, []):
+                try:
+                    tile = ctrl.content.content
+                    if isinstance(tile.trailing, ft.Row) and len(tile.trailing.controls) >= 2:
+                        l_btn = tile.trailing.controls[0]
+                        l_btn.icon = ft.Icons.THUMB_UP_OUTLINED if is_liked else ft.Icons.THUMB_UP_ROUNDED
+                        l_btn.icon_color = DIM if is_liked else CYAN
+                        self.try_update(l_btn)
+                except Exception:
+                    pass
+
+            if not is_liked:
+                # Run learning shift & random walk in background
+                async def run_learning_and_walk():
+                    try:
+                        walk_tracks = await tg.walk(db, track_path, length=5, edge_kinds=(tg.KIND_ACOUSTIC, tg.KIND_ARTIST))
+                        for wt in walk_tracks:
+                            await db.save_mood_feedback(wt, mood, 1)
+                            self._mood_feedback_map.setdefault(wt, {})[mood] = 1
+                            for ctrl in self._path_to_controls.get(wt, []):
+                                try:
+                                    tile = ctrl.content.content
+                                    if isinstance(tile.trailing, ft.Row) and len(tile.trailing.controls) >= 2:
+                                        l_btn = tile.trailing.controls[0]
+                                        l_btn.icon = ft.Icons.THUMB_UP_ROUNDED
+                                        l_btn.icon_color = CYAN
+                                        self.try_update(l_btn)
+                                except Exception:
+                                    pass
+                    except Exception as walk_err:
+                        logger.exception("Random walk failed during like toggle: %s", walk_err)
+
+                    try:
+                        await tg.adjust_mood_profile(db, mood, track_path, 1)
+                    except Exception as shift_err:
+                        logger.exception("Online learning shift failed during like: %s", shift_err)
+
+                self.page.run_task(run_learning_and_walk)
+
+            self._mood_recalc_pending = True
+            self._update_partition_tabs_ui()
+            self.app.show_snackbar(f"{feedback_str}. Recalculation pending.")
+        except Exception as e:
+            logger.exception("Failed to toggle mood like: %s", e)
+            self.app.show_snackbar(f"Failed to like track: {e}")
+
+    async def _register_mood_dislike(self, track_path: str, mood: str, btn: ft.IconButton = None):
+        db = self.app.db_manager
+        from utils import track_graph as tg
+        try:
+            # Save negative feedback
+            await db.save_mood_feedback(track_path, mood, -1)
+            self._mood_feedback_map.setdefault(track_path, {})[mood] = -1
+            
+            # Optimistic row deletion
+            controls = self._path_to_controls.get(track_path, [])
+            removed_any = False
+            for ctrl in controls:
+                if ctrl in self._library_list.controls:
+                    self._library_list.controls.remove(ctrl)
+                    removed_any = True
+            
+            if removed_any:
+                self.try_update(self._library_list)
+            
+            # Decrement search stats label
+            try:
+                if self._stats_label.text:
+                    parts = self._stats_label.text.split()
+                    if parts and parts[0].isdigit():
+                        cnt = max(0, int(parts[0]) - 1)
+                        self._stats_label.text = f"{cnt} {'TRACK' if cnt == 1 else 'TRACKS'}"
+                        self.try_update(self._stats_label)
+            except Exception:
+                pass
+
+            # Run learning shift in background
+            async def run_learning_dislike():
+                try:
+                    await tg.adjust_mood_profile(db, mood, track_path, -1)
+                except Exception as shift_err:
+                    logger.exception("Online learning shift failed during dislike: %s", shift_err)
+
+            self.page.run_task(run_learning_dislike)
+
+            self._mood_recalc_pending = True
+            self._update_partition_tabs_ui()
+            self.app.show_snackbar("Track excluded from mood subset. Recalculation pending.", color=CYAN)
+        except Exception as e:
+            logger.exception("Failed to register mood dislike: %s", e)
+            self.app.show_snackbar(f"Failed to dislike track: {e}")
+
+    async def _reset_mood_feedback(self):
+        db = self.app.db_manager
+        try:
+            self.app.show_snackbar("Resetting mood feedback & profiles...")
+            await db.clear_all_mood_feedback()
+            await db.clear_all_adjusted_mood_profiles()
+            self._mood_feedback_map.clear()
+            self._mood_recalc_pending = False
+            
+            # Invalidate cache of percentile matrix
+            from utils import track_graph as tg
+            tg.invalidate_mood_cache()
+            
+            # Recalculate
+            await self.recalculate_partitions_worker()
+            self.app.show_snackbar("Mood feedback & profiles reset successfully.", color=CYAN)
+        except Exception as e:
+            logger.exception("Failed to reset mood feedback: %s", e)
+            self.app.show_snackbar(f"Failed to reset mood feedback: {e}")
+
 
     async def recalculate_partitions_worker(self):
         self.app.safe_update(lambda: setattr(self._search_spinner, "visible", True))
@@ -2731,23 +2947,52 @@ class LibraryView:
             mood_assignments = {}
             if analysed_rows and len(analysed_indices) > 0:
                 filtered_percentiles = percentile_matrix[analysed_indices]
+                
+                # Load feedback and customized profiles from database
+                feedback_map = await db.get_mood_feedback()
+                adjusted_profiles = await db.get_all_adjusted_mood_profiles()
+                
                 mood_scores = {}
                 for mood, spec in tg.MOODS.items():
-                    if spec.profile:
-                        mood_scores[mood] = tg._score_against_profile(spec.profile, filtered_percentiles)
+                    profile = adjusted_profiles.get(mood) or spec.profile
+                    if profile:
+                        mood_scores[mood] = tg._score_against_profile(profile, filtered_percentiles)
                     else:
                         mood_scores[mood] = np.full(len(analysed_rows), -np.inf, dtype=np.float32)
                         
                 for i, track in enumerate(analysed_rows):
-                    best_mood = None
-                    best_score = -np.inf
-                    for mood in tg.MOODS.keys():
-                        score = mood_scores[mood][i]
-                        if score > best_score:
-                            best_score = score
-                            best_mood = mood
+                    path = track["path"]
+                    track_feedback = feedback_map.get(path, {})
+                    
+                    # 1. Check if the track has any liked feedback (fb == 1)
+                    track_likes = [m for m, fb in track_feedback.items() if fb == 1]
+                    if track_likes:
+                        # Pin track to the highest-scoring liked mood
+                        best_mood = None
+                        best_score = -np.inf
+                        for mood in track_likes:
+                            if mood in mood_scores:
+                                score = mood_scores[mood][i]
+                                if score > best_score:
+                                    best_score = score
+                                    best_mood = mood
+                        if best_mood is None:
+                            best_mood = track_likes[0]
+                    else:
+                        # 2. Exclude disliked moods (fb == -1)
+                        dislikes = {m for m, fb in track_feedback.items() if fb == -1}
+                        best_mood = None
+                        best_score = -np.inf
+                        for mood in tg.MOODS.keys():
+                            if mood in dislikes:
+                                continue
+                            score = mood_scores[mood][i]
+                            if score > best_score:
+                                best_score = score
+                                best_mood = mood
+                                
                     if best_mood is not None:
-                        mood_assignments[track["path"]] = best_mood
+                        mood_assignments[path] = best_mood
             
             # Islets are user-driven now (created from the Library "New Islet"
             # button or via Jarvis "save this as <name>"). Bulk graph-component
@@ -2765,6 +3010,8 @@ class LibraryView:
             self._cached_islets = None
             self._cached_unanalysed = None
 
+            self._mood_recalc_pending = False
+            self._update_partition_tabs_ui()
             self.app.show_snackbar("Mood subsets regenerated.")
             await self.load_library()
         except Exception as ex:
@@ -2789,7 +3036,7 @@ class LibraryView:
                             [
                                 ft.Icon(icon, color=BG if is_active else active_col, size=16),
                                 ft.Text(label, size=12, weight=ft.FontWeight.W_700,
-                                        color=BG if is_active else TEXT),
+                                        color=BG if is_active else TEXT, no_wrap=True),
                             ],
                             spacing=6,
                             alignment=ft.MainAxisAlignment.CENTER,
@@ -2800,7 +3047,8 @@ class LibraryView:
                         padding=ft.Padding.symmetric(horizontal=16, vertical=8),
                         animate=ft.Animation(150, ft.AnimationCurve.EASE_OUT),
                     ),
-                    on_tap=lambda e, m=mode: self._set_partition_sub_mode(m)
+                    on_tap=lambda e, m=mode: self._set_partition_sub_mode(m),
+                    expand=True,
                 )
             )
         # "New Islet" only shown when the user is on the islets sub-tab.
@@ -2815,13 +3063,26 @@ class LibraryView:
                     on_click=lambda _: self._open_create_islet_dialog(),
                 )
             )
+        # Reset mood feedback button (mood subsets only)
+        if self.partition_sub_mode == "moods":
+            tabs.append(
+                ft.IconButton(
+                    icon=ft.Icons.RESTART_ALT_ROUNDED,
+                    icon_color=active_col,
+                    icon_size=18,
+                    tooltip="Reset Mood Feedback",
+                    bgcolor=apply_opacity(0.08, active_col),
+                    on_click=lambda _: self.page.run_task(self._reset_mood_feedback),
+                )
+            )
         # Refresh partitions button (mood subsets only — islets are user-driven)
+        is_pending = getattr(self, "_mood_recalc_pending", False)
         tabs.append(
             ft.IconButton(
                 icon=ft.Icons.REFRESH_ROUNDED,
-                icon_color=active_col,
+                icon_color=ft.Colors.WHITE if is_pending else active_col,
                 icon_size=18,
-                tooltip="Recalculate Mood Subsets",
+                tooltip="Recalculate Mood Subsets (Changes Pending)" if is_pending else "Recalculate Mood Subsets",
                 bgcolor=apply_opacity(0.08, active_col),
                 on_click=self._refresh_partitions_click
             )
@@ -3383,13 +3644,17 @@ class LibraryView:
         total = max(1, self.total_pages)
         self._page_label.value = f"Page {self.current_page + 1} of {total}"
         
+        color = LIB_PARTITION_COLOR if self.view_mode == "partitions" else CYAN
         self._prev_page_btn.disabled = self.current_page <= 0
-        self._prev_page_btn.icon_color = DIM if self.current_page <= 0 else CYAN
+        self._prev_page_btn.icon_color = DIM if self.current_page <= 0 else color
         
         self._next_page_btn.disabled = self.current_page >= self.total_pages - 1
-        self._next_page_btn.icon_color = DIM if self.current_page >= self.total_pages - 1 else CYAN
+        self._next_page_btn.icon_color = DIM if self.current_page >= self.total_pages - 1 else color
         
-        self._pagination_bar.visible = self.total_pages > 1 and self.view_mode in ("tracks", "albums", "artists")
+        is_partitions_moods = (self.view_mode == "partitions" and self.partition_sub_mode == "moods")
+        self._pagination_bar.visible = self.total_pages > 1 and (
+            self.view_mode in ("tracks", "albums", "artists") or is_partitions_moods
+        )
         self.try_update(self._pagination_bar)
 
     async def change_page(self, new_page: int, scroll_to_bottom: bool = False):
@@ -3455,6 +3720,9 @@ class LibraryView:
                                 sub_tracks = await db.get_tracks_by_album(al['album'], al['artist'])
                                 for t in sub_tracks:
                                     controls.append(self._track_row(t, depth=2, album_context=(al['artist'], al['album'])))
+            elif self.view_mode == "partitions" and self.partition_sub_mode == "moods":
+                for item in page_items:
+                    controls.append(self._build_partition_track_row(item["data"], item["tracks"], depth=0))
                 
             if self.current_page < self.total_pages - 1:
                 controls.append(self._build_bottom_ghost())
@@ -3518,7 +3786,8 @@ class LibraryView:
             self._library_list.controls.clear(),
             self._path_to_controls.clear(),
             setattr(self._empty_label, "visible", False),
-            setattr(self._pagination_bar, "visible", False)
+            setattr(self._pagination_bar, "visible", False),
+            setattr(self._mood_pagination_bar, "visible", False)
         ))
 
         try:
@@ -3619,6 +3888,7 @@ class LibraryView:
                 
                 # Fetch saved partitions from SQLite database to avoid expensive recalculation on startup
                 saved_partitions = await db.get_saved_partitions()
+                self._mood_feedback_map = await db.get_mood_feedback()
                 
                 # Populate caches if not already warm. Moods come from the
                 # saved track_partitions table (computed by recalculate);
@@ -3741,20 +4011,58 @@ class LibraryView:
                                 
                         active_moods.sort(key=lambda x: len(x[1]), reverse=True)
                         
+                        unanalysed_searched = [t for t in (self._cached_unanalysed or []) if matches_query(t)]
+                        if unanalysed_searched:
+                            total_searched_count += len(unanalysed_searched)
+                            
+                        # Build all active sections
+                        active_sections = []
                         for mood, tracks in active_moods:
-                            content_controls = [
-                                self._build_partition_track_row(t, tracks, depth=1)
-                                for t in tracks
-                            ]
-                            accordion = AccordionCard(
-                                icon=ft.Icons.EMOJI_EMOTIONS_ROUNDED,
-                                title=mood.capitalize(),
-                                subtitle=f"{len(tracks)} tracks · Closest match",
-                                content_controls=content_controls
-                            )
-                            first_chunk.append(accordion)
+                            active_sections.append((mood.capitalize(), tracks, ft.Icons.EMOJI_EMOTIONS_ROUNDED))
+                        if unanalysed_searched:
+                            active_sections.append(("Unanalysed Tracks", unanalysed_searched, ft.Icons.HELP_OUTLINE_ROUNDED))
+                            
+                        if active_sections:
+                            # Clamp mood index
+                            if self.selected_mood_index >= len(active_sections):
+                                self.selected_mood_index = 0
+                            elif self.selected_mood_index < 0:
+                                self.selected_mood_index = max(0, len(active_sections) - 1)
+                                
+                            sec_title, sec_tracks, sec_icon = active_sections[self.selected_mood_index]
+                            
+                            # Populate flat rows for pagination
+                            self._flat_rows = [{"type": "partition_track", "data": t, "tracks": sec_tracks, "depth": 0} for t in sec_tracks]
+                            self.total_pages = math.ceil(len(sec_tracks) / self.items_per_page)
+                            
+                            # Update mood pagination control
+                            self._mood_label.value = sec_title
+                            self._prev_mood_btn.disabled = len(active_sections) <= 1
+                            self._next_mood_btn.disabled = len(active_sections) <= 1
+                            self._mood_pagination_bar.visible = True
+                            
+                            # Slice and build controls for current page
+                            start_idx = self.current_page * self.items_per_page
+                            end_idx = start_idx + self.items_per_page
+                            page_items = self._flat_rows[start_idx:end_idx]
+                            
+                            if self.current_page > 0:
+                                first_chunk.append(self._build_top_ghost())
+                                
+                            for item in page_items:
+                                first_chunk.append(self._build_partition_track_row(item["data"], item["tracks"], depth=0))
+                                
+                            if self.current_page < self.total_pages - 1:
+                                first_chunk.append(self._build_bottom_ghost())
+                        else:
+                            self._flat_rows = []
+                            self.total_pages = 1
+                            self._mood_pagination_bar.visible = False
                             
                     else:
+                        # Acoustic islets sub-mode: hide the mood pagination toggle
+                        self._mood_pagination_bar.visible = False
+                        
                         # User-named islets. Each one is a centroid (the
                         # exemplar track's timbre) with membership computed
                         # by cosine >= threshold via tg.tracks_in_islet.
@@ -3808,23 +4116,7 @@ class LibraryView:
                         if not (self._cached_islets or {}):
                             first_chunk.append(self._build_islet_empty_state())
                             
-                    # 5. Unanalysed Tracks Accordion
-                    unanalysed_searched = [t for t in (self._cached_unanalysed or []) if matches_query(t)]
-                    if unanalysed_searched:
-                        total_searched_count += len(unanalysed_searched)
-                        content_controls = [
-                            self._build_partition_track_row(t, unanalysed_searched, depth=1)
-                            for t in unanalysed_searched
-                        ]
-                        accordion = AccordionCard(
-                            icon=ft.Icons.HELP_OUTLINE_ROUNDED,
-                            title="Unanalysed Tracks",
-                            subtitle=f"{len(unanalysed_searched)} tracks · Missing DSP features",
-                            content_controls=content_controls
-                        )
-                        first_chunk.append(accordion)
-                        
-                    # 6. Stats label update
+                    # Stats label update
                     stats_text = f"{total_searched_count} TRACKS"
                 
                 if self._load_token != token:
@@ -4475,6 +4767,37 @@ class LibraryView:
             self.page.run_task(self.app.play_track, path, ("library", None))
             
         tile.on_click = play_partition_track
+
+        # Determine the active canonical mood name
+        from utils import track_graph as tg
+        mood = tg.mood_canonical(self._mood_label.value) if self.partition_sub_mode == "moods" and hasattr(self, "_mood_label") and self._mood_label else None
+
+        if mood:
+            # We are in mood partition mode. Add Like / Dislike buttons to the trailing part of the tile
+            feedback_map = getattr(self, "_mood_feedback_map", {})
+            track_feedback = feedback_map.get(path, {}).get(mood, 0)
+
+            is_liked = track_feedback == 1
+            is_disliked = track_feedback == -1
+
+            like_btn = ft.IconButton(
+                icon=ft.Icons.THUMB_UP_ROUNDED if is_liked else ft.Icons.THUMB_UP_OUTLINED,
+                icon_color=CYAN if is_liked else DIM,
+                icon_size=16,
+                tooltip="Like track in this mood (pin & random walk)",
+                on_click=lambda e, p=path, m=mood: self.page.run_task(self._toggle_mood_like, p, m, e.control),
+            )
+
+            dislike_btn = ft.IconButton(
+                icon=ft.Icons.THUMB_DOWN_ROUNDED if is_disliked else ft.Icons.THUMB_DOWN_OUTLINED,
+                icon_color=CYAN if is_disliked else DIM,
+                icon_size=16,
+                tooltip="Dislike track in this mood (exclude)",
+                on_click=lambda e, p=path, m=mood: self.page.run_task(self._register_mood_dislike, p, m, e.control),
+            )
+
+            tile.trailing = ft.Row([like_btn, dislike_btn], tight=True, spacing=0)
+
         return res
 
     def _edit_btn(self, edit_type: str, meta: dict, color: str = DIM) -> ft.Control:

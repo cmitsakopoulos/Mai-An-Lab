@@ -39,6 +39,13 @@ To keep Flet’s widget tree extremely tiny and guarantee memory-safe, ultra-flu
   - **Interactive Boundary Ghost Cards**: Custom glassmorphic boundary ghost cards appear at the top and bottom of the list when scrolled to the limits. These cards are fully interactive and clickable; clicking the top ghost card instantly navigates to the previous page, and clicking the bottom ghost card instantly navigates to the next page.
   - *Note*: Horizontal swipe gestures for page turning are explicitly removed to prevent accidental or uncontrollable page switching during standard scrolling.
 
+### 1.6 Mood Subsets & Feedback Controls
+When utilizing the **Mood Subsets** partitioning view:
+- **Interactive Feedback Controls**: Each track listing displays a pair of trailing icons for **Like** (thumbs up) and **Dislike** (thumbs down) interactions.
+  - **Like Interaction**: Tapping the thumbs-up icon pins the track to the current mood subset. The icon is filled with a vibrant **cyan accent** when active.
+  - **Dislike Interaction**: Tapping the thumbs-down icon immediately excludes the track from that mood subset. The system automatically re-routes the track to its second-best matching mood, displaying a confirmation snackbar.
+- **Feedback Reset**: A glassmorphic **Reset Feedback** header button (using the restart icon `ft.Icons.RESTART_ALT_ROUNDED`) is made visible when browsing mood subsets. Clicking this button clears all likes, dislikes, and dynamic DSP tuning, reverting all assignments back to their clean default states.
+
 ---
 
 ## 2. Search Functionality
