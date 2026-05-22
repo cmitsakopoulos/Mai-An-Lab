@@ -912,6 +912,18 @@ async def tracks_by_mood(
     if spec is None:
         return []
 
+    # Substitute customized profile from the database if present
+    custom_profile = await db_manager.get_adjusted_mood_profile(spec.canonical)
+    if custom_profile is not None:
+        spec = MoodSpec(
+            canonical=spec.canonical,
+            profile=custom_profile,
+            aliases=spec.aliases,
+            camelot_pref=spec.camelot_pref,
+            bpm_smooth_weight=spec.bpm_smooth_weight,
+            centroid=spec.centroid
+        )
+
     rows, percentiles = await _load_percentile_matrix(db_manager, features_version)
     if not rows:
         return []
@@ -980,6 +992,76 @@ async def tracks_by_mood(
     top_unsorted = np.argpartition(-scores, k - 1)[:k]
     top_ordered = top_unsorted[np.argsort(-scores[top_unsorted])]
     return [rows[int(i)] for i in top_ordered]
+
+
+async def adjust_mood_profile(db_manager, mood: str, track_path: str, feedback: int):
+    """
+    Perform target percentiles gradient shifts on a mood profile.
+    feedback: 1 = like (shift towards), -1 = dislike (shift away).
+    clamped to [0, 1]. Saves to mood_profiles.
+    """
+    # 1. Resolve canonical mood name
+    canonical = mood_canonical(mood)
+    if canonical is None:
+        logger.warning("adjust_mood_profile: Unknown mood %s", mood)
+        return
+
+    # 2. Get the current spec to find the features we care about and default targets
+    spec = _mood_spec(canonical)
+    if spec is None:
+        spec = _custom_mood_spec(canonical)
+    if spec is None:
+        logger.warning("adjust_mood_profile: No MoodSpec found for %s", canonical)
+        return
+
+    # Load any already adjusted profile, or fall back to spec.profile
+    current_profile = await db_manager.get_adjusted_mood_profile(canonical)
+    if current_profile is None:
+        current_profile = dict(spec.profile)
+    else:
+        current_profile = dict(current_profile)
+
+    # 3. Load the percentile matrix to find this track's percentile vector
+    rows, percentiles = await _load_percentile_matrix(db_manager, FEATURES_VERSION)
+    track_idx = None
+    for i, r in enumerate(rows):
+        if r["path"] == track_path:
+            track_idx = i
+            break
+
+    if track_idx is None:
+        logger.warning("adjust_mood_profile: Track %s not found in percentile matrix", track_path)
+        return
+
+    # Extract track's percentile vector for _MOOD_FEATURES
+    track_percentiles = percentiles[track_idx]
+    track_feat_map = {f: float(track_percentiles[col]) for col, f in enumerate(_MOOD_FEATURES)}
+
+    # 4. Perform gradient shift for all features defined in current_profile
+    # T_new = T_old +/- 0.15 * (P_track - T_old), clamped to [0, 1]
+    eta = 0.15
+    new_profile = {}
+    for feat, t_old in current_profile.items():
+        if feat not in track_feat_map:
+            new_profile[feat] = t_old
+            continue
+        p_track = track_feat_map[feat]
+        if feedback == 1:
+            # Shift towards
+            t_new = t_old + eta * (p_track - t_old)
+        elif feedback == -1:
+            # Shift away
+            t_new = t_old - eta * (p_track - t_old)
+        else:
+            t_new = t_old
+        # Clamp to [0, 1]
+        t_new = max(0.0, min(1.0, float(t_new)))
+        new_profile[feat] = t_new
+
+    # 5. Save the adjusted profile
+    await db_manager.save_adjusted_mood_profile(canonical, new_profile)
+    logger.info("adjust_mood_profile: Adjusted profile for mood '%s' based on track '%s' (feedback: %d)",
+                canonical, track_path, feedback)
 
 
 async def tracks_in_islet(

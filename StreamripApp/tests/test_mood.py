@@ -45,6 +45,9 @@ class FakeMoodDB:
     async def listen_signal_map(self):
         return dict(self.signal)
 
+    async def get_adjusted_mood_profile(self, mood: str) -> dict[str, float] | None:
+        return None
+
 
 def _row(path, **kwargs):
     base = {
@@ -157,26 +160,26 @@ class TestListenFeedback(unittest.TestCase):
         tg.invalidate_mood_cache()
 
     def test_signal_demotes_skipped_track(self):
-        # Use the single-feature "fast" mood (target bpm percentile 0.90) so
+        # Use the single-feature "noisy" mood (target spectral_flatness percentile 0.90) so
         # the ranking is deterministic from a one-column percentile rank.
-        # 8 slow distractors land at percentiles 0.0 .. 0.78; "skipped"
-        # (bpm 190) ends up at 0.89 (≈ target) and "kept" at 1.0 (slightly
+        # 8 quiet distractors land at percentiles 0.0 .. 0.78; "skipped"
+        # (spectral_flatness 0.89) ends up at 0.89 (≈ target) and "kept" at 1.0 (slightly
         # above target). Without feedback, skipped wins by ~0.09 on the
         # mood distance; β=0.20 listen-signal of −1 on skipped is more than
         # enough to flip the ranking.
-        rows = [_row(f"d{i}", bpm=60 + i * 5) for i in range(8)]
-        rows.append(_row("skipped", bpm=190))
-        rows.append(_row("kept", bpm=195))
+        rows = [_row(f"d{i}", spectral_flatness=0.1 + i * 0.05) for i in range(8)]
+        rows.append(_row("skipped", spectral_flatness=0.90))
+        rows.append(_row("kept", spectral_flatness=0.95))
         db = FakeMoodDB(rows)
 
-        baseline = _run(tg.tracks_by_mood(db, "fast", limit=2))
+        baseline = _run(tg.tracks_by_mood(db, "noisy", limit=2))
         baseline_top = {r["path"] for r in baseline}
         self.assertEqual(baseline_top, {"kept", "skipped"})
 
         tg.invalidate_mood_cache()
         db.signal["skipped"] = -1.0
         db.signal["kept"] = +0.5
-        biased = _run(tg.tracks_by_mood(db, "fast", limit=1))
+        biased = _run(tg.tracks_by_mood(db, "noisy", limit=1))
         self.assertEqual(biased[0]["path"], "kept")
 
 

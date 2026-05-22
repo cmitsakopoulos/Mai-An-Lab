@@ -228,6 +228,24 @@ class DatabaseManager:
                 await conn.execute("CREATE INDEX IF NOT EXISTS idx_tp_mood ON track_partitions(mood)")
                 await conn.execute("CREATE INDEX IF NOT EXISTS idx_tp_islet_id ON track_partitions(islet_id)")
 
+                # Mood feedback and profile adaptation tables
+                await conn.execute('''
+                    CREATE TABLE IF NOT EXISTS mood_feedback (
+                        track_path TEXT,
+                        mood       TEXT,
+                        feedback   INTEGER,
+                        PRIMARY KEY (track_path, mood)
+                    )
+                ''')
+                await conn.execute('''
+                    CREATE TABLE IF NOT EXISTS mood_profiles (
+                        mood    TEXT,
+                        feature TEXT,
+                        target  REAL,
+                        PRIMARY KEY (mood, feature)
+                    )
+                ''')
+
                 await conn.commit()
             except Exception as exc:
                 await conn.rollback()
@@ -824,6 +842,24 @@ class DatabaseManager:
         ''')
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_tp_mood ON track_partitions(mood)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_tp_islet_id ON track_partitions(islet_id)")
+
+        # Create mood_feedback and mood_profiles tables
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS mood_feedback (
+                track_path TEXT,
+                mood       TEXT,
+                feedback   INTEGER,
+                PRIMARY KEY (track_path, mood)
+            )
+        ''')
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS mood_profiles (
+                mood    TEXT,
+                feature TEXT,
+                target  REAL,
+                PRIMARY KEY (mood, feature)
+            )
+        ''')
         await conn.commit()
 
     async def get_saved_partitions(self) -> dict[str, dict]:
@@ -849,6 +885,102 @@ class DatabaseManager:
                 await conn.rollback()
                 logger.error(f"Failed to save partitions: {e}")
                 raise
+
+    async def save_mood_feedback(self, track_path: str, mood: str, feedback: int):
+        """Mutation: Save like/dislike feedback for a track in a specific mood."""
+        async with self._write_lock:
+            conn = await self.get_connection()
+            try:
+                await conn.execute(
+                    "INSERT OR REPLACE INTO mood_feedback (track_path, mood, feedback) VALUES (?, ?, ?)",
+                    (track_path, mood, feedback)
+                )
+                await conn.commit()
+            except Exception as e:
+                await conn.rollback()
+                logger.error(f"Failed to save mood feedback: {e}")
+                raise
+
+    async def get_mood_feedback(self) -> dict[str, dict[str, int]]:
+        """Lock-free read. Returns all mood feedback as a nested dict mapping track_path -> {mood: feedback}."""
+        conn = await self.get_connection()
+        async with conn.execute("SELECT track_path, mood, feedback FROM mood_feedback") as cursor:
+            rows = await cursor.fetchall()
+            out = {}
+            for r in rows:
+                path = r["track_path"]
+                mood = r["mood"]
+                val = r["feedback"]
+                if path not in out:
+                    out[path] = {}
+                out[path][mood] = val
+            return out
+
+    async def clear_all_mood_feedback(self):
+        """Mutation: Clears all mood feedback."""
+        async with self._write_lock:
+            conn = await self.get_connection()
+            try:
+                await conn.execute("DELETE FROM mood_feedback")
+                await conn.commit()
+            except Exception as e:
+                await conn.rollback()
+                logger.error(f"Failed to clear mood feedback: {e}")
+                raise
+
+    async def save_adjusted_mood_profile(self, mood: str, profile: dict[str, float]):
+        """Mutation: Saves customized targets for a mood's features."""
+        async with self._write_lock:
+            conn = await self.get_connection()
+            try:
+                await conn.execute("DELETE FROM mood_profiles WHERE mood = ?", (mood,))
+                if profile:
+                    await conn.executemany(
+                        "INSERT INTO mood_profiles (mood, feature, target) VALUES (?, ?, ?)",
+                        [(mood, feat, target) for feat, target in profile.items()]
+                    )
+                await conn.commit()
+            except Exception as e:
+                await conn.rollback()
+                logger.error(f"Failed to save adjusted mood profile: {e}")
+                raise
+
+    async def get_adjusted_mood_profile(self, mood: str) -> dict[str, float] | None:
+        """Lock-free read. Returns customized features for a mood, or None if not customized."""
+        conn = await self.get_connection()
+        async with conn.execute("SELECT feature, target FROM mood_profiles WHERE mood = ?", (mood,)) as cursor:
+            rows = await cursor.fetchall()
+            if not rows:
+                return None
+            return {r["feature"]: r["target"] for r in rows}
+
+    async def get_all_adjusted_mood_profiles(self) -> dict[str, dict[str, float]]:
+        """Lock-free read. Returns all customized mood profiles."""
+        conn = await self.get_connection()
+        async with conn.execute("SELECT mood, feature, target FROM mood_profiles") as cursor:
+            rows = await cursor.fetchall()
+            out = {}
+            for r in rows:
+                m = r["mood"]
+                f = r["feature"]
+                t = r["target"]
+                if m not in out:
+                    out[m] = {}
+                out[m][f] = t
+            return out
+
+    async def clear_all_adjusted_mood_profiles(self):
+        """Mutation: Clears all customized mood profiles."""
+        async with self._write_lock:
+            conn = await self.get_connection()
+            try:
+                await conn.execute("DELETE FROM mood_profiles")
+                await conn.commit()
+            except Exception as e:
+                await conn.rollback()
+                logger.error(f"Failed to clear adjusted mood profiles: {e}")
+                raise
+
 
     # ─── Playlist CRUD ─────────────────────────────────────────────────────────
 

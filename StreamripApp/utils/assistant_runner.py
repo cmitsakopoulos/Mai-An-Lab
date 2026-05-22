@@ -1695,15 +1695,27 @@ class AssistantRunner:
         )
 
     async def _handle_help(self, _intent: ai.Intent) -> AssistantResponse:
+        from utils import track_graph as tg
+        canonical_moods = sorted(tg.MOODS.keys())
+        custom_islets = tg.list_islets()
+
         spoken_msg = (
             "I can manage your playback, queue tracks, navigate by mood, create playlists, "
             "or walk the acoustic similarity graph, sir. Just say 'play some chill music' "
             "or 'more by this artist' to begin."
         )
+
+        moods_str = ", ".join(canonical_moods)
+        if custom_islets:
+            islets_str = ", ".join(custom_islets)
+        else:
+            islets_str = "None registered yet. Save one by saying *save this as [name]* while a song plays."
+
         displayed_msg = (
             "### Jarvis System Capabilities\n\n"
             "*   **Playback**: `play [song/artist]`, `pause`, `resume`, `skip`, `prev`, `shuffle`\n"
-            "*   **Acoustic Moods**: `play chill`, `play upbeat`, `play energetic`\n"
+            f"*   **Acoustic Moods**: `play [mood]` (Available: {moods_str})\n"
+            f"*   **Custom Islets**: `play [islet]` (Available: {islets_str})\n"
             "*   **Similarity Graph**: `play similar`, `more like this`, `more by this artist`\n"
             "*   **Playlists**: `create playlist [name]`, "
             "`create [mood] playlist called [name]` (library-wide DSP-ranked, "
