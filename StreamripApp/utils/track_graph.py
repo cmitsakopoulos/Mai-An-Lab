@@ -208,15 +208,22 @@ async def build_acoustic_edges(
         v = unpack_timbre(r.get("timbre"))
         if v is None or v.shape[0] != EMBED_DIMS:
             continue
-        # Append the scalar descriptors so BPM / brightness / energy contribute
-        # to the similarity ranking. Without them, two tracks with matching
-        # MFCC profile but very different tempos would be neighbours, which
-        # is rarely what a listener means by 'similar'.
+        # Append all 8 scalar descriptors so BPM / brightness / energy / rolloff
+        # / beat_strength / flatness / contrast / key_mode contribute to the
+        # similarity ranking. Without them, two tracks with matching MFCC
+        # profile but very different tempos or dynamic texture/harmonic profiles
+        # would be neighbours, which is rarely what a listener means by 'similar'.
+        ki = r.get("key_index", 0) or 0
+        key_mode = 1.0 if ki < 12 else 0.0
         scalars = np.array([
             r.get("bpm", 0) or 0,
             r.get("brightness", 0) or 0,
             r.get("energy", 0) or 0,
             r.get("rolloff", 0) or 0,
+            r.get("beat_strength", 0) or 0,
+            r.get("spectral_flatness", 0) or 0,
+            r.get("spectral_contrast", 0) or 0,
+            key_mode,
         ], dtype=np.float32)
         paths.append(r["path"])
         vectors.append(np.concatenate([v.astype(np.float32), scalars]))
@@ -225,7 +232,7 @@ async def build_acoustic_edges(
         await db_manager.replace_neighbors_bulk([], KIND_ACOUSTIC)
         return 0
 
-    X = np.stack(vectors, axis=0)  # (N, 42)
+    X = np.stack(vectors, axis=0)  # (N, EMBED_DIMS + 8) -> (N, 60)
     # z-score per dimension so the disparate scales (MFCC vs BPM) don't let
     # one axis dominate the cosine. Replace zero-variance columns with 1 to
     # avoid NaNs.
@@ -656,63 +663,48 @@ class MoodSpec:
 
 
 MOODS: dict[str, MoodSpec] = {
-    # Calm / low-energy
-    "chill":     MoodSpec("chill",
-                          {"bpm": 0.20, "energy": 0.20, "brightness": 0.30, "beat_strength": 0.30},
-                          aliases=("chilled",),
-                          camelot_pref="minor", bpm_smooth_weight=1.5),
-    "relaxed":   MoodSpec("relaxed",
-                          {"bpm": 0.20, "energy": 0.20, "brightness": 0.30},
-                          aliases=("relaxing",),
-                          camelot_pref="minor", bpm_smooth_weight=1.5),
-    "calm":      MoodSpec("calm",
-                          {"bpm": 0.15, "energy": 0.15, "brightness": 0.30},
-                          camelot_pref="minor", bpm_smooth_weight=1.5),
-    "mellow":    MoodSpec("mellow",
-                          {"bpm": 0.30, "energy": 0.30, "brightness": 0.30},
-                          bpm_smooth_weight=1.3),
-    "soft":      MoodSpec("soft", {"energy": 0.10, "brightness": 0.30}),
-    "ambient":   MoodSpec("ambient",
-                          {"bpm": 0.10, "energy": 0.10, "beat_strength": 0.05},
-                          bpm_smooth_weight=1.5),
-
-    # High-energy
-    "upbeat":    MoodSpec("upbeat",
-                          {"bpm": 0.75, "energy": 0.75, "brightness": 0.70},
-                          camelot_pref="major"),
-    "energetic": MoodSpec("energetic",
-                          {"bpm": 0.80, "energy": 0.90, "beat_strength": 0.85},
-                          aliases=("intense",)),
-    "hard":      MoodSpec("hard",
-                          {"energy": 0.88, "beat_strength": 0.85, "rolloff": 0.70, "brightness": 0.40},
-                          aliases=("heavy",)),
-    "powerful":  MoodSpec("powerful", {"energy": 0.85, "beat_strength": 0.80}),
-    "happy":     MoodSpec("happy",
-                          {"bpm": 0.70, "brightness": 0.85, "energy": 0.75},
-                          aliases=("uplifting",),
-                          camelot_pref="major"),
-
-    # Tempo-specific. Fast/slow gate on tempo AND beat conviction so a
-    # high-BPM ambient drone doesn't bucket into "fast", and a mid-BPM
-    # acoustic ballad with sparse beats can still bucket into "slow".
-    "fast":      MoodSpec("fast",
-                          {"bpm": 0.92, "beat_strength": 0.75},
-                          aliases=("quick",)),
-    "slow":      MoodSpec("slow",
-                          {"bpm": 0.10, "energy": 0.20, "beat_strength": 0.15},
-                          bpm_smooth_weight=1.5),
-
-    # Timbre / spectrum
-    "moody":     MoodSpec("moody",
-                          {"brightness": 0.20, "energy": 0.35, "spectral_flatness": 0.25},
-                          camelot_pref="minor"),
-    "bright":    MoodSpec("bright", {"brightness": 0.90, "rolloff": 0.85},
-                          camelot_pref="major"),
-
-    # v3 scalars: noisy axis (spectral_flatness rises with noise).
-    "noisy":     MoodSpec("noisy", {"spectral_flatness": 0.90}),
-    "acoustic":  MoodSpec("acoustic",
-                          {"spectral_flatness": 0.20, "energy": 0.35, "beat_strength": 0.30}),
+    "chill": MoodSpec(
+        "chill",
+        {"bpm": 0.18, "energy": 0.15, "brightness": 0.25, "beat_strength": 0.20, "spectral_flatness": 0.20, "rolloff": 0.25, "key_mode": 0.0},
+        aliases=("chilled", "relaxed", "relaxing", "calm", "mellow", "ambient", "soft"),
+        camelot_pref="minor",
+        bpm_smooth_weight=1.5,
+    ),
+    "upbeat": MoodSpec(
+        "upbeat",
+        {"bpm": 0.65, "energy": 0.70, "brightness": 0.75, "beat_strength": 0.75, "rolloff": 0.75, "spectral_flatness": 0.25, "spectral_contrast": 0.75, "key_mode": 1.0},
+        aliases=("happy", "bright", "uplifting"),
+        camelot_pref="major",
+        bpm_smooth_weight=1.0,
+    ),
+    "energetic": MoodSpec(
+        "energetic",
+        {"bpm": 0.88, "energy": 0.85, "beat_strength": 0.85, "spectral_contrast": 0.75, "spectral_flatness": 0.35},
+        aliases=("fast", "quick"),
+        camelot_pref=None,
+        bpm_smooth_weight=1.0,
+    ),
+    "intense": MoodSpec(
+        "intense",
+        {"energy": 0.90, "beat_strength": 0.82, "spectral_flatness": 0.85, "brightness": 0.75, "rolloff": 0.80, "spectral_contrast": 0.85},
+        aliases=("hard", "heavy", "powerful", "noisy"),
+        camelot_pref=None,
+        bpm_smooth_weight=1.0,
+    ),
+    "moody": MoodSpec(
+        "moody",
+        {"bpm": 0.20, "energy": 0.30, "brightness": 0.20, "spectral_flatness": 0.25, "spectral_contrast": 0.25, "key_mode": 0.0},
+        aliases=("slow", "dark", "somber"),
+        camelot_pref="minor",
+        bpm_smooth_weight=1.5,
+    ),
+    "acoustic": MoodSpec(
+        "acoustic",
+        {"spectral_flatness": 0.15, "spectral_contrast": 0.40, "beat_strength": 0.30, "energy": 0.35},
+        aliases=("organic", "clean"),
+        camelot_pref=None,
+        bpm_smooth_weight=1.0,
+    ),
 }
 
 
@@ -780,18 +772,16 @@ MOOD_KEYWORDS: tuple[str, ...] = tuple(MOOD_PROFILES.keys())
 
 # Feature columns participating in mood scoring. Order matters: weights and
 # the z-scored matrix are aligned to this list. Adding a column here means
-# every profile may optionally include it. NOTE: key_index is deliberately
-# excluded — it's a categorical value where direction-based z-scoring is
-# meaningless; the playlist sequencer uses it separately via the harmonic
-# adjacency penalty.
+# every profile may optionally include it. NOTE: key_mode is a projected
+# continuous binary mode (1.0 for major, 0.0 for minor) from key_index.
 _MOOD_FEATURES = (
     "bpm", "brightness", "energy", "rolloff", "beat_strength",
-    "spectral_flatness", "spectral_contrast",
+    "spectral_flatness", "spectral_contrast", "key_mode",
 )
 
 
 # Cache for the percentile matrix. Recomputing argsort(argsort(...)) over a
-# 5k-row × 7-col matrix on every mood query is wasteful when the library
+# 5k-row × 8-col matrix on every mood query is wasteful when the library
 # rarely changes between turns. Key is (features_version, row_count, max_path);
 # `max_path` is a cheap library-change proxy — when any new track is analysed,
 # the row set changes and so does the lexicographic max path.
@@ -802,8 +792,15 @@ def _build_percentile_matrix(rows: list[dict]) -> np.ndarray:
     """Column-wise percentile ranks ∈ [0, 1] for every analysed track over
     `_MOOD_FEATURES`. Returned shape (N, len(_MOOD_FEATURES))."""
     N = len(rows)
+
+    def get_val(r, f):
+        if f == "key_mode":
+            ki = r.get("key_index", 0) or 0
+            return 1.0 if ki < 12 else 0.0
+        return float(r.get(f, 0) or 0)
+
     matrix = np.array(
-        [[float(r.get(f, 0) or 0) for f in _MOOD_FEATURES] for r in rows],
+        [[get_val(r, f) for f in _MOOD_FEATURES] for r in rows],
         dtype=np.float32,
     )
     percentiles = np.zeros_like(matrix)

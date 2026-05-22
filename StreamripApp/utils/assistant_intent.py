@@ -77,10 +77,10 @@ except Exception:  # pragma: no cover — defensive fallback
     MOOD_KEYWORDS = (
         "chill", "chilled", "relaxed", "relaxing", "calm", "mellow", "soft",
         "upbeat", "energetic", "intense", "hard", "heavy", "powerful", "happy", "uplifting",
-        "fast", "quick", "slow",
+        "fast", "quick", "slow", "dark", "somber",
         "moody", "bright",
         "ambient",
-        "noisy", "acoustic",
+        "noisy", "acoustic", "organic", "clean",
     )
 
 
@@ -103,21 +103,22 @@ class Intent:
 def _build_patterns(mood_keywords: list[str]) -> list[tuple[str, re.Pattern]]:
     mood_alt = "|".join(re.escape(k) for k in mood_keywords)
     return [
-        # ── Naming / Entity Specification ───────────────────────────────────────
-        (INTENT_NAME_ENTITY, re.compile(
-            r"^\s*(?:call\s+(?:the\s+)?playlist|name\s+(?:the\s+)?playlist|call\s+it|name\s+it|make\s+it|called|named|titled)\s+(?P<q>.+?)\s*$",
-            re.I
-        )),
-
         # ── Confirmation routine (highest priority) ─────────────────────────────
         # Match these BEFORE play/queue so a bare "yes" or "no" during a
         # pending-confirmation turn doesn't get misread as a search query.
         (INTENT_AFFIRMATIVE,  re.compile(
             r"^\s*(?:yes|yeah|yep|yup|sure|ok|okay|do\s+it|go\s+ahead|please\s+do|"
-            r"confirm|affirmative|sounds\s+good|alright)\s*[.!]?\s*$", re.I)),
+            r"confirm|affirmative|sounds\s+good|alright|proceed|please\s+proceed|do\s+proceed|"
+            r"make\s+it\s+so|absolutely|definitely|indeed|of\s+course)\s*[.!]?\s*$", re.I)),
         (INTENT_NEGATIVE,     re.compile(
             r"^\s*(?:no|nope|nah|not\s+now|later|cancel|stop|forget\s+it|"
             r"negative|never\s+mind|nevermind)\s*[.!]?\s*$", re.I)),
+
+        # ── Naming / Entity Specification ───────────────────────────────────────
+        (INTENT_NAME_ENTITY, re.compile(
+            r"^\s*(?:call\s+(?:the\s+)?playlist|name\s+(?:the\s+)?playlist|call\s+it|name\s+it|make\s+it|called|named|titled)\s+(?P<q>.+?)\s*$",
+            re.I
+        )),
 
         # ── Islet creation (single-shot) ────────────────────────────────────────
         # The currently-playing track seeds a named islet in one turn — no
@@ -198,8 +199,10 @@ def _build_patterns(mood_keywords: list[str]) -> list[tuple[str, re.Pattern]]:
         )),
         (INTENT_PLAY_MORE_BY, re.compile(r"^\s*(?:play\s+)?more\s+(?:by|from)\s+(?:this|that|the)\s+artist\s*$", re.I)),
         (INTENT_PLAY_RANDOM,  re.compile(
-            r"^\s*(?:play|start|put\s+on)?\s*"
-            r"(?:a\s+|some\s+)?(?:random\s+)?\s*"
+            r"^\s*(?:play|start|put\s+on|add|queue|enqueue|put)?\s*"
+            r"(?:me\s+)?"
+            r"(?:a\s+|some\s+|any\s+)?\s*"
+            r"(?:random\s+)?\s*"
             r"(?:song|songs|track|tracks|music|tune|tunes|stuff|anything|something)\s*$",
             re.I
         )),

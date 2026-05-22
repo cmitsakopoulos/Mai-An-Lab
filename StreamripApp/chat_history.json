@@ -1,0 +1,160 @@
+{
+    "messages": [
+        {
+            "sender": "user",
+            "text": "how's it going?"
+        },
+        {
+            "sender": "assistant",
+            "text": "Good day, sir. The music catalog is ready and fully optimized. Awaiting your directive.",
+            "entities": {
+                "track": null,
+                "artist": null,
+                "playlist": null,
+                "intent": "greet"
+            },
+            "intent": {
+                "name": "greet",
+                "query": null,
+                "raw": "how's it going?",
+                "extras": {
+                    "semantic": true,
+                    "score": 0.5785496341778269,
+                    "anchor": "how is it going",
+                    "compute_time_windows_ms": 24.71,
+                    "simulated_android_fast_ms": 12.35,
+                    "simulated_android_slow_ms": 49.41
+                }
+            }
+        },
+        {
+            "sender": "user",
+            "text": "play me something"
+        },
+        {
+            "sender": "assistant",
+            "text": "No local match for **something**.",
+            "entities": {
+                "track": null,
+                "artist": null,
+                "playlist": null,
+                "intent": "play_now"
+            },
+            "intent": {
+                "name": "play_now",
+                "query": "something",
+                "raw": "play me something",
+                "extras": {}
+            }
+        },
+        {
+            "sender": "user",
+            "text": "play me a song"
+        },
+        {
+            "sender": "assistant",
+            "text": "Queued **25** matches for **a**. **Sodade** \u2014 Ces\u00e1ria Evora.",
+            "entities": {
+                "track": {
+                    "path": "/Users/chrismitsacopoulos/Desktop/Test/01. Ces\u00e1ria Evora - Sodade.flac",
+                    "title": "Sodade",
+                    "duration": 294.56,
+                    "artist": "Ces\u00e1ria Evora",
+                    "album": "Miss Perfumado",
+                    "fuzzy_match": false
+                },
+                "artist": "Ces\u00e1ria Evora",
+                "playlist": null,
+                "intent": "play_now"
+            },
+            "intent": {
+                "name": "play_now",
+                "query": "a",
+                "raw": "play me a song",
+                "extras": {}
+            }
+        },
+        {
+            "sender": "user",
+            "text": "meow"
+        },
+        {
+            "sender": "assistant",
+            "text": "I didn't understand that. Try 'help' to see my capabilities.",
+            "entities": {
+                "track": null,
+                "artist": null,
+                "playlist": null,
+                "intent": "unknown"
+            },
+            "intent": {
+                "name": "unknown",
+                "query": null,
+                "raw": "meow",
+                "extras": {}
+            }
+        },
+        {
+            "sender": "user",
+            "text": "bitch ass idiot"
+        },
+        {
+            "sender": "assistant",
+            "text": "I didn't understand that. Try 'help' to see my capabilities.",
+            "entities": {
+                "track": null,
+                "artist": null,
+                "playlist": null,
+                "intent": "unknown"
+            },
+            "intent": {
+                "name": "unknown",
+                "query": null,
+                "raw": "bitch ass idiot",
+                "extras": {}
+            }
+        },
+        {
+            "sender": "user",
+            "text": "fuck you"
+        },
+        {
+            "sender": "assistant",
+            "text": "I didn't understand that. Try 'help' to see my capabilities.",
+            "entities": {
+                "track": null,
+                "artist": null,
+                "playlist": null,
+                "intent": "unknown"
+            },
+            "intent": {
+                "name": "unknown",
+                "query": null,
+                "raw": "fuck you",
+                "extras": {}
+            }
+        },
+        {
+            "sender": "user",
+            "text": "motherfucker"
+        },
+        {
+            "sender": "assistant",
+            "text": "I didn't understand that. Try 'help' to see my capabilities.",
+            "entities": {
+                "track": null,
+                "artist": null,
+                "playlist": null,
+                "intent": "unknown"
+            },
+            "intent": {
+                "name": "unknown",
+                "query": null,
+                "raw": "motherfucker",
+                "extras": {}
+            }
+        }
+    ],
+    "init_greeted": false,
+    "last_active_timestamp": 1779475978.6759481
+}

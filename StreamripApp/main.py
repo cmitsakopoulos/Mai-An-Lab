@@ -65,6 +65,7 @@ import platform
 import re
 import json
 import asyncio
+import math
 import shutil
 import hashlib
 import threading
@@ -258,6 +259,7 @@ class NotificationSystem:
         self._initialized = False
         self.container = None
         self.wrapper = None
+        self._active_notifications = []
 
     def _ensure_initialized(self):
         if self._initialized:
@@ -281,6 +283,13 @@ class NotificationSystem:
         if self.app.is_background:
             return
         self._ensure_initialized()
+
+        # Limit to at most 3 active notifications
+        while len(self._active_notifications) >= 3:
+            oldest = self._active_notifications.pop(0)
+            if oldest.data and callable(oldest.data):
+                oldest.data()
+
         # Create a sleek notification card
         notification = ft.Container(
             content=ft.Row(
@@ -324,6 +333,8 @@ class NotificationSystem:
         def _do_dismiss_immediate():
             if dismissed[0]: return
             dismissed[0] = True
+            if dismissible in self._active_notifications:
+                self._active_notifications.remove(dismissible)
             def _remove():
                 if dismissible in self.container.controls:
                     self.container.controls.remove(dismissible)
@@ -332,6 +343,8 @@ class NotificationSystem:
         def _do_dismiss():
             if dismissed[0]: return
             dismissed[0] = True
+            if dismissible in self._active_notifications:
+                self._active_notifications.remove(dismissible)
             # If the app is in the background we can't drive animations;
             # skip straight to an immediate removal instead.
             if self.app.is_background:
@@ -355,6 +368,8 @@ class NotificationSystem:
             dismiss_direction=ft.DismissDirection.HORIZONTAL,
             on_dismiss=lambda e: _do_dismiss_immediate(),
         )
+        dismissible.data = _do_dismiss
+        self._active_notifications.append(dismissible)
 
         def _add():
             self.container.controls.insert(0, dismissible)
@@ -1695,7 +1710,6 @@ class SearchView:
 
         self._results_list.controls.clear()
 
-        import math
         self.total_pages = math.ceil(len(source) / self.items_per_page)
         
         # Sliced items for current page
@@ -2817,7 +2831,7 @@ class LibraryView:
                 # Run learning shift & random walk in background
                 async def run_learning_and_walk():
                     try:
-                        walk_tracks = await tg.walk(db, track_path, length=5, edge_kinds=(tg.KIND_ACOUSTIC, tg.KIND_ARTIST))
+                        walk_tracks = await tg.walk(db, track_path, length=5, edge_kinds=(tg.KIND_ACOUSTIC,))
                         for wt in walk_tracks:
                             await db.save_mood_feedback(wt, mood, 1)
                             self._mood_feedback_map.setdefault(wt, {})[mood] = 1
@@ -2840,6 +2854,30 @@ class LibraryView:
                         logger.exception("Online learning shift failed during like: %s", shift_err)
 
                 self.page.run_task(run_learning_and_walk)
+            else:
+                # Run random walk in background to revert propagated likes
+                async def run_unlike_walk():
+                    try:
+                        walk_tracks = await tg.walk(db, track_path, length=5, edge_kinds=(tg.KIND_ACOUSTIC,))
+                        feedback_map_latest = await db.get_mood_feedback()
+                        for wt in walk_tracks:
+                            if feedback_map_latest.get(wt, {}).get(mood, 0) == 1:
+                                await db.save_mood_feedback(wt, mood, 0)
+                                self._mood_feedback_map.setdefault(wt, {})[mood] = 0
+                                for ctrl in self._path_to_controls.get(wt, []):
+                                    try:
+                                        tile = ctrl.content.content
+                                        if isinstance(tile.trailing, ft.Row) and len(tile.trailing.controls) >= 2:
+                                            l_btn = tile.trailing.controls[0]
+                                            l_btn.icon = ft.Icons.THUMB_UP_OUTLINED
+                                            l_btn.icon_color = DIM
+                                            self.try_update(l_btn)
+                                    except Exception:
+                                        pass
+                    except Exception as walk_err:
+                        logger.exception("Random walk failed during unlike toggle: %s", walk_err)
+
+                self.page.run_task(run_unlike_walk)
 
             self._mood_recalc_pending = True
             self._update_partition_tabs_ui()
@@ -2852,6 +2890,9 @@ class LibraryView:
         db = self.app.db_manager
         from utils import track_graph as tg
         try:
+            feedback_map = await db.get_mood_feedback()
+            was_liked = feedback_map.get(track_path, {}).get(mood, 0) == 1
+
             # Save negative feedback
             await db.save_mood_feedback(track_path, mood, -1)
             self._mood_feedback_map.setdefault(track_path, {})[mood] = -1
@@ -2878,8 +2919,29 @@ class LibraryView:
             except Exception:
                 pass
 
-            # Run learning shift in background
+            # Run learning shift & unlike walk in background
             async def run_learning_dislike():
+                if was_liked:
+                    try:
+                        walk_tracks = await tg.walk(db, track_path, length=5, edge_kinds=(tg.KIND_ACOUSTIC,))
+                        feedback_map_latest = await db.get_mood_feedback()
+                        for wt in walk_tracks:
+                            if feedback_map_latest.get(wt, {}).get(mood, 0) == 1:
+                                await db.save_mood_feedback(wt, mood, 0)
+                                self._mood_feedback_map.setdefault(wt, {})[mood] = 0
+                                for ctrl in self._path_to_controls.get(wt, []):
+                                    try:
+                                        tile = ctrl.content.content
+                                        if isinstance(tile.trailing, ft.Row) and len(tile.trailing.controls) >= 2:
+                                            l_btn = tile.trailing.controls[0]
+                                            l_btn.icon = ft.Icons.THUMB_UP_OUTLINED
+                                            l_btn.icon_color = DIM
+                                            self.try_update(l_btn)
+                                    except Exception:
+                                        pass
+                    except Exception as walk_err:
+                        logger.exception("Random walk failed during dislike unlike propagation: %s", walk_err)
+
                 try:
                     await tg.adjust_mood_profile(db, mood, track_path, -1)
                 except Exception as shift_err:
@@ -3067,7 +3129,7 @@ class LibraryView:
         if self.partition_sub_mode == "moods":
             tabs.append(
                 ft.IconButton(
-                    icon=ft.Icons.RESTART_ALT_ROUNDED,
+                    icon=ft.Icons.DELETE_OUTLINE_ROUNDED,
                     icon_color=active_col,
                     icon_size=18,
                     tooltip="Reset Mood Feedback",
@@ -3640,7 +3702,6 @@ class LibraryView:
         )
 
     def _update_pagination_ui(self):
-        import math
         total = max(1, self.total_pages)
         self._page_label.value = f"Page {self.current_page + 1} of {total}"
         
@@ -3793,7 +3854,6 @@ class LibraryView:
         try:
             # Check if we are in tracks, albums, or artists mode to use the paginated flat row setup
             if self.view_mode in ("tracks", "albums", "artists"):
-                import math
                 db = self.app.db_manager
                 
                 if self.view_mode == "tracks":
@@ -6985,7 +7045,7 @@ class AssistantView:
 
         restored_controls = []
         for msg in self._history_list:
-            restored_controls.append(self._build_bubble_row(msg["sender"], msg["text"]))
+            restored_controls.append(self._build_bubble_row(msg))
 
         if restored_controls:
             self._messages.controls = restored_controls
@@ -7587,6 +7647,7 @@ class AssistantView:
         # Build a structured entity dict from the response so future turns
         # can resolve pronouns without any regex or DB round-trip.
         _track = response.extras.get("track") or response.extras.get("first")
+        intent = getattr(response, "intent", None)
         _entities = {
             "track":  _track,
             "artist": (
@@ -7594,13 +7655,15 @@ class AssistantView:
                 if _track else response.extras.get("artist")
             ),
             "playlist": response.extras.get("playlist"),
-            "intent": getattr(response, "_intent_name", None),
+            "intent": intent.name if intent else getattr(response, "_intent_name", None),
         }
+
         await self._append_bubble(
             "assistant", response.displayed,
             speak=response.success and bool(response.spoken),
             speak_text=response.spoken,
             entities=_entities if any(_entities.values()) else None,
+            intent=intent,
         )
         # Playback intents stage the queue but leave engine.play() to us so
         # Jarvis finishes his sentence before the music starts. _append_bubble
@@ -7634,15 +7697,23 @@ class AssistantView:
         speak: bool = False,
         speak_text: str | None = None,
         entities: dict | None = None,
+        intent = None,
     ):
-        row = self._build_bubble_row(sender, text)
-
         # Update in-memory history list. Persist structured entity data on
         # assistant messages so _resolve_anaphora can do a plain dict lookup
         # instead of regex-parsing markdown bold tags.
         msg: dict = {"sender": sender, "text": text}
         if entities:
             msg["entities"] = entities
+        if intent:
+            msg["intent"] = {
+                "name": intent.name if hasattr(intent, "name") else intent.get("name"),
+                "query": intent.query if hasattr(intent, "query") else intent.get("query"),
+                "raw": intent.raw if hasattr(intent, "raw") else intent.get("raw"),
+                "extras": intent.extras if hasattr(intent, "extras") else intent.get("extras", {}),
+            }
+
+        row = self._build_bubble_row(msg)
         self._history_list.append(msg)
         if len(self._history_list) > 50:
             self._history_list.pop(0)
@@ -7685,8 +7756,11 @@ class AssistantView:
                 except Exception as exc:
                     logger.warning("AssistantView: TTS speak failed: %s", exc)
 
-    def _build_bubble_row(self, sender: str, text: str) -> ft.Row:
+    def _build_bubble_row(self, msg: dict) -> ft.Row:
+        sender = msg.get("sender", "assistant")
+        text = msg.get("text", "")
         is_user = (sender == "user")
+
         if is_user:
             bubble_content = ft.Text(
                 text,
@@ -7703,12 +7777,73 @@ class AssistantView:
                 auto_follow_links=True,
             )
 
+        intent = msg.get("intent")
+        if not is_user and intent:
+            intent_name = intent.get("name", "unknown")
+            extras = intent.get("extras") or {}
+            is_semantic = extras.get("semantic", False)
+
+            # Stage 1: Regex
+            if intent_name != "unknown" and not is_semantic:
+                s1_text = f"Stage 1: Regex (Matched: {intent_name})"
+                s1_icon = ft.Icons.CHECK_CIRCLE_OUTLINE
+                s1_color = "#81C784"
+                
+                s2_text = "Stage 2: VLM (Skipped)"
+                s2_icon = ft.Icons.REMOVE_CIRCLE_OUTLINE
+                s2_color = DIM
+            elif is_semantic:
+                s1_text = "Stage 1: Regex (No Match)"
+                s1_icon = ft.Icons.CANCEL_OUTLINED
+                s1_color = "#E57373"
+                
+                score = extras.get("score")
+                score_str = f" @ {score:.2f}" if score is not None else ""
+                duration = extras.get("compute_time_windows_ms")
+                dur_str = f" in {duration:.1f}ms" if duration is not None else ""
+                s2_text = f"Stage 2: VLM (Matched: {intent_name}{score_str}{dur_str})"
+                s2_icon = ft.Icons.CHECK_CIRCLE_OUTLINE
+                s2_color = "#81C784"
+            else:
+                s1_text = "Stage 1: Regex (No Match)"
+                s1_icon = ft.Icons.CANCEL_OUTLINED
+                s1_color = "#E57373"
+                
+                s2_text = "Stage 2: VLM (No Match)"
+                s2_icon = ft.Icons.CANCEL_OUTLINED
+                s2_color = "#E57373"
+
+            bubble_content = ft.Column(
+                [
+                    bubble_content,
+                    ft.Container(height=1, bgcolor="#262626", margin=ft.margin.symmetric(vertical=6)),
+                    ft.Row(
+                        [
+                            ft.Icon(s1_icon, color=s1_color, size=11),
+                            ft.Text(s1_text, color=s1_color, size=10, weight=ft.FontWeight.W_500)
+                        ],
+                        spacing=6,
+                        alignment=ft.MainAxisAlignment.START,
+                    ),
+                    ft.Row(
+                        [
+                            ft.Icon(s2_icon, color=s2_color, size=11),
+                            ft.Text(s2_text, color=s2_color, size=10, weight=ft.FontWeight.W_500)
+                        ],
+                        spacing=6,
+                        alignment=ft.MainAxisAlignment.START,
+                    )
+                ],
+                spacing=4,
+                tight=True,
+            )
+
         bubble = ft.Container(
             content=bubble_content,
             padding=ft.Padding.symmetric(horizontal=14, vertical=10),
             bgcolor=CYAN if is_user else SURFACE2,
             border_radius=14,
-            width=350 if len(text) > 35 else None,
+            width=350 if (len(text) > 35 or intent) else None,
         )
         return ft.Row(
             [bubble],
@@ -8516,8 +8651,17 @@ class StreamripFletApp:
         try:
             conn = await self.db_manager.get_connection()
             async with self.db_manager._write_lock:
+                await conn.execute("PRAGMA foreign_keys = OFF")
                 await conn.execute("BEGIN")
                 try:
+                    await conn.execute("DELETE FROM playlist_tracks")
+                    await conn.execute("DELETE FROM playlists")
+                    await conn.execute("DELETE FROM track_partitions")
+                    await conn.execute("DELETE FROM mood_feedback")
+                    await conn.execute("DELETE FROM mood_profiles")
+                    await conn.execute("DELETE FROM playback_history")
+                    await conn.execute("DELETE FROM track_neighbors")
+                    await conn.execute("DELETE FROM play_counts")
                     await conn.execute("DELETE FROM tracks")
                     await conn.execute("DELETE FROM albums")
                     await conn.execute("DELETE FROM artists")
@@ -8528,12 +8672,25 @@ class StreamripFletApp:
                 except Exception:
                     await conn.rollback()
                     raise
+                finally:
+                    await conn.execute("PRAGMA foreign_keys = ON")
                 
             # Optional: attempt VACUUM outside the lock
             try:
                 await conn.execute("VACUUM")
             except: pass
             
+            # Clear in-memory caches
+            self.db_manager.clear_caches()
+            if hasattr(self, "library_view") and self.library_view:
+                self.library_view._tracks_cache = None
+                self.library_view._tracks_cache_key = None
+                self.library_view._cached_moods = None
+                self.library_view._cached_islets = None
+                self.library_view._cached_unanalysed = None
+                self.library_view._mood_feedback_map.clear()
+                self.library_view._mood_recalc_pending = False
+
             # Refresh UI
             await self.library_view.load_library()
             self.show_snackbar("Library database wiped successfully.")

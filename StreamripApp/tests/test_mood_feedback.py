@@ -122,27 +122,27 @@ class TestMoodFeedbackAndLearning(unittest.TestCase):
         self.assertAlmostEqual(matrix[1][0], 0.5, places=5)
         self.assertAlmostEqual(matrix[1][1], 0.5, places=5)
 
-        # Let's test adjust_mood_profile for "chill" (default spec bpm: 0.20, energy: 0.20)
+        # Let's test adjust_mood_profile for "chill" (default spec bpm: 0.18, energy: 0.15)
         # 1. LIKE on 't2' (bpm percentile 1.0, energy percentile 1.0)
         # Shift towards: T_new = T_old + 0.15 * (P_track - T_old)
-        # bpm: 0.20 + 0.15 * (1.0 - 0.20) = 0.20 + 0.12 = 0.32
-        # energy: 0.20 + 0.15 * (1.0 - 0.20) = 0.20 + 0.12 = 0.32
+        # bpm: 0.18 + 0.15 * (1.0 - 0.18) = 0.18 + 0.123 = 0.303
+        # energy: 0.15 + 0.15 * (1.0 - 0.15) = 0.15 + 0.1275 = 0.2775
         _run(tg.adjust_mood_profile(self.db, "chill", "t2", 1))
         
         prof = _run(self.db.get_adjusted_mood_profile("chill"))
         self.assertIsNotNone(prof)
-        self.assertAlmostEqual(prof["bpm"], 0.32, places=5)
-        self.assertAlmostEqual(prof["energy"], 0.32, places=5)
+        self.assertAlmostEqual(prof["bpm"], 0.303, places=5)
+        self.assertAlmostEqual(prof["energy"], 0.2775, places=5)
 
         # 2. DISLIKE on 't0' (bpm percentile 0.0, energy percentile 0.0)
         # Shift away: T_new = T_old - 0.15 * (P_track - T_old)
-        # bpm: 0.32 - 0.15 * (0.0 - 0.32) = 0.32 + 0.048 = 0.368
-        # energy: 0.32 - 0.15 * (0.0 - 0.32) = 0.32 + 0.048 = 0.368
+        # bpm: 0.303 - 0.15 * (0.0 - 0.303) = 0.303 + 0.04545 = 0.34845
+        # energy: 0.2775 - 0.15 * (0.0 - 0.2775) = 0.2775 + 0.041625 = 0.319125
         _run(tg.adjust_mood_profile(self.db, "chill", "t0", -1))
         
         prof = _run(self.db.get_adjusted_mood_profile("chill"))
-        self.assertAlmostEqual(prof["bpm"], 0.368, places=5)
-        self.assertAlmostEqual(prof["energy"], 0.368, places=5)
+        self.assertAlmostEqual(prof["bpm"], 0.34845, places=5)
+        self.assertAlmostEqual(prof["energy"], 0.319125, places=5)
 
         # 3. Test clamping
         # A. Clamp to 1.0: starting at 0.9, shift away from percentile 0.0 (t0)
@@ -245,9 +245,9 @@ class TestMoodFeedbackAndLearning(unittest.TestCase):
         natural_chill_mood = assignments["track_chill"]
         natural_energetic_mood = assignments["track_energetic"]
         
-        # Chill track should route to chill/relaxed/calm/ambient, energetic track to aggressive/energetic/fast/noisy/upbeat/happy/powerful/hard
-        self.assertIn(natural_chill_mood, ["chill", "relaxed", "calm", "ambient", "mellow", "soft", "slow", "moody"])
-        self.assertIn(natural_energetic_mood, ["energetic", "aggressive", "fast", "noisy", "upbeat", "happy", "powerful", "hard"])
+        # Chill track should route to chill/moody/acoustic, energetic track to energetic/upbeat/intense
+        self.assertIn(natural_chill_mood, ["chill", "moody", "acoustic"])
+        self.assertIn(natural_energetic_mood, ["energetic", "upbeat", "intense"])
 
         # 2. Pin energetic track to 'chill' (LIKE)
         _run(self.db.save_mood_feedback("track_energetic", "chill", 1))
@@ -261,7 +261,7 @@ class TestMoodFeedbackAndLearning(unittest.TestCase):
         # Should route to second best matching mood
         new_chill_mood = assignments["track_chill"]
         self.assertIsNotNone(new_chill_mood)
-        self.assertIn(new_chill_mood, ["chill", "relaxed", "calm", "ambient", "mellow", "soft", "slow", "moody"])
+        self.assertIn(new_chill_mood, ["chill", "moody", "acoustic"])
 
 
 if __name__ == "__main__":

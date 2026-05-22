@@ -55,6 +55,7 @@ class AssistantResponse:
     # finishes his sentence before the music kicks in. Playback-control
     # intents (resume/skip/etc.) act eagerly and leave this False.
     deferred_play: bool = False
+    intent: Optional[ai.Intent] = None
 
 
 @dataclass
@@ -575,7 +576,10 @@ class AssistantRunner:
         re-asking."""
         self._history_cache = None
         try:
-            return await self._dispatch_inner(intent)
+            response = await self._dispatch_inner(intent)
+            if response is not None:
+                response.intent = intent
+            return response
         finally:
             self._history_cache = None
 
