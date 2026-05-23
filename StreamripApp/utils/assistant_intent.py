@@ -207,6 +207,17 @@ def _build_patterns(mood_keywords: list[str]) -> list[tuple[str, re.Pattern]]:
             re.I
         )),
         (INTENT_PLAY_RANDOM,  re.compile(r"^\s*(?:shuffle\s+play|surprise\s+me)\s*$", re.I)),
+        # "play something else" / "play another" — fresh shuffle pick. Without
+        # this the parser fell through to play_now and searched the library
+        # for a literal track called "something else".
+        (INTENT_PLAY_RANDOM,  re.compile(
+            r"^\s*(?:play|start|put\s+on|give\s+me|queue)?\s*(?:me\s+)?"
+            r"(?:"
+            r"(?:something|anything)\s+(?:else|different|new)"
+            r"|another(?:\s+(?:one|song|track|tune))?"
+            r")\s*$",
+            re.I,
+        )),
 
         # ── Mood (DSP-driven) ───────────────────────────────────────────────────
         # Restricted to mood_alt so we don't steal "play something <artist>"

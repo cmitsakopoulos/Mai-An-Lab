@@ -21,6 +21,7 @@ chat UI. Keeping speech out of here makes the runner trivially unit-testable.
 
 from __future__ import annotations
 
+import copy
 import logging
 import random
 import re
@@ -68,6 +69,7 @@ class PendingConfirmation:
     on_yes_msg: str = "On it."
     on_no_msg: str = "Understood. Standing by."
     on_yes_callback: Optional[Callable] = None
+    on_no_callback: Optional[Callable] = None
 
 
 @dataclass
@@ -129,6 +131,11 @@ class AssistantRunner:
         # Conversational playlist flow wizard state
         self._playlist_flow: Optional[PendingPlaylistCreation] = None
         self._history_cache: Optional[dict] = None
+        # Optional injected callable returning the live in-memory history
+        # list. When set (by AssistantView), the resolver skips the disk
+        # round-trip through ChatMemoryManager and reads in-process state
+        # directly. Reset per-dispatch by dispatch() / dispatch_text().
+        self._history_provider: Optional[Callable[[], list]] = None
 
     def queue_confirmation(self, prompt: PendingConfirmation) -> None:
         """Stage a pending yes/no for the next user turn. Replaces any
@@ -565,7 +572,9 @@ class AssistantRunner:
 
     # ── Public dispatch ─────────────────────────────────────────────────────
 
-    async def dispatch(self, intent: ai.Intent) -> AssistantResponse:
+    async def dispatch(self, intent: ai.Intent,
+                       history_provider: Optional[Callable[[], list]] = None,
+                       ) -> AssistantResponse:
         """Route an Intent to its handler. Catches and reports handler errors
         so the chat UI always gets a renderable response.
 
@@ -573,17 +582,65 @@ class AssistantRunner:
         the queued action), INTENT_NEGATIVE cancels it, and anything else
         clears the pending and routes normally as a new request — the user
         moved on, treat their input as a fresh intent rather than ambiguously
-        re-asking."""
+        re-asking.
+
+        history_provider, when supplied, returns the in-memory chat history
+        list — avoids the disk round-trip through ChatMemoryManager."""
         self._history_cache = None
+        if history_provider is not None:
+            self._history_provider = history_provider
         try:
             response = await self._dispatch_inner(intent)
             if response is not None:
                 response.intent = intent
+                self._announce_anaphora(intent, response)
             return response
         finally:
             self._history_cache = None
+            self._history_provider = None
+
+    def _announce_anaphora(self, intent: "ai.Intent", response: "AssistantResponse") -> None:
+        """If _resolve_anaphora rewrote the query, prepend an audible
+        acknowledgement to response.spoken so the user can tell that Jarvis
+        is tracking context (rather than getting lucky). Bubble text is
+        already self-evidently the resolved entity — no need to touch it."""
+        label = intent.extras.get("anaphora_resolved_label")
+        trigger = intent.extras.get("anaphora_trigger")
+        if not label or not response.success:
+            return
+        if trigger:
+            # Explicit pronoun: prepend a short acknowledgement.
+            prefix = f"Resolving '{trigger}' to {label}. "
+            response.spoken = prefix + (response.spoken or "")
+        else:
+            # Implicit-context intent (play_similar / play_more_by with no
+            # pronoun). Softer phrasing — append as a tail clause so the
+            # primary handler phrase still reads naturally.
+            tail = f" (based on our recent discussion of {label})"
+            if response.spoken and not response.spoken.endswith(tail):
+                response.spoken = response.spoken.rstrip(".") + "." + tail
 
     async def _dispatch_inner(self, intent: ai.Intent) -> AssistantResponse:
+        # Check intent types and set jarvis_controlled state on the audio engine accordingly
+        play_or_queue_intents = {
+            ai.INTENT_PLAY_NOW,
+            ai.INTENT_QUEUE_ADD,
+            ai.INTENT_QUEUE_NEXT,
+            ai.INTENT_PLAY_SIMILAR,
+            ai.INTENT_PLAY_MORE_BY,
+            ai.INTENT_PLAY_MOOD,
+            ai.INTENT_PLAY_RANDOM,
+            ai.INTENT_PLAYLIST_PLAY,
+        }
+        stop_or_clear_intents = {
+            ai.INTENT_STOP,
+            ai.INTENT_CLEAR_QUEUE,
+        }
+        if intent.name in play_or_queue_intents:
+            self.engine.jarvis_controlled = True
+        elif intent.name in stop_or_clear_intents:
+            self.engine.jarvis_controlled = False
+
         # 1. Intercept for active conversational playlist wizard
         if self._playlist_flow is not None:
             # Emergency playback controls override the conversational wizard
@@ -628,6 +685,16 @@ class AssistantRunner:
                 )
             if intent.name == ai.INTENT_NEGATIVE:
                 self._pending = None
+                if pending.on_no_callback is not None:
+                    try:
+                        return await pending.on_no_callback()
+                    except Exception as e:
+                        logger.exception("PendingConfirmation: on_no_callback failed")
+                        return AssistantResponse(
+                            spoken="I had trouble processing that, sir.",
+                            displayed=f"Error executing callback: {e}",
+                            success=False,
+                        )
                 return AssistantResponse(
                     spoken=pending.on_no_msg,
                     displayed=pending.on_no_msg,
@@ -645,11 +712,23 @@ class AssistantRunner:
         # then return the question bubble immediately.
         if confirm_q is not None:
             resolved_intent = intent          # already fully resolved
+            # Ambiguity path: 'no' switches to the runner-up instead of
+            # cancelling outright. The alt intent was built by _resolve_anaphora.
+            alt_intent = intent.extras.pop("anaphora_alt_intent", None)
+            alt_label = intent.extras.pop("anaphora_alt_label", None)
+            if alt_intent is not None:
+                no_callback = lambda: self.dispatch(alt_intent)
+                no_msg = (f"Understood, sir. Going with **{alt_label}** instead."
+                          if alt_label else "Understood, sir. Going with the alternative.")
+            else:
+                no_callback = None
+                no_msg = "Understood, sir. Standing by."
             self._pending = PendingConfirmation(
                 prompt=confirm_q,
                 on_yes_msg=confirm_q,         # unused; callback drives the reply
-                on_no_msg="Understood, sir. Standing by.",
+                on_no_msg=no_msg,
                 on_yes_callback=lambda: self.dispatch(resolved_intent),
+                on_no_callback=no_callback,
             )
             return AssistantResponse(
                 spoken=confirm_q,
@@ -834,10 +913,12 @@ class AssistantRunner:
                     success=False
                 )
 
-    async def dispatch_text(self, text: str) -> AssistantResponse:
+    async def dispatch_text(self, text: str,
+                            history_provider: Optional[Callable[[], list]] = None,
+                            ) -> AssistantResponse:
         """Convenience: parse + dispatch in one call."""
         intent = ai.parse(text)
-        return await self.dispatch(intent)
+        return await self.dispatch(intent, history_provider=history_provider)
 
     # ── Recent-playback tracking ────────────────────────────────────────────
 
@@ -993,6 +1074,30 @@ class AssistantRunner:
         "play_more_by":  "artist",
     }
 
+    # Weight applied when picking the best candidate. Active-playback entities
+    # (the user actually asked to play this) outweigh passive search / info
+    # entities by ~2 ranks of recency — so 'play it' after a brief search
+    # interlude still resolves to the thing that was *playing*, not the thing
+    # that was *searched*. See _ANAPHORA_INTENT_K below.
+    _INTENT_WEIGHT: dict[str, float] = {
+        # active playback
+        "play_now":       1.0,
+        "queue_add":      1.0,
+        "queue_next":     1.0,
+        "play_similar":   1.0,
+        "play_more_by":   1.0,
+        "playlist_play":  1.0,
+        # passive / informational
+        "search_artist":  0.5,
+        "search_track":   0.5,
+        "search_album":   0.5,
+        "now_playing":    0.5,
+    }
+    _INTENT_DEFAULT_WEIGHT = 0.3   # bubbles whose intent is missing/unknown
+    # Multiplier on the weight delta in the candidate-picking score. With the
+    # weights above, an active bubble overcomes ~2 ranks of recency advantage.
+    _ANAPHORA_INTENT_K = 5.0
+
     # Intents for which we should attempt anaphora resolution even when the
     # query itself doesn't contain an explicit trigger word — because they
     # always act on whatever was last mentioned / currently playing.
@@ -1003,7 +1108,18 @@ class AssistantRunner:
     # Number of messages back beyond which the resolver asks for confirmation
     # rather than acting silently.  Keeps references within ~3 exchange pairs
     # automatic; anything older gets a "Did you mean…?" check.
-    _ANAPHORA_CONFIRM_THRESHOLD = 5
+    # Confirmation now fires at the edge of the scan window rather than mid-chat.
+    # Real conversations interleave smalltalk; a strict 5-message cutoff turned
+    # "play it" 3 turns later into a confirmation prompt every single time.
+    _ANAPHORA_CONFIRM_THRESHOLD = 12
+    # When two competing candidates of the right type sit within this rank gap,
+    # treat the situation as ambiguous and ask the user to pick rather than
+    # silently going with the slightly-more-recent one.
+    _ANAPHORA_AMBIGUITY_GAP = 2
+    # How far back in the chat history we look for entity candidates. 12 was
+    # the original cap; real conversations interleave music with smalltalk
+    # and burn through that quickly. 25 covers ~12 conversational turns.
+    _ANAPHORA_SCAN_WINDOW = 25
 
     async def _resolve_anaphora(self, intent: ai.Intent) -> tuple[ai.Intent, str | None]:
         """Attempt to resolve pronouns / anaphoric references in *intent* using
@@ -1052,10 +1168,16 @@ class AssistantRunner:
         if hint_type is None and needs_context:
             hint_type = self._INTENT_DEFAULT_TYPE.get(intent.name)
 
-        # -- 1. Load chat history (cap at last 12 messages) -------------------
+        # -- 1. Load chat history -------------------------------------------
+        # Prefer the in-memory provider injected by the caller (AssistantView
+        # passes its live _history_list). Falls back to ChatMemoryManager's
+        # disk session when no provider is supplied — tests rely on this.
         try:
             if self._history_cache is not None:
                 session = self._history_cache
+            elif self._history_provider is not None:
+                session = {"messages": list(self._history_provider() or [])}
+                self._history_cache = session
             else:
                 from utils.chat_memory import ChatMemoryManager
                 session = ChatMemoryManager().load_session()
@@ -1069,16 +1191,18 @@ class AssistantRunner:
             return intent, None
 
         # -- 2. Skip the current user turn (already appended before dispatch) -
-        scan_msgs = list(reversed(messages))[:12]
+        scan_msgs = list(reversed(messages))[:self._ANAPHORA_SCAN_WINDOW]
         if scan_msgs and scan_msgs[0].get("sender") == "user":
             scan_msgs = scan_msgs[1:]
 
         # -- 3. Collect typed candidates from history -------------------------
         _BOLD_RE = re.compile(r"\*\*([^*]+?)\*\*")   # legacy fallback only
 
-        # Each entry: (rank, type_label, data)
+        # Each entry: (rank, type_label, data, source_intent | None)
         # type_label ∈ {"track", "artist", "album", "track_legacy", "artist_legacy"}
-        candidates: list[tuple[int, str, object]] = []
+        # source_intent comes from entities["intent"] when present — used by
+        # the picker to weight active-playback bubbles over passive ones.
+        candidates: list[tuple[int, str, object, str | None]] = []
 
         for rank, msg in enumerate(scan_msgs):
             if msg.get("sender") != "assistant":
@@ -1086,13 +1210,14 @@ class AssistantRunner:
 
             entities = msg.get("entities")
             if entities:
+                src_intent = entities.get("intent")
                 # Fast path: structured entity dict present.
                 if (track := entities.get("track")) and track.get("path"):
-                    candidates.append((rank, "track", track))
+                    candidates.append((rank, "track", track, src_intent))
                 if artist := entities.get("artist"):
-                    candidates.append((rank, "artist", artist))
+                    candidates.append((rank, "artist", artist, src_intent))
                 if album := entities.get("album"):
-                    candidates.append((rank, "album", album))
+                    candidates.append((rank, "album", album, src_intent))
             else:
                 # Legacy fallback: parse bold markdown from pre-entities messages.
                 text = msg.get("text", "")
@@ -1115,9 +1240,9 @@ class AssistantRunner:
                             leg_title = leg_title or hit.strip()
 
                 if leg_title:
-                    candidates.append((rank, "track_legacy", (leg_title, leg_artist)))
+                    candidates.append((rank, "track_legacy", (leg_title, leg_artist), None))
                 elif leg_artist:
-                    candidates.append((rank, "artist_legacy", leg_artist))
+                    candidates.append((rank, "artist_legacy", leg_artist, None))
 
         # -- 4. Hard-filter: only consider entities of the hinted type --------
         if hint_type == "track":
@@ -1138,108 +1263,166 @@ class AssistantRunner:
             )
             return intent, None
 
-        # Pick most recent (lowest rank = closest to current turn).
-        best_rank, best_type, best_data = min(pool, key=lambda c: c[0])
+        # -- 5. Rank candidates by an intent-weighted recency score.
+        # score = -rank + weight * K  →  more recent and/or more-active
+        # bubbles score higher. Ambiguity is still measured by rank distance
+        # (handled below), so a high-score active far from a high-score
+        # passive does not produce a confirmation prompt.
+        def _score(c: tuple) -> float:
+            rank, _type, _data, src_intent = c
+            weight = self._INTENT_WEIGHT.get(src_intent or "", self._INTENT_DEFAULT_WEIGHT)
+            return -rank + weight * self._ANAPHORA_INTENT_K
 
-        # -- 5. Resolve the chosen candidate into a concrete track / artist ---
-        resolved_track:  dict | None = None
-        resolved_artist: str  | None = None
+        sorted_pool = sorted(pool, key=lambda c: (-_score(c), c[0]))
+        best_rank = sorted_pool[0][0]
+        intent.extras["resolved_via_intent"] = sorted_pool[0][3] or ""
 
-        if best_type == "track":
-            resolved_track = best_data  # already a full dict
-            logger.debug(
-                "_resolve_anaphora: entity-dict hit -- track '%s'",
-                resolved_track.get("title"),
+        primary_label = await self._apply_anaphora_resolution(
+            intent, sorted_pool[0], needs_context,
+        )
+        if primary_label is None:
+            logger.debug("_resolve_anaphora: best candidate failed to resolve.")
+            return intent, None
+        logger.info("_resolve_anaphora: '%s' -> '%s'", query_lower, primary_label)
+
+        # Stash for the speech wrapper in dispatch(): lets Jarvis audibly
+        # acknowledge which prior entity got picked, so context-tracking is
+        # observable to the user instead of feeling like a coincidence.
+        intent.extras["anaphora_resolved_label"] = primary_label
+        intent.extras["anaphora_trigger"] = trigger or ""
+
+        # -- 6. Detect ambiguity: a second candidate close in rank with a
+        # distinct label. We never silently pick between two equally-recent
+        # entities — that's where wrong resolutions hurt the most.
+        alt_intent = None
+        alt_label = None
+        if len(sorted_pool) >= 2:
+            alt_candidate = sorted_pool[1]
+            if alt_candidate[0] - best_rank <= self._ANAPHORA_AMBIGUITY_GAP:
+                alt_intent = copy.copy(intent)
+                # Reset to original state for an isolated resolution attempt.
+                alt_intent.extras = {k: v for k, v in intent.extras.items()
+                                     if k not in ("resolved_track",
+                                                  "seed_path_override",
+                                                  "seed_artist_override")}
+                alt_intent.query = intent.raw or query_lower
+                candidate_label = await self._apply_anaphora_resolution(
+                    alt_intent, alt_candidate, needs_context,
+                )
+                if (candidate_label is None
+                        or candidate_label.lower() == primary_label.lower()):
+                    alt_intent = None      # same entity → not actually ambiguous
+                else:
+                    alt_label = candidate_label
+
+        # -- 7. Decide whether to ask for confirmation ------------------------
+        # Three paths:
+        #   * ambiguous → "Did you mean X or Y" (yes=X, no=Y)
+        #   * far back  → "Just to confirm, sir — did you mean X?"
+        #   * otherwise → silent commit
+        confirm_q: str | None = None
+        if alt_intent is not None and alt_label is not None:
+            confirm_q = (
+                f"Did you mean **{primary_label}**, sir? "
+                f"(say 'no' for **{alt_label}** instead)"
             )
-        elif best_type == "track_legacy":
-            leg_title, leg_artist = best_data
-            search_q = f"{leg_title} {leg_artist}".strip() if leg_artist else leg_title
+            intent.extras["anaphora_alt_intent"] = alt_intent
+            intent.extras["anaphora_alt_label"] = alt_label
+            logger.info(
+                "_resolve_anaphora: ambiguity between '%s' (rank %d) and '%s' (rank %d)",
+                primary_label, best_rank, alt_label, sorted_pool[1][0],
+            )
+        elif best_rank > self._ANAPHORA_CONFIRM_THRESHOLD:
+            confirm_q = f"Just to confirm, sir — did you mean **{primary_label}**?"
+
+        return intent, confirm_q
+
+    async def _apply_anaphora_resolution(
+        self,
+        target_intent: "ai.Intent",
+        candidate: tuple,
+        needs_context: bool,
+    ) -> str | None:
+        """Resolve *candidate* into a concrete track/artist and mutate
+        *target_intent* (query + extras, plus engine-seed overrides when the
+        intent needs implicit context).
+
+        Returns a human-readable label for the resolved entity (e.g.
+        "Yesterday by The Beatles" or "Pink Floyd"), or None when resolution
+        failed. Used by both the primary candidate and the ambiguity check
+        on the runner-up, hence the helper."""
+        _, cand_type, cand_data, _src_intent = candidate
+        resolved_track: dict | None = None
+        resolved_artist: str | None = None
+
+        if cand_type == "track":
+            resolved_track = cand_data
+        elif cand_type == "track_legacy":
+            leg_title, leg_artist = cand_data
+            search_q = (f"{leg_title} {leg_artist}".strip()
+                        if leg_artist else leg_title)
             try:
                 resolved_track = await self._resolve_query(search_q)
             except Exception as exc:
-                logger.debug("_resolve_anaphora: legacy track resolve failed: %s", exc)
-        elif best_type == "artist":
-            resolved_artist = best_data
-            logger.debug(
-                "_resolve_anaphora: entity-dict hit -- artist '%s'", resolved_artist
-            )
-        elif best_type == "artist_legacy":
-            candidate_artist = best_data
+                logger.debug("_apply_anaphora_resolution: legacy track resolve failed: %s", exc)
+        elif cand_type == "artist":
+            resolved_artist = cand_data
+        elif cand_type == "artist_legacy":
             try:
-                artists = await self.db.get_all_artists(search_query=candidate_artist)
+                artists = await self.db.get_all_artists(search_query=cand_data)
                 if artists:
-                    target_lc = candidate_artist.lower()
+                    target_lc = cand_data.lower()
                     exact = next(
-                        (a for a in artists if a["name"].lower() == target_lc), None
+                        (a for a in artists if a["name"].lower() == target_lc),
+                        None,
                     )
                     resolved_artist = (exact or artists[0])["name"]
             except Exception as exc:
-                logger.debug("_resolve_anaphora: legacy artist resolve failed: %s", exc)
+                logger.debug("_apply_anaphora_resolution: legacy artist resolve failed: %s", exc)
 
         if resolved_track is None and resolved_artist is None:
-            logger.debug("_resolve_anaphora: candidate found but resolution yielded nothing.")
-            return intent, None
+            return None
 
-        # -- 6. Build confirmation question when entity is far back -----------
-        confirm_q: str | None = None
-        if best_rank > self._ANAPHORA_CONFIRM_THRESHOLD:
-            if resolved_track:
-                title  = resolved_track.get("title") or resolved_track.get("track_title") or "that track"
-                artist = resolved_track.get("artist") or resolved_track.get("artist_name") or ""
-                label  = f"{title} by {artist}" if artist else title
-                confirm_q = f"Just to confirm, sir — did you mean **{label}**?"
-            elif resolved_artist:
-                confirm_q = f"Just to confirm, sir — did you mean **{resolved_artist}**?"
-
-        # -- 7. Rewrite intent & seed engine state as needed ------------------
+        # Rewrite the intent in-place.
         if resolved_track:
-            resolved_title = resolved_track.get("title") or resolved_track.get("track_title") or ""
-            resolved_art   = resolved_track.get("artist") or resolved_track.get("artist_name") or ""
-            intent.query = f"{resolved_title} {resolved_art}".strip()
-            intent.extras["resolved_track"] = resolved_track
-            logger.info(
-                "_resolve_anaphora: '%s' -> track '%s' by '%s'",
-                query_lower, resolved_title, resolved_art,
-            )
+            resolved_title = (resolved_track.get("title")
+                              or resolved_track.get("track_title") or "")
+            resolved_art = (resolved_track.get("artist")
+                            or resolved_track.get("artist_name") or "")
+            target_intent.query = f"{resolved_title} {resolved_art}".strip()
+            target_intent.extras["resolved_track"] = resolved_track
             if needs_context and not self.engine.current_path:
                 seed_path = resolved_track.get("path") or ""
                 if seed_path:
-                    intent.extras["seed_path_override"] = seed_path
-                    intent.extras["seed_artist_override"] = resolved_art
-                    logger.info("_resolve_anaphora: set seed_path_override '%s'", seed_path)
+                    target_intent.extras["seed_path_override"] = seed_path
+                    target_intent.extras["seed_artist_override"] = resolved_art
+            return (f"{resolved_title} by {resolved_art}"
+                    if resolved_art else resolved_title or "that track")
 
-        elif resolved_artist:
-            intent.query = resolved_artist
-            logger.info(
-                "_resolve_anaphora: '%s' -> artist '%s'", query_lower, resolved_artist
-            )
-            if needs_context and not self.engine.current_path:
-                try:
-                    conn = await self.db.get_connection()
-                    async with conn.execute(
-                        """
-                        SELECT t.path, t.title, ar.name AS artist
-                        FROM tracks t
-                        JOIN albums al ON al.id = t.album_id
-                        JOIN artists ar ON ar.id = al.artist_id
-                        WHERE ar.name = ? COLLATE NOCASE
-                        LIMIT 1
-                        """,
-                        (resolved_artist,),
-                    ) as cursor:
-                        row = await cursor.fetchone()
-                    if row:
-                        row = dict(row)
-                        intent.extras["seed_path_override"] = row["path"]
-                        intent.extras["seed_artist_override"] = resolved_artist
-                        logger.info(
-                            "_resolve_anaphora: set seed_path_override with artist track '%s'",
-                            row["path"],
-                        )
-                except Exception as exc:
-                    logger.debug("_resolve_anaphora: artist seed lookup failed: %s", exc)
-
-        return intent, confirm_q
+        # resolved_artist path
+        target_intent.query = resolved_artist
+        if needs_context and not self.engine.current_path:
+            try:
+                conn = await self.db.get_connection()
+                async with conn.execute(
+                    """
+                    SELECT t.path, t.title, ar.name AS artist
+                    FROM tracks t
+                    JOIN albums al ON al.id = t.album_id
+                    JOIN artists ar ON ar.id = al.artist_id
+                    WHERE ar.name = ? COLLATE NOCASE
+                    LIMIT 1
+                    """,
+                    (resolved_artist,),
+                ) as cursor:
+                    row = await cursor.fetchone()
+                if row:
+                    row = dict(row)
+                    target_intent.extras["seed_path_override"] = row["path"]
+                    target_intent.extras["seed_artist_override"] = resolved_artist
+            except Exception as exc:
+                logger.debug("_apply_anaphora_resolution: artist seed lookup failed: %s", exc)
+        return resolved_artist
 
 
 
@@ -1294,7 +1477,10 @@ class AssistantRunner:
                 f"Queued **{len(engine_tracks)}** matches for **{intent.query}**. "
                 f"{prefix_displayed}**{first.get('title')}** — {first.get('artist')}."
             ),
-            extras={"queued": len(engine_tracks), "first": first},
+            # is_multi flags the random opener as a non-canonical track seed.
+            # The artist is still meaningful for 'more by them' follow-ups.
+            extras={"queued": len(engine_tracks), "first": first,
+                    "is_multi": True, "query": intent.query or ""},
             deferred_play=True,
         )
 
@@ -1343,7 +1529,8 @@ class AssistantRunner:
             return AssistantResponse(
                 spoken=f"{self._say('affirmative')} Added {len(tracks)} {mood} tracks to the queue.",
                 displayed=f"Queued **{len(tracks)}** {mood} tracks based on DSP profile.",
-                extras={"mood": mood, "queued": len(tracks)},
+                extras={"mood": mood, "queued": len(tracks),
+                        "entity_intent": "play_mood"},
             )
         else:
             self.engine.set_queue(engine_tracks, start_index=0)
@@ -1359,7 +1546,8 @@ class AssistantRunner:
                     f"Queued **{len(tracks)}** {mood} tracks based on DSP profile. "
                     f"Starting with **{first.get('title')}** — {first.get('artist')}."
                 ),
-                extras={"mood": mood, "queued": len(tracks)},
+                extras={"mood": mood, "queued": len(tracks),
+                        "entity_intent": "play_mood"},
                 deferred_play=True,
             )
 
@@ -1385,7 +1573,11 @@ class AssistantRunner:
         return AssistantResponse(
             spoken=f"{self._say('affirmative')} Initiating shuffle play. Starting with {title} by {artist}.",
             displayed=f"Shuffle play active. Queued **{len(engine_tracks)}** tracks. Starting with: **{title}** — {artist}",
-            extras={"track": first, "queued": len(engine_tracks)},
+            # entity_intent flags this 'track' as a non-canonical seed so the
+            # persistence layer doesn't anchor future 'play it' on a random
+            # song the user never asked for.
+            extras={"track": first, "queued": len(engine_tracks),
+                    "entity_intent": "play_random"},
             deferred_play=True,
         )
 
@@ -1501,7 +1693,8 @@ class AssistantRunner:
                     f"Similarity sequence initiated. Queued **{added}** tracks "
                     f"(via acoustic walk). Next similar: **{first_name}**."
                 ),
-                extras={"added": added, "kind": "walk"},
+                extras={"added": added, "kind": "walk",
+                        "entity_intent": "play_similar_bulk"},
             )
         else:
             self.engine.set_queue(engine_tracks, start_index=0)
@@ -1514,7 +1707,8 @@ class AssistantRunner:
                     f"Similarity sequence initiated. Now playing **{added}** tracks "
                     f"(via acoustic walk). First similar: **{first_name}**."
                 ),
-                extras={"added": added, "kind": "walk"},
+                extras={"added": added, "kind": "walk",
+                        "entity_intent": "play_similar_bulk"},
                 deferred_play=True,
             )
 
@@ -1670,9 +1864,18 @@ class AssistantRunner:
         artist = getattr(self.engine, "current_artist", "") or ""
         if not title:
             return AssistantResponse(spoken="Nothing is playing.", displayed="No current track.")
+        # Build a minimal track dict so the persistence layer can stash a
+        # structured entity instead of relying on bold-tag regex parsing.
+        track_dict = {
+            "path":   getattr(self.engine, "current_path", "") or "",
+            "title":  title,
+            "artist": artist,
+            "album":  getattr(self.engine, "current_album", "") or "",
+        }
         return AssistantResponse(
             spoken=self._say("status", track=title, artist=artist),
             displayed=f"**{title}** — {artist}",
+            extras={"track": track_dict, "artist": artist},
         )
 
     async def _handle_rescan_dsp(self, _intent: ai.Intent) -> AssistantResponse:

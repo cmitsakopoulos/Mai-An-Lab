@@ -594,14 +594,19 @@ class HubSettingItem(ScaleButton):
 
 class AccordionCard(ft.Column):
     def __init__(self, icon: str, title: str, subtitle: str, content_controls: list,
-                 header_actions: list | None = None):
-        self.is_open = False
+                 header_actions: list | None = None, initially_open: bool = False,
+                 on_toggle: callable = None):
+        self.is_open = initially_open
+        self.on_toggle = on_toggle
         self.content_area = ft.Container(
             content=ft.Column(content_controls, spacing=6),
-            visible=False,
+            visible=initially_open,
             padding=ft.Padding.only(left=16, right=16, bottom=14, top=4),
         )
-        self.chevron = ft.Icon(ft.Icons.CHEVRON_RIGHT, color=DIM, opacity=0.35, size=18)
+        self.chevron = ft.Icon(
+            ft.Icons.KEYBOARD_ARROW_DOWN if initially_open else ft.Icons.CHEVRON_RIGHT,
+            color=DIM, opacity=0.35, size=18
+        )
         # Click target is the toggle_zone only; header_actions live outside it
         # so clicking edit/delete doesn't also toggle the accordion.
         toggle_zone = ft.Container(
@@ -635,6 +640,8 @@ class AccordionCard(ft.Column):
         self.is_open = not self.is_open
         self.content_area.visible = self.is_open
         self.chevron.icon = ft.Icons.KEYBOARD_ARROW_DOWN if self.is_open else ft.Icons.CHEVRON_RIGHT
+        if self.on_toggle:
+            self.on_toggle(self.is_open)
         self.update()
 
 # AnimatedLibraryNode removed; library uses flat row list rebuilt by load_library()
@@ -2169,6 +2176,7 @@ class SearchView:
                         data["preview_state"] = "playing"
                         icon_ctrl.content = ft.Icon(ft.Icons.STOP_CIRCLE_OUTLINED, color=CYAN, size=20)
                         container_ctrl.shadow = ft.BoxShadow(blur_radius=8, color=apply_opacity(0.15, CYAN))
+                        audio_engine.jarvis_controlled = False
                         audio_engine.set_queue([meta], start_index=0)
                         self.app.show_snackbar(f"Playing preview: {title}")
                         icon_ctrl.update()
@@ -2752,10 +2760,12 @@ class LibraryView:
         self._update_partition_tabs_ui()
         self.page.run_task(self.load_library)
 
-    async def _change_mood(self, delta: int):
-        if not self._cached_moods:
-            return
+    def _select_mood_index(self, index: int):
+        self.selected_mood_index = index
+        self.current_page = 0
+        self.page.run_task(self.load_library)
 
+    async def _change_mood(self, delta: int):
         # Gather active sections matching the search query
         active_moods = []
         sq = self.search_query.lower() if self.search_query else ""
@@ -2768,10 +2778,11 @@ class LibraryView:
                 sq in (t.get("path") or "").lower()
             )
 
-        for mood, tracks in (self._cached_moods or {}).items():
+        from utils import track_graph as tg
+        for mood in tg.MOODS.keys():
+            tracks = (self._cached_moods or {}).get(mood, [])
             filtered = [t for t in tracks if matches_query(t)]
-            if filtered:
-                active_moods.append((mood, filtered))
+            active_moods.append((mood, filtered))
 
         active_moods.sort(key=lambda x: len(x[1]), reverse=True)
 
@@ -2779,7 +2790,7 @@ class LibraryView:
 
         active_sections = []
         for mood, tracks in active_moods:
-            active_sections.append(mood)
+            active_sections.append(mood.capitalize())
         if unanalysed_searched:
             active_sections.append("Unanalysed Tracks")
 
@@ -2981,6 +2992,11 @@ class LibraryView:
         self.app.safe_update(lambda: setattr(self._search_spinner, "visible", True))
         try:
             db = self.app.db_manager
+            
+            # Clear all existing mood feedback/likes to guarantee a completely new, clean slate context
+            await db.clear_all_mood_feedback()
+            self._mood_feedback_map.clear()
+            
             import numpy as np
             from utils import track_graph as tg
             
@@ -3223,6 +3239,41 @@ class LibraryView:
         dlg.open = True
         self.page.update()
 
+    async def _exclude_track_from_islet(self, islet_name: str, track_path: str, track_title: str):
+        from utils import track_graph as tg
+        ok = tg.blacklist_track_from_islet(islet_name, track_path)
+        if ok:
+            self._cached_islets = None
+            self.app.show_snackbar(
+                f"'{track_title}' excluded from custom mood '{islet_name.title()}'.",
+                icon=ft.Icons.CHECK_CIRCLE_OUTLINE
+            )
+            await self.load_library()
+        else:
+            self.app.show_snackbar(
+                "Failed to exclude track from custom mood.",
+                icon=ft.Icons.ERROR_OUTLINE
+            )
+
+    async def _clear_islet_blacklist_action(self, islet_name: str, dialog: ft.AlertDialog):
+        from utils import track_graph as tg
+        dialog.open = False
+        self.page.update()
+        
+        ok = tg.clear_islet_blacklist(islet_name)
+        if ok:
+            self._cached_islets = None
+            self.app.show_snackbar(
+                f"Exclusion blacklist cleared for custom mood '{islet_name.title()}'.",
+                icon=ft.Icons.CHECK_CIRCLE_OUTLINE
+            )
+            await self.load_library()
+        else:
+            self.app.show_snackbar(
+                "Failed to clear exclusion blacklist.",
+                icon=ft.Icons.ERROR_OUTLINE
+            )
+
     def _open_edit_islet_dialog(self, name: str):
         """Rename + retune-threshold for an existing islet. Centroid and
         exemplar stay locked — to re-seed, delete and create fresh."""
@@ -3255,6 +3306,22 @@ class LibraryView:
             ),
         )
 
+        blacklist = entry.get("blacklist", [])
+        blacklist_container = ft.Container(visible=bool(blacklist))
+        if blacklist:
+            blacklist_container.content = ft.Row(
+                [
+                    ft.Text(f"{len(blacklist)} track(s) excluded", size=11, color=DIM, weight=ft.FontWeight.W_600),
+                    ft.TextButton(
+                        "Clear Exclusions",
+                        icon=ft.Icons.RESTORE_ROUNDED,
+                        style=ft.ButtonStyle(color="#FF4444"),
+                        on_click=lambda _e: self.page.run_task(self._clear_islet_blacklist_action, name, dlg)
+                    )
+                ],
+                alignment=ft.MainAxisAlignment.SPACE_BETWEEN
+            )
+
         dlg = ft.AlertDialog(
             title=ft.Text("Edit Islet"),
             content=ft.Container(
@@ -3269,6 +3336,8 @@ class LibraryView:
                             "Looser values pull in more distant neighbours.",
                             color=DIM, size=11, max_lines=3,
                         ),
+                        ft.Container(height=6, visible=bool(blacklist)),
+                        blacklist_container,
                     ],
                     spacing=4, tight=True,
                 ),
@@ -3838,6 +3907,13 @@ class LibraryView:
         self._tracks_cache = None
         self._tracks_cache_key = None
 
+        # Reset the content of the list wrapper to the flat list view unless we are in default moods mode
+        if not (self.view_mode == "partitions" and self.partition_sub_mode == "moods"):
+            old_content = self._animated_list_wrapper.content
+            self._animated_list_wrapper.content = self._library_list
+            if old_content != self._library_list:
+                self.try_update(self._animated_list_wrapper)
+
         # Force fresh reload of partitions and islets to prevent race conditions
         # and ensure changes in database/metadata reflect instantly
         if self.view_mode == "partitions":
@@ -3849,14 +3925,20 @@ class LibraryView:
         # be *built* against.
         self._last_highlighted_path = audio_engine.current_path or None
 
-        self.app.safe_update(lambda: (
-            setattr(self._search_spinner, "visible", True),
-            self._library_list.controls.clear(),
-            self._path_to_controls.clear(),
-            setattr(self._empty_label, "visible", False),
-            setattr(self._pagination_bar, "visible", False),
-            setattr(self._mood_pagination_bar, "visible", False)
-        ))
+        self._search_spinner.visible = True
+        self._library_list.controls.clear()
+        self._path_to_controls.clear()
+        self._empty_label.visible = False
+        self._pagination_bar.visible = False
+        self._mood_pagination_bar.visible = False
+        
+        self.try_update(
+            self._search_spinner,
+            self._library_list,
+            self._empty_label,
+            self._pagination_bar,
+            self._mood_pagination_bar,
+        )
 
         try:
             # Check if we are in tracks, albums, or artists mode to use the paginated flat row setup
@@ -3941,6 +4023,12 @@ class LibraryView:
                         self._empty_label.content.controls[0].color = apply_opacity(0.3, CYAN)
                         self._empty_label.content.controls[1].value = "It's empty in here."
                         self._empty_label.content.controls[2].value = "Index your folders to start listening."
+                    
+                    # Ensure vertical scroll wheel (left dial) is hidden and wrapper content is reset
+                    old_content = self._animated_list_wrapper.content
+                    self._animated_list_wrapper.content = self._library_list
+                    if old_content != self._library_list:
+                        self._animated_list_wrapper.update()
                     
                     self._update_pagination_ui()
                     self.page.update()
@@ -4077,13 +4165,25 @@ class LibraryView:
                     stats_text = "0 TRACKS"
                 else:
                     if self.partition_sub_mode == "moods":
-                        # Mood subsets partition
+                        # Default moods partition
                         active_moods = []
-                        for mood, tracks in (self._cached_moods or {}).items():
+                        mood_icons = {
+                            "chill": ft.Icons.SPA_ROUNDED,
+                            "dreamy": ft.Icons.CLOUD_ROUNDED,
+                            "sad": ft.Icons.WATER_DROP_ROUNDED,
+                            "moody": ft.Icons.NIGHTLIGHT_ROUNDED,
+                            "acoustic": ft.Icons.MUSIC_NOTE_ROUNDED,
+                            "groovy": ft.Icons.GRAPHIC_EQ_ROUNDED,
+                            "upbeat": ft.Icons.CELEBRATION_ROUNDED,
+                            "energetic": ft.Icons.BOLT_ROUNDED,
+                            "intense": ft.Icons.WHATSHOT_ROUNDED,
+                        }
+                        
+                        for mood in tg.MOODS.keys():
+                            tracks = (self._cached_moods or {}).get(mood, [])
                             filtered_tracks = [t for t in tracks if matches_query(t)]
-                            if filtered_tracks:
-                                active_moods.append((mood, filtered_tracks))
-                                total_searched_count += len(filtered_tracks)
+                            active_moods.append((mood, filtered_tracks))
+                            total_searched_count += len(filtered_tracks)
                                 
                         active_moods.sort(key=lambda x: len(x[1]), reverse=True)
                         
@@ -4094,7 +4194,8 @@ class LibraryView:
                         # Build all active sections
                         active_sections = []
                         for mood, tracks in active_moods:
-                            active_sections.append((mood.capitalize(), tracks, ft.Icons.EMOJI_EMOTIONS_ROUNDED))
+                            icon = mood_icons.get(mood.lower(), ft.Icons.EMOJI_EMOTIONS_ROUNDED)
+                            active_sections.append((mood.capitalize(), tracks, icon))
                         if unanalysed_searched:
                             active_sections.append(("Unanalysed Tracks", unanalysed_searched, ft.Icons.HELP_OUTLINE_ROUNDED))
                             
@@ -4106,30 +4207,102 @@ class LibraryView:
                                 self.selected_mood_index = max(0, len(active_sections) - 1)
                                 
                             sec_title, sec_tracks, sec_icon = active_sections[self.selected_mood_index]
-                            
-                            # Populate flat rows for pagination
-                            self._flat_rows = [{"type": "partition_track", "data": t, "tracks": sec_tracks, "depth": 0} for t in sec_tracks]
-                            self.total_pages = math.ceil(len(sec_tracks) / self.items_per_page)
-                            
-                            # Update mood pagination control
                             self._mood_label.value = sec_title
-                            self._prev_mood_btn.disabled = len(active_sections) <= 1
-                            self._next_mood_btn.disabled = len(active_sections) <= 1
-                            self._mood_pagination_bar.visible = True
                             
-                            # Slice and build controls for current page
-                            start_idx = self.current_page * self.items_per_page
-                            end_idx = start_idx + self.items_per_page
-                            page_items = self._flat_rows[start_idx:end_idx]
+                            # For default moods, disable pagination completely to make it frictionless
+                            # Cap rendering to 35 tracks for optimal performance
+                            self._flat_rows = [{"type": "partition_track", "data": t, "tracks": sec_tracks, "depth": 0} for t in sec_tracks][:35]
+                            self.total_pages = 1
+                            self.current_page = 0
                             
-                            if self.current_page > 0:
-                                first_chunk.append(self._build_top_ghost())
-                                
-                            for item in page_items:
-                                first_chunk.append(self._build_partition_track_row(item["data"], item["tracks"], depth=0))
-                                
-                            if self.current_page < self.total_pages - 1:
-                                first_chunk.append(self._build_bottom_ghost())
+                            # Hide the old horizontal pagination slider
+                            self._mood_pagination_bar.visible = False
+                            
+                            # Build or update the premium vertical scrollwheel controls in-place
+                            if hasattr(self, "_mood_wheel_list") and self._mood_wheel_list is not None and len(self._mood_wheel_list.controls) == len(active_sections):
+                                for idx, (title, tracks, icon) in enumerate(active_sections):
+                                    is_selected = (idx == self.selected_mood_index)
+                                    accent = LIB_PARTITION_COLOR if is_selected else DIM
+                                    
+                                    chip = self._mood_wheel_list.controls[idx]
+                                    container = chip.content
+                                    column = container.content
+                                    
+                                    # Update Icon
+                                    column.controls[0].name = icon
+                                    column.controls[0].color = accent
+                                    
+                                    # Update Text
+                                    short_title = title.split()[0]
+                                    column.controls[1].value = short_title
+                                    column.controls[1].color = accent
+                                    
+                                    # Update Container Styling
+                                    container.bgcolor = apply_opacity(0.12, LIB_PARTITION_COLOR) if is_selected else "transparent"
+                                    container.border = ft.Border.all(1.5, LIB_PARTITION_COLOR if is_selected else apply_opacity(0.15, TEXT))
+                                    chip.on_tap = lambda _e, index=idx: self._select_mood_index(index)
+                            else:
+                                wheel_controls = []
+                                for idx, (title, tracks, icon) in enumerate(active_sections):
+                                    is_selected = (idx == self.selected_mood_index)
+                                    accent = LIB_PARTITION_COLOR if is_selected else DIM
+                                    
+                                    short_title = title.split()[0]
+                                    
+                                    chip = ft.GestureDetector(
+                                        content=ft.Container(
+                                            content=ft.Column(
+                                                [
+                                                    ft.Icon(icon, color=accent, size=18),
+                                                    ft.Text(short_title, size=8.5, weight=ft.FontWeight.W_700, color=accent, text_align=ft.TextAlign.CENTER, no_wrap=True),
+                                                ],
+                                                alignment=ft.MainAxisAlignment.CENTER,
+                                                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                                                spacing=2,
+                                            ),
+                                            width=58,
+                                            height=58,
+                                            border_radius=29,
+                                            bgcolor=apply_opacity(0.12, LIB_PARTITION_COLOR) if is_selected else "transparent",
+                                            border=ft.Border.all(1.5, LIB_PARTITION_COLOR if is_selected else apply_opacity(0.15, TEXT)),
+                                            padding=4,
+                                            animate=ft.Animation(150, ft.AnimationCurve.EASE_OUT),
+                                        ),
+                                        on_tap=lambda _e, index=idx: self._select_mood_index(index),
+                                    )
+                                    wheel_controls.append(chip)
+                                    
+                                if not hasattr(self, "_mood_wheel_list") or self._mood_wheel_list is None:
+                                    self._mood_wheel_list = ft.ListView(
+                                        spacing=12,
+                                        width=68,
+                                        padding=ft.Padding.only(left=2, right=2, top=6, bottom=20),
+                                    )
+                                self._mood_wheel_list.controls = wheel_controls
+                            
+                            # Render all tracks in the active mood
+                            if self._flat_rows:
+                                for item in self._flat_rows:
+                                    first_chunk.append(self._build_partition_track_row(item["data"], item["tracks"], depth=0))
+                            else:
+                                # Show a beautiful empty state inside the tracks list for this empty mood
+                                first_chunk.append(
+                                    ft.Container(
+                                        content=ft.Column(
+                                            [
+                                                ft.Icon(ft.Icons.MUSIC_NOTE_ROUNDED, color=apply_opacity(0.3, LIB_PARTITION_COLOR), size=32),
+                                                ft.Text(f"No tracks assigned to {sec_title}", color=DIM, size=13, weight=ft.FontWeight.W_600),
+                                                ft.Text("Analyze more tracks or adjust liked feedback.", color=apply_opacity(0.5, TEXT), size=11),
+                                            ],
+                                            alignment=ft.MainAxisAlignment.CENTER,
+                                            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                                            spacing=6,
+                                        ),
+                                        padding=32,
+                                        alignment=ft.Alignment(0, 0),
+                                        expand=True,
+                                    )
+                                )
                         else:
                             self._flat_rows = []
                             self.total_pages = 1
@@ -4161,10 +4334,27 @@ class LibraryView:
                                 subtitle = f"{len(member_tracks)} tracks · Featuring {dominant_artist}"
                             else:
                                 subtitle = "0 tracks · threshold too tight — edit to loosen"
+                            
+                            # Cap rendering to 35 tracks for optimal performance
+                            rendered_tracks = member_tracks[:35]
                             content_controls = [
-                                self._build_partition_track_row(t, member_tracks, depth=1)
-                                for t in member_tracks
+                                self._build_partition_track_row(t, member_tracks, depth=1, islet_name=name)
+                                for t in rendered_tracks
                             ]
+                            if len(member_tracks) > 35:
+                                remaining = len(member_tracks) - 35
+                                content_controls.append(
+                                    ft.Container(
+                                        content=ft.Text(
+                                            f"+ {remaining} more tracks in this custom islet",
+                                            size=11,
+                                            color=DIM,
+                                            italic=True,
+                                        ),
+                                        padding=ft.Padding.only(left=24, top=6, bottom=6),
+                                    )
+                                )
+                                
                             edit_btn = ft.IconButton(
                                 icon=ft.Icons.EDIT_OUTLINED,
                                 icon_color=DIM,
@@ -4179,12 +4369,22 @@ class LibraryView:
                                 tooltip="Delete islet",
                                 on_click=lambda _e, n=name: self._confirm_delete_islet(n),
                             )
+                            node_id = f"islet_{name.lower().strip()}"
+                            initially_open = node_id in self.expanded_nodes
+                            
+                            def make_toggle_cb(nid):
+                                return lambda open_state: (
+                                    self.expanded_nodes.add(nid) if open_state else self.expanded_nodes.discard(nid)
+                                )
+
                             accordion = AccordionCard(
                                 icon=ft.Icons.DIVERSITY_3_ROUNDED,
                                 title=name.title(),
                                 subtitle=subtitle,
                                 content_controls=content_controls,
                                 header_actions=[edit_btn, del_btn],
+                                initially_open=initially_open,
+                                on_toggle=make_toggle_cb(node_id),
                             )
                             first_chunk.append(accordion)
 
@@ -4211,10 +4411,48 @@ class LibraryView:
                         self._empty_label.content.controls[1].value = "No partition results found."
                         self._empty_label.content.controls[2].value = "Try checking your filters or search query."
                     
-                    self._update_pagination_ui()
-                    self.page.update()
+                    # Update layout: if default moods sub-mode, embed the vertical dial wheel
+                    if self.partition_sub_mode == "moods" and not is_empty:
+                        is_row_already_set = (
+                            isinstance(self._animated_list_wrapper.content, ft.Row) and
+                            len(self._animated_list_wrapper.content.controls) == 2 and
+                            hasattr(self, "_mood_wheel_list") and
+                            self._mood_wheel_list is not None and
+                            self._animated_list_wrapper.content.controls[0].content == self._mood_wheel_list
+                        )
+                        if not is_row_already_set:
+                            self._animated_list_wrapper.content = ft.Row(
+                                [
+                                    ft.Container(
+                                        content=self._mood_wheel_list,
+                                        border=ft.Border(right=ft.BorderSide(1, apply_opacity(0.1, TEXT))),
+                                        padding=ft.Padding.only(right=6),
+                                    ),
+                                    self._library_list
+                                ],
+                                spacing=6,
+                                expand=True,
+                            )
+                            self._animated_list_wrapper.update()
+                        else:
+                            # Update only the changed circular chips in place—no list replacement!
+                            self._mood_wheel_list.update()
+                            self._library_list.update()
+                    else:
+                        old_content = self._animated_list_wrapper.content
+                        self._animated_list_wrapper.content = self._library_list
+                        if old_content != self._library_list:
+                            self._animated_list_wrapper.update()
+                        else:
+                            self._library_list.update()
                     
-                self.app.safe_update(finalize_partitions)
+                    self._stats_label.update()
+                    self._search_spinner.update()
+                    if self._empty_label.visible:
+                        self._empty_label.update()
+                    self._update_pagination_ui()
+                    
+                finalize_partitions()
 
             else:
                 # Expandable view modes (artists, playlists) use the original lazy chunk scroll generator
@@ -4253,6 +4491,13 @@ class LibraryView:
                             self._empty_label.content.controls[0].color = apply_opacity(0.3, CYAN)
                             self._empty_label.content.controls[1].value = "It's empty in here."
                             self._empty_label.content.controls[2].value = "Index your folders to start listening."
+                    
+                    # Ensure vertical scroll wheel (left dial) is hidden and wrapper content is reset
+                    old_content = self._animated_list_wrapper.content
+                    self._animated_list_wrapper.content = self._library_list
+                    if old_content != self._library_list:
+                        self._animated_list_wrapper.update()
+                    
                     self.page.update()
 
                 self.app.safe_update(finalize)
@@ -4553,7 +4798,11 @@ class LibraryView:
             else:
                 tile.title.color = CYAN if is_current else TEXT
 
-            tile.subtitle.color = CYAN if is_current else DIM
+            if isinstance(tile.subtitle, ft.Column):
+                tile.subtitle.controls[0].color = CYAN if is_current else DIM
+            else:
+                tile.subtitle.color = CYAN if is_current else DIM
+                
             tile.bgcolor = active_color if is_current else "transparent"
             
             if tile.page:
@@ -4832,10 +5081,21 @@ class LibraryView:
         self._path_to_controls.setdefault(path, []).append(res)
         return res
 
-    def _build_partition_track_row(self, t: dict, partition_tracks: list[dict], depth: int = 0) -> ft.Control:
+    def _build_partition_track_row(self, t: dict, partition_tracks: list[dict], depth: int = 0, islet_name: str = None) -> ft.Control:
         res = self._track_row(t, depth=depth)
         path = t.get("path", "")
         tile = res.content.content
+        title = t.get("title") or os.path.basename(path)
+
+        if islet_name:
+            exclude_btn = ft.IconButton(
+                icon=ft.Icons.REMOVE_CIRCLE_OUTLINE,
+                icon_size=18,
+                icon_color="#FF4444",
+                tooltip="Exclude track from this custom mood",
+                on_click=lambda e, p=path, n=islet_name, t=title: self.page.run_task(self._exclude_track_from_islet, n, p, t)
+            )
+            tile.trailing = ft.Row([exclude_btn], tight=True, spacing=0)
         
         def play_partition_track(_e):
             self._tracks_cache = partition_tracks
@@ -4849,7 +5109,7 @@ class LibraryView:
         mood = tg.mood_canonical(self._mood_label.value) if self.partition_sub_mode == "moods" and hasattr(self, "_mood_label") and self._mood_label else None
 
         if mood:
-            # We are in mood partition mode. Add Like / Dislike buttons to the trailing part of the tile
+            # We are in mood partition mode. Add Like / Dislike buttons to the subtitle
             feedback_map = getattr(self, "_mood_feedback_map", {})
             track_feedback = feedback_map.get(path, {}).get(mood, 0)
 
@@ -4872,7 +5132,33 @@ class LibraryView:
                 on_click=lambda e, p=path, m=mood: self.page.run_task(self._register_mood_dislike, p, m, e.control),
             )
 
-            tile.trailing = ft.Row([like_btn, dislike_btn], tight=True, spacing=0)
+            artist = t.get("artist") or "Unknown"
+            tnum = t.get("track_num")
+            is_current = (path == audio_engine.current_path and bool(path))
+
+            tile.subtitle = ft.Column(
+                [
+                    ft.Text(
+                        f"Track {tnum}  ·  {artist}" if tnum else artist,
+                        color=CYAN if is_current else DIM,
+                        size=11,
+                        max_lines=1,
+                        overflow=ft.TextOverflow.ELLIPSIS,
+                    ),
+                    ft.Row(
+                        [
+                            like_btn,
+                            ft.Container(width=4), # subtle separator
+                            dislike_btn,
+                        ],
+                        spacing=0,
+                        tight=True,
+                    ),
+                ],
+                spacing=2,
+                tight=True,
+            )
+            tile.trailing = None
 
         return res
 
@@ -7659,17 +7945,75 @@ class AssistantView:
                 "Hold on — I'm still initialising. Try again in a moment.",
             )
             return
-        response = await self._runner.dispatch_text(text)
+
+        # Mirror the voice flow: show a "Thinking..." bubble while the runner
+        # works so text-only users get the same feedback as voice users.
+        thinking_bubble = ft.Row(
+            [
+                ft.Container(
+                    content=ft.Row(
+                        [
+                            ft.Icon(ft.Icons.AUTO_AWESOME_ROUNDED, color=CYAN, size=18),
+                            ft.Text("Thinking...", color=DIM, size=13, italic=True),
+                            ft.ProgressRing(width=12, height=12, stroke_width=1.5, color=CYAN),
+                        ],
+                        spacing=8,
+                        alignment=ft.MainAxisAlignment.START,
+                    ),
+                    padding=ft.Padding.symmetric(horizontal=14, vertical=10),
+                    bgcolor=SURFACE2,
+                    border_radius=14,
+                    border=ft.Border.all(1, apply_opacity(0.1, CYAN)),
+                )
+            ],
+            alignment=ft.MainAxisAlignment.START,
+        )
+        def _show_thinking():
+            self._messages.controls.append(thinking_bubble)
+            self._messages.update()
+        self.app.safe_update(_show_thinking)
+
+        # Hand the runner a live snapshot of the chat history so it can
+        # resolve anaphora without round-tripping through chat_history.json
+        # on every utterance.
+        try:
+            response = await self._runner.dispatch_text(
+                text, history_provider=lambda: list(self._history_list),
+            )
+        finally:
+            def _hide_thinking():
+                if thinking_bubble in self._messages.controls:
+                    self._messages.controls.remove(thinking_bubble)
+                    self._messages.update()
+            self.app.safe_update(_hide_thinking)
         # Build a structured entity dict from the response so future turns
         # can resolve pronouns without any regex or DB round-trip.
-        _track = response.extras.get("track") or response.extras.get("first")
+        # Non-canonical seeds (play_random, play_mood, play_similar_bulk) carry
+        # an entity_intent marker — their "track"/"first" is a system-picked
+        # seed, NOT the user's referent, so we don't anchor pronouns on it.
+        # Multi-match plays (extras.is_multi) are similar: the opener was
+        # randomly picked from many hits, but the artist (if consistent) is
+        # still meaningful for "more by them" follow-ups.
+        _NON_CANONICAL_SEEDS = {"play_random", "play_mood", "play_similar_bulk"}
+        _entity_intent = response.extras.get("entity_intent")
+        _is_non_canonical = _entity_intent in _NON_CANONICAL_SEEDS
+        _is_multi = bool(response.extras.get("is_multi"))
+        _raw_track = response.extras.get("track") or response.extras.get("first")
+        if _is_non_canonical:
+            _track = None
+            _artist = None
+        elif _is_multi:
+            _track = None        # random opener is not the anchor
+            _artist = (_raw_track.get("artist") or _raw_track.get("artist_name")
+                       if _raw_track else None)
+        else:
+            _track = _raw_track
+            _artist = (_track.get("artist") or _track.get("artist_name")
+                       if _track else response.extras.get("artist"))
         intent = getattr(response, "intent", None)
         _entities = {
             "track":  _track,
-            "artist": (
-                _track.get("artist") or _track.get("artist_name")
-                if _track else response.extras.get("artist")
-            ),
+            "artist": _artist,
             "playlist": response.extras.get("playlist"),
             "intent": intent.name if intent else getattr(response, "_intent_name", None),
         }
@@ -7693,10 +8037,13 @@ class AssistantView:
             except Exception as exc:
                 logger.warning("AssistantView: deferred play failed: %s", exc)
 
-        # Update shuffle button color in Now Playing if state changed in audio_engine
+        # Update shuffle button color in Now Playing if state changed in audio_engine.
+        # Without page.update() the icon_color assignment doesn't repaint until the
+        # next unrelated UI event, so play_random's shuffle activation looked silent.
         try:
             if hasattr(self.app, "now_playing") and self.app.now_playing:
                 self.app.now_playing.update_shuffle(audio_engine.is_shuffle)
+                self.app.page.update()
         except Exception:
             pass
 
@@ -7749,11 +8096,20 @@ class AssistantView:
             if len(self._messages.controls) > 50:
                 self._messages.controls.pop(0)
         self.app.safe_update(_mutate)
-        
-        # Smoothly scroll to the bottom after the UI has flushed and rendered
+
+        # Smoothly scroll to the bottom after the UI has flushed and rendered.
+        # Tall bubbles (VLM-matched bubbles carry a 3-row diagnostic footer;
+        # markdown content lays out asynchronously) finish painting after the
+        # first scroll fires, leaving the new content below the fold — so we
+        # do a second pass once layout has settled.
         await asyncio.sleep(0.06)
         try:
             await self._messages.scroll_to(offset=-1, duration=200)
+        except Exception:
+            pass
+        await asyncio.sleep(0.25)
+        try:
+            await self._messages.scroll_to(offset=-1, duration=120)
         except Exception:
             pass
 
@@ -8405,6 +8761,7 @@ class StreamripFletApp:
         audio_engine.bind(
             on_playback_error=lambda _, d: self.show_snackbar(f"Playback error: {d}", icon=ft.Icons.ERROR_OUTLINE, color="#FF4444"),
             on_queue_mutated=_on_queue_mutated,
+            on_jarvis_continue=self._on_jarvis_continue,
         )
 
         # build and mount UI
@@ -8989,6 +9346,140 @@ class StreamripFletApp:
 
         self.safe_update(_atomic_update)
 
+    def _on_jarvis_continue(self, _inst, _val=None):
+        """Sync callback dispatched by AudioEngine when the Jarvis-controlled
+        queue runs dry. Bridges into the async continuation coroutine safely."""
+        if self._page:
+            self._page.run_task(self._jarvis_auto_continue_queue)
+
+    async def _jarvis_auto_continue_queue(self):
+        """Automatically extend a Jarvis-managed queue with 5 acoustically
+        similar tracks when playback reaches the end of the current list.
+
+        Walk order:
+          1. Determine seed from the last-played track (current_path or last
+             queue entry so the seed is valid even after engine state resets).
+          2. Build an avoid set from the runner's recent-play history.
+          3. Walk the acoustic+artist graph for up to 5 new paths.
+          4. Fetch full metadata from DB and append tracks to the live queue.
+          5. Post a premium Jarvis chat bubble and speak the announcement.
+          6. Kick off playback at the first newly-appended slot.
+        """
+        import asyncio
+        import random
+        from utils import track_graph as tg
+
+        # ── Seed resolution ──────────────────────────────────────────────────
+        seed_path = audio_engine.current_path
+        if not seed_path and audio_engine.queue:
+            seed_path = audio_engine.queue[-1].get("path", "")
+        if not seed_path:
+            logger.warning("Jarvis continuation: no seed path found; skipping.")
+            return
+
+        # ── Avoid set ────────────────────────────────────────────────────────
+        avoid: set[str] = set()
+        runner = getattr(self.assistant_view, "_runner", None)
+        if runner is not None:
+            try:
+                avoid = await runner._avoid_set()
+            except Exception:
+                pass
+        avoid.add(seed_path)
+
+        # ── Acoustic graph walk ───────────────────────────────────────────────
+        try:
+            walk_paths = await tg.walk(
+                self.db_manager,
+                seed_path,
+                length=5,
+                edge_kinds=(tg.KIND_ACOUSTIC, tg.KIND_ARTIST),
+                avoid=avoid,
+                restart_prob=0.15,
+                diversity_lambda=0.3,
+                temperature=0.08,
+            )
+        except Exception as exc:
+            logger.warning("Jarvis continuation: graph walk failed: %s", exc)
+            walk_paths = []
+
+        if not walk_paths:
+            logger.info("Jarvis continuation: no neighbours found for seed %s", seed_path)
+            # Nothing to queue — stop cleanly so the engine doesn't hang.
+            audio_engine.stop()
+            return
+
+        # ── Fetch metadata and append to queue ───────────────────────────────
+        first_new_index = len(audio_engine.queue)
+        appended_tracks: list[dict] = []
+        for p in walk_paths:
+            try:
+                row = await self.db_manager.get_track_full(p)
+            except Exception:
+                row = None
+            if not row:
+                continue
+            track_dict = {
+                "path":        row.get("path"),
+                "track_title": row.get("title") or row.get("track_title") or os.path.basename(p),
+                "artist_name": row.get("artist") or row.get("artist_name") or "Unknown Artist",
+                "album_title": row.get("album")  or row.get("album_title")  or "Unknown Album",
+                "duration":    row.get("duration", 0.0) or 0.0,
+                "image_url":   row.get("image_url", "") or "",
+            }
+            audio_engine.queue_last(track_dict)
+            if runner is not None:
+                runner._remember(p, seed_path=seed_path)
+            appended_tracks.append(track_dict)
+
+        appended = len(appended_tracks)
+        if appended == 0:
+            logger.info("Jarvis continuation: metadata lookup failed for all neighbours.")
+            audio_engine.stop()
+            return
+
+        # ── Honour shuffle state when picking the first continuation track ────
+        # If the user is in shuffle (e.g. play_random), starting deterministically
+        # at first_new_index breaks the shuffle illusion for one track. For
+        # ordered modes (play_similar, sequential queues) we preserve the
+        # DSP-derived walk order.
+        if getattr(audio_engine, "is_shuffle", False) and appended > 1:
+            offset = random.randint(0, appended - 1)
+        else:
+            offset = 0
+        start_index = first_new_index + offset
+        first_track = appended_tracks[offset]
+        first_track_name = (
+            f"{first_track['track_title']} — {first_track['artist_name']}"
+        )
+
+        # ── Speak and post bubble ─────────────────────────────────────────────
+        spoken_msg = (
+            f"The queue has ended, sir. I've automatically continued with "
+            f"{appended} similar track{'s' if appended != 1 else ''}. "
+            f"Starting with {first_track_name}."
+        )
+        displayed_msg = (
+            f"Queue ended — automatically continued with **{appended}** "
+            f"acoustically similar track{'s' if appended != 1 else ''}. "
+            f"Now playing: **{first_track_name}**."
+        )
+
+        av = self.assistant_view
+        av._ensure_initialized()
+        try:
+            await av._append_bubble(
+                "assistant",
+                displayed_msg,
+                speak=True,
+                speak_text=spoken_msg,
+            )
+        except Exception as exc:
+            logger.warning("Jarvis continuation: bubble failed: %s", exc)
+
+        # ── Resume playback at chosen new track (shuffle-aware) ──────────────
+        audio_engine.play_track_at(start_index)
+
     def _fetch_artwork_url_async(self, img_url: str):
         # Check in-memory cache first; avoids any disk/network I/O
         cached = _ARTWORK_CACHE.get(img_url)
@@ -9374,6 +9865,7 @@ class StreamripFletApp:
                     "album_title": t.get("album")  or "Unknown",
                 })
 
+        audio_engine.jarvis_controlled = False
         audio_engine.set_queue(tracks, start_index=target_idx - start)
 
     def toggle_shuffle(self):

@@ -53,6 +53,7 @@ class AudioEngine:
 
         self.queue: list[dict] = []
         self.current_index: int = 0
+        self.jarvis_controlled = False
 
         self._audio: AudioServiceControl | None = None
         self._is_loaded: bool = False
@@ -256,6 +257,8 @@ class AudioEngine:
             # Dart handles auto-advance via ConcatenatingAudioSource; we just
             # reflect end-of-queue state here.
             self._set("is_playing", False)
+            if getattr(self, "jarvis_controlled", False):
+                self.dispatch("on_jarvis_continue")
         elif processing_state == "ready":
             self._is_loaded = True
             # Apply any seek that was queued before the source finished
@@ -467,7 +470,10 @@ class AudioEngine:
             self._sync_metadata_for_current()
             self._page.run_task(self._audio.skip_to_index, 0)
         else:
-            self.stop()
+            if getattr(self, "jarvis_controlled", False):
+                self.dispatch("on_jarvis_continue")
+            else:
+                self.stop()
 
     def previous(self):
         if self.position > 3.0:
@@ -686,6 +692,7 @@ class AudioEngine:
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     def stop(self):
+        self.jarvis_controlled = False
         if self._audio:
             target = self._audio
             self._is_loaded = False
