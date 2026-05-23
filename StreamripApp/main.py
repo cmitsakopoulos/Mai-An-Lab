@@ -2792,7 +2792,7 @@ class LibraryView:
         await self.load_library()
 
     def _refresh_partitions_click(self, e):
-        self.app.show_snackbar("Recalculating Mood Subsets...")
+        self.app.show_snackbar("Recalculating Default Moods...")
         self.page.run_task(self.recalculate_partitions_worker)
 
     async def _toggle_mood_like(self, track_path: str, mood: str, btn: ft.IconButton = None):
@@ -3074,7 +3074,7 @@ class LibraryView:
 
             self._mood_recalc_pending = False
             self._update_partition_tabs_ui()
-            self.app.show_snackbar("Mood subsets regenerated.")
+            self.app.show_snackbar("Default moods regenerated.")
             await self.load_library()
         except Exception as ex:
             logger.exception("Failed to recalculate partitions: %s", ex)
@@ -3085,8 +3085,8 @@ class LibraryView:
     def _update_partition_tabs_ui(self):
         tabs = []
         for mode, label, icon in [
-            ("moods", "Mood Subsets", ft.Icons.EMOJI_EMOTIONS_ROUNDED),
-            ("islets", "Acoustic Islets", ft.Icons.DIVERSITY_3_ROUNDED),
+            ("moods", "Default", ft.Icons.EMOJI_EMOTIONS_ROUNDED),
+            ("islets", "Custom", ft.Icons.DIVERSITY_3_ROUNDED),
         ]:
             is_active = (self.partition_sub_mode == mode)
             active_col = LIB_PARTITION_COLOR
@@ -3137,14 +3137,14 @@ class LibraryView:
                     on_click=lambda _: self.page.run_task(self._reset_mood_feedback),
                 )
             )
-        # Refresh partitions button (mood subsets only — islets are user-driven)
+        # Refresh partitions button (default moods only — custom islets are user-driven)
         is_pending = getattr(self, "_mood_recalc_pending", False)
         tabs.append(
             ft.IconButton(
                 icon=ft.Icons.REFRESH_ROUNDED,
                 icon_color=ft.Colors.WHITE if is_pending else active_col,
                 icon_size=18,
-                tooltip="Recalculate Mood Subsets (Changes Pending)" if is_pending else "Recalculate Mood Subsets",
+                tooltip="Recalculate Default Moods (Changes Pending)" if is_pending else "Recalculate Default Moods",
                 bgcolor=apply_opacity(0.08, active_col),
                 on_click=self._refresh_partitions_click
             )
@@ -3441,7 +3441,7 @@ class LibraryView:
         }
         tabs = []
         for mode, label in [
-            ("partitions", "Partitions"),
+            ("partitions", "Moods"),
             ("playlists", "Playlists"),
             ("artists", "Artists"),
             ("albums", "Albums"),
@@ -3838,6 +3838,13 @@ class LibraryView:
         self._tracks_cache = None
         self._tracks_cache_key = None
 
+        # Force fresh reload of partitions and islets to prevent race conditions
+        # and ensure changes in database/metadata reflect instantly
+        if self.view_mode == "partitions":
+            self._cached_islets = None
+            self._cached_moods = None
+            self._cached_unanalysed = None
+
         # Sync the highlight cache to whatever path the rows are about to
         # be *built* against.
         self._last_highlighted_path = audio_engine.current_path or None
@@ -3958,33 +3965,42 @@ class LibraryView:
                     all_tracks = await db.get_all_tracks()
                     all_paths_to_track = {t["path"]: t for t in all_tracks}
 
-                    self._cached_moods = {mood: [] for mood in tg.MOODS.keys()}
-                    self._cached_unanalysed = []
+                    cached_moods = {mood: [] for mood in tg.MOODS.keys()}
+                    cached_unanalysed = []
 
                     if saved_partitions:
                         for t in all_tracks:
                             path = t["path"]
                             if path in saved_partitions:
                                 mood = saved_partitions[path].get("mood")
-                                if mood in self._cached_moods:
-                                    self._cached_moods[mood].append(t)
+                                if mood in cached_moods:
+                                    cached_moods[mood].append(t)
                             else:
-                                self._cached_unanalysed.append(t)
+                                cached_unanalysed.append(t)
                     else:
                         # No mood partitions saved yet; every track is "unanalysed"
                         # from the partition view's standpoint.
-                        self._cached_unanalysed = list(all_tracks)
+                        cached_unanalysed = list(all_tracks)
 
                     # Islets: enumerate user-named islets from custom_moods.json
                     # and resolve members against the current library state.
                     # min_count=0 so an islet whose threshold was tightened
                     # below the floor still renders (with an empty/sparse
                     # subtitle and a hint to loosen) rather than vanishing.
-                    self._cached_islets = {}
+                    cached_islets = {}
                     for islet_name in tg.list_islets():
                         members = await tg.tracks_in_islet(db, islet_name, min_count=0)
                         members = [m for m in members if m.get("path") in all_paths_to_track]
-                        self._cached_islets[islet_name] = members
+                        cached_islets[islet_name] = members
+
+                    # Thread-safe/load-token check before mutating shared instance state
+                    # to prevent concurrent/aborted loads from writing stale data.
+                    if self._load_token != token:
+                        return
+
+                    self._cached_moods = cached_moods
+                    self._cached_unanalysed = cached_unanalysed
+                    self._cached_islets = cached_islets
 
                 # Filter pre-computed partitions using the search_query (if active)
                 if self.search_query:
@@ -4019,7 +4035,7 @@ class LibraryView:
                                     padding=16,
                                 ),
                                 ft.Text(
-                                    "Sonic Library Partitions",
+                                    "Sonic Library Moods",
                                     color=TEXT,
                                     size=18,
                                     weight=ft.FontWeight.W_700,
@@ -4027,7 +4043,7 @@ class LibraryView:
                                 ),
                                 ft.Text(
                                     "Analyze your library's DSP features to segment your music "
-                                    "collection into cohesive Mood Subsets and Acoustic Islets.",
+                                    "collection into cohesive Default and Custom moods.",
                                     color=DIM,
                                     size=13,
                                     text_align=ft.TextAlign.CENTER,
@@ -4035,7 +4051,7 @@ class LibraryView:
                                 ),
                                 ft.Container(height=8),
                                 ft.Button(
-                                    "Partition Library",
+                                    "Generate Moods",
                                     icon=ft.Icons.AUTO_AWESOME_ROUNDED,
                                     color=BG,
                                     bgcolor=LIB_PARTITION_COLOR,
@@ -7816,7 +7832,7 @@ class AssistantView:
             bubble_content = ft.Column(
                 [
                     bubble_content,
-                    ft.Container(height=1, bgcolor="#262626", margin=ft.margin.symmetric(vertical=6)),
+                    ft.Container(height=1, bgcolor="#262626", margin=ft.Margin.symmetric(vertical=6)),
                     ft.Row(
                         [
                             ft.Icon(s1_icon, color=s1_color, size=11),
@@ -7843,7 +7859,7 @@ class AssistantView:
             padding=ft.Padding.symmetric(horizontal=14, vertical=10),
             bgcolor=CYAN if is_user else SURFACE2,
             border_radius=14,
-            width=350 if (len(text) > 35 or intent) else None,
+            width=290 if (len(text) > 25 or intent) else None,
         )
         return ft.Row(
             [bubble],

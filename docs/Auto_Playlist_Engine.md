@@ -289,7 +289,7 @@ Higher (closer to 0) is better. The cache key `(features_version, row_count, max
 
 ### 4.2 Custom-mood centroids and the convex combination
 
-A custom mood; implemented as an **Acoustic Islet** stored in `custom_moods.json`; is seeded by a single exemplar track. The 52-dimensional timbre vector of that exemplar track acts as the **centroid** ($C = T_{\text{exemplar}}$). For a track to match a custom mood, the scorer computes the cosine similarity between its timbre BLOB and the centroid:
+A custom mood; stored in `custom_moods.json`; is seeded by a single exemplar track. The 52-dimensional timbre vector of that exemplar track acts as the **centroid** ($C = T_{\text{exemplar}}$). For a track to match a custom mood, the scorer computes the cosine similarity between its timbre BLOB and the centroid:
 
 $$\text{centroid\_score}_i = \cos(\text{timbre}_i, \text{centroid}) = \frac{\text{timbre}_i \cdot \text{centroid}}{\|\text{timbre}_i\| \cdot \|\text{centroid}\|}$$
 
@@ -297,7 +297,7 @@ Built-in moods score on percentile-Euclidean (4.1); custom moods score on this c
 
 $$\text{mood\_score}_i = \alpha \cdot \text{scalar\_score}_i + (1 - \alpha) \cdot \text{centroid\_score}_i$$
 
-with $\alpha = 0.5$ (`_MOOD_ALPHA_SCALAR`). Built-in moods today have profile only; scalar score wins; custom moods today have centroid only; cosine wins. The unified scorer means there are no two code paths to keep in sync; adding a `profile` to a custom mood (or a `centroid` to a built-in) automatically blends both signals without any new branching.
+with $\alpha = 0.5$ (`_MOOD_ALPHA_SCALAR`). Built-in moods today have profile only; scalar score wins; custom moods (Custom tab) today have centroid only; cosine wins. The unified scorer means there are no two code paths to keep in sync; adding a `profile` to a custom mood (or a `centroid` to a built-in) automatically blends both signals without any new branching.
 
 ### 4.3 Listener-feedback re-rank; the β-mix
 
@@ -329,9 +329,9 @@ Both consumers degrade gracefully if the table is empty (fresh install); `recent
 
 * **Why it's library-relative**: A "fast" or "intense" track in a library of ambient is slower than a "fast" track in a library of drum & bass. Percentile ranking against the active database distribution ensures mood recommendations adapt to the user's specific collection; there is no global threshold to maintain.
 
-### 4.5 Acoustic Islets and Custom Centroids
+### 4.5 Custom Moods (Islets) and Custom Centroids
 
-Acoustic islets represent dynamic, localized topological clusters in the unit-normalised 52-dimensional timbre space ($\mathbb{R}^{52}$). Rather than relying on rigid, pre-computed playlist classes; the mood system dynamically generates custom centroids and identifies cohesive islets of contiguous tracks.
+Custom moods (originally named Acoustic Islets) represent dynamic, localized topological clusters in the unit-normalised 52-dimensional timbre space ($\mathbb{R}^{52}$). Rather than relying on rigid, pre-computed playlist classes; the mood system dynamically generates custom centroids and identifies cohesive groups of contiguous tracks.
 
 #### A. Centroid Computation Mathematics
 
@@ -341,20 +341,20 @@ $$C = T_{\text{exemplar}}$$
 
 The timbre vector $T_{\text{exemplar}}$ is a concatenation of the harmonic-isolated MFCC mean (20-D), harmonic-isolated MFCC delta mean (20-D), and harmonic-isolated chroma pitch profile (12-D).
 
-#### B. Dynamic Islet Membership Evaluation
+#### B. Dynamic Custom Mood Membership Evaluation
 
-A track $i$ with timbre vector $T_i$ is admitted as a member of the acoustic islet if its cosine similarity to the centroid $C$ meets or exceeds a designated threshold $\theta_{\text{islet}}$:
+A track $i$ with timbre vector $T_i$ is admitted as a member of the custom mood if its cosine similarity to the centroid $C$ meets or exceeds a designated threshold $\theta_{\text{custom}}$:
 
-$$\text{similarity}_i = \cos(T_i, C) = \frac{T_i \cdot C}{\|T_i\|_2 \|C\|_2} \ge \theta_{\text{islet}}$$
+$$\text{similarity}_i = \cos(T_i, C) = \frac{T_i \cdot C}{\|T_i\|_2 \|C\|_2} \ge \theta_{\text{custom}}$$
 
-* **Base Threshold**: The default threshold is set at $\theta_{\text{islet}} = 0.93$, capturing exceptionally tight acoustic coherence.
-* **Dynamic Decay**: If candidate density is sparse, $\theta_{\text{islet}}$ dynamically decays down to a lower bound of $0.85$ to ensure coverage.
-* **Generalizability Guard (`ISLET_MIN = 3`)**: To prevent degenerate, isolated outlier tracks from acting as spurious micro-clusters, an islet must contain a minimum of three tracks. If $|I| < 3$, where $I$ is the set of matching candidates, the islet is discarded and returns an empty list.
-* **Density Capping (`ISLET_MAX = 50`)**: To preserve high-dimensional specificity and prevent massive, high-density music regions from diluting the playlist tone; islet membership is capped at a maximum of 50 tracks.
+* **Base Threshold**: The default threshold is set at $\theta_{\text{custom}} = 0.93$, capturing exceptionally tight acoustic coherence.
+* **Dynamic Decay**: If candidate density is sparse, $\theta_{\text{custom}}$ dynamically decays down to a lower bound of $0.85$ to ensure coverage.
+* **Generalizability Guard (`ISLET_MIN = 3`)**: To prevent degenerate, isolated outlier tracks from acting as spurious micro-clusters, a custom mood must contain a minimum of three tracks. If $|I| < 3$, where $I$ is the set of matching candidates, the custom mood is discarded and returns an empty list.
+* **Density Capping (`ISLET_MAX = 50`)**: To preserve high-dimensional specificity and prevent massive, high-density music regions from diluting the playlist tone; custom mood membership is capped at a maximum of 50 tracks.
 
 #### C. The Unified Hybrid Scoring Equation
 
-For hybrid moods that define both a target scalar percentile profile and an acoustic islet centroid, the engine computes a unified score via a convex combination:
+For hybrid moods that define both a target scalar percentile profile and a custom mood centroid, the engine computes a unified score via a convex combination:
 
 $$\text{mood\_score}_i = \alpha \cdot \text{scalar\_score}_i + (1 - \alpha) \cdot \text{centroid\_score}_i$$
 
@@ -362,7 +362,7 @@ where $\alpha = 0.50$ represents the default balance parameter (`_MOOD_ALPHA_SCA
 
 ### 4.6 Smart Online Learning (Dynamic Mood Profile Adaptation)
 
-To allow the library's preset and custom moods to dynamically morph and adapt to the listener's tastes over time, the system features a robust **Smart Online Learning** algorithm driven by active track feedback (Likes/Dislikes) in the Mood Subsets pane.
+To allow the library's preset and custom moods to dynamically morph and adapt to the listener's tastes over time, the system features a robust **Smart Online Learning** algorithm driven by active track feedback (Likes/Dislikes) in the Default moods view.
 
 #### A. The Profile Tuning Learning Rule
 When a user provides positive or negative feedback on a track $i$ under mood $M$, the system performs a gradient shift on the mood's target DSP percentiles ($T_f$). 

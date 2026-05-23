@@ -320,20 +320,18 @@ class FletAudioService extends FletService with WidgetsBindingObserver {
         _ttsCompleter!.complete();
       }
     });
-    // Force Android to wait for the utterance to finish (otherwise speak()
-    // returns immediately and the assistant's completion event would fire
-    // before the user hears anything).
-    if (Platform.isAndroid) {
-      try {
-        await tts.awaitSpeakCompletion(true);
-      } catch (_) {}
-    }
+    // Force Android to wait for the utterance to finish via completion handler
+    // instead of block-waiting inside speak(), preventing cold-start engine hangs.
     try {
       if (Platform.isAndroid) {
         // Force the high-quality Google engine if available.
         await tts.setEngine("com.google.android.tts");
       }
+    } catch (_) {}
+    try {
       await tts.setLanguage('en-GB');
+    } catch (_) {}
+    try {
       // Attempt to find a higher-quality British male voice (Jarvis style)
       await _applyJarvisVoice(tts);
     } catch (_) {}
@@ -410,14 +408,13 @@ class FletAudioService extends FletService with WidgetsBindingObserver {
       _ttsCompleter = Completer<void>();
       await tts.speak(text);
       
-      // Await actual speech completion on non-Android platforms, where
-      // tts.speak() resolves instantly upon queueing rather than completion.
-      if (!Platform.isAndroid) {
-        try {
-          await _ttsCompleter!.future.timeout(const Duration(seconds: 30));
-        } catch (e) {
-          debugPrint("FletAudioService: TTS speech completion wait exception/timeout: $e");
-        }
+      // Await actual speech completion on all platforms, since tts.speak()
+      // now resolves instantly or can hang under specific hardware profiles.
+      // A 30-second safety timeout ensures the completion event is always sent.
+      try {
+        await _ttsCompleter!.future.timeout(const Duration(seconds: 30));
+      } catch (e) {
+        debugPrint("FletAudioService: TTS speech completion wait exception/timeout: $e");
       }
       
       control.triggerEvent('tts_complete', jsonEncode({
