@@ -52,6 +52,7 @@ import logging
 import random
 import json
 import os
+import asyncio
 from typing import Optional
 
 import numpy as np
@@ -677,11 +678,38 @@ async def walk(
 from dataclasses import dataclass
 
 
+_PROFILE_SCHEMA_VERSION = 2
+
+
+def _normalize_profile(
+    profile: dict[str, float | tuple[float, float]] | None,
+) -> dict[str, tuple[float, float]]:
+    """Coerce a mood profile dict to the v2 (target, weight) shape.
+
+    v1 callers (and existing `mood_profiles` rows) stored only a target
+    float; we promote those to weight=1.0 so the weighted-Euclidean scorer
+    keeps its old behaviour for un-tuned features. Tuples pass through
+    unchanged. Returns {} for None/empty input.
+    """
+    if not profile:
+        return {}
+    out: dict[str, tuple[float, float]] = {}
+    for feat, val in profile.items():
+        if isinstance(val, tuple) and len(val) == 2:
+            out[feat] = (float(val[0]), float(val[1]))
+        else:
+            out[feat] = (float(val), 1.0)
+    return out
+
+
 @dataclass(frozen=True)
 class MoodSpec:
-    """Per-mood configuration. `profile` is the percentile-target dict over
-    `_MOOD_FEATURES`; missing keys mean "this feature doesn't matter for this
-    mood" and are masked out of the distance computation.
+    """Per-mood configuration. `profile` is a `{feature: (target, weight)}`
+    dict over `_MOOD_FEATURES`; missing keys mean "this feature doesn't matter
+    for this mood" and are masked out of the distance computation. The weight
+    channel lets the scorer prioritise high-signal features (e.g. spectral
+    flatness for 'chill') over noisy ones (e.g. bpm percentile across a
+    multi-genre library).
 
     `camelot_pref` biases the *starting anchor* of the playlist sequencer
     toward a track in that mode ("major" / "minor"). None means no preference.
@@ -690,7 +718,7 @@ class MoodSpec:
     for moods where listeners notice tempo jumps more (slow / chill / ambient).
     """
     canonical: str
-    profile: dict[str, float]
+    profile: dict[str, tuple[float, float]]
     aliases: tuple[str, ...] = ()
     camelot_pref: str | None = None
     bpm_smooth_weight: float = 1.0
@@ -700,148 +728,116 @@ class MoodSpec:
     centroid: tuple[float, ...] = ()
 
 
+# Per-mood profiles. Values are (target_percentile, weight).
+#
+# **Tuning philosophy** (post-phase-1 retune): every mood owns at least one
+# *signature feature* with a target near 0.0 or 1.0 and a heavy weight
+# (2.5–4.0). Without this, mid-target moods become universal attractors —
+# every track at the library median lands closer to a mid-target mood than
+# to any extreme one, and the whole library gets routed to one bucket.
+#
+# Weights at 0.0 silence a feature entirely (cheaper to compute, and signals
+# "this dimension is irrelevant for this mood" rather than "weakly relevant").
+# The regressor (phase 2) refines from feedback, but the prior set here is
+# what the user experiences on day one — strong opinions, lightly held.
 MOODS: dict[str, MoodSpec] = {
     "chill": MoodSpec(
         "chill",
         {
-            "bpm": 0.10,
-            "energy": 0.10,
-            "brightness": 0.15,
-            "beat_strength": 0.15,
-            "spectral_flatness": 0.40,
-            "rolloff": 0.25,
-            "spectral_contrast": 0.20,
-            "key_mode": 0.0,
+            "bpm":               (0.10, 3.0),
+            "brightness":        (0.15, 2.5),
+            "energy":            (0.05, 4.5),
+            "rolloff":           (0.15, 3.0),
+            "beat_strength":     (0.10, 4.5),
+            "spectral_flatness": (0.40, 2.0),
+            "spectral_contrast": (0.10, 3.5),
+            "key_mode":          (0.5,  0.0),
         },
-        aliases=("chilled", "relaxed", "relaxing", "calm", "mellow", "ambient", "soft"),
+        aliases=(
+            "chilled", "relaxed", "relaxing", "calm", "mellow", "ambient", "soft",
+            "dreamy", "dream", "ethereal", "spacey", "washed",
+            "acoustic", "organic", "clean", "folk", "guitar", "piano", "unplugged"
+        ),
         camelot_pref="minor",
         bpm_smooth_weight=1.5,
     ),
-    "dreamy": MoodSpec(
-        "dreamy",
+    "dark": MoodSpec(
+        "dark",
         {
-            "bpm": 0.10,
-            "energy": 0.10,
-            "brightness": 0.70,
-            "beat_strength": 0.10,
-            "spectral_flatness": 0.80,
-            "rolloff": 0.70,
-            "spectral_contrast": 0.10,
-            "key_mode": 0.8,
+            "bpm":               (0.20, 1.5),
+            "brightness":        (0.15, 3.5),
+            "energy":            (0.15, 3.5),
+            "rolloff":           (0.20, 1.5),
+            "beat_strength":     (0.30, 2.0),
+            "spectral_flatness": (0.50, 2.0),
+            "spectral_contrast": (0.30, 1.5),
+            "key_mode":          (0.8,  4.5),
         },
-        aliases=("dream", "ethereal", "spacey", "washed", "shoegaze", "slowdive"),
-        camelot_pref="major",
-        bpm_smooth_weight=1.5,
-    ),
-    "sad": MoodSpec(
-        "sad",
-        {
-            "bpm": 0.15,
-            "energy": 0.15,
-            "brightness": 0.10,
-            "beat_strength": 0.20,
-            "spectral_flatness": 0.30,
-            "rolloff": 0.20,
-            "spectral_contrast": 0.25,
-            "key_mode": 0.0,
-        },
-        aliases=("depressing", "melancholy", "somber", "crying", "tears", "blue"),
+        aliases=("moody", "sad", "depressing", "melancholy", "somber", "crying", "tears", "blue", "brooding", "tense", "mysterious", "shoegaze", "slowdive",),
         camelot_pref="minor",
         bpm_smooth_weight=1.5,
-    ),
-    "moody": MoodSpec(
-        "moody",
-        {
-            "bpm": 0.20,
-            "energy": 0.25,
-            "brightness": 0.15,
-            "beat_strength": 0.25,
-            "spectral_flatness": 0.60,
-            "rolloff": 0.30,
-            "spectral_contrast": 0.35,
-            "key_mode": 0.1,
-        },
-        aliases=("dark", "brooding", "tense", "mysterious"),
-        camelot_pref="minor",
-        bpm_smooth_weight=1.5,
-    ),
-    "acoustic": MoodSpec(
-        "acoustic",
-        {
-            "bpm": 0.40,
-            "energy": 0.30,
-            "brightness": 0.35,
-            "beat_strength": 0.30,
-            "spectral_flatness": 0.10,
-            "rolloff": 0.35,
-            "spectral_contrast": 0.40,
-            "key_mode": 0.6,
-        },
-        aliases=("organic", "clean", "folk", "guitar", "piano", "unplugged"),
-        camelot_pref=None,
-        bpm_smooth_weight=1.0,
-    ),
-    "groovy": MoodSpec(
-        "groovy",
-        {
-            "bpm": 0.70,
-            "energy": 0.65,
-            "brightness": 0.55,
-            "beat_strength": 0.80,
-            "spectral_flatness": 0.25,
-            "rolloff": 0.60,
-            "spectral_contrast": 0.65,
-            "key_mode": 0.8,
-        },
-        aliases=("funk", "funky", "dance", "danceable", "rhythm", "groove", "warm"),
-        camelot_pref="major",
-        bpm_smooth_weight=1.0,
     ),
     "upbeat": MoodSpec(
         "upbeat",
         {
-            "bpm": 0.75,
-            "energy": 0.75,
-            "brightness": 0.85,
-            "beat_strength": 0.70,
-            "spectral_flatness": 0.15,
-            "rolloff": 0.80,
-            "spectral_contrast": 0.70,
-            "key_mode": 1.0,
+            "bpm":               (0.60, 2.0),
+            "brightness":        (0.90, 3.0),
+            "energy":            (0.80, 2.5),
+            "rolloff":           (0.85, 3.0),
+            "beat_strength":     (0.90, 4.0),
+            "spectral_flatness": (0.15, 4.5),
+            "spectral_contrast": (0.85, 3.0),
+            "key_mode":          (0.5,  0.0),
         },
-        aliases=("happy", "bright", "uplifting", "cheerful"),
+        aliases=("happy", "bright", "uplifting", "cheerful", "dance",),
         camelot_pref="major",
         bpm_smooth_weight=1.0,
     ),
-    "energetic": MoodSpec(
-        "energetic",
+    "rock": MoodSpec(
+        "rock",
         {
-            "bpm": 0.90,
-            "energy": 0.90,
-            "brightness": 0.65,
-            "beat_strength": 0.90,
-            "spectral_flatness": 0.35,
-            "rolloff": 0.75,
-            "spectral_contrast": 0.85,
-            "key_mode": 0.5,
+            "bpm":               (0.55, 2.5),
+            "brightness":        (0.50, 2.5),
+            "energy":            (0.65, 3.0),
+            "rolloff":           (0.55, 2.0),
+            "beat_strength":     (0.40, 2.5),
+            "spectral_flatness": (0.60, 3.5),
+            "spectral_contrast": (0.80, 3.5),
+            "key_mode":          (0.6,  2.0),
         },
-        aliases=("fast", "quick", "driving", "hype", "pumped"),
+        aliases=("groovy", "altrock", "alt-rock", "softrock", "soft-rock", "classicrock", "indierock", "indie-rock", "classic", "indie"),
         camelot_pref=None,
+        bpm_smooth_weight=1.0,
+    ),
+    "beats": MoodSpec(
+        "beats",
+        {
+            "bpm":               (0.45, 2.5),
+            "brightness":        (0.45, 2.0),
+            "energy":            (0.65, 3.0),
+            "rolloff":           (0.40, 2.5),
+            "beat_strength":     (0.98, 4.5),
+            "spectral_flatness": (0.30, 3.5),
+            "spectral_contrast": (0.90, 4.0),
+            "key_mode":          (0.0,  3.0),
+        },
+        aliases=("hip-hop", "trap", "rap", "urban", "beats", "lofi", "lo-fi"),
+        camelot_pref="minor",
         bpm_smooth_weight=1.0,
     ),
     "intense": MoodSpec(
         "intense",
         {
-            "bpm": 0.80,
-            "energy": 0.95,
-            "brightness": 0.70,
-            "beat_strength": 0.85,
-            "spectral_flatness": 0.90,
-            "rolloff": 0.80,
-            "spectral_contrast": 0.90,
-            "key_mode": 0.1,
+            "bpm":               (0.50, 1.5),
+            "brightness":        (0.50, 1.5),
+            "energy":            (0.90, 3.5),
+            "rolloff":           (0.85, 2.5),
+            "beat_strength":     (0.70, 4.5),
+            "spectral_flatness": (0.65, 3.5),
+            "spectral_contrast": (0.80, 4.5),
+            "key_mode":          (0.2,  2.0),
         },
-        aliases=("hard", "heavy", "powerful", "noisy", "aggressive", "metal", "rock"),
+        aliases=("hard", "heavy", "powerful", "noisy", "aggressive", "metal", "rock", "fast", "quick", "driving", "hype", "pumped", "energetic"),
         camelot_pref="minor",
         bpm_smooth_weight=1.0,
     ),
@@ -881,13 +877,14 @@ def _mood_spec(name: str) -> MoodSpec | None:
 def _custom_mood_spec(name: str) -> MoodSpec | None:
     """Build an ephemeral MoodSpec for a custom mood. Custom moods may carry
     only a timbre centroid (legacy v1) or also a percentile profile (v2);
-    both shapes are accepted so an upgrade path is unnecessary."""
+    both shapes are accepted so an upgrade path is unnecessary. v1 profile
+    floats are promoted to weight=1.0 by `_normalize_profile`."""
     cleaned = name.lower().strip()
     cm = load_custom_moods().get(cleaned)
     if cm is None:
         return None
     centroid = tuple(cm.get("centroid") or ())
-    profile = dict(cm.get("profile") or {})
+    profile = _normalize_profile(cm.get("profile") or {})
     return MoodSpec(
         canonical=cleaned,
         profile=profile,
@@ -898,7 +895,7 @@ def _custom_mood_spec(name: str) -> MoodSpec | None:
 # Derived view: every alias and every canonical name maps to its profile
 # dict. Preserves the `mood in MOOD_PROFILES` and `MOOD_PROFILES.keys()`
 # API for the existing call sites; do not write to this directly.
-MOOD_PROFILES: dict[str, dict[str, float]] = {}
+MOOD_PROFILES: dict[str, dict[str, tuple[float, float]]] = {}
 for _spec in MOODS.values():
     MOOD_PROFILES[_spec.canonical] = _spec.profile
     for _alias in _spec.aliases:
@@ -934,6 +931,8 @@ def _build_percentile_matrix(rows: list[dict]) -> np.ndarray:
     N = len(rows)
 
     def get_val(r, f):
+        # This might appear confusing, major -- semantically -- is close to BIG
+        # And if BIG, then we approach 1 the maximum quartile value.
         if f == "key_mode":
             ki = r.get("key_index", 0) or 0
             return 1.0 if ki < 12 else 0.0
@@ -980,23 +979,40 @@ async def _load_percentile_matrix(
 
 
 def _score_against_profile(
-    profile: dict[str, float],
+    profile: dict[str, float | tuple[float, float]],
     percentiles: np.ndarray,
 ) -> np.ndarray:
-    """Negative Euclidean distance from each row's percentile vector to the
-    profile target, restricted to features the profile actually specifies.
-    Higher is better. Returns shape (N,)."""
+    """Negative weighted-Euclidean distance from each row's percentile vector
+    to the profile target. The profile is `{feature: (target, weight)}`;
+    legacy float values are promoted to weight=1.0 (parity with v1 behaviour).
+    Features absent from the profile and features with weight ≤ 0 are masked
+    out entirely. Higher score is better. Returns shape (N,).
+
+    Mathematically:  score = -sqrt(Σ wᵢ · (pᵢ - tᵢ)²)
+    Equivalent to scaling each axis by √wᵢ then taking standard Euclidean,
+    but spelled out as weights for readability."""
     if percentiles.shape[0] == 0:
         return np.zeros(0, dtype=np.float32)
-    mask = np.array([f in profile for f in _MOOD_FEATURES], dtype=bool)
-    if not mask.any():
+    profile = _normalize_profile(profile)
+    if not profile:
         return np.zeros(percentiles.shape[0], dtype=np.float32)
-    target = np.array(
-        [profile.get(f, 0.0) for f in _MOOD_FEATURES],
+
+    targets = np.array(
+        [profile.get(f, (0.0, 0.0))[0] for f in _MOOD_FEATURES],
         dtype=np.float32,
     )
-    diff = percentiles[:, mask] - target[mask]
-    return -np.sqrt((diff * diff).sum(axis=1))
+    weights = np.array(
+        [profile.get(f, (0.0, 0.0))[1] for f in _MOOD_FEATURES],
+        dtype=np.float32,
+    )
+    # weight ≤ 0 removes a feature from the metric entirely. Lets the
+    # regressor (phase 2) silence a feature without erasing the target row.
+    mask = weights > 0.0
+    if not mask.any():
+        return np.zeros(percentiles.shape[0], dtype=np.float32)
+    diff = percentiles[:, mask] - targets[mask]
+    weighted_sq = weights[mask] * diff * diff
+    return -np.sqrt(weighted_sq.sum(axis=1))
 
 
 def _score_against_centroid(
@@ -1073,6 +1089,36 @@ async def tracks_by_mood(
         if has_profile else np.zeros(len(rows), dtype=np.float32)
     )
 
+    # Phase-2 regressor blend. The prior (scalar_score) keeps ranking when
+    # n_samples is small; the regressor takes over once feedback has had
+    # time to accumulate. blend() handles the confidence ramp internally.
+    # Cold start: no DB row yet → bootstrap ephemerally from spec.profile
+    # (no write here; the first feedback event persists). This means the
+    # very first query for a fresh mood ranks exactly like the prior alone.
+    if has_profile:
+        from utils import mood_regressor as _mr
+        try:
+            reg_row = await db_manager.get_mood_regressor(
+                spec.canonical, features_version,
+            )
+        except Exception as exc:
+            logger.debug("tracks_by_mood: regressor load failed: %s", exc)
+            reg_row = None
+        if reg_row is not None:
+            try:
+                w = _mr.unpack_weights(reg_row[0])
+                bias = reg_row[1]
+                n_samples = reg_row[2]
+            except ValueError as exc:
+                logger.debug("tracks_by_mood: regressor blob malformed: %s", exc)
+                w, bias = _mr.bootstrap_from_profile(spec.profile, _MOOD_FEATURES)
+                n_samples = 0
+        else:
+            w, bias = _mr.bootstrap_from_profile(spec.profile, _MOOD_FEATURES)
+            n_samples = 0
+        regressor_score = _mr.score(percentiles, w, bias)
+        scalar_score = _mr.blend(scalar_score, regressor_score, n_samples)
+
     # Centroid scoring needs the timbre matrix aligned to `rows`. Skip the
     # work entirely when no centroid is set (every built-in mood).
     if has_centroid:
@@ -1131,19 +1177,40 @@ async def tracks_by_mood(
     return [rows[int(i)] for i in top_ordered]
 
 
+_MOOD_ADJUST_LOCKS: dict[str, asyncio.Lock] = {}
+
+
 async def adjust_mood_profile(db_manager, mood: str, track_path: str, feedback: int):
-    """
-    Perform target percentiles gradient shifts on a mood profile.
-    feedback: 1 = like (shift towards), -1 = dislike (shift away).
-    clamped to [0, 1]. Saves to mood_profiles.
-    """
-    # 1. Resolve canonical mood name
     canonical = mood_canonical(mood)
     if canonical is None:
         logger.warning("adjust_mood_profile: Unknown mood %s", mood)
         return
 
-    # 2. Get the current spec to find the features we care about and default targets
+    if canonical not in _MOOD_ADJUST_LOCKS:
+        _MOOD_ADJUST_LOCKS[canonical] = asyncio.Lock()
+
+    async with _MOOD_ADJUST_LOCKS[canonical]:
+        await _adjust_mood_profile_impl(db_manager, canonical, track_path, feedback)
+
+
+async def _adjust_mood_profile_impl(db_manager, canonical: str, track_path: str, feedback: int):
+    """
+    Per-feature gradient shifts on a mood's (target, weight) profile.
+    feedback: 1 = like (shift target towards / boost weight on aligned features),
+             -1 = dislike (shift target away / reduce weight on aligned features).
+
+    Target rule:  T_new = T_old ± η_t · (P_track - T_old), clamped [0, 1].
+    Weight rule:  W_new = W_old · (1 ± η_w · (1 - |P_track - T_old|)),
+                  clamped to [0, _MAX_FEATURE_WEIGHT].
+                  Features where the track sits *close* to the current target
+                  carry more signal — like → weight up, dislike → weight down.
+                  Distant features barely move (small alignment factor).
+
+    Both rules use small etas so manual feedback is a nudge, not a jolt;
+    the phase-2 logistic regressor will take over for fine-grained learning.
+    Saves to mood_profiles in the v2 (target, weight) shape.
+    """
+    # 2. Resolve the current spec for default targets/weights
     spec = _mood_spec(canonical)
     if spec is None:
         spec = _custom_mood_spec(canonical)
@@ -1151,14 +1218,15 @@ async def adjust_mood_profile(db_manager, mood: str, track_path: str, feedback: 
         logger.warning("adjust_mood_profile: No MoodSpec found for %s", canonical)
         return
 
-    # Load any already adjusted profile, or fall back to spec.profile
+    # Load any already adjusted profile (v2-shaped), else fall back to spec.
+    # _normalize_profile coerces legacy float-only rows to (target, 1.0).
     current_profile = await db_manager.get_adjusted_mood_profile(canonical)
     if current_profile is None:
-        current_profile = dict(spec.profile)
+        current_profile = _normalize_profile(spec.profile)
     else:
-        current_profile = dict(current_profile)
+        current_profile = _normalize_profile(current_profile)
 
-    # 3. Load the percentile matrix to find this track's percentile vector
+    # 3. Load the percentile matrix to find this track's feature percentiles
     rows, percentiles = await _load_percentile_matrix(db_manager, FEATURES_VERSION)
     track_idx = None
     for i, r in enumerate(rows):
@@ -1170,35 +1238,82 @@ async def adjust_mood_profile(db_manager, mood: str, track_path: str, feedback: 
         logger.warning("adjust_mood_profile: Track %s not found in percentile matrix", track_path)
         return
 
-    # Extract track's percentile vector for _MOOD_FEATURES
     track_percentiles = percentiles[track_idx]
     track_feat_map = {f: float(track_percentiles[col]) for col, f in enumerate(_MOOD_FEATURES)}
 
-    # 4. Perform gradient shift for all features defined in current_profile
-    # T_new = T_old +/- 0.15 * (P_track - T_old), clamped to [0, 1]
-    eta = 0.15
-    new_profile = {}
-    for feat, t_old in current_profile.items():
+    # 4. Per-feature shift: target by η_t, weight by η_w scaled by alignment.
+    eta_target = 0.15
+    eta_weight = 0.05
+    new_profile: dict[str, tuple[float, float]] = {}
+    for feat, (t_old, w_old) in current_profile.items():
         if feat not in track_feat_map:
-            new_profile[feat] = t_old
+            new_profile[feat] = (t_old, w_old)
             continue
         p_track = track_feat_map[feat]
+        residual = p_track - t_old
         if feedback == 1:
-            # Shift towards
-            t_new = t_old + eta * (p_track - t_old)
+            t_new = t_old + eta_target * residual
+            # alignment ∈ [0, 1]; 1.0 when track matches target exactly.
+            alignment = 1.0 - abs(residual)
+            w_new = w_old * (1.0 + eta_weight * alignment)
         elif feedback == -1:
-            # Shift away
-            t_new = t_old - eta * (p_track - t_old)
+            t_new = t_old - eta_target * residual
+            alignment = 1.0 - abs(residual)
+            w_new = w_old * (1.0 - eta_weight * alignment)
         else:
-            t_new = t_old
-        # Clamp to [0, 1]
+            t_new, w_new = t_old, w_old
         t_new = max(0.0, min(1.0, float(t_new)))
-        new_profile[feat] = t_new
+        w_new = max(0.0, min(_MAX_FEATURE_WEIGHT, float(w_new)))
+        new_profile[feat] = (t_new, w_new)
 
-    # 5. Save the adjusted profile
+    # 5. Persist the v2 profile
     await db_manager.save_adjusted_mood_profile(canonical, new_profile)
+
+    # 6. Feed the same event into the per-mood logistic regressor. The
+    # target/weight shift above remains useful for the first ~N_CONFIDENT
+    # events (the regressor needs labelled data to converge); the blend()
+    # ramp in tracks_by_mood gradually hands ranking off once the regressor
+    # is confident. Both layers refining in parallel is harmless — they
+    # converge to the same shape and the prior's contribution fades.
+    if feedback in (1, -1):
+        try:
+            from utils import mood_regressor as _mr
+            x_full = track_percentiles.astype(np.float32, copy=True)
+            # Bootstrap from spec.profile if no row yet; otherwise load and
+            # incrementally update.
+            reg_row = await db_manager.get_mood_regressor(
+                canonical, FEATURES_VERSION,
+            )
+            if reg_row is not None:
+                try:
+                    w = _mr.unpack_weights(reg_row[0])
+                    b = reg_row[1]
+                    n = reg_row[2]
+                except ValueError:
+                    w, b = _mr.bootstrap_from_profile(new_profile, _MOOD_FEATURES)
+                    n = 0
+            else:
+                w, b = _mr.bootstrap_from_profile(new_profile, _MOOD_FEATURES)
+                n = 0
+            y = 1 if feedback == 1 else 0
+            w, b = _mr.online_update(x_full, y, w, b)
+            await db_manager.save_mood_regressor(
+                canonical, _mr.pack_weights(w), b, n + 1, FEATURES_VERSION,
+            )
+        except Exception as exc:
+            logger.warning(
+                "adjust_mood_profile: regressor update failed for '%s': %s",
+                canonical, exc,
+            )
+
     logger.info("adjust_mood_profile: Adjusted profile for mood '%s' based on track '%s' (feedback: %d)",
                 canonical, track_path, feedback)
+
+
+# Upper bound on per-feature weight so a long like-streak can't push one
+# feature's contribution to infinity. 5× the default weight ≈ "this feature
+# completely dominates the metric"; beyond that you've overfit one track.
+_MAX_FEATURE_WEIGHT = 5.0
 
 
 async def tracks_in_islet(
@@ -1209,8 +1324,19 @@ async def tracks_in_islet(
 ) -> list[dict]:
     """Members of a named islet, ranked by similarity to the centroid.
 
-    Membership rule: cosine(track.timbre, islet.centroid) >= islet.threshold.
-    Returns at most `ISLET_MAX` rows, sorted high-to-low similarity.
+    Two scoring paths:
+      * **Regressor path (preferred)**: when a `mood_regressors` row exists
+        for this islet, membership is `σ(w·percentile + b) >= threshold`.
+        Threshold ∈ (0, 1) is interpreted as a calibrated probability — the
+        same per-islet `cm["threshold"]` field, different semantics. A user
+        who has migrated may need to slide the threshold down (cosine 0.93
+        is "near-identical"; probability 0.93 is "regressor is 93% certain").
+      * **Cosine fallback (legacy)**: when no regressor row exists yet,
+        membership stays `cosine(track.timbre, islet.centroid) >= threshold`.
+
+    First call against an existing islet bootstraps a regressor from the
+    exemplar's percentile vector — subsequent calls use the regressor path
+    automatically. Blacklisted tracks are excluded from both paths.
 
     By default returns [] if fewer than `ISLET_MIN` tracks pass — a centroid
     that doesn't generalise produces no playable queue. Pass `min_count=0`
@@ -1218,20 +1344,102 @@ async def tracks_in_islet(
     view, which still needs to render the accordion so the user can loosen
     a too-tight threshold instead of thinking the islet was deleted).
     """
-    cm = load_custom_moods().get(name.lower().strip())
+    cleaned = name.lower().strip()
+    cm = load_custom_moods().get(cleaned)
     if cm is None:
         return []
+    threshold = float(cm.get("threshold", ISLET_THRESHOLD))
+    blacklist = set(cm.get("blacklist") or [])
+
+    from utils import mood_regressor as _mr
+
+    # ── Regressor path ──────────────────────────────────────────────────
+    reg_row = None
+    try:
+        reg_row = await db_manager.get_mood_regressor(cleaned, features_version)
+    except Exception as exc:
+        logger.debug("tracks_in_islet: regressor load failed: %s", exc)
+
+    # Lazy bootstrap: if no regressor row exists yet but the islet has a
+    # known exemplar, seed one in-place. Subsequent calls hit the fast path.
+    if reg_row is None:
+        exemplar_path = cm.get("exemplar_path")
+        if exemplar_path:
+            try:
+                ex_rows, ex_pcts = await _load_percentile_matrix(
+                    db_manager, features_version,
+                )
+                ex_idx = next(
+                    (i for i, r in enumerate(ex_rows) if r.get("path") == exemplar_path),
+                    None,
+                )
+                if ex_idx is not None:
+                    ex_vec = ex_pcts[ex_idx].astype(np.float32)
+                    # Bootstrap from a synthetic profile pinned to the
+                    # exemplar's percentile values (target = exemplar, weight 1.0
+                    # for every feature). Then a small batch of positive
+                    # updates so the regressor scores the exemplar near 1.0.
+                    synthetic = {
+                        f: (float(ex_vec[col]), 1.0)
+                        for col, f in enumerate(_MOOD_FEATURES)
+                    }
+                    w, b = _mr.bootstrap_from_profile(synthetic, _MOOD_FEATURES)
+                    for _ in range(3):  # ≈3× exemplar sample weight
+                        w, b = _mr.online_update(ex_vec, 1, w, b)
+                    try:
+                        await db_manager.save_mood_regressor(
+                            cleaned, _mr.pack_weights(w), b, 3, features_version,
+                        )
+                        reg_row = (_mr.pack_weights(w), b, 3)
+                    except Exception as exc:
+                        logger.debug(
+                            "tracks_in_islet: regressor bootstrap persist failed: %s", exc,
+                        )
+            except Exception as exc:
+                logger.debug("tracks_in_islet: exemplar bootstrap failed: %s", exc)
+
+    if reg_row is not None:
+        try:
+            w = _mr.unpack_weights(reg_row[0])
+            b = reg_row[1]
+            rows, percentiles = await _load_percentile_matrix(
+                db_manager, features_version,
+            )
+            if not rows:
+                return []
+            keep_idx = [
+                i for i, r in enumerate(rows)
+                if r.get("path") not in blacklist
+            ]
+            if not keep_idx:
+                return []
+            filtered = percentiles[keep_idx]
+            probs = _mr.score(filtered, w, b)
+            member_mask = probs >= threshold
+            if int(member_mask.sum()) < min_count:
+                return []
+            member_indices = np.where(member_mask)[0]
+            ordered = (
+                member_indices[np.argsort(-probs[member_indices])][:ISLET_MAX]
+            )
+            return [rows[keep_idx[int(i)]] for i in ordered]
+        except ValueError as exc:
+            logger.debug("tracks_in_islet: regressor blob malformed (%s); "
+                         "falling back to cosine", exc)
+        except Exception as exc:
+            logger.debug("tracks_in_islet: regressor scoring failed (%s); "
+                         "falling back to cosine", exc)
+
+    # ── Cosine fallback (legacy islets, or regressor scoring errored) ───
     centroid_list = cm.get("centroid") or []
     if not centroid_list:
         return []
-    threshold = float(cm.get("threshold", ISLET_THRESHOLD))
     centroid = np.array(centroid_list, dtype=np.float32)
 
     rows = await db_manager.get_tracks_with_features(features_version)
     if not rows:
         return []
 
-    blacklist = set(cm.get("blacklist") or [])
     timbres_list: list[np.ndarray] = []
     keep_idx: list[int] = []
     for i, r in enumerate(rows):
@@ -1253,6 +1461,49 @@ async def tracks_in_islet(
     member_indices = np.where(member_mask)[0]
     ordered = member_indices[np.argsort(-sims[member_indices])][:ISLET_MAX]
     return [rows[keep_idx[int(i)]] for i in ordered]
+
+
+async def record_islet_negative(
+    db_manager,
+    islet_name: str,
+    track_path: str,
+    features_version: int = FEATURES_VERSION,
+) -> bool:
+    """Feed a blacklisted track into the islet's regressor as a y=0 sample.
+    No-op when the regressor doesn't exist yet (the JSON blacklist still
+    removes the track from results; the regressor refinement is best-effort).
+
+    Returns True on successful update, False otherwise.
+    """
+    cleaned = islet_name.lower().strip()
+    try:
+        reg_row = await db_manager.get_mood_regressor(cleaned, features_version)
+        if reg_row is None:
+            return False
+
+        from utils import mood_regressor as _mr
+        rows, percentiles = await _load_percentile_matrix(
+            db_manager, features_version,
+        )
+        track_idx = next(
+            (i for i, r in enumerate(rows) if r.get("path") == track_path),
+            None,
+        )
+        if track_idx is None:
+            return False
+
+        x = percentiles[track_idx].astype(np.float32)
+        w = _mr.unpack_weights(reg_row[0])
+        b = reg_row[1]
+        n = reg_row[2]
+        w, b = _mr.online_update(x, 0, w, b)
+        await db_manager.save_mood_regressor(
+            cleaned, _mr.pack_weights(w), b, n + 1, features_version,
+        )
+        return True
+    except Exception as exc:
+        logger.debug("record_islet_negative failed for '%s': %s", islet_name, exc)
+        return False
 
 
 def invalidate_mood_cache() -> None:

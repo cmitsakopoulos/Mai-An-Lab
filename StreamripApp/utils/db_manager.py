@@ -242,7 +242,34 @@ class DatabaseManager:
                         mood    TEXT,
                         feature TEXT,
                         target  REAL,
+                        weight  REAL DEFAULT 1.0,
                         PRIMARY KEY (mood, feature)
+                    )
+                ''')
+                # Migration for pre-v2 mood_profiles rows (target only).
+                try:
+                    await conn.execute(
+                        "ALTER TABLE mood_profiles ADD COLUMN weight REAL DEFAULT 1.0"
+                    )
+                except Exception:
+                    pass  # column already exists
+
+                # Per-mood logistic regressor (phase 2 of the DSP plan).
+                # `weights` is a float32 LE BLOB of length MOOD_REGRESSOR_DIM
+                # (currently 8, matches _MOOD_FEATURES). `features_version`
+                # gates against schema drift — bulk_analyze invalidates these
+                # rows when the feature space changes so stale weights never
+                # score against the wrong vector layout. `n_samples` tracks
+                # how many like/dislike events the regressor has seen, used
+                # by the blend(prior, regressor) confidence ramp.
+                await conn.execute('''
+                    CREATE TABLE IF NOT EXISTS mood_regressors (
+                        mood              TEXT PRIMARY KEY,
+                        weights           BLOB NOT NULL,
+                        bias              REAL NOT NULL,
+                        n_samples         INTEGER NOT NULL DEFAULT 0,
+                        features_version  INTEGER NOT NULL DEFAULT 0,
+                        updated_at        REAL NOT NULL
                     )
                 ''')
 
@@ -928,16 +955,32 @@ class DatabaseManager:
                 logger.error(f"Failed to clear mood feedback: {e}")
                 raise
 
-    async def save_adjusted_mood_profile(self, mood: str, profile: dict[str, float]):
-        """Mutation: Saves customized targets for a mood's features."""
+    async def save_adjusted_mood_profile(
+        self,
+        mood: str,
+        profile: dict[str, float | tuple[float, float]],
+    ):
+        """Mutation: Saves customized (target, weight) per feature for a mood.
+
+        Accepts both v1 (float target) and v2 (target, weight) shapes — v1
+        values are promoted to weight=1.0 so callers can pass either shape
+        during the migration window."""
         async with self._write_lock:
             conn = await self.get_connection()
             try:
                 await conn.execute("DELETE FROM mood_profiles WHERE mood = ?", (mood,))
                 if profile:
+                    rows = []
+                    for feat, val in profile.items():
+                        if isinstance(val, tuple) and len(val) == 2:
+                            target, weight = float(val[0]), float(val[1])
+                        else:
+                            target, weight = float(val), 1.0
+                        rows.append((mood, feat, target, weight))
                     await conn.executemany(
-                        "INSERT INTO mood_profiles (mood, feature, target) VALUES (?, ?, ?)",
-                        [(mood, feat, target) for feat, target in profile.items()]
+                        "INSERT INTO mood_profiles (mood, feature, target, weight) "
+                        "VALUES (?, ?, ?, ?)",
+                        rows,
                     )
                 await conn.commit()
             except Exception as e:
@@ -945,28 +988,46 @@ class DatabaseManager:
                 logger.error(f"Failed to save adjusted mood profile: {e}")
                 raise
 
-    async def get_adjusted_mood_profile(self, mood: str) -> dict[str, float] | None:
-        """Lock-free read. Returns customized features for a mood, or None if not customized."""
+    async def get_adjusted_mood_profile(
+        self, mood: str,
+    ) -> dict[str, tuple[float, float]] | None:
+        """Lock-free read. Returns customized features for a mood as a v2
+        {feature: (target, weight)} dict, or None if not customized. Legacy
+        rows with NULL weight (pre-migration writes) are coerced to 1.0."""
         conn = await self.get_connection()
-        async with conn.execute("SELECT feature, target FROM mood_profiles WHERE mood = ?", (mood,)) as cursor:
+        async with conn.execute(
+            "SELECT feature, target, weight FROM mood_profiles WHERE mood = ?",
+            (mood,),
+        ) as cursor:
             rows = await cursor.fetchall()
             if not rows:
                 return None
-            return {r["feature"]: r["target"] for r in rows}
+            return {
+                r["feature"]: (
+                    float(r["target"]),
+                    float(r["weight"]) if r["weight"] is not None else 1.0,
+                )
+                for r in rows
+            }
 
-    async def get_all_adjusted_mood_profiles(self) -> dict[str, dict[str, float]]:
-        """Lock-free read. Returns all customized mood profiles."""
+    async def get_all_adjusted_mood_profiles(
+        self,
+    ) -> dict[str, dict[str, tuple[float, float]]]:
+        """Lock-free read. Returns all customized mood profiles as v2 shapes."""
         conn = await self.get_connection()
-        async with conn.execute("SELECT mood, feature, target FROM mood_profiles") as cursor:
+        async with conn.execute(
+            "SELECT mood, feature, target, weight FROM mood_profiles"
+        ) as cursor:
             rows = await cursor.fetchall()
-            out = {}
+            out: dict[str, dict[str, tuple[float, float]]] = {}
             for r in rows:
                 m = r["mood"]
                 f = r["feature"]
-                t = r["target"]
+                t = float(r["target"])
+                w = float(r["weight"]) if r["weight"] is not None else 1.0
                 if m not in out:
                     out[m] = {}
-                out[m][f] = t
+                out[m][f] = (t, w)
             return out
 
     async def clear_all_adjusted_mood_profiles(self):
@@ -979,6 +1040,91 @@ class DatabaseManager:
             except Exception as e:
                 await conn.rollback()
                 logger.error(f"Failed to clear adjusted mood profiles: {e}")
+                raise
+
+    # ── Mood regressors (phase 2) ───────────────────────────────────────────
+    # Pure persistence layer; no training logic lives here. The regressor
+    # math is in utils/mood_regressor.py and called from track_graph.
+
+    async def get_mood_regressor(
+        self, mood: str, features_version: int,
+    ) -> tuple[bytes, float, int] | None:
+        """Lock-free read. Returns (weights_blob, bias, n_samples) for the
+        regressor associated with `mood`, or None if absent or the persisted
+        features_version doesn't match (stale weights against a different
+        feature layout are silently ignored — caller bootstraps fresh)."""
+        conn = await self.get_connection()
+        async with conn.execute(
+            "SELECT weights, bias, n_samples, features_version "
+            "FROM mood_regressors WHERE mood = ?",
+            (mood,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None:
+            return None
+        if int(row["features_version"]) != features_version:
+            return None
+        return (bytes(row["weights"]), float(row["bias"]), int(row["n_samples"]))
+
+    async def save_mood_regressor(
+        self,
+        mood: str,
+        weights_blob: bytes,
+        bias: float,
+        n_samples: int,
+        features_version: int,
+    ) -> None:
+        """Upsert one regressor row. Caller is responsible for the BLOB
+        layout (float32 LE of length MOOD_REGRESSOR_DIM)."""
+        async with self._write_lock:
+            conn = await self.get_connection()
+            try:
+                await conn.execute(
+                    """
+                    INSERT OR REPLACE INTO mood_regressors
+                        (mood, weights, bias, n_samples,
+                         features_version, updated_at)
+                    VALUES (?, ?, ?, ?, ?, strftime('%s','now'))
+                    """,
+                    (mood, weights_blob, float(bias), int(n_samples),
+                     int(features_version)),
+                )
+                await conn.commit()
+            except Exception as e:
+                await conn.rollback()
+                logger.error(f"Failed to save mood regressor: {e}")
+                raise
+
+    async def get_all_mood_regressors(
+        self, features_version: int,
+    ) -> dict[str, tuple[bytes, float, int]]:
+        """Lock-free read of every regressor matching `features_version`.
+        Used by the bulk recalculator so it can score the whole library
+        across every mood in one DB pass."""
+        conn = await self.get_connection()
+        async with conn.execute(
+            "SELECT mood, weights, bias, n_samples FROM mood_regressors "
+            "WHERE features_version = ?",
+            (features_version,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return {
+            r["mood"]: (bytes(r["weights"]), float(r["bias"]), int(r["n_samples"]))
+            for r in rows
+        }
+
+    async def clear_all_mood_regressors(self) -> None:
+        """Mutation: wipe all regressors. Call after bulk_analyze when
+        FEATURES_VERSION changes (the version gate would silently ignore
+        them anyway, but the row count creeps if we never sweep)."""
+        async with self._write_lock:
+            conn = await self.get_connection()
+            try:
+                await conn.execute("DELETE FROM mood_regressors")
+                await conn.commit()
+            except Exception as e:
+                await conn.rollback()
+                logger.error(f"Failed to clear mood regressors: {e}")
                 raise
 
 

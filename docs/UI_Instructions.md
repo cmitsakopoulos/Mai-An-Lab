@@ -39,13 +39,17 @@ To keep Flet’s widget tree extremely tiny and guarantee memory-safe, ultra-flu
   - **Interactive Boundary Ghost Cards**: Custom glassmorphic boundary ghost cards appear at the top and bottom of the list when scrolled to the limits. These cards are fully interactive and clickable; clicking the top ghost card instantly navigates to the previous page, and clicking the bottom ghost card instantly navigates to the next page.
   - *Note*: Horizontal swipe gestures for page turning are explicitly removed to prevent accidental or uncontrollable page switching during standard scrolling.
 
-### 1.6 Default Moods & Feedback Controls
+### 1.6 Default Moods, Feedback Controls & Regressor Adaptation
 
-When utilizing the **Default** moods view:
-- **Interactive Feedback Controls**: Each track listing displays a pair of trailing icons for **Like** (thumbs up) and **Dislike** (thumbs down) interactions.
-  - **Like Interaction**: Tapping the thumbs-up icon pins the track to the current default mood. The icon is filled with a vibrant **cyan accent** when active.
-  - **Dislike Interaction**: Tapping the thumbs-down icon immediately excludes the track from that default mood. The system automatically re-routes the track to its second-best matching default mood, displaying a confirmation snackbar.
-- **Feedback Reset**: A glassmorphic **Reset Feedback** header button (using the restart icon `ft.Icons.RESTART_ALT_ROUNDED`) is made visible when browsing default moods. Clicking this button clears all likes, dislikes, and dynamic DSP tuning, reverting all assignments back to their clean default states.
+The **Default Moods** pane (accessible under the Default tab) organizes your library into **6 pre-curated, sonically distinct core moods** (`chill`, `dark`, `upbeat`, `rock`, `beats`, `intense`). 
+
+- **Library-Relative Adaptation**: Rather than relying on rigid, pre-compiled genre tags, the default moods automatically adapt and calibrate to the unique distribution of your music collection. The engine calculates column-wise percentile ranks $\in [0, 1]$ over 8 continuous acoustic DSP features (BPM, brightness, energy, spectral rolloff, beat strength, spectral flatness, spectral contrast, and key mode), ensuring that "chill" or "intense" always represents your library's relative extremes.
+- **Dynamic On-Device SGD Regressor Optimisation**: As you interact with tracks, a Phase-2 on-device **Logistic Regression Layer** runs in the background. It dynamically optimizes the feature weights for each mood profile based on your Likes and Dislikes using online Stochastic Gradient Descent (SGD) with $L_2$ Ridge Regularization to prevent parameters from drifting or over-fitting.
+- **Task-Safe Serialized Concurrency Queue**: Liking or disliking multiple tracks in quick succession (or batch-updating feedback) is fully protected under the hood. The system coordinates concurrent database reads and writes using a **Per-Mood Serializing Lock Registry** (`asyncio.Lock()`). This marshals all batch feedback into a strict, mathematically sequential queue, preserving sequential SGD learning accuracy and eliminating database race conditions (lost updates).
+- **Interactive Feedback Controls**:
+  - **Like Interaction**: Tapping the thumbs-up icon pins the track to the current default mood and sends a $y=1$ positive sample to that mood's regressor. The icon glows with a vibrant **cyan accent** when active.
+  - **Dislike Interaction**: Tapping the thumbs-down icon immediately excludes the track from that default mood, sends a $y=0$ negative sample to the regressor, and automatically re-routes the track to its second-best matching default mood (displaying a confirmation snackbar).
+- **Feedback Reset**: A glassmorphic **Reset Feedback** header button (using the restart icon `ft.Icons.RESTART_ALT_ROUNDED`) is made visible when browsing default moods. Clicking this button clears all likes, dislikes, and dynamic DSP tuning, and **completely wipes the `mood_regressors` and `mood_profiles` tables**. This immediately restores all moods to their pristine factory-default profiles, resets the online SGD models, and triggers a clean recalculation of all track partition assignments.
 
 ---
 
