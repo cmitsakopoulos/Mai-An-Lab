@@ -42,6 +42,7 @@ class AudioEngine:
 
         self.queue: list[dict] = []
         self.current_index: int = 0
+        self.jarvis_controlled = False
 
         self._page:  ft.Page | None = None
         self._observers: dict[str, list] = {}
@@ -318,7 +319,10 @@ class AudioEngine:
                 if self._page:
                     self._page.run_task(self.play_current)
             else:
-                self.stop()
+                if getattr(self, "jarvis_controlled", False):
+                    self.dispatch("on_jarvis_continue")
+                else:
+                    self.stop()
 
     def previous(self):
         with self._lock:
@@ -414,6 +418,7 @@ class AudioEngine:
 
     def stop(self):
         with self._lock:
+            self.jarvis_controlled = False
             self._stop_playback()
             self.current_index = 0
             self._set("is_playing",     False)

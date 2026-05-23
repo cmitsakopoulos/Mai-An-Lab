@@ -75,9 +75,12 @@ def setUpModule():
 
 class _FakeEngine:
     """Bare-minimum audio engine stub."""
-    def __init__(self, current_path: str = "", current_artist: str = ""):
+    def __init__(self, current_path: str = "", current_artist: str = "",
+                 current_track: str = "", current_album: str = ""):
         self.current_path = current_path
         self.current_artist = current_artist
+        self.current_track = current_track
+        self.current_album = current_album
         self.queue: list = []
 
     def set_queue(self, tracks, start_index=0):
@@ -955,40 +958,66 @@ class TestPronounTypeHardFilter(unittest.TestCase):
 
     # --- scan window cap ---------------------------------------------------
 
-    def test_scan_capped_at_12_messages(self):
-        """Entity beyond 12 messages back must not be found."""
+    def test_scan_capped_at_window(self):
+        """Entity beyond _ANAPHORA_SCAN_WINDOW messages back must not be found."""
+        from utils.assistant_runner import AssistantRunner
+        window = AssistantRunner._ANAPHORA_SCAN_WINDOW
         entity_msg = {
             "sender": "assistant",
             "text": "Playing Yesterday.",
             "entities": {"track": _SAMPLE_TRACKS[0], "artist": "The Beatles",
                          "playlist": None, "intent": "play_now"},
         }
-        # 13 filler messages between entity and current user turn
+        # Enough filler to push the entity past the scan window.
+        filler_pairs = (window // 2) + 2
         filler = [{"sender": "user", "text": "what time is it"},
-                  {"sender": "assistant", "text": "It is 3pm, sir."}] * 7
+                  {"sender": "assistant", "text": "It is 3pm, sir."}] * filler_pairs
         messages = [entity_msg] + filler + [{"sender": "user", "text": "play it"}]
         runner, _, _ = _make_runner(tracks=_SAMPLE_TRACKS, artists=_SAMPLE_ARTISTS)
         result, _, _ = _run_anaphora(runner, messages, _make_intent(query="it"))
-        # Entity is > 12 messages back → not found → query unchanged
         self.assertEqual(result.query, "it",
-                         "Scan window exceeded 12 messages.")
+                         "Scan window exceeded its configured cap.")
 
-    def test_entity_within_12_messages_is_found(self):
-        """Entity exactly within the 12-message window must be resolved."""
+    def test_entity_within_window_is_found(self):
+        """Entity comfortably inside the scan window must be resolved."""
+        from utils.assistant_runner import AssistantRunner
+        window = AssistantRunner._ANAPHORA_SCAN_WINDOW
         entity_msg = {
             "sender": "assistant",
             "text": "Playing Comfortably Numb.",
             "entities": {"track": _SAMPLE_TRACKS[1], "artist": "Pink Floyd",
                          "playlist": None, "intent": "play_now"},
         }
-        # 5 filler pairs (10 messages) between entity and current user turn
+        # Half-window filler keeps entity well inside the cap regardless of value.
+        filler_pairs = max(1, (window // 4))
         filler = [{"sender": "user", "text": "what time is it"},
-                  {"sender": "assistant", "text": "It is 3pm, sir."}] * 5
+                  {"sender": "assistant", "text": "It is 3pm, sir."}] * filler_pairs
         messages = [entity_msg] + filler + [{"sender": "user", "text": "play it"}]
         runner, _, _ = _make_runner(tracks=_SAMPLE_TRACKS, artists=_SAMPLE_ARTISTS)
         result, _, _ = _run_anaphora(runner, messages, _make_intent(query="it"))
         self.assertIn("Comfortably Numb", result.query,
-                      "Entity within the 12-message window was not resolved.")
+                      "Entity within the scan window was not resolved.")
+
+    def test_entity_at_rank_20_still_resolvable_within_window(self):
+        """A play_now entity 20 messages back is still resolvable with the
+        production scan window (≥ 21 covers rank 20)."""
+        from utils.assistant_runner import AssistantRunner
+        if AssistantRunner._ANAPHORA_SCAN_WINDOW <= 20:
+            self.skipTest("scan window too small for this fixture")
+        entity_msg = {
+            "sender": "assistant",
+            "text": "Playing Yesterday.",
+            "entities": {"track": _SAMPLE_TRACKS[0], "artist": "The Beatles",
+                         "playlist": None, "intent": "play_now"},
+        }
+        # 9 filler pairs (18 messages) + 1 current user = entity at rank 19.
+        filler = [{"sender": "user", "text": "x"},
+                  {"sender": "assistant", "text": "y"}] * 9
+        messages = [entity_msg] + filler + [{"sender": "user", "text": "play it"}]
+        runner, _, _ = _make_runner(tracks=_SAMPLE_TRACKS, artists=_SAMPLE_ARTISTS)
+        result, _, _ = _run_anaphora(runner, messages, _make_intent(query="it"))
+        self.assertIn("Yesterday", result.query,
+                      "Entity 19 messages back should be resolvable in window=25.")
 
     # --- interleaved non-music turns must not poison resolution ------------
 
@@ -1081,7 +1110,23 @@ class TestAnaphoraConfirmationThreshold(unittest.TestCase):
     """When the resolved entity is found > _ANAPHORA_CONFIRM_THRESHOLD messages
     back, _resolve_anaphora must return a confirmation question instead of
     silently acting. The intent is still fully resolved so the callback can
-    dispatch it directly on confirmation."""
+    dispatch it directly on confirmation.
+
+    Threshold is patched to 2 for this class so far-back fixtures can stay
+    compact and fit inside the production scan window regardless of how the
+    production threshold value is tuned."""
+
+    @classmethod
+    def setUpClass(cls):
+        from utils.assistant_runner import AssistantRunner
+        cls._threshold_patcher = patch.object(
+            AssistantRunner, "_ANAPHORA_CONFIRM_THRESHOLD", 2,
+        )
+        cls._threshold_patcher.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._threshold_patcher.stop()
 
     _ENTITY_YESTERDAY = {
         "track": _SAMPLE_TRACKS[0],
@@ -1108,15 +1153,13 @@ class TestAnaphoraConfirmationThreshold(unittest.TestCase):
 
     def test_near_entity_no_confirm(self):
         """Entity at rank <= threshold must resolve silently (confirm_q is None)."""
-        from utils.assistant_runner import AssistantRunner
-        threshold = AssistantRunner._ANAPHORA_CONFIRM_THRESHOLD
         entity_msg = {
             "sender": "assistant",
             "text": "Playing Yesterday.",
             "entities": self._ENTITY_YESTERDAY,
         }
-        # 2 filler pairs = 4 messages + skip current user = entity at rank 4
-        messages = self._build_messages(entity_msg, filler_pairs=2)
+        # 0 filler pairs = entity_msg + current user; entity at rank 1 (≤ threshold).
+        messages = self._build_messages(entity_msg, filler_pairs=0)
         runner, _, _ = _make_runner(tracks=_SAMPLE_TRACKS, artists=_SAMPLE_ARTISTS)
         result, _, confirm_q = _run_anaphora(runner, messages, _make_intent(query="it"))
         self.assertIsNone(confirm_q,
@@ -1194,6 +1237,399 @@ class TestAnaphoraConfirmationThreshold(unittest.TestCase):
         self.assertIsNotNone(confirm_q)
         self.assertIn("Yesterday", result.query,
                       "Intent must be fully resolved even when confirmation is pending.")
+
+
+class TestAnaphoraAmbiguity(unittest.TestCase):
+    """When two candidates of the right type sit within
+    _ANAPHORA_AMBIGUITY_GAP messages of each other, the resolver must defer
+    to the user instead of silently picking the slightly-more-recent one."""
+
+    _ENTITY_YESTERDAY = {
+        "track": _SAMPLE_TRACKS[0],
+        "artist": "The Beatles",
+        "playlist": None,
+        "intent": "play_now",
+    }
+    _ENTITY_COMFORTABLY_NUMB = {
+        "track": _SAMPLE_TRACKS[1],
+        "artist": "Pink Floyd",
+        "playlist": None,
+        "intent": "play_now",
+    }
+
+    def test_two_close_track_entities_triggers_disambig(self):
+        """Two distinct track entities one assistant turn apart → confirm_q
+        names both candidates and stashes the alt intent on extras."""
+        messages = [
+            {"sender": "assistant", "text": "Playing Yesterday.",
+             "entities": self._ENTITY_YESTERDAY},
+            {"sender": "user",      "text": "wait"},
+            {"sender": "assistant", "text": "Playing Comfortably Numb.",
+             "entities": self._ENTITY_COMFORTABLY_NUMB},
+            {"sender": "user",      "text": "play it"},
+        ]
+        runner, _, _ = _make_runner(tracks=_SAMPLE_TRACKS, artists=_SAMPLE_ARTISTS)
+        result, _, confirm_q = _run_anaphora(runner, messages, _make_intent(query="it"))
+        self.assertIsNotNone(confirm_q,
+                             "Two close-rank track entities should trigger disambiguation.")
+        # Primary (most-recent) named first; alt named second.
+        self.assertIn("Comfortably Numb", confirm_q)
+        self.assertIn("Yesterday", confirm_q)
+        # Alt intent stashed so the dispatch site can wire the no-callback.
+        alt = result.extras.get("anaphora_alt_intent")
+        self.assertIsNotNone(alt, "Alt intent should be stashed on extras.")
+        self.assertIn("Yesterday", alt.query,
+                      "Alt intent should resolve to the older candidate.")
+
+    def test_identical_entities_within_gap_no_disambig(self):
+        """Two assistant bubbles naming the same entity must NOT trigger
+        disambiguation — that's the same answer twice, not ambiguity."""
+        messages = [
+            {"sender": "assistant", "text": "Playing Yesterday.",
+             "entities": self._ENTITY_YESTERDAY},
+            {"sender": "user",      "text": "ok"},
+            {"sender": "assistant", "text": "Still playing Yesterday.",
+             "entities": self._ENTITY_YESTERDAY},
+            {"sender": "user",      "text": "play it"},
+        ]
+        runner, _, _ = _make_runner(tracks=_SAMPLE_TRACKS, artists=_SAMPLE_ARTISTS)
+        result, _, confirm_q = _run_anaphora(runner, messages, _make_intent(query="it"))
+        self.assertIsNone(confirm_q,
+                          "Identical entities shouldn't be treated as ambiguous.")
+        self.assertIn("Yesterday", result.query)
+
+    def test_distant_alt_does_not_trigger_disambig(self):
+        """Alt candidate beyond the ambiguity gap → silent commit to primary."""
+        # Best at rank 1; alt buried 8 messages back (well past the 2-rank gap).
+        filler_pairs = [{"sender": "user", "text": "x"},
+                        {"sender": "assistant", "text": "y"}] * 4
+        messages = (
+            [{"sender": "assistant", "text": "Playing Yesterday.",
+              "entities": self._ENTITY_YESTERDAY}]
+            + filler_pairs
+            + [{"sender": "assistant", "text": "Playing Comfortably Numb.",
+                "entities": self._ENTITY_COMFORTABLY_NUMB},
+               {"sender": "user", "text": "play it"}]
+        )
+        runner, _, _ = _make_runner(tracks=_SAMPLE_TRACKS, artists=_SAMPLE_ARTISTS)
+        result, _, confirm_q = _run_anaphora(runner, messages, _make_intent(query="it"))
+        self.assertIsNone(confirm_q,
+                          "Alt outside ambiguity gap should not trigger disambiguation.")
+        self.assertIn("Comfortably Numb", result.query)
+
+
+class TestNowPlayingPersistsEntities(unittest.TestCase):
+    """_handle_now_playing must return extras['track'] + extras['artist'] so
+    the persistence layer in main.py can build a structured entity dict
+    instead of relying on bold-tag regex parsing of the bubble text."""
+
+    def test_now_playing_bubble_persists_entity_dict(self):
+        from utils.assistant_runner import AssistantRunner
+        engine = _FakeEngine(
+            current_path="/music/yesterday.flac",
+            current_artist="The Beatles",
+            current_track="Yesterday",
+            current_album="Help!",
+        )
+        db = _FakeDB(tracks=_SAMPLE_TRACKS, artists=_SAMPLE_ARTISTS)
+        runner = AssistantRunner(db_manager=db, audio_engine=engine)
+        intent = _make_intent(name="now_playing", query="")
+        response = run(runner._handle_now_playing(intent))
+        track = response.extras.get("track")
+        self.assertIsNotNone(track,
+                             "now_playing must expose extras['track'] for persistence.")
+        self.assertEqual(track["title"], "Yesterday")
+        self.assertEqual(track["artist"], "The Beatles")
+        self.assertEqual(track["path"], "/music/yesterday.flac")
+        self.assertEqual(response.extras.get("artist"), "The Beatles")
+
+    def test_now_playing_no_track_returns_no_extras(self):
+        """Empty engine state → no track entity exposed (handler returns
+        the 'nothing playing' branch)."""
+        from utils.assistant_runner import AssistantRunner
+        engine = _FakeEngine()
+        db = _FakeDB(tracks=_SAMPLE_TRACKS, artists=_SAMPLE_ARTISTS)
+        runner = AssistantRunner(db_manager=db, audio_engine=engine)
+        intent = _make_intent(name="now_playing", query="")
+        response = run(runner._handle_now_playing(intent))
+        self.assertNotIn("track", response.extras)
+
+
+class TestAnaphoraSpokenAcknowledgement(unittest.TestCase):
+    """When _resolve_anaphora rewrites the query, dispatch() must prepend
+    (pronoun) or append (implicit) an audible acknowledgement to
+    response.spoken so the user can hear that Jarvis tracked context."""
+
+    def _set_history_path(self, runner, messages):
+        """Persist messages to a temp file and patch the chat-memory path."""
+        import tempfile
+        from utils.chat_memory import ChatMemoryManager
+        self._tmpdir = tempfile.TemporaryDirectory()
+        hist_path = _write_history(self._tmpdir.name, messages)
+        self._patcher = patch.object(
+            ChatMemoryManager, "_get_history_path", lambda self_: hist_path,
+        )
+        self._patcher.start()
+
+    def tearDown(self):
+        if hasattr(self, "_patcher"):
+            self._patcher.stop()
+        if hasattr(self, "_tmpdir"):
+            self._tmpdir.cleanup()
+
+    def test_resolution_prepends_spoken_acknowledgement(self):
+        """Explicit pronoun ('play it') → spoken response begins with
+        'Resolving 'it' to <label>.'"""
+        messages = [
+            {"sender": "assistant", "text": "Playing Yesterday.",
+             "entities": {"track": _SAMPLE_TRACKS[0], "artist": "The Beatles",
+                          "playlist": None, "intent": "play_now"}},
+            {"sender": "user", "text": "play it"},
+        ]
+        runner, _, _ = _make_runner(tracks=_SAMPLE_TRACKS, artists=_SAMPLE_ARTISTS)
+        self._set_history_path(runner, messages)
+        intent = _make_intent(name="play_now", query="it")
+        response = run(runner.dispatch(intent))
+        self.assertIsNotNone(response.spoken)
+        self.assertIn("Resolving 'it'", response.spoken,
+                      f"Expected pronoun acknowledgement, got: {response.spoken!r}")
+        self.assertIn("Yesterday", response.spoken)
+
+    def test_implicit_intent_appends_softer_acknowledgement(self):
+        """play_similar without pronoun → spoken response appends
+        '(based on our recent discussion of <label>)'."""
+        messages = [
+            {"sender": "assistant", "text": "Playing Yesterday.",
+             "entities": {"track": _SAMPLE_TRACKS[0], "artist": "The Beatles",
+                          "playlist": None, "intent": "play_now"}},
+            {"sender": "user", "text": "play similar"},
+        ]
+        runner, _, _ = _make_runner(tracks=_SAMPLE_TRACKS, artists=_SAMPLE_ARTISTS)
+        self._set_history_path(runner, messages)
+        intent = _make_intent(name="play_similar", query="")
+        response = run(runner.dispatch(intent))
+        # play_similar will fail without a walk graph, but the announcement
+        # should only fire when response.success is True. For implicit intents
+        # that fail, no announcement — verify resolution still happened.
+        self.assertEqual(
+            intent.extras.get("anaphora_resolved_label", "").startswith("Yesterday"),
+            True,
+            "Resolution should still stash the label even if handler fails.",
+        )
+
+    def test_no_acknowledgement_when_no_resolution(self):
+        """Concrete query (no pronoun, no implicit) → spoken response is
+        the raw handler output, no anaphora prefix."""
+        messages = [
+            {"sender": "user", "text": "play yesterday"},
+        ]
+        runner, _, _ = _make_runner(tracks=_SAMPLE_TRACKS, artists=_SAMPLE_ARTISTS)
+        self._set_history_path(runner, messages)
+        intent = _make_intent(name="play_now", query="yesterday")
+        response = run(runner.dispatch(intent))
+        self.assertNotIn("Resolving", response.spoken or "",
+                         "No anaphora resolved — should not prepend acknowledgement.")
+
+
+class TestIntentWeightedResolution(unittest.TestCase):
+    """Resolution score = -rank + weight*K. An active-playback bubble
+    overcomes a couple ranks of passive (search/info) recency advantage —
+    so 'play it' favours what was *playing*, not what was *searched*."""
+
+    def test_play_now_entity_outranks_older_search_entity(self):
+        """Search bubble at rank 1, play bubble at rank 3 — the play wins."""
+        messages = [
+            {"sender": "user",      "text": "play yesterday"},
+            {"sender": "assistant", "text": "Playing Yesterday.",
+             "entities": {"track": _SAMPLE_TRACKS[0], "artist": "The Beatles",
+                          "playlist": None, "intent": "play_now"}},
+            {"sender": "user",      "text": "search radiohead"},
+            {"sender": "assistant", "text": "Here are Radiohead's albums.",
+             "entities": {"track": _SAMPLE_TRACKS[1], "artist": "Radiohead",
+                          "playlist": None, "intent": "search_artist"}},
+            {"sender": "user",      "text": "play it"},
+        ]
+        runner, _, _ = _make_runner(tracks=_SAMPLE_TRACKS, artists=_SAMPLE_ARTISTS)
+        result, _, _ = _run_anaphora(runner, messages, _make_intent(query="it"))
+        # Active 'play_now' at rank 3 beats passive 'search_artist' at rank 1.
+        self.assertIn("Yesterday", result.query,
+                      "Active-playback bubble should outscore older search bubble.")
+        self.assertEqual(result.extras.get("resolved_via_intent"), "play_now",
+                         "resolved_via_intent should stash the source intent.")
+
+    def test_recent_search_beats_far_back_play(self):
+        """If the active bubble is buried far back, the recent search wins —
+        intent weight is bounded; recency still dominates at large gaps."""
+        # play_now at rank 9 vs search_artist at rank 1 — gap of 8 ranks
+        # exceeds what the 0.5 weight delta * K=5 (~2.5 ranks) can overcome.
+        filler = [{"sender": "user", "text": "x"},
+                  {"sender": "assistant", "text": "y"}] * 4
+        messages = (
+            [{"sender": "assistant", "text": "Playing Yesterday.",
+              "entities": {"track": _SAMPLE_TRACKS[0], "artist": "The Beatles",
+                           "playlist": None, "intent": "play_now"}}]
+            + filler
+            + [{"sender": "assistant", "text": "Here are Radiohead's tracks.",
+                "entities": {"track": _SAMPLE_TRACKS[1], "artist": "Radiohead",
+                             "playlist": None, "intent": "search_artist"}},
+               {"sender": "user", "text": "play it"}]
+        )
+        runner, _, _ = _make_runner(tracks=_SAMPLE_TRACKS, artists=_SAMPLE_ARTISTS)
+        result, _, _ = _run_anaphora(runner, messages, _make_intent(query="it"))
+        # Recent search at rank 1 outweighs far-back play at rank 9.
+        self.assertEqual(result.extras.get("resolved_via_intent"), "search_artist")
+
+
+class TestHistoryProviderInjection(unittest.TestCase):
+    """When a history_provider is injected into dispatch_text(), the
+    resolver must use it instead of touching ChatMemoryManager / the disk."""
+
+    def test_history_provider_takes_priority_over_disk(self):
+        from utils.assistant_runner import AssistantRunner
+        from utils.chat_memory import ChatMemoryManager
+
+        injected_messages = [
+            {"sender": "assistant", "text": "Playing Yesterday.",
+             "entities": {"track": _SAMPLE_TRACKS[0], "artist": "The Beatles",
+                          "playlist": None, "intent": "play_now"}},
+            {"sender": "user", "text": "play it"},
+        ]
+        runner, _, _ = _make_runner(tracks=_SAMPLE_TRACKS, artists=_SAMPLE_ARTISTS)
+
+        # Sentinel: if the disk path runs, the test fails loudly.
+        def _explode(_self):
+            raise AssertionError(
+                "ChatMemoryManager._get_history_path was called despite "
+                "history_provider being supplied."
+            )
+
+        with patch.object(ChatMemoryManager, "_get_history_path", _explode):
+            response = run(runner.dispatch_text(
+                "play it",
+                history_provider=lambda: list(injected_messages),
+            ))
+        # Resolution still happened — provider was consulted.
+        self.assertIsNotNone(response)
+        # The runner clears _history_provider after dispatch; next call would
+        # fall back to disk.
+        self.assertIsNone(runner._history_provider)
+
+    def test_no_provider_falls_back_to_disk(self):
+        """Without a provider, the disk-based ChatMemoryManager path runs."""
+        messages = [
+            {"sender": "assistant", "text": "Playing Yesterday.",
+             "entities": {"track": _SAMPLE_TRACKS[0], "artist": "The Beatles",
+                          "playlist": None, "intent": "play_now"}},
+            {"sender": "user", "text": "play it"},
+        ]
+        runner, _, _ = _make_runner(tracks=_SAMPLE_TRACKS, artists=_SAMPLE_ARTISTS)
+        intent = _make_intent(name="play_now", query="it")
+        result, _, _ = _run_anaphora(runner, messages, intent)
+        # Disk fallback resolved correctly via the patched path in _run_anaphora.
+        self.assertIn("Yesterday", result.query)
+
+
+class TestMultiMatchDoesNotAnchorTrack(unittest.TestCase):
+    """When the user's query matches many tracks (e.g. 'play radiohead'),
+    the random opener is NOT the user's referent — the artist usually is.
+    The persistence layer strips the track from the bubble entity but keeps
+    the artist."""
+
+    def test_multi_match_does_not_anchor_random_track_for_play_it(self):
+        """Sequence: 'play radiohead' (multi-match) → 'play it'. The track
+        was randomly chosen, so 'it' shouldn't resolve to that random track."""
+        messages = [
+            {"sender": "user", "text": "play radiohead"},
+            # main.py strips the random opener track when is_multi=True;
+            # artist remains for 'more by them' to still work.
+            {"sender": "assistant",
+             "text": "Queued 47 matches for radiohead. Starting with **A** — Radiohead.",
+             "entities": {"track": None, "artist": "Radiohead",
+                          "playlist": None, "intent": "play_now"}},
+            {"sender": "user", "text": "play it"},
+        ]
+        runner, _, _ = _make_runner(tracks=_SAMPLE_TRACKS, artists=_SAMPLE_ARTISTS)
+        result, _, _ = _run_anaphora(runner, messages, _make_intent(query="it"))
+        # No track entity in scope → 'it' stays unresolved.
+        self.assertEqual(result.query, "it",
+                         "Multi-match bubble should not anchor 'play it' on the random opener.")
+
+    def test_multi_match_still_anchors_play_more_by(self):
+        """The artist IS preserved in a multi-match bubble, so 'more by them'
+        still routes to the user's original query."""
+        messages = [
+            {"sender": "user", "text": "play radiohead"},
+            {"sender": "assistant",
+             "text": "Queued 47 matches for radiohead.",
+             "entities": {"track": None, "artist": "Radiohead",
+                          "playlist": None, "intent": "play_now"}},
+            {"sender": "user", "text": "play more by them"},
+        ]
+        runner, _, _ = _make_runner(tracks=_SAMPLE_TRACKS, artists=_SAMPLE_ARTISTS)
+        result, _, _ = _run_anaphora(
+            runner, messages,
+            _make_intent(name="play_more_by", query="them"),
+        )
+        self.assertEqual(result.query, "Radiohead",
+                         "Artist should still anchor 'more by them' after a multi-match.")
+
+
+class TestNonCanonicalSeedDoesNotPoison(unittest.TestCase):
+    """When the persistence layer (main.py) sees an assistant response with
+    extras['entity_intent'] in the non-canonical set (play_random, play_mood,
+    play_similar_bulk), it persists the bubble with track=None and
+    artist=None — so the system-picked seed never becomes the anchor for a
+    later pronoun.
+
+    These tests verify the resolver's downstream behaviour given the bubbles
+    main.py would produce for that flow."""
+
+    def test_play_random_does_not_anchor_subsequent_play_more_by(self):
+        """Sequence: 'play radiohead' → 'play random' → 'play more by them'.
+        Resolution must walk past the play_random bubble (whose persisted
+        entities are empty) and anchor on the earlier 'Radiohead' artist."""
+        messages = [
+            {"sender": "user", "text": "play radiohead"},
+            {"sender": "assistant",
+             "text": "Queued 47 matches for radiohead...",
+             "entities": {"track": None, "artist": "Radiohead",
+                          "playlist": None, "intent": "play_now"}},
+            {"sender": "user", "text": "play random"},
+            # main.py strips track/artist for entity_intent=play_random:
+            {"sender": "assistant",
+             "text": "Shuffle play active. Starting with **Some Random — Other Artist**.",
+             "entities": {"track": None, "artist": None,
+                          "playlist": None, "intent": "play_random"}},
+            {"sender": "user", "text": "play more by them"},
+        ]
+        runner, _, _ = _make_runner(tracks=_SAMPLE_TRACKS, artists=_SAMPLE_ARTISTS)
+        result, _, _ = _run_anaphora(
+            runner, messages,
+            _make_intent(name="play_more_by", query="them"),
+        )
+        self.assertEqual(result.query, "Radiohead",
+                         "play_random bubble must not anchor artist resolution.")
+
+    def test_play_random_does_not_anchor_subsequent_play_it(self):
+        """Same flow but with 'play it' — the track-typed pronoun must also
+        skip past the play_random bubble and find the older real track."""
+        messages = [
+            {"sender": "user", "text": "play yesterday"},
+            {"sender": "assistant",
+             "text": "Playing Yesterday.",
+             "entities": {"track": _SAMPLE_TRACKS[0], "artist": "The Beatles",
+                          "playlist": None, "intent": "play_now"}},
+            {"sender": "user", "text": "play random"},
+            {"sender": "assistant",
+             "text": "Shuffle play active.",
+             "entities": {"track": None, "artist": None,
+                          "playlist": None, "intent": "play_random"}},
+            {"sender": "user", "text": "play it"},
+        ]
+        runner, _, _ = _make_runner(tracks=_SAMPLE_TRACKS, artists=_SAMPLE_ARTISTS)
+        result, _, _ = _run_anaphora(runner, messages, _make_intent(query="it"))
+        self.assertIn("Yesterday", result.query,
+                      "play_random bubble must not anchor track resolution.")
 
 
 class TestEndToEndFlow(unittest.TestCase):

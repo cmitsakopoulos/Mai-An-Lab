@@ -157,6 +157,44 @@ def delete_custom_mood(name: str) -> bool:
     return True
 
 
+def blacklist_track_from_islet(islet_name: str, track_path: str) -> bool:
+    """Add a track path to the islet's blacklist array in custom_moods.json."""
+    cleaned = islet_name.lower().strip()
+    moods = load_custom_moods()
+    if cleaned not in moods:
+        return False
+    if "blacklist" not in moods[cleaned]:
+        moods[cleaned]["blacklist"] = []
+    if track_path not in moods[cleaned]["blacklist"]:
+        moods[cleaned]["blacklist"].append(track_path)
+        try:
+            with open(CUSTOM_MOODS_PATH, "w", encoding="utf-8") as f:
+                json.dump(moods, f, indent=4)
+            return True
+        except Exception as e:
+            logger.error("Failed to save blacklist for islet %s: %s", islet_name, e)
+            return False
+    return True
+
+
+def clear_islet_blacklist(islet_name: str) -> bool:
+    """Clear all track paths from the islet's blacklist array in custom_moods.json."""
+    cleaned = islet_name.lower().strip()
+    moods = load_custom_moods()
+    if cleaned not in moods:
+        return False
+    if "blacklist" in moods[cleaned]:
+        moods[cleaned]["blacklist"] = []
+        try:
+            with open(CUSTOM_MOODS_PATH, "w", encoding="utf-8") as f:
+                json.dump(moods, f, indent=4)
+            return True
+        except Exception as e:
+            logger.error("Failed to clear blacklist for islet %s: %s", islet_name, e)
+            return False
+    return True
+
+
 def list_islets() -> list[str]:
     """Names of all user-saved islets, alphabetised."""
     return sorted(load_custom_moods().keys())
@@ -665,44 +703,146 @@ class MoodSpec:
 MOODS: dict[str, MoodSpec] = {
     "chill": MoodSpec(
         "chill",
-        {"bpm": 0.18, "energy": 0.15, "brightness": 0.25, "beat_strength": 0.20, "spectral_flatness": 0.20, "rolloff": 0.25, "key_mode": 0.0},
+        {
+            "bpm": 0.10,
+            "energy": 0.10,
+            "brightness": 0.15,
+            "beat_strength": 0.15,
+            "spectral_flatness": 0.40,
+            "rolloff": 0.25,
+            "spectral_contrast": 0.20,
+            "key_mode": 0.0,
+        },
         aliases=("chilled", "relaxed", "relaxing", "calm", "mellow", "ambient", "soft"),
         camelot_pref="minor",
         bpm_smooth_weight=1.5,
     ),
-    "upbeat": MoodSpec(
-        "upbeat",
-        {"bpm": 0.65, "energy": 0.70, "brightness": 0.75, "beat_strength": 0.75, "rolloff": 0.75, "spectral_flatness": 0.25, "spectral_contrast": 0.75, "key_mode": 1.0},
-        aliases=("happy", "bright", "uplifting"),
+    "dreamy": MoodSpec(
+        "dreamy",
+        {
+            "bpm": 0.10,
+            "energy": 0.10,
+            "brightness": 0.70,
+            "beat_strength": 0.10,
+            "spectral_flatness": 0.80,
+            "rolloff": 0.70,
+            "spectral_contrast": 0.10,
+            "key_mode": 0.8,
+        },
+        aliases=("dream", "ethereal", "spacey", "washed", "shoegaze", "slowdive"),
         camelot_pref="major",
-        bpm_smooth_weight=1.0,
+        bpm_smooth_weight=1.5,
     ),
-    "energetic": MoodSpec(
-        "energetic",
-        {"bpm": 0.88, "energy": 0.85, "beat_strength": 0.85, "spectral_contrast": 0.75, "spectral_flatness": 0.35},
-        aliases=("fast", "quick"),
-        camelot_pref=None,
-        bpm_smooth_weight=1.0,
-    ),
-    "intense": MoodSpec(
-        "intense",
-        {"energy": 0.90, "beat_strength": 0.82, "spectral_flatness": 0.85, "brightness": 0.75, "rolloff": 0.80, "spectral_contrast": 0.85},
-        aliases=("hard", "heavy", "powerful", "noisy"),
-        camelot_pref=None,
-        bpm_smooth_weight=1.0,
+    "sad": MoodSpec(
+        "sad",
+        {
+            "bpm": 0.15,
+            "energy": 0.15,
+            "brightness": 0.10,
+            "beat_strength": 0.20,
+            "spectral_flatness": 0.30,
+            "rolloff": 0.20,
+            "spectral_contrast": 0.25,
+            "key_mode": 0.0,
+        },
+        aliases=("depressing", "melancholy", "somber", "crying", "tears", "blue"),
+        camelot_pref="minor",
+        bpm_smooth_weight=1.5,
     ),
     "moody": MoodSpec(
         "moody",
-        {"bpm": 0.20, "energy": 0.30, "brightness": 0.20, "spectral_flatness": 0.25, "spectral_contrast": 0.25, "key_mode": 0.0},
-        aliases=("slow", "dark", "somber"),
+        {
+            "bpm": 0.20,
+            "energy": 0.25,
+            "brightness": 0.15,
+            "beat_strength": 0.25,
+            "spectral_flatness": 0.60,
+            "rolloff": 0.30,
+            "spectral_contrast": 0.35,
+            "key_mode": 0.1,
+        },
+        aliases=("dark", "brooding", "tense", "mysterious"),
         camelot_pref="minor",
         bpm_smooth_weight=1.5,
     ),
     "acoustic": MoodSpec(
         "acoustic",
-        {"spectral_flatness": 0.15, "spectral_contrast": 0.40, "beat_strength": 0.30, "energy": 0.35},
-        aliases=("organic", "clean"),
+        {
+            "bpm": 0.40,
+            "energy": 0.30,
+            "brightness": 0.35,
+            "beat_strength": 0.30,
+            "spectral_flatness": 0.10,
+            "rolloff": 0.35,
+            "spectral_contrast": 0.40,
+            "key_mode": 0.6,
+        },
+        aliases=("organic", "clean", "folk", "guitar", "piano", "unplugged"),
         camelot_pref=None,
+        bpm_smooth_weight=1.0,
+    ),
+    "groovy": MoodSpec(
+        "groovy",
+        {
+            "bpm": 0.70,
+            "energy": 0.65,
+            "brightness": 0.55,
+            "beat_strength": 0.80,
+            "spectral_flatness": 0.25,
+            "rolloff": 0.60,
+            "spectral_contrast": 0.65,
+            "key_mode": 0.8,
+        },
+        aliases=("funk", "funky", "dance", "danceable", "rhythm", "groove", "warm"),
+        camelot_pref="major",
+        bpm_smooth_weight=1.0,
+    ),
+    "upbeat": MoodSpec(
+        "upbeat",
+        {
+            "bpm": 0.75,
+            "energy": 0.75,
+            "brightness": 0.85,
+            "beat_strength": 0.70,
+            "spectral_flatness": 0.15,
+            "rolloff": 0.80,
+            "spectral_contrast": 0.70,
+            "key_mode": 1.0,
+        },
+        aliases=("happy", "bright", "uplifting", "cheerful"),
+        camelot_pref="major",
+        bpm_smooth_weight=1.0,
+    ),
+    "energetic": MoodSpec(
+        "energetic",
+        {
+            "bpm": 0.90,
+            "energy": 0.90,
+            "brightness": 0.65,
+            "beat_strength": 0.90,
+            "spectral_flatness": 0.35,
+            "rolloff": 0.75,
+            "spectral_contrast": 0.85,
+            "key_mode": 0.5,
+        },
+        aliases=("fast", "quick", "driving", "hype", "pumped"),
+        camelot_pref=None,
+        bpm_smooth_weight=1.0,
+    ),
+    "intense": MoodSpec(
+        "intense",
+        {
+            "bpm": 0.80,
+            "energy": 0.95,
+            "brightness": 0.70,
+            "beat_strength": 0.85,
+            "spectral_flatness": 0.90,
+            "rolloff": 0.80,
+            "spectral_contrast": 0.90,
+            "key_mode": 0.1,
+        },
+        aliases=("hard", "heavy", "powerful", "noisy", "aggressive", "metal", "rock"),
+        camelot_pref="minor",
         bpm_smooth_weight=1.0,
     ),
 }
@@ -1091,9 +1231,12 @@ async def tracks_in_islet(
     if not rows:
         return []
 
+    blacklist = set(cm.get("blacklist") or [])
     timbres_list: list[np.ndarray] = []
     keep_idx: list[int] = []
     for i, r in enumerate(rows):
+        if r.get("path") in blacklist:
+            continue
         v = unpack_timbre(r.get("timbre"))
         if v is not None and v.shape == centroid.shape:
             timbres_list.append(v)
