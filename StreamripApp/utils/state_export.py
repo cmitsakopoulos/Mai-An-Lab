@@ -24,7 +24,7 @@ logger = logging.getLogger("state_export")
 
 # Bump this when the bundle layout or any of the included file formats change
 # in an incompatible way. Import refuses bundles with a different major.
-BUNDLE_VERSION = 1
+BUNDLE_VERSION = 2  # bumped from 1: bundle now carries custom_moods.json.
 
 # Where bundles get written / read from. /sdcard/Download is the obvious spot
 # on Android because the app already has MANAGE_EXTERNAL_STORAGE and the user
@@ -52,6 +52,27 @@ def list_bundles() -> list[str]:
                 continue
     items.sort(reverse=True)
     return [p for _, p in items]
+
+
+def _read_regressor_summary(db_path: str) -> dict[str, int]:
+    """Open the snapshotted DB read-only and return `{mood: n_samples}` for
+    every row in `mood_regressors`. Used to enrich the bundle manifest with
+    an at-a-glance preview of trained state; failures are silent because the
+    bundle is still valid without the summary."""
+    if not os.path.exists(db_path) or os.path.getsize(db_path) == 0:
+        return {}
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            cur = conn.execute(
+                "SELECT mood, n_samples FROM mood_regressors"
+            )
+            return {row[0]: int(row[1]) for row in cur.fetchall()}
+        finally:
+            conn.close()
+    except sqlite3.Error as ex:
+        logger.debug("regressor summary unavailable (%s)", ex)
+        return {}
 
 
 def _snapshot_sqlite(src_path: str, dst_path: str) -> None:
@@ -82,10 +103,17 @@ def export_state(
     config_path: str,
     search_history_path: Optional[str] = None,
     out_dir: Optional[str] = None,
+    custom_moods_path: Optional[str] = None,
 ) -> str:
     """Write a bundle ZIP and return its absolute path. The DB file is
     snapshotted via SQLite's online backup API so callers don't have to close
-    their `aiosqlite` connection."""
+    their `aiosqlite` connection.
+
+    `custom_moods_path`, when supplied and present on disk, is included in
+    the bundle so user-created islets and their thresholds survive
+    export/import. Phase-2 regressor weights live in the SQLite DB itself
+    and ride along inside `library.db` automatically — no extra arg needed
+    on this side."""
     out_dir = out_dir or _default_bundle_dir()
     os.makedirs(out_dir, exist_ok=True)
 
@@ -111,11 +139,23 @@ def export_state(
                 contents["recent_searches.json"] = {
                     "bytes": os.path.getsize(search_history_path)
                 }
+            if custom_moods_path and os.path.exists(custom_moods_path):
+                zf.write(custom_moods_path, "custom_moods.json")
+                contents["custom_moods.json"] = {
+                    "bytes": os.path.getsize(custom_moods_path)
+                }
+
+            # Snapshot-time peek at the regressor table — gives import dialogs
+            # a quick "this bundle has N trained moods (M total samples)"
+            # preview without unpacking the BLOB column. Quiet on failure;
+            # the bundle is still valid without the summary.
+            mood_regressors_summary = _read_regressor_summary(tmp_db)
 
             manifest = {
                 "bundle_version": BUNDLE_VERSION,
                 "exported_at": ts,
                 "contents": contents,
+                "mood_regressors": mood_regressors_summary,
             }
             zf.writestr("manifest.json", json.dumps(manifest, indent=2))
     finally:
@@ -165,11 +205,16 @@ def import_state(
     db_path: str,
     config_path: str,
     search_history_path: Optional[str] = None,
+    custom_moods_path: Optional[str] = None,
 ) -> dict:
     """Replace the live state files with what's inside the bundle. Caller is
     responsible for closing any open DB connection BEFORE calling this and
     restarting the app afterwards — there is no in-place reload of the DB
     handle or in-memory config caches.
+
+    `custom_moods_path` is optional for back-compat with v1 bundles that
+    didn't carry the file. If supplied and the bundle contains the member,
+    the live JSON gets replaced.
 
     Returns a dict describing what was replaced.
     """
@@ -199,5 +244,6 @@ def import_state(
         _replace("library.db", db_path)
         _replace("config.toml", config_path)
         _replace("recent_searches.json", search_history_path)
+        _replace("custom_moods.json", custom_moods_path)
 
     return {"replaced": replaced, "manifest": manifest}

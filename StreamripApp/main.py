@@ -2900,6 +2900,7 @@ class LibraryView:
     async def _register_mood_dislike(self, track_path: str, mood: str, btn: ft.IconButton = None):
         db = self.app.db_manager
         from utils import track_graph as tg
+        import numpy as np
         try:
             feedback_map = await db.get_mood_feedback()
             was_liked = feedback_map.get(track_path, {}).get(mood, 0) == 1
@@ -2907,7 +2908,70 @@ class LibraryView:
             # Save negative feedback
             await db.save_mood_feedback(track_path, mood, -1)
             self._mood_feedback_map.setdefault(track_path, {})[mood] = -1
-            
+
+            # Instantly re-calculate the next best matching mood for this track
+            try:
+                rows, percentile_matrix = await tg._load_percentile_matrix(db, tg.FEATURES_VERSION)
+                track_idx = None
+                for idx, r in enumerate(rows):
+                    if r["path"] == track_path:
+                        track_idx = idx
+                        break
+
+                if track_idx is not None:
+                    track_percentile_2d = percentile_matrix[track_idx : track_idx + 1]
+                    adjusted_profiles = await db.get_all_adjusted_mood_profiles()
+                    
+                    mood_scores = {}
+                    for m, spec in tg.MOODS.items():
+                        profile = adjusted_profiles.get(m) or spec.profile
+                        if profile:
+                            mood_scores[m] = float(tg._score_against_profile(profile, track_percentile_2d)[0])
+                        else:
+                            mood_scores[m] = -np.inf
+
+                    # Find the next best matching mood that is NOT disliked
+                    dislikes = {m for m, fb in self._mood_feedback_map.get(track_path, {}).items() if fb == -1}
+                    
+                    best_mood = None
+                    best_score = -np.inf
+                    for m in tg.MOODS.keys():
+                        if m in dislikes:
+                            continue
+                        score = mood_scores[m]
+                        if score > best_score:
+                            best_score = score
+                            best_mood = m
+
+                    if best_mood is not None and best_score >= -2.0:
+                        # Write the updated partition assignment to SQLite immediately
+                        await db.save_partitions([(track_path, best_mood, None)])
+                        logger.info("register_mood_dislike: Re-routed track '%s' from '%s' to next-best mood '%s' (score: %.3f)",
+                                    track_path, mood, best_mood, best_score)
+                    else:
+                        # If the track is disliked across all moods or does not meet the specificity threshold, remove it from track_partitions
+                        async with db._write_lock:
+                            conn = await db.get_connection()
+                            await conn.execute("DELETE FROM track_partitions WHERE track_path = ?", (track_path,))
+                            await conn.commit()
+                        best_mood = None
+                        logger.info("register_mood_dislike: Track '%s' has no compatible default partition, removed from partitions",
+                                    track_path)
+
+                    # Update in-memory cache directly to ensure UI and cache are perfectly aligned
+                    if self._cached_moods is not None:
+                        track_obj = None
+                        if mood in self._cached_moods:
+                            for t in list(self._cached_moods[mood]):
+                                if t["path"] == track_path:
+                                    track_obj = t
+                                    self._cached_moods[mood].remove(t)
+                                    break
+                        if track_obj is not None and best_mood is not None and best_mood in self._cached_moods:
+                            self._cached_moods[best_mood].append(track_obj)
+            except Exception as routing_err:
+                logger.exception("Failed to calculate next-best matching mood partition during dislike: %s", routing_err)
+
             # Optimistic row deletion
             controls = self._path_to_controls.get(track_path, [])
             removed_any = False
@@ -2962,7 +3026,7 @@ class LibraryView:
 
             self._mood_recalc_pending = True
             self._update_partition_tabs_ui()
-            self.app.show_snackbar("Track excluded from mood subset. Recalculation pending.", color=CYAN)
+            self.app.show_snackbar("Track excluded from mood subset and re-routed.", color=CYAN)
         except Exception as e:
             logger.exception("Failed to register mood dislike: %s", e)
             self.app.show_snackbar(f"Failed to dislike track: {e}")
@@ -2973,6 +3037,7 @@ class LibraryView:
             self.app.show_snackbar("Resetting mood feedback & profiles...")
             await db.clear_all_mood_feedback()
             await db.clear_all_adjusted_mood_profiles()
+            await db.clear_all_mood_regressors()
             self._mood_feedback_map.clear()
             self._mood_recalc_pending = False
             
@@ -2995,6 +3060,8 @@ class LibraryView:
             
             # Clear all existing mood feedback/likes to guarantee a completely new, clean slate context
             await db.clear_all_mood_feedback()
+            await db.clear_all_adjusted_mood_profiles()
+            await db.clear_all_mood_regressors()
             self._mood_feedback_map.clear()
             
             import numpy as np
@@ -3068,6 +3135,10 @@ class LibraryView:
                             if score > best_score:
                                 best_score = score
                                 best_mood = mood
+                                
+                        # Sonic Specificity Threshold: only assign to default partition if it genuinely matches
+                        if best_score is not None and best_score < -2.0:
+                            best_mood = None
                                 
                     if best_mood is not None:
                         mood_assignments[path] = best_mood
@@ -3243,6 +3314,13 @@ class LibraryView:
         from utils import track_graph as tg
         ok = tg.blacklist_track_from_islet(islet_name, track_path)
         if ok:
+            # Best-effort: feed the negative into the islet's regressor too.
+            # Quiet on failure — the JSON blacklist is the source of truth
+            # for membership; this is a refinement on top.
+            try:
+                await tg.record_islet_negative(self.db, islet_name, track_path)
+            except Exception as exc:
+                logger.debug("islet regressor negative update failed: %s", exc)
             self._cached_islets = None
             self.app.show_snackbar(
                 f"'{track_title}' excluded from custom mood '{islet_name.title()}'.",
@@ -4169,13 +4247,10 @@ class LibraryView:
                         active_moods = []
                         mood_icons = {
                             "chill": ft.Icons.SPA_ROUNDED,
-                            "dreamy": ft.Icons.CLOUD_ROUNDED,
-                            "sad": ft.Icons.WATER_DROP_ROUNDED,
-                            "moody": ft.Icons.NIGHTLIGHT_ROUNDED,
-                            "acoustic": ft.Icons.MUSIC_NOTE_ROUNDED,
-                            "groovy": ft.Icons.GRAPHIC_EQ_ROUNDED,
+                            "dark": ft.Icons.NIGHTLIGHT_ROUNDED,
                             "upbeat": ft.Icons.CELEBRATION_ROUNDED,
-                            "energetic": ft.Icons.BOLT_ROUNDED,
+                            "rock": ft.Icons.FESTIVAL_ROUNDED,
+                            "beats": ft.Icons.SPEAKER_ROUNDED,
                             "intense": ft.Icons.WHATSHOT_ROUNDED,
                         }
                         
@@ -5905,6 +5980,7 @@ class SettingsView:
 
     async def _do_export_state(self, out_dir: str):
         from utils import state_export
+        from utils import track_graph as tg
         from utils.streamrip_api import get_config_path
         from utils.search_history import get_search_history_path
 
@@ -5918,6 +5994,7 @@ class SettingsView:
                 get_config_path(),
                 get_search_history_path(),
                 out_dir,
+                tg.CUSTOM_MOODS_PATH,
             )
         except Exception as ex:
             logger.exception("state export failed")
@@ -5929,6 +6006,7 @@ class SettingsView:
 
     async def _do_import_state(self, zip_path: str):
         from utils import state_export
+        from utils import track_graph as tg
         from utils.streamrip_api import get_config_path
         from utils.search_history import get_search_history_path
 
@@ -5950,6 +6028,7 @@ class SettingsView:
                 self.app.db_manager.db_path,
                 get_config_path(),
                 get_search_history_path(),
+                tg.CUSTOM_MOODS_PATH,
             )
         except Exception as ex:
             logger.exception("state import failed")

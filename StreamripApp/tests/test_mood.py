@@ -155,6 +155,80 @@ class TestMoodScoring(unittest.TestCase):
         self.assertEqual([r["path"] for r in a], [r["path"] for r in b])
 
 
+class TestWeightedEuclidean(unittest.TestCase):
+    """The Phase-1 (target, weight) profile shape must be honoured by
+    _score_against_profile — higher-weight features dominate the metric,
+    weight=0 silences a feature entirely."""
+
+    def setUp(self):
+        tg.invalidate_mood_cache()
+        from utils.track_graph import MoodSpec
+        # Extreme targets (bpm low, flatness high) so percentile-distance
+        # winners are unambiguous; flatness gets 5× the weight of bpm.
+        self._old = tg.MOODS.get("synth_test")
+        tg.MOODS["synth_test"] = MoodSpec(
+            "synth_test",
+            {
+                "bpm":               (0.0, 1.0),
+                "spectral_flatness": (1.0, 5.0),   # heavy weight
+            },
+        )
+
+    def tearDown(self):
+        if self._old is None:
+            tg.MOODS.pop("synth_test", None)
+        else:
+            tg.MOODS["synth_test"] = self._old
+
+    def test_weighted_euclidean_prefers_high_weight_feature(self):
+        """match_heavy nails the heavy-weighted feature but is the worst on
+        the light-weighted one; match_light is the reverse. The 5× weight on
+        flatness must decide the winner.
+
+        With only 2 rows, percentile rank is binary {0.0, 1.0} so the math
+        is exact:
+          match_heavy: sqrt(1.0·(1.0-0.0)² + 5.0·(1.0-1.0)²) = 1.000
+          match_light: sqrt(1.0·(0.0-0.0)² + 5.0·(0.0-1.0)²) = √5 ≈ 2.236
+        """
+        rows = [
+            _row("match_heavy", bpm=200.0, spectral_flatness=0.95),
+            _row("match_light", bpm=50.0,  spectral_flatness=0.05),
+        ]
+        db = FakeMoodDB(rows)
+        results = _run(tg.tracks_by_mood(db, "synth_test", limit=1))
+        self.assertEqual(results[0]["path"], "match_heavy",
+                         "Heavy-weight feature should outrank light-weight feature.")
+
+    def test_weight_zero_silences_feature(self):
+        """A feature with weight=0 must have zero influence on ranking. We
+        configure bpm-only scoring and verify the bpm-perfect track wins
+        even when its silenced feature is the worst in the library."""
+        from utils.track_graph import MoodSpec
+        tg.MOODS["zero_test"] = MoodSpec(
+            "zero_test",
+            {
+                "bpm":               (0.0, 1.0),
+                "spectral_flatness": (1.0, 0.0),   # silenced
+            },
+        )
+        try:
+            rows = [
+                # 'a' is bpm-perfect (lowest); flatness is the worst in the
+                # library (would lose under equal weighting).
+                _row("a", bpm=50.0,  spectral_flatness=0.05),
+                # 'b' has worst bpm but perfect flatness.
+                _row("b", bpm=200.0, spectral_flatness=0.95),
+                # Filler spreads percentiles.
+                _row("c", bpm=100.0, spectral_flatness=0.5),
+            ]
+            db = FakeMoodDB(rows)
+            results = _run(tg.tracks_by_mood(db, "zero_test", limit=1))
+            self.assertEqual(results[0]["path"], "a",
+                             "weight=0 should remove flatness from the metric.")
+        finally:
+            tg.MOODS.pop("zero_test", None)
+
+
 class TestListenFeedback(unittest.TestCase):
     def setUp(self):
         tg.invalidate_mood_cache()
