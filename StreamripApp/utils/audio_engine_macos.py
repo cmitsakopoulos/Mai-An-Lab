@@ -44,6 +44,7 @@ class AudioEngine:
         self.queue: list[dict] = []
         self.current_index: int = 0
         self.jarvis_controlled = False
+        self.play_similar_seed_path = ""
 
         self._page:  ft.Page | None = None
         self._observers: dict[str, list] = {}
@@ -55,6 +56,9 @@ class AudioEngine:
         self._lock = threading.RLock()
 
     def setup(self, page: ft.Page):
+        if self._page is not page:
+            logger.warning("ADB_AUDIO: page changed; clearing stale observers")
+            self.clear_observers()
         self._page = page
 
     @property
@@ -159,6 +163,11 @@ class AudioEngine:
                 except ValueError:
                     pass
 
+    def clear_observers(self):
+        with self._obs_lock:
+            self._observers.clear()
+            logger.warning("ADB_AUDIO: Cleared all old observers")
+
     def dispatch(self, name: str, value=None):
         with self._obs_lock:
             fns = list(self._observers.get(name, []))
@@ -166,7 +175,10 @@ class AudioEngine:
             try:
                 fn(self, value)
             except Exception as exc:
-                logger.error("AudioEngine dispatch error (%s): %s", name, exc)
+                if "destroyed session" in str(exc):
+                    logger.warning("AudioEngine dispatch suppressed stale session callback (%s): %s", name, exc)
+                else:
+                    logger.error("AudioEngine dispatch error (%s): %s", name, exc)
 
     def _set(self, attr: str, value):
         if getattr(self, attr, None) == value:

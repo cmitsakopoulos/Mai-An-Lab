@@ -391,41 +391,35 @@ Disliking a track applies a persistent, hard exclusion constraint on the track-m
 2. **Second-Best Matching Routing**: The partition calculator re-evaluates the track's score across all remaining moods. It automatically re-routes the track to its next-highest scored matching mood, ensuring the disliked track is instantly removed from the current subset but remains organized within the library.
 
 #### D. The Feedback Reset Hook
-Users can erase all manual adjustments at any time. Activating the reset option deletes all rows from the `mood_feedback`, `mood_profiles`, and `mood_regressors` tables and invalidates the cached percentile matrix. This immediately restores all moods to their pristine factory-default profiles and triggers a clean recalculation of all track partition assignments.
+Users can erase all manual adjustments at any time. Activating the reset option deletes all rows from the `mood_feedback` and `mood_profiles` tables, wipes the `user_taste_model` table, and invalidates the cached percentile matrix. This immediately restores all moods to their factory-default configurations and resets the online SGD taste parameters.
 
-#### E. Phase 2: Per-Mood Logistic Regressor Architecture
-While Phase 1 targets coarse, day-one presets using a hand-tuned **Weighted Euclidean Distance**, Phase 2 deploys an on-device, per-mood **Logistic Regression Layer** to dynamically optimize classification weights from real-time listener feedback:
+#### E. The Global SGD Taste Model Architecture
+While Phase 1 handles coarse-grained target-profile partitions, a single **Global SGD Taste Model (Logistic Regressor)** runs on-device to capture overall listener preferences across all play sessions. 
 
-$$\text{prior\_score} = -\sqrt{\sum w_{\text{prior}, i} \cdot (x_i - t_i)^2}$$
+The taste model operates in the low-dimensional **3-D Principal Component space** (PC1 Timbre, PC2 Tempo, PC3 Harmonic) derived from the library's SVD projection eigenvalues. It models the probability of the user liking a track as:
 
-Each mood maintains an independent linear model $P(\text{track matches mood} \mid x) = \sigma(\mathbf{w} \cdot \mathbf{x} + b)$ over the 8-dimensional percentile vector $\mathbf{x}$ representing the track's DSP descriptors:
+$$P(\text{like} \mid \mathbf{x}) = \sigma(\mathbf{w} \cdot \mathbf{x} + b)$$
 
-1. **Pragmatic Bootstrap Prior**: 
-   Before any feedback is registered, the weights are ephemerally bootstrapped from the Phase 1 target and weight profile:
-   $$w_i = (t_i - 0.5) \cdot \text{weight}_i$$
-   Features with targets above the library median ($>0.5$) obtain positive starting weights, whereas features below the median obtain negative starting weights. Bias starts at $0.0$.
-   
-2. **Online Learning via Stochastic Gradient Descent (SGD)**:
-   When a user provides positive ($y=1$) or negative ($y=0$) feedback on a track, the model runs a single-step SGD update with $L_2$ Ridge Regularization to prevent runaway weight drift:
+where $\mathbf{x} \in \mathbb{R}^3$ represents the projection coordinates of the track.
+
+1. **Online Stochastic Gradient Descent (SGD)**:
+   When a user likes ($y=1$) or dislikes ($y=0$) a track in the playback bar, the engine runs a single-step SGD update with $L_2$ Ridge Regularization to prevent runaway weight drift:
    $$\mathbf{w} \leftarrow \mathbf{w} + \eta \cdot ((y - \sigma(\mathbf{w} \cdot \mathbf{x} + b)) \cdot \mathbf{x} - \lambda \cdot \mathbf{w})$$
    $$b \leftarrow b + \eta \cdot (y - \sigma(\mathbf{w} \cdot \mathbf{x} + b))$$
-   *Parameters*: $\eta = 0.05$ (learning rate), $\lambda = 10^{-4}$ (ridge weight decay). The weight decay prevents "like-streaks" from shifting parameters too aggressively.
+   *Parameters*: $\eta = 0.04$ (learning rate), $\lambda = 10^{-4}$ (regularization weight decay).
 
-3. **Confidence-Based Prior Blending**:
-   To ensure excellent, stable recommendations from day one, scoring convexly blends the Phase 1 prior and Phase 2 regressor outputs based on the sample count ($n$):
-   $$\text{final\_score} = \gamma \cdot \text{regressor\_score} + (1 - \gamma) \cdot \text{prior\_score}$$
-   where $\gamma = \min(1.0, n / N_{\text{confident}})$ and $N_{\text{confident}} = 30$. Once the user has provided $30$ feedback events on a mood, the optimized regressor completely takes over.
+2. **Sample-Weight Awareness**:
+   Feedback samples are weighted based on their source. Explicit user clicks (Likes/Dislikes) carry maximum weight ($1.0$), while implicit listening signals (e.g. playing past the skip threshold or skipping early) carry half weight ($0.5$).
 
-#### F. Task-Safe Serialized SGD updates
-Because feedback actions and random walks can execute concurrently in background tasks, multiple updates to the same mood regressor can occur simultaneously. In standard async environments, this introduces a critical **lost update race condition**:
-1. Task 1 and Task 2 concurrently read the active weights $\mathbf{w}$ from the database.
-2. Both run `online_update` on their respective tracks.
-3. Whichever task saves last overwrites the other, leading to lost learning updates and a corrupted sample count ($n$).
+3. **PageRank Walker Integration**:
+   During similarity walks, candidate logits are dynamically re-ranked using the taste model:
+   $$w_c \leftarrow w_c + \gamma \cdot \big(P(\text{like} \mid \mathbf{x}_c) - 0.5\big)$$
+   where $\gamma = 0.15$ is the taste weight. A small exploration parameter $\epsilon = 0.05$ introduces step-level randomness by occasionally skipping taste re-ranking, promoting healthy sonic discovery.
 
-To prevent this, the engine wraps the update pipeline with a **Per-Mood Serializing Lock Registry** using `asyncio.Lock()` per canonical mood. Even if multiple likes/dislikes are fired simultaneously (e.g. during batch selection or random walks):
-* Concurrent calls are marshaled into a strictly sequential queue.
-* Each update reads the freshly written weights from the previous sample's completed update.
-* This guarantees strict sequential SGD correctness, preserves weight update consistency, and prevents any database read-write race conditions.
+#### F. Task-Safe Serialized updates
+Because feedback actions and random walks can execute concurrently in background tasks, multiple updates to the taste model weights can occur simultaneously. 
+
+To prevent lost updates, database reads and writes for the SGD Taste Model are fully protected under the hood. The system coordinates taste model parameter updates using a strict transactional queue, ensuring that sequential learning weight updates are completely serialized and eliminating data race conditions.
 
 ---
 
