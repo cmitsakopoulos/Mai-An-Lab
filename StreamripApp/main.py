@@ -2599,12 +2599,20 @@ class LibraryView:
             size=14,
             weight=ft.FontWeight.BOLD,
         )
+        self._mood_eq_btn = ft.IconButton(
+            icon=ft.Icons.TUNE,
+            icon_color=LIB_PARTITION_COLOR,
+            icon_size=20,
+            tooltip="Adjust EQ for this mood",
+            on_click=lambda e: self.page.run_task(self._open_mood_eq_dialog),
+        )
         self._mood_pagination_bar = ft.Container(
             content=ft.Row(
                 [
                     self._prev_mood_btn,
                     self._mood_label,
                     self._next_mood_btn,
+                    self._mood_eq_btn,
                 ],
                 alignment=ft.MainAxisAlignment.CENTER,
                 spacing=20,
@@ -2806,6 +2814,289 @@ class LibraryView:
         self.app.show_snackbar("Recalculating Default Moods...")
         self.page.run_task(self.recalculate_partitions_worker)
 
+    async def _open_mood_eq_dialog(self):
+        """Open a popover with raw feature quartile dropdowns to optimize the active mood."""
+        from utils import track_graph as tg
+        label_value = (self._mood_label.value or "").strip()
+        canonical = tg.mood_canonical(label_value)
+        if not canonical:
+            self.app.show_snackbar("Select a mood partition first.", icon=ft.Icons.INFO_OUTLINE)
+            return
+
+        db = self.app.db_manager
+        try:
+            definition = await tg.get_mood_definition(db, canonical)
+        except Exception as exc:
+            logger.exception("EQ dialog: failed to fetch mood definition: %s", exc)
+            definition = None
+
+        # Load SVD projection space and eigenvalues for dynamic raw feature mapping and variance calculations
+        raw_features = ["bpm", "brightness", "energy", "rolloff", "beat_strength", "spectral_flatness", "spectral_contrast", "key_mode"]
+        
+        friendly_names = {
+            "bpm": "Tempo / BPM",
+            "brightness": "Brightness",
+            "energy": "Energy",
+            "rolloff": "Treble Rolloff",
+            "beat_strength": "Beat Strength",
+            "spectral_flatness": "Flatness / Acoustic",
+            "spectral_contrast": "Timbre Contrast",
+            "key_mode": "Key Mode (Major/Minor)"
+        }
+        
+        projection = None
+        eigenvalues = None
+        try:
+            conn = await db.get_connection()
+            async with conn.execute("SELECT projection, eigenvalues FROM pca_space WHERE id = 1") as cursor:
+                row = await cursor.fetchone()
+            
+            # If not optimized or empty, compute SVD on-the-fly to get eigenvalues/projection
+            if row is None or not row['eigenvalues']:
+                logger.info("EQ dialog: PCA space empty, optimizing on-the-fly...")
+                await tg.optimize_pca_spacing(db, tg.FEATURES_VERSION)
+                async with conn.execute("SELECT projection, eigenvalues FROM pca_space WHERE id = 1") as cursor:
+                    row = await cursor.fetchone()
+            
+            if row:
+                import numpy as np
+                projection = np.frombuffer(row['projection'], dtype=np.float32).reshape(8, 3)
+                if row['eigenvalues']:
+                    eigenvalues = np.frombuffer(row['eigenvalues'], dtype=np.float32)
+        except Exception as exc:
+            logger.exception("EQ dialog: failed to load SVD space for dynamic mapping: %s", exc)
+
+        most_variance_text = ""
+        least_variance_text = ""
+        
+        feature_pc = {f: 0 for f in raw_features}
+        
+        if projection is not None:
+            import numpy as np
+            overall_weights = []
+            for feat_idx, feat in enumerate(raw_features):
+                if eigenvalues is not None and len(eigenvalues) >= 3:
+                    weight = float(
+                        (projection[feat_idx, 0] ** 2) * eigenvalues[0] +
+                        (projection[feat_idx, 1] ** 2) * eigenvalues[1] +
+                        (projection[feat_idx, 2] ** 2) * eigenvalues[2]
+                    )
+                else:
+                    weight = float(
+                        (projection[feat_idx, 0] ** 2) +
+                        (projection[feat_idx, 1] ** 2) +
+                        (projection[feat_idx, 2] ** 2)
+                    )
+                overall_weights.append((feat, weight))
+                
+                # Determine dominant PC for this feature
+                loadings = [abs(projection[feat_idx, 0]), abs(projection[feat_idx, 1]), abs(projection[feat_idx, 2])]
+                feature_pc[feat] = int(np.argmax(loadings))
+                
+            sorted_overall = sorted(overall_weights, key=lambda x: x[1], reverse=True)
+            most_variance_features = [friendly_names[x[0]] for x in sorted_overall[:3]]
+            most_variance_text = ", ".join(most_variance_features)
+            
+            least_variance_features = [friendly_names[x[0]] for x in sorted_overall[-2:]]
+            least_variance_text = ", ".join(least_variance_features)
+            
+            # Sort raw_features by descending variance contribution
+            raw_features = [x[0] for x in sorted_overall]
+
+        header_controls = []
+        if most_variance_text and least_variance_text:
+            header_controls.extend([
+                ft.Text("Sonic Variance Profile", color=CYAN, size=11, weight=ft.FontWeight.BOLD),
+                ft.Container(
+                    content=ft.Column(
+                        [
+                            ft.Text(f"Most Active: {most_variance_text}", color=TEXT, size=11, weight=ft.FontWeight.W_600),
+                            ft.Text(f"Least Active: {least_variance_text}", color=DIM, size=10),
+                        ],
+                        spacing=2,
+                    ),
+                    bgcolor=apply_opacity(0.04, TEXT),
+                    border_radius=8,
+                    padding=10,
+                    margin=ft.Margin.only(bottom=8),
+                    border=ft.Border.all(1, apply_opacity(0.08, TEXT)),
+                )
+            ])
+
+        def _weight_for(feature: str) -> float:
+            if not definition:
+                return 0.0
+            entry = definition.get(feature)
+            if not entry:
+                return 0.0
+            try:
+                # Target stores the quartile (1.0 to 4.0), weight stores 1.0 (active) or 0.0 (neutral)
+                target_val, weight_val = entry
+                if weight_val == 0.0:
+                    return 0.0
+                return float(target_val)
+            except (TypeError, ValueError, IndexError):
+                return 0.0
+
+        sliders: dict[str, ft.Slider] = {}
+        
+        pc_metadata = {
+            0: {"label": "Timbre (PC1)", "color": ft.Colors.CYAN},
+            1: {"label": "Tempo (PC2)", "color": ft.Colors.PURPLE},
+            2: {"label": "Harmonic (PC3)", "color": ft.Colors.AMBER_500},
+        }
+
+        labels = {
+            0: "Any / Neutral",
+            1: "Very Low",
+            2: "Low",
+            3: "High",
+            4: "Very High",
+        }
+
+        def _make_row(feature: str) -> ft.Container:
+            initial = int(_weight_for(feature))
+            
+            dom_pc = feature_pc.get(feature, 0)
+            meta = pc_metadata[dom_pc]
+            pc_color = meta["color"]
+            pc_label = meta["label"]
+            
+            value_text_control = ft.Text(
+                labels.get(initial, "Any / Neutral"),
+                color=pc_color,
+                size=11,
+                weight=ft.FontWeight.W_600
+            )
+
+            def _on_slider_change(e, val_text=value_text_control):
+                val = int(e.control.value)
+                val_text.value = labels.get(val, "Any / Neutral")
+                val_text.update()
+
+            slider = ft.Slider(
+                min=0,
+                max=4,
+                divisions=4,
+                value=initial,
+                active_color=pc_color,
+                inactive_color=apply_opacity(0.15, pc_color),
+                thumb_color=TEXT,
+                on_change=_on_slider_change,
+            )
+            sliders[feature] = slider
+            
+            label_text = friendly_names.get(feature, feature)
+            
+            dot = ft.Container(
+                width=8,
+                height=8,
+                border_radius=4,
+                bgcolor=pc_color,
+                margin=ft.Margin.only(right=6),
+            )
+            
+            return ft.Container(
+                content=ft.Column(
+                    [
+                        ft.Row(
+                            [
+                                ft.Row(
+                                    [
+                                        dot,
+                                        ft.Text(label_text, color=TEXT, size=12, weight=ft.FontWeight.W_700, no_wrap=True),
+                                    ],
+                                    alignment=ft.MainAxisAlignment.START,
+                                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                                    spacing=0,
+                                ),
+                                value_text_control,
+                            ],
+                            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        ),
+                        ft.Row(
+                            [
+                                ft.Text(f"{feature} • {pc_label}", color=pc_color, size=9.5, weight=ft.FontWeight.W_600, margin=ft.Margin.only(left=14)),
+                            ],
+                            alignment=ft.MainAxisAlignment.START,
+                        ),
+                        ft.Container(
+                            content=slider,
+                            margin=ft.Margin.only(top=-6, bottom=-4),
+                        ),
+                    ],
+                    spacing=2,
+                    tight=True,
+                ),
+                padding=ft.Padding.only(bottom=4),
+            )
+
+        rows = []
+        if header_controls:
+            rows.extend(header_controls)
+        rows.extend([_make_row(f) for f in raw_features])
+
+        dlg = ft.AlertDialog(
+            title=ft.Text(f"{label_value or canonical.capitalize()} Quartile Optimization", color=TEXT),
+            content=ft.Container(
+                content=ft.Column(rows, spacing=16, tight=True, scroll=ft.ScrollMode.ADAPTIVE),
+                padding=ft.Padding.only(top=8, right=8),
+                width=380,
+                height=460,
+            ),
+            actions_alignment=ft.MainAxisAlignment.END,
+            bgcolor=SURFACE,
+        )
+
+        def _close(_e=None):
+            dlg.open = False
+            self.page.update()
+
+        def _on_apply(_e):
+            weights_to_save = {
+                f: float(sliders[f].value) for f in raw_features
+            }
+            
+            _close()
+            self.page.run_task(self._apply_mood_eq, canonical, weights_to_save)
+
+        dlg.actions = [
+            ft.TextButton("Cancel", on_click=_close),
+            ft.TextButton(
+                content=ft.Text("Apply", weight=ft.FontWeight.BOLD, color=CYAN),
+                on_click=_on_apply,
+            ),
+        ]
+        self.page.overlay.append(dlg)
+        dlg.open = True
+        self.page.update()
+
+    async def _apply_mood_eq(self, canonical_mood: str, weights: dict[str, float]):
+        from utils import track_graph as tg
+        db = self.app.db_manager
+        try:
+            await tg.set_mood_eq(db, canonical_mood, weights)
+        except Exception as exc:
+            logger.exception("Failed to set mood EQ: %s", exc)
+            self.app.show_snackbar(f"EQ update failed: {exc}",
+                                    icon=ft.Icons.ERROR_OUTLINE)
+            return
+        self.app.show_snackbar(
+            f"EQ updated for {canonical_mood.capitalize()}.",
+            icon=ft.Icons.CHECK_CIRCLE_OUTLINE,
+        )
+        # Refresh the partition view if the user is still viewing this mood.
+        try:
+            current_label = (self._mood_label.value or "").strip()
+            if (
+                self.partition_sub_mode == "moods"
+                and tg.mood_canonical(current_label) == canonical_mood
+            ):
+                await self.load_library()
+        except Exception as exc:
+            logger.debug("EQ apply: post-save refresh failed: %s", exc)
+
     async def _toggle_mood_like(self, track_path: str, mood: str, btn: ft.IconButton = None):
         db = self.app.db_manager
         from utils import track_graph as tg
@@ -2919,14 +3210,14 @@ class LibraryView:
                         break
 
                 if track_idx is not None:
-                    track_percentile_2d = percentile_matrix[track_idx : track_idx + 1]
                     adjusted_profiles = await db.get_all_adjusted_mood_profiles()
                     
+                    # Score the track using the uncompressed raw physical quartile distance system
+                    raw_mood_scores = tg.score_tracks_for_repartition(rows, adjusted_profiles)
                     mood_scores = {}
-                    for m, spec in tg.MOODS.items():
-                        profile = adjusted_profiles.get(m) or spec.profile
-                        if profile:
-                            mood_scores[m] = float(tg._score_against_profile(profile, track_percentile_2d)[0])
+                    for m in tg.MOODS.keys():
+                        if m in raw_mood_scores:
+                            mood_scores[m] = float(raw_mood_scores[m][track_idx])
                         else:
                             mood_scores[m] = -np.inf
 
@@ -3031,23 +3322,56 @@ class LibraryView:
             logger.exception("Failed to register mood dislike: %s", e)
             self.app.show_snackbar(f"Failed to dislike track: {e}")
 
+    def _open_reset_feedback_confirmation(self):
+        """Open a confirmation dialog before resetting mood feedback and profiles."""
+        def _on_confirm(e):
+            dlg.open = False
+            self.page.update()
+            self.page.run_task(self._reset_mood_feedback)
+
+        def _on_cancel(e):
+            dlg.open = False
+            self.page.update()
+
+        dlg = ft.AlertDialog(
+            title=ft.Text("Reset Mood Configurations?", color=TEXT),
+            content=ft.Text("This will permanently delete all your custom mood EQ tunings, partition assignments, and feedback. Are you sure you want to begin calibration from scratch?", color=DIM),
+            actions_alignment=ft.MainAxisAlignment.END,
+            bgcolor=SURFACE,
+            actions=[
+                ft.TextButton("Cancel", on_click=_on_cancel),
+                ft.TextButton(
+                    content=ft.Text("Reset", weight=ft.FontWeight.BOLD, color=ft.Colors.RED_400),
+                    on_click=_on_confirm,
+                ),
+            ],
+        )
+        self.page.overlay.append(dlg)
+        dlg.open = True
+        self.page.update()
+
     async def _reset_mood_feedback(self):
         db = self.app.db_manager
         try:
             self.app.show_snackbar("Resetting mood feedback & profiles...")
             await db.clear_all_mood_feedback()
             await db.clear_all_adjusted_mood_profiles()
-            await db.clear_all_mood_regressors()
+            await db.save_partitions([])  # Wipe all track partitions from SQLite
             self._mood_feedback_map.clear()
             self._mood_recalc_pending = False
+            
+            # Reset memory caches so library view updates
+            self._cached_moods = None
+            self._cached_islets = None
+            self._cached_unanalysed = None
             
             # Invalidate cache of percentile matrix
             from utils import track_graph as tg
             tg.invalidate_mood_cache()
             
-            # Recalculate
-            await self.recalculate_partitions_worker()
-            self.app.show_snackbar("Mood feedback & profiles reset successfully.", color=CYAN)
+            # Re-load the library to show the setup card (Generate Moods / Run PCA) from scratch
+            await self.load_library()
+            self.app.show_snackbar("Mood feedback & profiles reset successfully. Ready for clean calibration.", color=CYAN)
         except Exception as e:
             logger.exception("Failed to reset mood feedback: %s", e)
             self.app.show_snackbar(f"Failed to reset mood feedback: {e}")
@@ -3058,16 +3382,11 @@ class LibraryView:
         try:
             db = self.app.db_manager
             
-            # Clear all existing mood feedback/likes to guarantee a completely new, clean slate context
-            await db.clear_all_mood_feedback()
-            await db.clear_all_adjusted_mood_profiles()
-            await db.clear_all_mood_regressors()
-            self._mood_feedback_map.clear()
-            
             import numpy as np
             from utils import track_graph as tg
             
-            # 1. Fetch percentile matrix
+            # 1. Re-optimize PCA projection space and fetch coordinates
+            await tg.optimize_pca_spacing(db, tg.FEATURES_VERSION)
             rows, percentile_matrix = await tg._load_percentile_matrix(db, tg.FEATURES_VERSION)
             
             # 2. Get all tracks
@@ -3095,15 +3414,25 @@ class LibraryView:
                 
                 # Load feedback and customized profiles from database
                 feedback_map = await db.get_mood_feedback()
+                self._mood_feedback_map = feedback_map
                 adjusted_profiles = await db.get_all_adjusted_mood_profiles()
                 
+                # If no profiles exist in the database (e.g. cold start onboarding or after a wipe/reset),
+                # seed the database with the preconfigured default target quartiles to initialize the scoring scaffold.
+                if not adjusted_profiles:
+                    for mood in tg.MOODS.keys():
+                        default_profile = tg._get_default_quartiles(mood)
+                        await db.save_adjusted_mood_profile(mood, default_profile)
+                    adjusted_profiles = await db.get_all_adjusted_mood_profiles()
+                
+                # Score all tracks against all adjusted mood profiles using the raw-feature quartile system
+                raw_mood_scores = tg.score_tracks_for_repartition(analysed_rows, adjusted_profiles)
                 mood_scores = {}
-                for mood, spec in tg.MOODS.items():
-                    profile = adjusted_profiles.get(mood) or spec.profile
-                    if profile:
-                        mood_scores[mood] = tg._score_against_profile(profile, filtered_percentiles)
+                for mood in tg.MOODS.keys():
+                    if mood in raw_mood_scores:
+                        mood_scores[mood] = raw_mood_scores[mood]
                     else:
-                        mood_scores[mood] = np.full(len(analysed_rows), -np.inf, dtype=np.float32)
+                        raise ValueError(f"No adjusted mood profile found in database for '{mood}'. Built-in default profiles are disabled.")
                         
                 for i, track in enumerate(analysed_rows):
                     path = track["path"]
@@ -3217,11 +3546,11 @@ class LibraryView:
             tabs.append(
                 ft.IconButton(
                     icon=ft.Icons.DELETE_OUTLINE_ROUNDED,
-                    icon_color=active_col,
+                    icon_color=ft.Colors.WHITE,
                     icon_size=18,
                     tooltip="Reset Mood Feedback",
                     bgcolor=apply_opacity(0.08, active_col),
-                    on_click=lambda _: self.page.run_task(self._reset_mood_feedback),
+                    on_click=lambda _: self._open_reset_feedback_confirmation(),
                 )
             )
         # Refresh partitions button (default moods only — custom islets are user-driven)
@@ -4186,7 +4515,7 @@ class LibraryView:
                 total_searched_count = 0
                 
                 # If partitions have not been generated yet, show the premium glassmorphic setup card
-                if not saved_partitions and self._cached_moods is None:
+                if not saved_partitions:
                     setup_card = ft.Container(
                         content=ft.Column(
                             [
@@ -4294,12 +4623,12 @@ class LibraryView:
                             self._mood_pagination_bar.visible = False
                             
                             # Build or update the premium vertical scrollwheel controls in-place
-                            if hasattr(self, "_mood_wheel_list") and self._mood_wheel_list is not None and len(self._mood_wheel_list.controls) == len(active_sections):
+                            if hasattr(self, "_mood_wheel_list") and self._mood_wheel_list is not None and len(self._mood_wheel_list.controls) == len(active_sections) + 1:
                                 for idx, (title, tracks, icon) in enumerate(active_sections):
                                     is_selected = (idx == self.selected_mood_index)
                                     accent = LIB_PARTITION_COLOR if is_selected else DIM
                                     
-                                    chip = self._mood_wheel_list.controls[idx]
+                                    chip = self._mood_wheel_list.controls[idx + 1]
                                     container = chip.content
                                     column = container.content
                                     
@@ -4318,6 +4647,31 @@ class LibraryView:
                                     chip.on_tap = lambda _e, index=idx: self._select_mood_index(index)
                             else:
                                 wheel_controls = []
+                                
+                                # Prepend the beautifully styled circular TUNE / EQ dial button
+                                eq_btn = ft.GestureDetector(
+                                    content=ft.Container(
+                                        content=ft.Column(
+                                            [
+                                                ft.Icon(ft.Icons.TUNE_ROUNDED, color=CYAN, size=18),
+                                                ft.Text("TUNE", size=8.5, weight=ft.FontWeight.W_700, color=CYAN, text_align=ft.TextAlign.CENTER, no_wrap=True),
+                                            ],
+                                            alignment=ft.MainAxisAlignment.CENTER,
+                                            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                                            spacing=2,
+                                        ),
+                                        width=58,
+                                        height=58,
+                                        border_radius=29,
+                                        bgcolor="transparent",
+                                        border=ft.Border.all(1.5, apply_opacity(0.4, CYAN)),
+                                        padding=4,
+                                        animate=ft.Animation(150, ft.AnimationCurve.EASE_OUT),
+                                    ),
+                                    on_tap=lambda _e: self.page.run_task(self._open_mood_eq_dialog),
+                                )
+                                wheel_controls.append(eq_btn)
+                                
                                 for idx, (title, tracks, icon) in enumerate(active_sections):
                                     is_selected = (idx == self.selected_mood_index)
                                     accent = LIB_PARTITION_COLOR if is_selected else DIM
@@ -4611,7 +4965,7 @@ class LibraryView:
                     if res:
                         new_rows = [self._track_row(t, depth + 1, playlist_id=pl_id) for t in res]
                     else:
-                        new_rows = [self._auto_generate_playlist_widget(pl_id, depth + 1)]
+                        new_rows = [self._empty_playlist_widget(depth + 1)]
 
             def _mutate():
                 controls = self._library_list.controls
@@ -4908,27 +5262,15 @@ class LibraryView:
 
         self._last_highlighted_path = current_path
 
-    def _auto_generate_playlist_widget(self, playlist_id, depth) -> ft.Control:
-        handler = lambda _: asyncio.create_task(self.app.open_auto_playlist_dialog(playlist_id))
-
+    def _empty_playlist_widget(self, depth) -> ft.Control:
         return ft.Container(
-            # depth is required so _toggle_node's collapse loop and dup-guard
-            # treat this widget as a child row of its parent playlist.
-            data={"depth": depth, "type": "auto_generate"},
+            data={"depth": depth, "type": "empty_playlist"},
             content=ft.Row([
-                ft.Text("Playlist is empty", color=TEXT, size=13, weight=ft.FontWeight.BOLD, expand=True),
-                ft.TextButton(
-                    "Auto-Generate",
-                    icon=ft.Icons.BOLT_ROUNDED,
-                    on_click=handler
-                ),
-            ], spacing=12),
-            padding=ft.Padding.only(left=20 * depth + 10, right=15, top=10, bottom=10),
-            bgcolor=apply_opacity(0.05, CYAN),
-            border_radius=10,
+                ft.Icon(ft.Icons.PLAYLIST_REMOVE_ROUNDED, color=DIM, size=18),
+                ft.Text("Playlist is empty", color=DIM, size=12, weight=ft.FontWeight.W_600, expand=True),
+            ], spacing=8),
+            padding=ft.Padding.only(left=20 * depth + 12, right=15, top=8, bottom=8),
             margin=ft.Margin.only(left=20 * depth, right=10, top=5, bottom=5),
-            on_click=handler,
-            ink=True,
         )
 
     def _find_playlist_track_indices(self, playlist_id):
@@ -6649,6 +6991,19 @@ class MiniPlayerBar:
         self._music_icon = ft.Icon(ft.Icons.MUSIC_NOTE, color=CYAN, size=24)
         self._progress   = ft.ProgressBar(value=0, color=CYAN, bgcolor=None, height=2)
 
+        self._like_btn = ft.IconButton(
+            icon=ft.Icons.THUMB_UP_OUTLINED,
+            icon_color=DIM, icon_size=20,
+            tooltip="Like this track",
+            on_click=lambda e: self.app._on_feedback_click(True),
+        )
+        self._dislike_btn = ft.IconButton(
+            icon=ft.Icons.THUMB_DOWN_OUTLINED,
+            icon_color=DIM, icon_size=20,
+            tooltip="Dislike this track",
+            on_click=lambda e: self.app._on_feedback_click(False),
+        )
+
         self._ever_shown  = False   # True once a title has been set at least once
         self._last_title  = ""
         self._last_artist = ""
@@ -6789,7 +7144,7 @@ class NowPlayingSheet:
 
         self._title   = ft.Text("Unknown",  color=TEXT, size=18, weight=ft.FontWeight.W_700,
                                   text_align=ft.TextAlign.CENTER, max_lines=2,
-                                  overflow=ft.TextOverflow.ELLIPSIS)
+                                  overflow=ft.TextOverflow.ELLIPSIS, expand=True)
         self._artist  = ft.Text("Unknown",  color=DIM,  size=13, text_align=ft.TextAlign.CENTER)
         self._album   = ft.Text("Unknown",  color=DIM + "88", size=11, text_align=ft.TextAlign.CENTER)
         
@@ -6843,11 +7198,43 @@ class NowPlayingSheet:
             icon_size=20,
             on_click=lambda e: self.app.toggle_shuffle(),
         )
+        self._play_similar_btn = ft.IconButton(
+            icon=ft.Icons.LINK_ROUNDED,
+            icon_color=CYAN if self.app.play_similar_mode else DIM,
+            icon_size=20,
+            tooltip="Play Similar (Dynamic Recommendation Walk)",
+            on_click=self._toggle_play_similar,
+        )
         self._repeat_btn = ft.IconButton(
             icon=ft.Icons.REPEAT,
             icon_color=DIM,
             icon_size=20,
             on_click=lambda e: self.app.cycle_repeat(),
+        )
+        
+        lib = getattr(self.app, "library_view", None)
+        in_mood_partition = (
+            lib is not None
+            and getattr(lib, "view_mode", "") == "partitions"
+            and getattr(lib, "partition_sub_mode", "") == "moods"
+        )
+        show_feedback = self.app.play_similar_mode or in_mood_partition
+        
+        self._like_btn = ft.IconButton(
+            icon=ft.Icons.THUMB_UP_OUTLINED,
+            icon_color=DIM,
+            icon_size=26,
+            tooltip="Like this track",
+            visible=show_feedback,
+            on_click=lambda e: self.app._on_feedback_click(True),
+        )
+        self._dislike_btn = ft.IconButton(
+            icon=ft.Icons.THUMB_DOWN_OUTLINED,
+            icon_color=DIM,
+            icon_size=26,
+            tooltip="Dislike this track",
+            visible=show_feedback,
+            on_click=lambda e: self.app._on_feedback_click(False),
         )
 
         self._subtitle_text = ft.Text(
@@ -6894,7 +7281,16 @@ class NowPlayingSheet:
                         [
                             ft.Text("NOW PLAYING", color=CYAN, size=10, weight=ft.FontWeight.W_700,
                                     opacity=0.65, text_align=ft.TextAlign.CENTER),
-                            self._title,
+                            ft.Row(
+                                [
+                                    self._dislike_btn,
+                                    self._title,
+                                    self._like_btn,
+                                ],
+                                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                                spacing=12,
+                            ),
                             self._subtitle_text,
                         ],
                         spacing=4,
@@ -6923,6 +7319,8 @@ class NowPlayingSheet:
                     content=ft.Row(
                         [
                             self._shuffle_btn,
+                            ft.Container(expand=True),
+                            self._play_similar_btn,
                             ft.Container(expand=True),
                             self._repeat_btn,
                         ],
@@ -6990,6 +7388,7 @@ class NowPlayingSheet:
             # FIX: Removed manual page height calculations. 
             # Flexbox handles resizing natively now.
             self.container.open = True
+            self.update_play_similar(self.app.play_similar_mode)
         self.app.safe_update(_mutate)
 
     def collapse(self):
@@ -7068,6 +7467,36 @@ class NowPlayingSheet:
         self.update_state(is_playing)
         self.app.mini_player.update_state(is_playing)
         self.page.update()
+
+    def _toggle_play_similar(self, e):
+        self.app.play_similar_mode = not self.app.play_similar_mode
+        self.update_play_similar(self.app.play_similar_mode)
+        verb = "Enabled" if self.app.play_similar_mode else "Disabled"
+        self.app.show_snackbar(
+            f"Play Similar: {verb}",
+            icon=ft.Icons.LINK_ROUNDED if self.app.play_similar_mode else ft.Icons.LINK_OFF_ROUNDED
+        )
+
+    def update_play_similar(self, enabled: bool):
+        self._ensure_initialized()
+        self._play_similar_btn.icon_color = CYAN if enabled else DIM
+        
+        lib = getattr(self.app, "library_view", None)
+        in_mood_partition = (
+            lib is not None
+            and getattr(lib, "view_mode", "") == "partitions"
+            and getattr(lib, "partition_sub_mode", "") == "moods"
+        )
+        show_feedback = enabled or in_mood_partition
+        self._like_btn.visible = show_feedback
+        self._dislike_btn.visible = show_feedback
+        
+        if self._play_similar_btn.page:
+            self._play_similar_btn.update()
+        if self._like_btn.page:
+            self._like_btn.update()
+        if self._dislike_btn.page:
+            self._dislike_btn.update()
 
 
 # ─── Queue Sheet ───────────────────────────────────────────────────────────────
@@ -8661,7 +9090,21 @@ class StreamripFletApp:
         self._is_restarting = False
         self.is_background  = False
         self.is_restoring_session = False
-        
+
+        # Taste-model / playback-event tracking. _last_played_path holds the
+        # path that was most recently *playing* so we can fire a single
+        # record_play_event when playback transitions away from it (via skip,
+        # natural end, or stop). _last_play_position is the latest reported
+        # position on that track. _last_play_duration is its total duration.
+        # _explicit_feedback_cache is a per-process map of path -> True/False
+        # used to keep the playback-bar like/dislike buttons in sync without
+        # re-querying the DB on every track change.
+        self._last_played_path: str = ""
+        self._last_play_position: float = 0.0
+        self._last_play_duration: float = 0.0
+        self._explicit_feedback_cache: dict[str, bool] = {}
+        self.play_similar_mode: bool = False
+
     def _show_error(self, e=None):
         """Surfaces critical errors to the full-screen ErrorBoundary."""
         if hasattr(self, "error_boundary"):
@@ -8897,119 +9340,7 @@ class StreamripFletApp:
         self.wipe_dialog.open = True
         self.page.update()
 
-    async def open_auto_playlist_dialog(self, playlist_id):
-        logger.info(f"Opening Playlist Creation dialog for playlist {playlist_id}")
-        # Mood dropdown drives selection. Options are MOOD_KEYWORDS so a
-        # change here doesn't drift from what the assistant recognises.
-        from utils.assistant_intent import MOOD_KEYWORDS
-        mood_dropdown = ft.Dropdown(
-            label="Mood",
-            value="chill",
-            options=[ft.dropdown.Option(m) for m in MOOD_KEYWORDS],
-            bgcolor=SURFACE2,
-            border_color=BORDER,
-            focused_border_color=CYAN,
-            text_style=ft.TextStyle(color=TEXT, size=13),
-            label_style=ft.TextStyle(color=CYAN, size=11),
-            border_radius=10,
-        )
-        # Length slider: 5-50 tracks. Default 20; long enough to feel like a
-        # real playlist while still fitting on screen.
-        length_slider = ft.Slider(
-            min=5, max=50, value=20, divisions=45, label="{value} tracks", active_color=CYAN,
-        )
-        progress_label = ft.Text("", size=11, color=DIM)
-        loading_indicator = ft.ProgressBar(width=300, color=CYAN, visible=False)
-        gen_btn = ft.Button(
-            "Generate", on_click=lambda _: self.page.run_task(_generate),
-            bgcolor=CYAN, color=BG,
-        )
 
-        async def _generate():
-            from utils.auto_playlist import generate_mood_playlist
-            gen_btn.disabled = True
-            mood_dropdown.disabled = True
-            length_slider.disabled = True
-            loading_indicator.visible = True
-            self.page.update()
-
-            try:
-                mood = (mood_dropdown.value or "").strip().lower()
-                if not mood:
-                    self.show_snackbar("Pick a mood first.", color="#FF4444")
-                    return
-
-                target_length = int(length_slider.value)
-                tracks = await generate_mood_playlist(
-                    self.db_manager, mood, target_length
-                )
-                if not tracks:
-                    # Either unknown mood (shouldn't happen — dropdown is
-                    # constrained) or no analysed tracks. Point at the rescan
-                    # flow either way.
-                    self.show_snackbar(
-                        "Not enough analysed tracks for this mood. Open Jarvis "
-                        "and accept the rescan prompt, then try again.",
-                        color="#FF4444",
-                    )
-                    return
-
-                for t in tracks:
-                    await self.db_manager.add_track_to_playlist(
-                        playlist_id, t["path"]
-                    )
-
-                self.show_snackbar(
-                    f"Generated {len(tracks)} {mood} tracks!",
-                    icon=ft.Icons.CHECK_CIRCLE, color=CYAN,
-                )
-                await self.library_view.load_library()
-
-            except Exception as ex:
-                logger.exception("Mood playlist generation failed")
-                self.show_snackbar(f"Generation failed: {ex}", color="#FF4444")
-            finally:
-                dlg.open = False
-                self.page.update()
-
-        def _close_dlg(_e):
-            dlg.open = False
-            self.page.update()
-
-        dlg = ft.AlertDialog(
-            title=ft.Row(
-                [ft.Icon(ft.Icons.AUTO_AWESOME_ROUNDED, color=CYAN),
-                 ft.Text("Playlist Creation")],
-                spacing=10,
-            ),
-            content=ft.Column([
-                ft.Text(
-                    "Mood-driven selection ranks every DSP-analysed track in "
-                    "your library against the chosen mood profile (z-scored, "
-                    "weighted dot product) and orders the top picks into a "
-                    "smooth listening arc. Tracks without features are skipped "
-                    "— run a rescan via Jarvis to analyse the rest of your library.",
-                    size=12, color=DIM,
-                ),
-                ft.Container(height=10),
-                ft.Text("Mood", size=13, weight=ft.FontWeight.W_600),
-                mood_dropdown,
-                ft.Container(height=10),
-                ft.Text("Playlist length", size=13, weight=ft.FontWeight.W_600),
-                length_slider,
-                ft.Container(height=10),
-                progress_label,
-                loading_indicator,
-            ], tight=True, width=300),
-            actions=[
-                ft.TextButton("Cancel", on_click=_close_dlg),
-                gen_btn,
-            ],
-        )
-        self.page.overlay.append(dlg)
-        self.page.update()
-        dlg.open = True
-        self.page.update()
 
     async def check_onboarding(self):
         """Detects a fresh install using a marker file."""
@@ -9395,6 +9726,61 @@ class StreamripFletApp:
         # kills us before the next mutation event.
         self._schedule_queue_save()
 
+        # ── Implicit play-event capture ──────────────────────────────────
+        # Every transition of `current_path` (skip, natural end via
+        # _on_track_ended → next(), or stop which sets path to "") fires
+        # exactly once for the outgoing track. The classifier inside
+        # taste_model discards skips < 5s, so we forward unconditionally
+        # whenever we actually had a previous track.
+        prev_path = self._last_played_path
+        prev_pos  = self._last_play_position
+        prev_dur  = self._last_play_duration
+        if (
+            prev_path
+            and prev_path != path
+            and not getattr(self, "is_restoring_session", False)
+        ):
+            self.page.run_task(
+                self._record_play_event_safe, prev_path, prev_pos, prev_dur
+            )
+
+        # Reset trackers for the incoming track. Duration may arrive a beat
+        # later via _on_duration; that's fine — _on_position will overwrite
+        # _last_play_duration as soon as a valid duration is reported.
+        self._last_played_path    = path or ""
+        self._last_play_position  = 0.0
+        self._last_play_duration  = float(audio_engine.duration or 0.0)
+
+        # Refresh playback-bar like/dislike state for the new track.
+        self._refresh_feedback_buttons(path)
+
+        # Play Similar dynamic queue replenishment hook
+        if self.play_similar_mode and path and not getattr(self, "is_restoring_session", False):
+            if audio_engine.current_index >= len(audio_engine.queue) - 1:
+                async def _recommend_similar():
+                    from utils import track_graph as tg
+                    try:
+                        walk_tracks = await tg.walk(self.db_manager, path, length=3, edge_kinds=(tg.KIND_ACOUSTIC, tg.KIND_ARTIST))
+                        if walk_tracks:
+                            queue_paths = {t["path"] for t in audio_engine.queue}
+                            next_track_path = None
+                            for wt in walk_tracks:
+                                if wt not in queue_paths:
+                                    next_track_path = wt
+                                    break
+                            
+                            if not next_track_path:
+                                next_track_path = walk_tracks[0]
+                            
+                            track_details = await self.db_manager.get_track_by_path(next_track_path)
+                            if track_details:
+                                audio_engine.queue_last(track_details)
+                                logger.info("Play Similar: Appended recommended track '%s' to queue.", next_track_path)
+                    except Exception as exc:
+                        logger.exception("Play Similar: Failed to generate dynamic recommendation: %s", exc)
+                
+                self.page.run_task(_recommend_similar)
+
         def _atomic_update():
             track  = audio_engine.current_track  or ""
             artist = audio_engine.current_artist or ""
@@ -9424,6 +9810,144 @@ class StreamripFletApp:
                 self._extract_artwork_async(path)
 
         self.safe_update(_atomic_update)
+
+    async def _record_play_event_safe(self, path: str, played: float, duration: float):
+        """Background-safe wrapper around tg.record_play_event so the engine's
+        sync dispatch doesn't get coupled to import-time / DB errors."""
+        from utils import track_graph as tg
+        try:
+            await tg.record_play_event(
+                self.db_manager,
+                path,
+                float(played or 0.0),
+                float(duration or 0.0),
+            )
+        except Exception as exc:
+            logger.debug("record_play_event failed for %s: %s", path, exc)
+
+    def _refresh_feedback_buttons(self, path: str):
+        """Sync the playback-bar like/dislike icons to whatever explicit
+        feedback we have cached for `path`. Hollow = neutral, filled = active."""
+        like_state = self._explicit_feedback_cache.get(path) if path else None
+
+        def _apply(btn_like, btn_dislike):
+            if btn_like is None or btn_dislike is None:
+                return
+            if like_state is True:
+                btn_like.icon       = ft.Icons.THUMB_UP_ROUNDED
+                btn_like.icon_color = CYAN
+                btn_dislike.icon       = ft.Icons.THUMB_DOWN_OUTLINED
+                btn_dislike.icon_color = DIM
+            elif like_state is False:
+                btn_like.icon       = ft.Icons.THUMB_UP_OUTLINED
+                btn_like.icon_color = DIM
+                btn_dislike.icon       = ft.Icons.THUMB_DOWN_ROUNDED
+                btn_dislike.icon_color = CYAN
+            else:
+                btn_like.icon       = ft.Icons.THUMB_UP_OUTLINED
+                btn_like.icon_color = DIM
+                btn_dislike.icon       = ft.Icons.THUMB_DOWN_OUTLINED
+                btn_dislike.icon_color = DIM
+
+        try:
+            _apply(getattr(self.mini_player, "_like_btn", None),
+                   getattr(self.mini_player, "_dislike_btn", None))
+            if getattr(self.now_playing, "_initialized", False):
+                _apply(getattr(self.now_playing, "_like_btn", None),
+                       getattr(self.now_playing, "_dislike_btn", None))
+        except Exception as exc:
+            logger.debug("Failed to refresh feedback buttons: %s", exc)
+
+        def _push():
+            for btn in (
+                getattr(self.mini_player, "_like_btn", None),
+                getattr(self.mini_player, "_dislike_btn", None),
+                getattr(self.now_playing, "_like_btn", None),
+                getattr(self.now_playing, "_dislike_btn", None),
+            ):
+                if btn is not None and getattr(btn, "page", None):
+                    try:
+                        btn.update()
+                    except Exception:
+                        pass
+        try:
+            _push()
+        except Exception:
+            pass
+
+    def _on_feedback_click(self, like: bool):
+        """Click handler for the playback-bar like/dislike buttons. Mirrors
+        the library-tile mood like/dislike behaviour when the user is viewing
+        a mood partition."""
+        current_path = audio_engine.current_path
+        if not current_path:
+            return
+
+        # Toggle off if the user clicks the same state again, otherwise flip
+        # to the new state. Cache update is optimistic — the DB call below
+        # is the source of truth.
+        prev_state = self._explicit_feedback_cache.get(current_path)
+        if prev_state == like:
+            self._explicit_feedback_cache.pop(current_path, None)
+            new_state = None
+        else:
+            self._explicit_feedback_cache[current_path] = like
+            new_state = like
+
+        self._refresh_feedback_buttons(current_path)
+
+        if not like and self.play_similar_mode:
+            audio_engine.next()
+
+        async def _persist():
+            from utils import track_graph as tg
+            try:
+                # Always record the explicit signal: even an "unlike" carries
+                # information (the user actively walked back a prior like).
+                await tg.record_explicit_feedback(
+                    self.db_manager, current_path, like=like
+                )
+            except Exception as exc:
+                logger.debug("record_explicit_feedback failed: %s", exc)
+
+            # Mirror to the active mood partition, if the user is in one.
+            try:
+                lib = getattr(self, "library_view", None)
+                if (
+                    lib is not None
+                    and getattr(lib, "partition_sub_mode", "") == "moods"
+                    and getattr(lib, "_mood_label", None) is not None
+                ):
+                    label_value = (lib._mood_label.value or "").strip()
+                    canonical = tg.mood_canonical(label_value)
+                    if canonical:
+                        delta = 1 if like else -1
+                        await tg.adjust_mood_profile(
+                            self.db_manager, canonical, current_path, delta
+                        )
+                        # Refresh the partition view so the tile state reflects
+                        # the new partition membership.
+                        try:
+                            await lib.load_library()
+                        except Exception as refresh_exc:
+                            logger.debug(
+                                "Feedback click: partition refresh failed: %s",
+                                refresh_exc,
+                            )
+            except Exception as exc:
+                logger.debug("Feedback click: mood mirror failed: %s", exc)
+
+        self.page.run_task(_persist)
+
+        verb = ("Liked" if like else "Disliked") if new_state is not None else "Cleared"
+        try:
+            self.show_snackbar(
+                f"{verb}: {audio_engine.current_track or 'track'}",
+                icon=(ft.Icons.THUMB_UP if like else ft.Icons.THUMB_DOWN)
+                if new_state is not None else ft.Icons.REMOVE_CIRCLE_OUTLINE,
+            )
+        except Exception:
+            pass
 
     def _on_jarvis_continue(self, _inst, _val=None):
         """Sync callback dispatched by AudioEngine when the Jarvis-controlled
@@ -9658,6 +10182,16 @@ class StreamripFletApp:
         # Pacing is set in Dart (flet_audio_service.dart) and dirty-checked in
         # the engine's _set(). No throttle needed here — every dispatch reflects
         # a visible (≥1 s) change at the slider granularity.
+        try:
+            pos_f = float(position or 0.0)
+        except (TypeError, ValueError):
+            pos_f = 0.0
+        # Only capture position for the currently-active track. Skip the
+        # reset-to-zero pulse emitted by _sync_metadata_for_current immediately
+        # before the engine swaps current_path — otherwise we'd record every
+        # skip as a 0-second play and lose the implicit signal.
+        if pos_f > 0.0 and audio_engine.current_path == self._last_played_path:
+            self._last_play_position = pos_f
         if self.is_background or self.is_scrubbing:
             return
 
@@ -9676,6 +10210,15 @@ class StreamripFletApp:
     def _on_duration(self, _instance, duration: float):
         # Duration is invariant during playback of a single track, so the
         # total-time label is set once per track-change instead of per tick.
+        try:
+            dur_f = float(duration or 0.0)
+        except (TypeError, ValueError):
+            dur_f = 0.0
+        # Same guard as _on_position: ignore the reset-to-zero pulse during
+        # track transitions and only update when the duration belongs to the
+        # currently-active track.
+        if dur_f > 0.0 and audio_engine.current_path == self._last_played_path:
+            self._last_play_duration = dur_f
         if self.is_background:
             return
         self.now_playing.update_duration(duration)
@@ -9922,19 +10465,10 @@ class StreamripFletApp:
             self.safe_update(lambda: self.show_snackbar("Track not found in current view."))
             return
 
-        # Build a sliding window of ~100 tracks around the target to save
-        # memory and keep set_playlist's IPC payload bounded. Album /
-        # playlist queue sources are usually < window_size, so the slice
-        # is a no-op for them.
-        window_size = 100
-        start = max(0, target_idx - (window_size // 2))
-        end   = min(len(items), start + window_size)
-        if end - start < window_size:
-            start = max(0, end - window_size)
-
-        subset = items[start:end]
+        # Physical playback queue extends to the end of the library/search results,
+        # fully decoupled from the UI rendering/pagination limits.
         tracks = []
-        for t in subset:
+        for t in items:
             p = t.get("path", "")
             if p:
                 tracks.append({
@@ -9945,7 +10479,7 @@ class StreamripFletApp:
                 })
 
         audio_engine.jarvis_controlled = False
-        audio_engine.set_queue(tracks, start_index=target_idx - start)
+        audio_engine.set_queue(tracks, start_index=target_idx)
 
     def toggle_shuffle(self):
         audio_engine.is_shuffle = not audio_engine.is_shuffle

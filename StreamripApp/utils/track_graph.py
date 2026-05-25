@@ -52,7 +52,6 @@ import logging
 import random
 import json
 import os
-import asyncio
 from typing import Optional
 
 import numpy as np
@@ -477,6 +476,8 @@ async def walk(
     restart_prob: float = 0.15,
     diversity_lambda: float = 0.3,
     temperature: float = 0.08,
+    taste_weight: float = 0.15,
+    taste_explore: float = 0.05,
     seed_rng: Optional[random.Random] = None,
 ) -> list[str]:
     """Personalised-PageRank-flavoured random walk over the track graph.
@@ -511,6 +512,13 @@ async def walk(
         much more diversity across re-asks from the same seed.
     temperature : softmax temperature on the effective weights. Tuning
         guidance — similarity (≈ greedy): 0.05–0.10; discovery: 0.15–0.25.
+    taste_weight : γ on the taste-model contribution to per-candidate
+        logits. 0 disables the taste re-rank entirely (e.g. for tests).
+        Cold taste model (no feedback events yet) is also a no-op
+        regardless of `taste_weight`.
+    taste_explore : ε ∈ [0, 1]. At each step, with probability ε the taste
+        term is skipped for that step. Counters the filter-bubble effect
+        where the walk only surfaces tracks the user already likes.
 
     Returns
     -------
@@ -572,6 +580,31 @@ async def walk(
     if seed_emb is not None:
         visited_embs.append(seed_emb)
 
+    # ── Taste-model setup ─────────────────────────────────────────────────
+    # One DB read for the model, one (cached) library load for path→PC. The
+    # walk step loop then just does a dot product per candidate.
+    taste_active = taste_weight > 0.0
+    taste_w: Optional[np.ndarray] = None
+    taste_b: float = 0.0
+    taste_pcs: dict[str, np.ndarray] = {}
+    if taste_active:
+        try:
+            from utils import taste_model as _tm
+            w_arr, b_val, ne, ni = await _load_taste_model(db_manager)
+            if ne + ni > 0:
+                taste_w = w_arr
+                taste_b = b_val
+                rows_all, percentile_matrix = await _load_percentile_matrix(
+                    db_manager, FEATURES_VERSION,
+                )
+                for i, r in enumerate(rows_all):
+                    taste_pcs[r["path"]] = percentile_matrix[i]
+            else:
+                taste_active = False  # cold model, skip the per-step work
+        except Exception as exc:
+            logger.debug("walk: taste model unavailable (%s); skipping re-rank", exc)
+            taste_active = False
+
     def _merge_candidates(raw: list[dict]) -> list[dict]:
         """De-duplicate on `path`, taking the maximum effective weight across
         tiers. A track that's both an acoustic and an artist neighbour should
@@ -614,8 +647,19 @@ async def walk(
             if not cands:
                 break
 
+        # Per-step exploration toggle: roll once for the whole candidate
+        # pool. If we're "exploring," the taste term is dropped for this
+        # step so the walk can surface tracks outside the user's known
+        # preferences.
+        step_taste_active = (
+            taste_active
+            and taste_w is not None
+            and (taste_explore <= 0.0 or rng.random() >= taste_explore)
+        )
+
         # Compute logits: effective weight, optionally penalised by the
-        # max cosine to any already-visited node in the timbre sub-space.
+        # max cosine to any already-visited node in the timbre sub-space,
+        # then nudged by the global taste model when it has signal.
         logits = np.empty(len(cands), dtype=np.float32)
         for i, c in enumerate(cands):
             eff = float(c["_eff"])
@@ -627,6 +671,13 @@ async def walk(
                         dtype=np.float32,
                     )
                     eff -= float(diversity_lambda) * float(sims.max())
+            if step_taste_active:
+                pc = taste_pcs.get(c["path"])
+                if pc is not None:
+                    z = float(np.dot(taste_w, pc)) + taste_b
+                    z = max(-30.0, min(30.0, z))
+                    p_like = 1.0 / (1.0 + float(np.exp(-z)))
+                    eff += float(taste_weight) * (p_like - 0.5)
             logits[i] = eff
 
         # Softmax with temperature. Subtract max for numerical stability.
@@ -704,12 +755,7 @@ def _normalize_profile(
 
 @dataclass(frozen=True)
 class MoodSpec:
-    """Per-mood configuration. `profile` is a `{feature: (target, weight)}`
-    dict over `_MOOD_FEATURES`; missing keys mean "this feature doesn't matter
-    for this mood" and are masked out of the distance computation. The weight
-    channel lets the scorer prioritise high-signal features (e.g. spectral
-    flatness for 'chill') over noisy ones (e.g. bpm percentile across a
-    multi-genre library).
+    """Per-mood configuration.
 
     `camelot_pref` biases the *starting anchor* of the playlist sequencer
     toward a track in that mode ("major" / "minor"). None means no preference.
@@ -718,7 +764,6 @@ class MoodSpec:
     for moods where listeners notice tempo jumps more (slow / chill / ambient).
     """
     canonical: str
-    profile: dict[str, tuple[float, float]]
     aliases: tuple[str, ...] = ()
     camelot_pref: str | None = None
     bpm_smooth_weight: float = 1.0
@@ -726,117 +771,47 @@ class MoodSpec:
     # + chroma). Currently always empty for built-ins; populated for custom
     # moods so both code paths share `score_tracks_by_mood`.
     centroid: tuple[float, ...] = ()
+    profile: dict[str, tuple[float, float]] | None = None
 
 
-# Per-mood profiles. Values are (target_percentile, weight).
-#
-# **Tuning philosophy** (post-phase-1 retune): every mood owns at least one
-# *signature feature* with a target near 0.0 or 1.0 and a heavy weight
-# (2.5–4.0). Without this, mid-target moods become universal attractors —
-# every track at the library median lands closer to a mid-target mood than
-# to any extreme one, and the whole library gets routed to one bucket.
-#
-# Weights at 0.0 silence a feature entirely (cheaper to compute, and signals
-# "this dimension is irrelevant for this mood" rather than "weakly relevant").
-# The regressor (phase 2) refines from feedback, but the prior set here is
-# what the user experiences on day one — strong opinions, lightly held.
+# Per-mood profiles. Built-in defaults are completely disabled.
+# This dictionary now defines vocabulary, aliases, and sequencer preferences.
 MOODS: dict[str, MoodSpec] = {
     "chill": MoodSpec(
         "chill",
-        {
-            "bpm":               (0.10, 3.0),
-            "brightness":        (0.15, 2.5),
-            "energy":            (0.05, 4.5),
-            "rolloff":           (0.15, 3.0),
-            "beat_strength":     (0.10, 4.5),
-            "spectral_flatness": (0.40, 2.0),
-            "spectral_contrast": (0.10, 3.5),
-            "key_mode":          (0.5,  0.0),
-        },
         aliases=(
             "chilled", "relaxed", "relaxing", "calm", "mellow", "ambient", "soft",
-            "dreamy", "dream", "ethereal", "spacey", "washed",
-            "acoustic", "organic", "clean", "folk", "guitar", "piano", "unplugged"
+            "dreamy", "dream", "ethereal", "washed", "acoustic", "organic", "clean"
         ),
         camelot_pref="minor",
         bpm_smooth_weight=1.5,
     ),
     "dark": MoodSpec(
         "dark",
-        {
-            "bpm":               (0.20, 1.5),
-            "brightness":        (0.15, 3.5),
-            "energy":            (0.15, 3.5),
-            "rolloff":           (0.20, 1.5),
-            "beat_strength":     (0.30, 2.0),
-            "spectral_flatness": (0.50, 2.0),
-            "spectral_contrast": (0.30, 1.5),
-            "key_mode":          (0.8,  4.5),
-        },
-        aliases=("moody", "sad", "depressing", "melancholy", "somber", "crying", "tears", "blue", "brooding", "tense", "mysterious", "shoegaze", "slowdive",),
+        aliases=("sad", "gloomy", "melancholy", "moody", "gothic", "shadow"),
         camelot_pref="minor",
-        bpm_smooth_weight=1.5,
+        bpm_smooth_weight=1.0,
     ),
     "upbeat": MoodSpec(
         "upbeat",
-        {
-            "bpm":               (0.60, 2.0),
-            "brightness":        (0.90, 3.0),
-            "energy":            (0.80, 2.5),
-            "rolloff":           (0.85, 3.0),
-            "beat_strength":     (0.90, 4.0),
-            "spectral_flatness": (0.15, 4.5),
-            "spectral_contrast": (0.85, 3.0),
-            "key_mode":          (0.5,  0.0),
-        },
-        aliases=("happy", "bright", "uplifting", "cheerful", "dance",),
+        aliases=("happy", "bright", "cheerful", "party", "dance", "pop"),
         camelot_pref="major",
         bpm_smooth_weight=1.0,
     ),
     "rock": MoodSpec(
         "rock",
-        {
-            "bpm":               (0.55, 2.5),
-            "brightness":        (0.50, 2.5),
-            "energy":            (0.65, 3.0),
-            "rolloff":           (0.55, 2.0),
-            "beat_strength":     (0.40, 2.5),
-            "spectral_flatness": (0.60, 3.5),
-            "spectral_contrast": (0.80, 3.5),
-            "key_mode":          (0.6,  2.0),
-        },
-        aliases=("groovy", "altrock", "alt-rock", "softrock", "soft-rock", "classicrock", "indierock", "indie-rock", "classic", "indie"),
+        aliases=("groovy", "altrock", "alt-rock", "softrock", "soft-rock", "classicrock", "indierock", "classic", "indie"),
         camelot_pref=None,
         bpm_smooth_weight=1.0,
     ),
     "beats": MoodSpec(
         "beats",
-        {
-            "bpm":               (0.45, 2.5),
-            "brightness":        (0.45, 2.0),
-            "energy":            (0.65, 3.0),
-            "rolloff":           (0.40, 2.5),
-            "beat_strength":     (0.98, 4.5),
-            "spectral_flatness": (0.30, 3.5),
-            "spectral_contrast": (0.90, 4.0),
-            "key_mode":          (0.0,  3.0),
-        },
         aliases=("hip-hop", "trap", "rap", "urban", "beats", "lofi", "lo-fi"),
         camelot_pref="minor",
         bpm_smooth_weight=1.0,
     ),
     "intense": MoodSpec(
         "intense",
-        {
-            "bpm":               (0.50, 1.5),
-            "brightness":        (0.50, 1.5),
-            "energy":            (0.90, 3.5),
-            "rolloff":           (0.85, 2.5),
-            "beat_strength":     (0.70, 4.5),
-            "spectral_flatness": (0.65, 3.5),
-            "spectral_contrast": (0.80, 4.5),
-            "key_mode":          (0.2,  2.0),
-        },
         aliases=("hard", "heavy", "powerful", "noisy", "aggressive", "metal", "rock", "fast", "quick", "driving", "hype", "pumped", "energetic"),
         camelot_pref="minor",
         bpm_smooth_weight=1.0,
@@ -897,9 +872,10 @@ def _custom_mood_spec(name: str) -> MoodSpec | None:
 # API for the existing call sites; do not write to this directly.
 MOOD_PROFILES: dict[str, dict[str, tuple[float, float]]] = {}
 for _spec in MOODS.values():
-    MOOD_PROFILES[_spec.canonical] = _spec.profile
+    _prof = _spec.profile if _spec.profile is not None else {"PC1": (0.0, 1.0), "PC2": (0.0, 1.0), "PC3": (0.0, 1.0)}
+    MOOD_PROFILES[_spec.canonical] = _prof
     for _alias in _spec.aliases:
-        MOOD_PROFILES[_alias] = _spec.profile
+        MOOD_PROFILES[_alias] = _prof
 del _spec
 
 
@@ -911,108 +887,406 @@ MOOD_KEYWORDS: tuple[str, ...] = tuple(MOOD_PROFILES.keys())
 # the z-scored matrix are aligned to this list. Adding a column here means
 # every profile may optionally include it. NOTE: key_mode is a projected
 # continuous binary mode (1.0 for major, 0.0 for minor) from key_index.
-_MOOD_FEATURES = (
-    "bpm", "brightness", "energy", "rolloff", "beat_strength",
-    "spectral_flatness", "spectral_contrast", "key_mode",
-)
+_MOOD_FEATURES = ("PC1", "PC2", "PC3")
 
 
-# Cache for the percentile matrix. Recomputing argsort(argsort(...)) over a
-# 5k-row × 8-col matrix on every mood query is wasteful when the library
-# rarely changes between turns. Key is (features_version, row_count, max_path);
-# `max_path` is a cheap library-change proxy — when any new track is analysed,
-# the row set changes and so does the lexicographic max path.
+# Cache for the projected PCA matrix to avoid database calls and SVD projections on every query.
 _PERCENTILE_CACHE: dict[tuple, tuple] = {}
 
 
-def _build_percentile_matrix(rows: list[dict]) -> np.ndarray:
-    """Column-wise percentile ranks ∈ [0, 1] for every analysed track over
-    `_MOOD_FEATURES`. Returned shape (N, len(_MOOD_FEATURES))."""
-    N = len(rows)
-
-    def get_val(r, f):
-        # This might appear confusing, major -- semantically -- is close to BIG
-        # And if BIG, then we approach 1 the maximum quartile value.
-        if f == "key_mode":
-            ki = r.get("key_index", 0) or 0
-            return 1.0 if ki < 12 else 0.0
-        return float(r.get(f, 0) or 0)
-
-    matrix = np.array(
-        [[get_val(r, f) for f in _MOOD_FEATURES] for r in rows],
-        dtype=np.float32,
-    )
-    percentiles = np.zeros_like(matrix)
-    if N <= 1:
-        return percentiles
-    for col in range(matrix.shape[1]):
-        ranks = np.argsort(np.argsort(matrix[:, col]))
-        percentiles[:, col] = ranks / float(N - 1)
-    return percentiles
+async def optimize_pca_spacing(db_manager, features_version: int):
+    """Mutation: Retrieves all analyzed tracks, computes PCA (Z-score standardized),
+    saves the loadings/eigenvectors to the DB, projects all tracks into the 3D space,
+    and caches their coordinates in the play_counts table."""
+    rows = await db_manager.get_tracks_with_features(features_version)
+    if len(rows) < 2:
+        logger.warning("Fewer than 2 tracks analyzed. Cannot optimize PCA spacing.")
+        return
+        
+    from utils.pca_engine import calculate_pca_projection, project_track
+    means, stds, V_keep, eigenvalues, kaiser_k = calculate_pca_projection(rows)
+    await db_manager.save_pca_space(means, stds, V_keep, eigenvalues)
+    
+    batch_data = []
+    for r in rows:
+        z = project_track(r, means, stds, V_keep)
+        batch_data.append((r["path"], z))
+        
+    await db_manager.update_tracks_pca_coords_batch(batch_data)
+    _PERCENTILE_CACHE.clear()
+    logger.info(f"PCA library spacing optimized successfully (Kaiser count={kaiser_k}).")
 
 
 async def _load_percentile_matrix(
     db_manager,
     features_version: int,
 ) -> tuple[list[dict], np.ndarray]:
-    """Returns (rows, percentile_matrix). Cached on `(features_version, N,
-    sentinel_path)`; cheap to invalidate by simply checking those keys
-    against the latest fetch. Cache hit → one dict-lookup; cache miss → one
-    DB fetch + one N×7 percentile pass."""
+    """Returns (rows, pca_coordinate_matrix). Recovers/computes PCA projection
+    on-the-fly and handles cached DB values transparently. Replaces legacy percentile matrix."""
     rows = await db_manager.get_tracks_with_features(features_version)
     if not rows:
         return [], np.zeros((0, len(_MOOD_FEATURES)), dtype=np.float32)
+        
     sentinel = max(r["path"] for r in rows)
     key = (features_version, len(rows), sentinel)
     cached = _PERCENTILE_CACHE.get(key)
     if cached is not None:
-        cached_rows, cached_matrix = cached
-        return cached_rows, cached_matrix
-    matrix = _build_percentile_matrix(rows)
-    _PERCENTILE_CACHE.clear()  # only ever hold the latest snapshot
+        return cached
+        
+    pca_space = await db_manager.load_pca_space()
+    if pca_space is None:
+        logger.info("PCA projection space not found. Running auto-initialization...")
+        await optimize_pca_spacing(db_manager, features_version)
+        pca_space = await db_manager.load_pca_space()
+        
+    if pca_space is not None:
+        means, stds, V_keep = pca_space
+    else:
+        means = np.zeros(8, dtype=np.float32)
+        stds = np.ones(8, dtype=np.float32)
+        V_keep = np.eye(8, 3, dtype=np.float32)
+        
+    matrix = np.zeros((len(rows), 3), dtype=np.float32)
+    coords_rows = await db_manager.get_tracks_pca_coords()
+    coords_map = {r["path"]: r["pca_coords"] for r in coords_rows}
+    
+    tracks_to_cache = []
+    from utils.pca_engine import project_track
+    for idx, r in enumerate(rows):
+        path = r["path"]
+        if path in coords_map:
+            matrix[idx, :] = coords_map[path]
+        else:
+            z = project_track(r, means, stds, V_keep)
+            matrix[idx, :] = z
+            tracks_to_cache.append((path, z))
+            
+    if tracks_to_cache:
+        await db_manager.update_tracks_pca_coords_batch(tracks_to_cache)
+        
+    _PERCENTILE_CACHE.clear()
     _PERCENTILE_CACHE[key] = (rows, matrix)
-    logger.info(
-        "track_graph: percentile cache rebuilt (N=%d, features_version=%d)",
-        len(rows), features_version,
-    )
+    logger.info(f"track_graph: PCA 3D matrix cache rebuilt (N={len(rows)})")
     return rows, matrix
 
 
-def _score_against_profile(
-    profile: dict[str, float | tuple[float, float]],
+# ── Mood partition + EQ (replaces the per-mood logistic regressor path) ─────
+#
+# A mood is now defined by:
+#   * a *centroid* in PC space — the mean of the tracks the user has
+#     assigned to this mood (or the hand-tuned seed in MOODS for empty
+#     partitions);
+#   * a per-feature *EQ weight* — multiplies the Euclidean distance along
+#     that axis. The user adjusts these from the UI; the regressor that
+#     used to nudge them is gone.
+#
+# Storage reuses `mood_profiles`: one row per (mood, PC) with
+# `target = centroid_coord` and `weight = eq_slider`. Three rows per mood.
+
+
+async def assign_track_to_mood(db_manager, track_path: str, mood: str) -> None:
+    """Assign one track to a mood, overwriting any prior assignment. Invalidates
+    the centroid for the destination mood (and the source mood if it changed)
+    so the next `tracks_by_mood` call recomputes."""
+    canonical = mood_canonical(mood) or mood.lower().strip()
+    await db_manager.assign_track_to_mood(track_path, canonical)
+    # Recompute lazily on next read — calling `recompute_mood_centroid` here
+    # would double the cost of bulk-assign flows. The mood_profiles row stays
+    # stale until something reads it, at which point the partition count
+    # signals "recompute me".
+
+
+async def unassign_track_from_mood(db_manager, track_path: str) -> None:
+    """Remove a track from its current mood partition."""
+    await db_manager.unassign_track(track_path)
+
+
+async def tracks_in_partition(db_manager, mood: str) -> list[str]:
+    """Track paths currently assigned to `mood`. Resolves aliases first."""
+    canonical = mood_canonical(mood) or mood.lower().strip()
+    return await db_manager.get_tracks_in_mood(canonical)
+
+
+def _get_default_quartiles(mood: str) -> dict[str, tuple[float, float]]:
+    defaults = {
+        "chill": {
+            "bpm": (1.0, 1.0),      # Very Low
+            "energy": (1.0, 1.0),   # Very Low
+            "spectral_flatness": (4.0, 1.0), # Very High
+        },
+        "dark": {
+            "energy": (1.0, 1.0),   # Very Low
+            "spectral_flatness": (1.0, 1.0), # Very Low
+        },
+        "upbeat": {
+            "bpm": (4.0, 1.0),      # Very High
+            "energy": (4.0, 1.0),   # Very High
+            "beat_strength": (4.0, 1.0), # Very High
+        },
+        "rock": {
+            "bpm": (3.0, 1.0),      # High
+            "brightness": (4.0, 1.0), # Very High
+        },
+        "beats": {
+            "beat_strength": (4.0, 1.0), # Very High
+        },
+        "intense": {
+            "energy": (4.0, 1.0),   # Very High
+            "beat_strength": (4.0, 1.0), # Very High
+        }
+    }
+    res = {}
+    raw_features = ["bpm", "brightness", "energy", "rolloff", "beat_strength", "spectral_flatness", "spectral_contrast", "key_mode"]
+    mood_def = defaults.get(mood, {})
+    for f in raw_features:
+        res[f] = mood_def.get(f, (0.0, 0.0))
+    return res
+
+
+async def recompute_mood_centroid(
+    db_manager,
+    mood: str,
+) -> dict[str, tuple[float, float]] | None:
+    """Re-derive the target quartiles for `mood` from its current partition.
+    Pulls the assigned tracks' percentiles and maps their column-wise mean to quartiles.
+    """
+    canonical = mood_canonical(mood) or mood.lower().strip()
+    assigned_paths = await db_manager.get_tracks_in_mood(canonical)
+    if not assigned_paths:
+        return None
+        
+    rows = await db_manager.get_tracks_with_features(FEATURES_VERSION)
+    if not rows:
+        return None
+        
+    N = len(rows)
+    raw_features = ["bpm", "brightness", "energy", "rolloff", "beat_strength", "spectral_flatness", "spectral_contrast", "key_mode"]
+    
+    track_ranks = {}
+    for f in raw_features:
+        vals = np.array([float(r.get(f) or 0.0) for r in rows], dtype=np.float32)
+        ranks = np.argsort(np.argsort(vals)) / max(1, N - 1)
+        track_ranks[f] = {rows[idx]["path"]: float(ranks[idx]) for idx in range(N)}
+        
+    new_profile = {}
+    for f in raw_features:
+        active_pcts = [track_ranks[f].get(p, 0.5) for p in assigned_paths if p in track_ranks[f]]
+        if active_pcts:
+            avg_pct = np.mean(active_pcts)
+            quartile = int(np.clip(np.floor(avg_pct * 4) + 1, 1, 4))
+            new_profile[f] = (float(quartile), 1.0)
+        else:
+            new_profile[f] = (0.0, 0.0)
+            
+    await db_manager.save_adjusted_mood_profile(canonical, new_profile)
+    return new_profile
+
+
+async def set_mood_eq(
+    db_manager,
+    mood: str,
+    eq_weights: dict[str, float],
+) -> None:
+    """Update target quartiles for `mood`."""
+    canonical = mood_canonical(mood) or mood.lower().strip()
+    new_profile: dict[str, tuple[float, float]] = {}
+    for f, val in eq_weights.items():
+        quartile = float(val)
+        weight = 1.0 if quartile > 0.0 else 0.0
+        new_profile[f] = (quartile, weight)
+    await db_manager.save_adjusted_mood_profile(canonical, new_profile)
+
+
+async def get_mood_definition(
+    db_manager,
+    mood: str,
+) -> dict[str, tuple[float, float]] | None:
+    """Resolve the target quartiles actually used to score `mood`.
+
+    Precedence:
+      1. If `mood_profiles` has rows → use them (user has partitioned or
+         tuned the mood at least once).
+      2. Else → Raise ValueError to force crash and remove default fallback.
+    """
+    canonical = mood_canonical(mood)
+    if canonical is None:
+        return None
+    stored = await db_manager.get_adjusted_mood_profile(canonical)
+    if stored is not None:
+        return stored
+    raise ValueError(f"No adjusted mood profile found in database for '{canonical}'. Built-in factory-default profiles are disabled.")
+
+
+# ── User-taste model wiring ─────────────────────────────────────────────────
+#
+# Global model loaded once per process and re-cached after each update.
+# Reads are hot (every walk step, every mood query); writes are rare
+# (per playback event). Module-level cache keeps the steady-state cost at
+# zero DB hits per scoring call.
+
+_TASTE_CACHE: tuple[np.ndarray, float, int, int] | None = None
+
+
+def invalidate_taste_cache() -> None:
+    """Drop the in-memory taste model. Call after every persist."""
+    global _TASTE_CACHE
+    _TASTE_CACHE = None
+
+
+async def _load_taste_model(
+    db_manager,
+    features_version: int = FEATURES_VERSION,
+) -> tuple[np.ndarray, float, int, int]:
+    """Return (weights, bias, n_explicit, n_implicit). Fresh zeros on a cold
+    start so callers can always score without a branch."""
+    global _TASTE_CACHE
+    if _TASTE_CACHE is not None:
+        return _TASTE_CACHE
+    from utils import taste_model as _tm
+    row = await db_manager.get_taste_model(features_version)
+    if row is None:
+        w, b = _tm.fresh()
+        _TASTE_CACHE = (w, b, 0, 0)
+    else:
+        try:
+            w = _tm.unpack_weights(row[0])
+            b = float(row[1])
+            _TASTE_CACHE = (w, b, int(row[2]), int(row[3]))
+        except ValueError as exc:
+            logger.warning("taste_model: weights blob malformed (%s); resetting", exc)
+            w, b = _tm.fresh()
+            _TASTE_CACHE = (w, b, 0, 0)
+    return _TASTE_CACHE
+
+
+async def record_explicit_feedback(
+    db_manager,
+    track_path: str,
+    like: bool,
+    features_version: int = FEATURES_VERSION,
+) -> None:
+    """Train the taste model on one like (`True`) or dislike (`False`) event.
+    Looks up the track's cached PC coords; no-op if the track hasn't been
+    analysed yet (a label we can't ground in features is signal we can't use)."""
+    from utils import taste_model as _tm
+    pcs = await _get_track_pcs(db_manager, track_path, features_version)
+    if pcs is None:
+        return
+    w, b, ne, ni = await _load_taste_model(db_manager, features_version)
+    y = 1 if like else 0
+    w, b = _tm.online_update(
+        pcs, y, w, b, sample_weight=_tm.WEIGHT_EXPLICIT,
+    )
+    await db_manager.save_taste_model(
+        _tm.pack_weights(w), b, ne + 1, ni, features_version,
+    )
+    invalidate_taste_cache()
+
+
+async def record_play_event(
+    db_manager,
+    track_path: str,
+    played_seconds: float,
+    duration_seconds: float,
+    features_version: int = FEATURES_VERSION,
+) -> None:
+    """Classify a playback event via `taste_model.classify_play_event` and
+    feed it into the taste model with implicit-sample weight. Returns silently
+    when the event is too short to be informative."""
+    from utils import taste_model as _tm
+    y = _tm.classify_play_event(float(played_seconds), float(duration_seconds))
+    if y is None:
+        return
+    pcs = await _get_track_pcs(db_manager, track_path, features_version)
+    if pcs is None:
+        return
+    w, b, ne, ni = await _load_taste_model(db_manager, features_version)
+    w, b = _tm.online_update(
+        pcs, y, w, b, sample_weight=_tm.WEIGHT_IMPLICIT,
+    )
+    await db_manager.save_taste_model(
+        _tm.pack_weights(w), b, ne, ni + 1, features_version,
+    )
+    invalidate_taste_cache()
+
+
+async def _get_track_pcs(
+    db_manager,
+    track_path: str,
+    features_version: int,
+) -> np.ndarray | None:
+    """Pull a single track's cached PC vector. Returns None when the track
+    has no analysed features yet — callers skip rather than zero-fill so the
+    taste model doesn't learn off the origin."""
+    rows, percentiles = await _load_percentile_matrix(db_manager, features_version)
+    for i, r in enumerate(rows):
+        if r.get("path") == track_path:
+            return percentiles[i].astype(np.float32, copy=True)
+    return None
+
+
+async def taste_scores_for_matrix(
+    db_manager,
     percentiles: np.ndarray,
-) -> np.ndarray:
-    """Negative weighted-Euclidean distance from each row's percentile vector
-    to the profile target. The profile is `{feature: (target, weight)}`;
-    legacy float values are promoted to weight=1.0 (parity with v1 behaviour).
-    Features absent from the profile and features with weight ≤ 0 are masked
-    out entirely. Higher score is better. Returns shape (N,).
+    features_version: int = FEATURES_VERSION,
+) -> tuple[np.ndarray, bool]:
+    """Score every row of `percentiles` under the current taste model.
+    Returns (scores, has_signal): `has_signal=False` means the model is
+    cold (zero events seen) and callers should ignore the scores entirely
+    rather than re-ranking by σ ≈ 0.5 noise."""
+    from utils import taste_model as _tm
+    w, b, ne, ni = await _load_taste_model(db_manager, features_version)
+    if ne + ni == 0:
+        return np.full(percentiles.shape[0], 0.5, dtype=np.float32), False
+    return _tm.score(percentiles, w, b).astype(np.float32), True
 
-    Mathematically:  score = -sqrt(Σ wᵢ · (pᵢ - tᵢ)²)
-    Equivalent to scaling each axis by √wᵢ then taking standard Euclidean,
-    but spelled out as weights for readability."""
-    if percentiles.shape[0] == 0:
-        return np.zeros(0, dtype=np.float32)
-    profile = _normalize_profile(profile)
-    if not profile:
-        return np.zeros(percentiles.shape[0], dtype=np.float32)
 
-    targets = np.array(
-        [profile.get(f, (0.0, 0.0))[0] for f in _MOOD_FEATURES],
-        dtype=np.float32,
-    )
-    weights = np.array(
-        [profile.get(f, (0.0, 0.0))[1] for f in _MOOD_FEATURES],
-        dtype=np.float32,
-    )
-    # weight ≤ 0 removes a feature from the metric entirely. Lets the
-    # regressor (phase 2) silence a feature without erasing the target row.
-    mask = weights > 0.0
-    if not mask.any():
-        return np.zeros(percentiles.shape[0], dtype=np.float32)
-    diff = percentiles[:, mask] - targets[mask]
-    weighted_sq = weights[mask] * diff * diff
-    return -np.sqrt(weighted_sq.sum(axis=1))
+def score_tracks_for_repartition(
+    rows: list[dict],
+    adjusted_profiles: dict[str, dict[str, tuple[float, float]]],
+) -> dict[str, np.ndarray]:
+    """Helper used during partition recalculation. Returns a dict mapping
+    mood -> np.ndarray of quartile-distance scores for all tracks in rows.
+    """
+    raw_features = ["bpm", "brightness", "energy", "rolloff", "beat_strength", "spectral_flatness", "spectral_contrast", "key_mode"]
+    N = len(rows)
+    if N == 0:
+        return {m: np.zeros(0, dtype=np.float32) for m in adjusted_profiles}
+
+    # Compute raw feature percentile ranks in memory
+    track_ranks = {}
+    for f in raw_features:
+        vals = np.array([float(r.get(f) or 0.0) for r in rows], dtype=np.float32)
+        ranks = np.argsort(np.argsort(vals)) / max(1, N - 1)
+        track_ranks[f] = {rows[idx]["path"]: float(ranks[idx]) for idx in range(N)}
+
+    out = {}
+    for mood, profile in adjusted_profiles.items():
+        scores = np.zeros(N, dtype=np.float32)
+        for idx, r in enumerate(rows):
+            path = r["path"]
+            dist_sq_sum = 0.0
+            active_count = 0
+            for f in raw_features:
+                target, weight = profile.get(f, (0.0, 0.0))
+                if weight > 0.0 and target > 0.0:
+                    pct = track_ranks[f].get(path, 0.5)
+                    low_bound = (target - 1) * 0.25
+                    high_bound = target * 0.25
+                    if pct < low_bound:
+                        d = low_bound - pct
+                    elif pct > high_bound:
+                        d = pct - high_bound
+                    else:
+                        d = 0.0
+                    dist_sq_sum += d * d
+                    active_count += 1
+            if active_count > 0:
+                scores[idx] = -np.sqrt(dist_sq_sum / active_count)
+            else:
+                scores[idx] = 0.0
+        out[mood] = scores
+    return out
 
 
 def _score_against_centroid(
@@ -1028,11 +1302,10 @@ def _score_against_centroid(
     return (timbres @ centroid) / (norm_t * norm_c)
 
 
-# Weight balance for the unified scorer. β controls how much the listener-
-# feedback signal (B3) re-ranks the top candidates. α controls the
-# scalar-profile vs timbre-centroid balance for moods that carry both.
-_MOOD_BETA_LISTEN = 0.20
-_MOOD_ALPHA_SCALAR = 0.50
+# Re-rank weight for the taste model on top of the mood score. Small enough
+# that taste shapes ordering at the margin but doesn't let a global
+# preference drag an off-mood track into the result.
+_MOOD_TASTE_BETA = 0.20
 
 
 async def tracks_by_mood(
@@ -1041,135 +1314,106 @@ async def tracks_by_mood(
     limit: int = 12,
     features_version: int = FEATURES_VERSION,
 ) -> list[dict]:
-    """Rank tracks by how well they match a mood's DSP profile, with
-    optional listener-feedback re-rank.
+    """Rank tracks by how well their physical feature percentiles match the target quartiles
+    of the mood, re-ranked at the top by the global user-taste model.
 
-    Scoring pipeline:
-      1. Resolve the mood alias to a canonical MoodSpec or to a custom-mood
-         spec built from custom_moods.json.
-      2. Look up (or compute + cache) the library's percentile matrix over
-         `_MOOD_FEATURES`.
-      3. If the spec has a percentile profile, score by negative Euclidean
-         distance in percentile space. If the spec has a timbre centroid,
-         score by cosine. Specs with both (typical for new custom moods)
-         get the convex combination α·scalar + (1-α)·centroid.
-      4. Re-rank the top candidates by (1-β)·mood_score + β·listen_signal
-         where listen_signal ∈ [-1, 1] is built from playback_history.
-
-    Library-relative throughout — the same word picks different tracks in
-    different libraries. Returns [] for unknown moods or empty libraries.
+    Returns [] for unknown moods or empty libraries.
     """
-    spec = _mood_spec(mood)
-    if spec is None:
-        spec = _custom_mood_spec(mood)
-    if spec is None:
+    canonical = mood_canonical(mood)
+    if canonical is None:
         return []
 
-    # Substitute customized profile from the database if present
-    custom_profile = await db_manager.get_adjusted_mood_profile(spec.canonical)
-    if custom_profile is not None:
-        spec = MoodSpec(
-            canonical=spec.canonical,
-            profile=custom_profile,
-            aliases=spec.aliases,
-            camelot_pref=spec.camelot_pref,
-            bpm_smooth_weight=spec.bpm_smooth_weight,
-            centroid=spec.centroid
-        )
+    # Built-in moods follow the partition + EQ path. Custom moods (islets)
+    # keep the legacy cosine/regressor pipeline — see `tracks_in_islet`.
+    if canonical not in MOODS:
+        return await tracks_in_islet(db_manager, canonical, features_version)
 
     rows, percentiles = await _load_percentile_matrix(db_manager, features_version)
     if not rows:
         return []
 
-    has_profile = bool(spec.profile)
-    has_centroid = bool(spec.centroid)
+    raw_features = ["bpm", "brightness", "energy", "rolloff", "beat_strength", "spectral_flatness", "spectral_contrast", "key_mode"]
+    N = len(rows)
 
-    scalar_score = (
-        _score_against_profile(spec.profile, percentiles)
-        if has_profile else np.zeros(len(rows), dtype=np.float32)
-    )
+    # Compute raw feature percentile ranks in memory
+    track_ranks = {}
+    for f in raw_features:
+        vals = np.array([float(r.get(f) or 0.0) for r in rows], dtype=np.float32)
+        ranks = np.argsort(np.argsort(vals)) / max(1, N - 1)
+        track_ranks[f] = {rows[idx]["path"]: float(ranks[idx]) for idx in range(N)}
 
-    # Phase-2 regressor blend. The prior (scalar_score) keeps ranking when
-    # n_samples is small; the regressor takes over once feedback has had
-    # time to accumulate. blend() handles the confidence ramp internally.
-    # Cold start: no DB row yet → bootstrap ephemerally from spec.profile
-    # (no write here; the first feedback event persists). This means the
-    # very first query for a fresh mood ranks exactly like the prior alone.
-    if has_profile:
-        from utils import mood_regressor as _mr
-        try:
-            reg_row = await db_manager.get_mood_regressor(
-                spec.canonical, features_version,
-            )
-        except Exception as exc:
-            logger.debug("tracks_by_mood: regressor load failed: %s", exc)
-            reg_row = None
-        if reg_row is not None:
-            try:
-                w = _mr.unpack_weights(reg_row[0])
-                bias = reg_row[1]
-                n_samples = reg_row[2]
-            except ValueError as exc:
-                logger.debug("tracks_by_mood: regressor blob malformed: %s", exc)
-                w, bias = _mr.bootstrap_from_profile(spec.profile, _MOOD_FEATURES)
-                n_samples = 0
-        else:
-            w, bias = _mr.bootstrap_from_profile(spec.profile, _MOOD_FEATURES)
-            n_samples = 0
-        regressor_score = _mr.score(percentiles, w, bias)
-        scalar_score = _mr.blend(scalar_score, regressor_score, n_samples)
-
-    # Centroid scoring needs the timbre matrix aligned to `rows`. Skip the
-    # work entirely when no centroid is set (every built-in mood).
-    if has_centroid:
-        centroid = np.array(spec.centroid, dtype=np.float32)
-        timbres_list: list[np.ndarray] = []
-        keep_idx: list[int] = []
-        for i, r in enumerate(rows):
-            v = unpack_timbre(r.get("timbre"))
-            if v is not None:
-                timbres_list.append(v)
-                keep_idx.append(i)
-        if timbres_list:
-            timbres = np.stack(timbres_list, axis=0)
-            cent_scores_partial = _score_against_centroid(centroid, timbres)
-            centroid_score = np.full(len(rows), -np.inf, dtype=np.float32)
-            for j, src_i in enumerate(keep_idx):
-                centroid_score[src_i] = cent_scores_partial[j]
-        else:
-            centroid_score = np.zeros(len(rows), dtype=np.float32)
-            has_centroid = False
+    # Prefer a partition-derived target profile when the user has assigned tracks;
+    # otherwise load from SQLite adjusted_mood_profiles or throw.
+    assigned_paths = await db_manager.get_tracks_in_mood(canonical)
+    if assigned_paths:
+        stored = {}
+        for f in raw_features:
+            active_pcts = [track_ranks[f].get(p, 0.5) for p in assigned_paths if p in track_ranks[f]]
+            if active_pcts:
+                avg_pct = np.mean(active_pcts)
+                quartile = int(np.clip(np.floor(avg_pct * 4) + 1, 1, 4))
+                stored[f] = (float(quartile), 1.0)
+            else:
+                stored[f] = (0.0, 0.0)
     else:
-        centroid_score = np.zeros(len(rows), dtype=np.float32)
+        stored = await db_manager.get_adjusted_mood_profile(canonical)
+        if stored is None:
+            raise ValueError(f"No adjusted mood profile found in database for '{canonical}' and partition is empty.")
 
-    if has_profile and has_centroid:
-        alpha = _MOOD_ALPHA_SCALAR
-        scores = alpha * scalar_score + (1.0 - alpha) * centroid_score
-    elif has_centroid:
-        scores = centroid_score
-    elif has_profile:
-        scores = scalar_score
-    else:
+    # Calculate distance to target quartiles for each track
+    scores = np.zeros(N, dtype=np.float32)
+    for idx, r in enumerate(rows):
+        path = r["path"]
+        dist_sq_sum = 0.0
+        active_count = 0
+        for f in raw_features:
+            target, weight = stored.get(f, (0.0, 0.0))
+            if weight > 0.0 and target > 0.0:
+                pct = track_ranks[f].get(path, 0.5)
+                # target represents the quartile:
+                # 1: [0.0, 0.25]
+                # 2: [0.25, 0.50]
+                # 3: [0.50, 0.75]
+                # 4: [0.75, 1.0]
+                low_bound = (target - 1) * 0.25
+                high_bound = target * 0.25
+                if pct < low_bound:
+                    d = low_bound - pct
+                elif pct > high_bound:
+                    d = pct - high_bound
+                else:
+                    d = 0.0
+                dist_sq_sum += d * d
+                active_count += 1
+        if active_count > 0:
+            scores[idx] = -np.sqrt(dist_sq_sum / active_count)
+        else:
+            scores[idx] = 0.0
+
+    if scores.size == 0:
         return []
 
-    # B3: Listener feedback. We only re-rank the top 3× limit candidates so
-    # signal noise on the long tail (a single skip on a low-scoring track
-    # shouldn't yank an irrelevant track into the result).
+    # Taste-model re-rank over the top 3×limit window. Cold model
+    # (no events yet) skips the blend entirely so first-day behaviour is
+    # purely mood-driven.
     rerank_window = max(limit * 3, 12)
     if scores.size > rerank_window:
         cand_idx = np.argpartition(-scores, rerank_window - 1)[:rerank_window]
     else:
         cand_idx = np.arange(scores.size)
-    try:
-        signal = await db_manager.listen_signal_map()
-    except Exception:
-        signal = {}
-    if signal:
-        beta = _MOOD_BETA_LISTEN
-        for i in cand_idx:
-            s = signal.get(rows[int(i)]["path"])
-            if s is not None:
-                scores[int(i)] = (1.0 - beta) * float(scores[int(i)]) + beta * float(s)
+        
+    taste_scores, has_signal = await taste_scores_for_matrix(
+        db_manager, percentiles[cand_idx], features_version,
+    )
+    if has_signal:
+        beta = _MOOD_TASTE_BETA
+        # Mood scores are non-positive (negative distance); taste in (0, 1).
+        # Subtract 0.5 to centre taste so a neutral track doesn't reward the
+        # blend just by existing.
+        scores[cand_idx] = (
+            (1.0 - beta) * scores[cand_idx]
+            + beta * (taste_scores - 0.5)
+        )
 
     k = min(limit, scores.size)
     top_unsorted = np.argpartition(-scores, k - 1)[:k]
@@ -1177,137 +1421,43 @@ async def tracks_by_mood(
     return [rows[int(i)] for i in top_ordered]
 
 
-_MOOD_ADJUST_LOCKS: dict[str, asyncio.Lock] = {}
+async def adjust_mood_profile(
+    db_manager,
+    mood: str,
+    track_path: str,
+    feedback: int,
+):
+    """Compatibility shim for legacy callers.
 
+    Old semantics nudged the mood's (target, weight) via gradient on a
+    single like/dislike event. The new model decouples those:
 
-async def adjust_mood_profile(db_manager, mood: str, track_path: str, feedback: int):
+      * `feedback == +1` (like in mood X) → assign the track to X's
+        partition AND record an explicit positive event for the global
+        taste model.
+      * `feedback == -1` (dislike in mood X) → unassign the track from any
+        partition AND record an explicit negative taste event.
+      * any other value → no-op.
+
+    The centroid for X is re-derived from the partition lazily on the next
+    `tracks_by_mood` call; no per-call cost here beyond the two writes.
+    """
     canonical = mood_canonical(mood)
     if canonical is None:
         logger.warning("adjust_mood_profile: Unknown mood %s", mood)
         return
-
-    if canonical not in _MOOD_ADJUST_LOCKS:
-        _MOOD_ADJUST_LOCKS[canonical] = asyncio.Lock()
-
-    async with _MOOD_ADJUST_LOCKS[canonical]:
-        await _adjust_mood_profile_impl(db_manager, canonical, track_path, feedback)
-
-
-async def _adjust_mood_profile_impl(db_manager, canonical: str, track_path: str, feedback: int):
-    """
-    Per-feature gradient shifts on a mood's (target, weight) profile.
-    feedback: 1 = like (shift target towards / boost weight on aligned features),
-             -1 = dislike (shift target away / reduce weight on aligned features).
-
-    Target rule:  T_new = T_old ± η_t · (P_track - T_old), clamped [0, 1].
-    Weight rule:  W_new = W_old · (1 ± η_w · (1 - |P_track - T_old|)),
-                  clamped to [0, _MAX_FEATURE_WEIGHT].
-                  Features where the track sits *close* to the current target
-                  carry more signal — like → weight up, dislike → weight down.
-                  Distant features barely move (small alignment factor).
-
-    Both rules use small etas so manual feedback is a nudge, not a jolt;
-    the phase-2 logistic regressor will take over for fine-grained learning.
-    Saves to mood_profiles in the v2 (target, weight) shape.
-    """
-    # 2. Resolve the current spec for default targets/weights
-    spec = _mood_spec(canonical)
-    if spec is None:
-        spec = _custom_mood_spec(canonical)
-    if spec is None:
-        logger.warning("adjust_mood_profile: No MoodSpec found for %s", canonical)
-        return
-
-    # Load any already adjusted profile (v2-shaped), else fall back to spec.
-    # _normalize_profile coerces legacy float-only rows to (target, 1.0).
-    current_profile = await db_manager.get_adjusted_mood_profile(canonical)
-    if current_profile is None:
-        current_profile = _normalize_profile(spec.profile)
+    if feedback == 1:
+        await assign_track_to_mood(db_manager, track_path, canonical)
+        await record_explicit_feedback(db_manager, track_path, True)
+    elif feedback == -1:
+        await unassign_track_from_mood(db_manager, track_path)
+        await record_explicit_feedback(db_manager, track_path, False)
     else:
-        current_profile = _normalize_profile(current_profile)
-
-    # 3. Load the percentile matrix to find this track's feature percentiles
-    rows, percentiles = await _load_percentile_matrix(db_manager, FEATURES_VERSION)
-    track_idx = None
-    for i, r in enumerate(rows):
-        if r["path"] == track_path:
-            track_idx = i
-            break
-
-    if track_idx is None:
-        logger.warning("adjust_mood_profile: Track %s not found in percentile matrix", track_path)
         return
-
-    track_percentiles = percentiles[track_idx]
-    track_feat_map = {f: float(track_percentiles[col]) for col, f in enumerate(_MOOD_FEATURES)}
-
-    # 4. Per-feature shift: target by η_t, weight by η_w scaled by alignment.
-    eta_target = 0.15
-    eta_weight = 0.05
-    new_profile: dict[str, tuple[float, float]] = {}
-    for feat, (t_old, w_old) in current_profile.items():
-        if feat not in track_feat_map:
-            new_profile[feat] = (t_old, w_old)
-            continue
-        p_track = track_feat_map[feat]
-        residual = p_track - t_old
-        if feedback == 1:
-            t_new = t_old + eta_target * residual
-            # alignment ∈ [0, 1]; 1.0 when track matches target exactly.
-            alignment = 1.0 - abs(residual)
-            w_new = w_old * (1.0 + eta_weight * alignment)
-        elif feedback == -1:
-            t_new = t_old - eta_target * residual
-            alignment = 1.0 - abs(residual)
-            w_new = w_old * (1.0 - eta_weight * alignment)
-        else:
-            t_new, w_new = t_old, w_old
-        t_new = max(0.0, min(1.0, float(t_new)))
-        w_new = max(0.0, min(_MAX_FEATURE_WEIGHT, float(w_new)))
-        new_profile[feat] = (t_new, w_new)
-
-    # 5. Persist the v2 profile
-    await db_manager.save_adjusted_mood_profile(canonical, new_profile)
-
-    # 6. Feed the same event into the per-mood logistic regressor. The
-    # target/weight shift above remains useful for the first ~N_CONFIDENT
-    # events (the regressor needs labelled data to converge); the blend()
-    # ramp in tracks_by_mood gradually hands ranking off once the regressor
-    # is confident. Both layers refining in parallel is harmless — they
-    # converge to the same shape and the prior's contribution fades.
-    if feedback in (1, -1):
-        try:
-            from utils import mood_regressor as _mr
-            x_full = track_percentiles.astype(np.float32, copy=True)
-            # Bootstrap from spec.profile if no row yet; otherwise load and
-            # incrementally update.
-            reg_row = await db_manager.get_mood_regressor(
-                canonical, FEATURES_VERSION,
-            )
-            if reg_row is not None:
-                try:
-                    w = _mr.unpack_weights(reg_row[0])
-                    b = reg_row[1]
-                    n = reg_row[2]
-                except ValueError:
-                    w, b = _mr.bootstrap_from_profile(new_profile, _MOOD_FEATURES)
-                    n = 0
-            else:
-                w, b = _mr.bootstrap_from_profile(new_profile, _MOOD_FEATURES)
-                n = 0
-            y = 1 if feedback == 1 else 0
-            w, b = _mr.online_update(x_full, y, w, b)
-            await db_manager.save_mood_regressor(
-                canonical, _mr.pack_weights(w), b, n + 1, FEATURES_VERSION,
-            )
-        except Exception as exc:
-            logger.warning(
-                "adjust_mood_profile: regressor update failed for '%s': %s",
-                canonical, exc,
-            )
-
-    logger.info("adjust_mood_profile: Adjusted profile for mood '%s' based on track '%s' (feedback: %d)",
-                canonical, track_path, feedback)
+    logger.info(
+        "adjust_mood_profile: mood='%s' track='%s' feedback=%d",
+        canonical, track_path, feedback,
+    )
 
 
 # Upper bound on per-feature weight so a long like-streak can't push one
@@ -1322,21 +1472,16 @@ async def tracks_in_islet(
     features_version: int = FEATURES_VERSION,
     min_count: int = ISLET_MIN,
 ) -> list[dict]:
-    """Members of a named islet, ranked by similarity to the centroid.
+    """Members of a named islet, ranked by cosine similarity to the centroid.
 
-    Two scoring paths:
-      * **Regressor path (preferred)**: when a `mood_regressors` row exists
-        for this islet, membership is `σ(w·percentile + b) >= threshold`.
-        Threshold ∈ (0, 1) is interpreted as a calibrated probability — the
-        same per-islet `cm["threshold"]` field, different semantics. A user
-        who has migrated may need to slide the threshold down (cosine 0.93
-        is "near-identical"; probability 0.93 is "regressor is 93% certain").
-      * **Cosine fallback (legacy)**: when no regressor row exists yet,
-        membership stays `cosine(track.timbre, islet.centroid) >= threshold`.
+    Loads the islet's `custom_moods.json` entry → reads `threshold` and
+    `blacklist` → fetches every track with current-version features →
+    computes `cosine(track.timbre, islet.centroid)` over non-blacklisted
+    tracks → returns rows with sim ≥ threshold, ordered by descending sim.
 
-    First call against an existing islet bootstraps a regressor from the
-    exemplar's percentile vector — subsequent calls use the regressor path
-    automatically. Blacklisted tracks are excluded from both paths.
+    This is the only scoring path. Users prune unwanted tracks by adding
+    them to the per-islet blacklist (see `blacklist_track_from_islet`); no
+    per-islet learning model is involved.
 
     By default returns [] if fewer than `ISLET_MIN` tracks pass — a centroid
     that doesn't generalise produces no playable queue. Pass `min_count=0`
@@ -1351,86 +1496,6 @@ async def tracks_in_islet(
     threshold = float(cm.get("threshold", ISLET_THRESHOLD))
     blacklist = set(cm.get("blacklist") or [])
 
-    from utils import mood_regressor as _mr
-
-    # ── Regressor path ──────────────────────────────────────────────────
-    reg_row = None
-    try:
-        reg_row = await db_manager.get_mood_regressor(cleaned, features_version)
-    except Exception as exc:
-        logger.debug("tracks_in_islet: regressor load failed: %s", exc)
-
-    # Lazy bootstrap: if no regressor row exists yet but the islet has a
-    # known exemplar, seed one in-place. Subsequent calls hit the fast path.
-    if reg_row is None:
-        exemplar_path = cm.get("exemplar_path")
-        if exemplar_path:
-            try:
-                ex_rows, ex_pcts = await _load_percentile_matrix(
-                    db_manager, features_version,
-                )
-                ex_idx = next(
-                    (i for i, r in enumerate(ex_rows) if r.get("path") == exemplar_path),
-                    None,
-                )
-                if ex_idx is not None:
-                    ex_vec = ex_pcts[ex_idx].astype(np.float32)
-                    # Bootstrap from a synthetic profile pinned to the
-                    # exemplar's percentile values (target = exemplar, weight 1.0
-                    # for every feature). Then a small batch of positive
-                    # updates so the regressor scores the exemplar near 1.0.
-                    synthetic = {
-                        f: (float(ex_vec[col]), 1.0)
-                        for col, f in enumerate(_MOOD_FEATURES)
-                    }
-                    w, b = _mr.bootstrap_from_profile(synthetic, _MOOD_FEATURES)
-                    for _ in range(3):  # ≈3× exemplar sample weight
-                        w, b = _mr.online_update(ex_vec, 1, w, b)
-                    try:
-                        await db_manager.save_mood_regressor(
-                            cleaned, _mr.pack_weights(w), b, 3, features_version,
-                        )
-                        reg_row = (_mr.pack_weights(w), b, 3)
-                    except Exception as exc:
-                        logger.debug(
-                            "tracks_in_islet: regressor bootstrap persist failed: %s", exc,
-                        )
-            except Exception as exc:
-                logger.debug("tracks_in_islet: exemplar bootstrap failed: %s", exc)
-
-    if reg_row is not None:
-        try:
-            w = _mr.unpack_weights(reg_row[0])
-            b = reg_row[1]
-            rows, percentiles = await _load_percentile_matrix(
-                db_manager, features_version,
-            )
-            if not rows:
-                return []
-            keep_idx = [
-                i for i, r in enumerate(rows)
-                if r.get("path") not in blacklist
-            ]
-            if not keep_idx:
-                return []
-            filtered = percentiles[keep_idx]
-            probs = _mr.score(filtered, w, b)
-            member_mask = probs >= threshold
-            if int(member_mask.sum()) < min_count:
-                return []
-            member_indices = np.where(member_mask)[0]
-            ordered = (
-                member_indices[np.argsort(-probs[member_indices])][:ISLET_MAX]
-            )
-            return [rows[keep_idx[int(i)]] for i in ordered]
-        except ValueError as exc:
-            logger.debug("tracks_in_islet: regressor blob malformed (%s); "
-                         "falling back to cosine", exc)
-        except Exception as exc:
-            logger.debug("tracks_in_islet: regressor scoring failed (%s); "
-                         "falling back to cosine", exc)
-
-    # ── Cosine fallback (legacy islets, or regressor scoring errored) ───
     centroid_list = cm.get("centroid") or []
     if not centroid_list:
         return []
@@ -1469,41 +1534,20 @@ async def record_islet_negative(
     track_path: str,
     features_version: int = FEATURES_VERSION,
 ) -> bool:
-    """Feed a blacklisted track into the islet's regressor as a y=0 sample.
-    No-op when the regressor doesn't exist yet (the JSON blacklist still
-    removes the track from results; the regressor refinement is best-effort).
+    """Mark a track as unwanted in an islet by adding it to the islet's
+    blacklist in `custom_moods.json`. Thin wrapper around
+    `blacklist_track_from_islet` — kept as a named entrypoint because
+    callers refer to the action as "record a negative" even though there's
+    no longer any model being updated.
 
-    Returns True on successful update, False otherwise.
+    `db_manager` and `features_version` are accepted for backwards
+    compatibility with existing call sites but are unused.
+
+    Returns True if the path was added (or was already present), False if
+    the islet doesn't exist or the JSON write failed.
     """
-    cleaned = islet_name.lower().strip()
-    try:
-        reg_row = await db_manager.get_mood_regressor(cleaned, features_version)
-        if reg_row is None:
-            return False
-
-        from utils import mood_regressor as _mr
-        rows, percentiles = await _load_percentile_matrix(
-            db_manager, features_version,
-        )
-        track_idx = next(
-            (i for i, r in enumerate(rows) if r.get("path") == track_path),
-            None,
-        )
-        if track_idx is None:
-            return False
-
-        x = percentiles[track_idx].astype(np.float32)
-        w = _mr.unpack_weights(reg_row[0])
-        b = reg_row[1]
-        n = reg_row[2]
-        w, b = _mr.online_update(x, 0, w, b)
-        await db_manager.save_mood_regressor(
-            cleaned, _mr.pack_weights(w), b, n + 1, features_version,
-        )
-        return True
-    except Exception as exc:
-        logger.debug("record_islet_negative failed for '%s': %s", islet_name, exc)
-        return False
+    del db_manager, features_version  # unused; signature kept for compat
+    return blacklist_track_from_islet(islet_name, track_path)
 
 
 def invalidate_mood_cache() -> None:

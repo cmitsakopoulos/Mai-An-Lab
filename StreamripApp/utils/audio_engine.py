@@ -48,7 +48,8 @@ class AudioEngine:
         self.position       = 0.0
         self.duration       = 0.0
         self.is_playing     = False
-        self.is_shuffle     = False
+        self._is_shuffle    = False
+        self._shuffle_order: list[int] = []
         self._repeat_mode   = "none"
 
         self.queue: list[dict] = []
@@ -70,6 +71,92 @@ class AudioEngine:
         self._observers: dict[str, list] = {}
         self._obs_lock = threading.Lock()
         self._native_lock = None
+
+    @property
+    def is_shuffle(self) -> bool:
+        return self._is_shuffle
+
+    @is_shuffle.setter
+    def is_shuffle(self, val: bool):
+        val = bool(val)
+        if getattr(self, "_is_shuffle", False) == val:
+            return
+        self._is_shuffle = val
+        self._on_shuffle_changed()
+
+    def _on_shuffle_changed(self):
+        if self._is_shuffle:
+            indices = list(range(len(self.queue)))
+            if 0 <= self.current_index < len(self.queue):
+                indices.remove(self.current_index)
+                random.shuffle(indices)
+                self._shuffle_order = [self.current_index] + indices
+            else:
+                random.shuffle(indices)
+                self._shuffle_order = indices
+        else:
+            self._shuffle_order = []
+
+        if self._page and self.queue:
+            self._arm_queue_gate()
+            self._page.run_task(self._push_queue_native, self.current_index, self.is_playing)
+
+    def _on_track_added_to_shuffle(self, insert_at: int, play_next: bool = True):
+        if not getattr(self, "_shuffle_order", None):
+            self._shuffle_order = list(range(len(self.queue)))
+            return
+        # Adjust indices greater than or equal to the inserted index
+        self._shuffle_order = [
+            (x + 1 if x >= insert_at else x) for x in self._shuffle_order
+        ]
+        # Insert the new index into shuffle order
+        if play_next:
+            try:
+                curr_pos = self._shuffle_order.index(self.current_index)
+                self._shuffle_order.insert(curr_pos + 1, insert_at)
+            except ValueError:
+                self._shuffle_order.append(insert_at)
+        else:
+            # Append randomly to the remaining unplayed portion or just the end
+            try:
+                curr_pos = self._shuffle_order.index(self.current_index)
+                if curr_pos < len(self._shuffle_order) - 1:
+                    insert_pos = random.randint(curr_pos + 1, len(self._shuffle_order))
+                    self._shuffle_order.insert(insert_pos, insert_at)
+                else:
+                    self._shuffle_order.append(insert_at)
+            except ValueError:
+                self._shuffle_order.append(insert_at)
+
+    def _on_track_removed_from_shuffle(self, index: int):
+        if not getattr(self, "_shuffle_order", None):
+            return
+        # Remove the index from shuffle order
+        if index in self._shuffle_order:
+            self._shuffle_order.remove(index)
+        # Adjust indices larger than the removed index
+        self._shuffle_order = [
+            (x - 1 if x > index else x) for x in self._shuffle_order
+        ]
+
+    def _on_track_moved_in_shuffle(self, old_index: int, new_index: int):
+        if not getattr(self, "_shuffle_order", None):
+            return
+        new_order = []
+        for x in self._shuffle_order:
+            if x == old_index:
+                new_order.append(new_index)
+            elif old_index < new_index:
+                if old_index < x <= new_index:
+                    new_order.append(x - 1)
+                else:
+                    new_order.append(x)
+            else:  # new_index < old_index
+                if new_index <= x < old_index:
+                    new_order.append(x + 1)
+                else:
+                    new_order.append(x)
+        self._shuffle_order = new_order
 
     @property
     def repeat_mode(self) -> str:
@@ -168,10 +255,13 @@ class AudioEngine:
 
     def _build_playlist_payload(self) -> list[dict]:
         items = []
-        for track in self.queue:
-            item = self._track_to_playlist_item(track)
-            if item is not None:
-                items.append(item)
+        order = self._shuffle_order if (self._is_shuffle and getattr(self, "_shuffle_order", None)) else range(len(self.queue))
+        for idx in order:
+            if 0 <= idx < len(self.queue):
+                track = self.queue[idx]
+                item = self._track_to_playlist_item(track)
+                if item is not None:
+                    items.append(item)
         return items
 
     async def _push_queue_native(self, start_index: int = 0, autoplay: bool = True):
@@ -198,7 +288,13 @@ class AudioEngine:
                 pass
             return
         try:
-            target = max(0, min(start_index, len(items) - 1))
+            target = start_index
+            if self._is_shuffle and getattr(self, "_shuffle_order", None):
+                try:
+                    target = self._shuffle_order.index(start_index)
+                except ValueError:
+                    target = 0
+            target = max(0, min(target, len(items) - 1))
             await self._audio.set_playlist(items, start_index=target)
             if autoplay:
                 await self._audio.play()
@@ -238,8 +334,12 @@ class AudioEngine:
             and time.time() >= self._queue_change_until
         ):
             qi = max(0, min(queue_index, len(self.queue) - 1))
-            if qi != self.current_index:
-                self.current_index = qi
+            target_idx = qi
+            if self._is_shuffle and getattr(self, "_shuffle_order", None):
+                if 0 <= qi < len(self._shuffle_order):
+                    target_idx = self._shuffle_order[qi]
+            if target_idx != self.current_index:
+                self.current_index = target_idx
                 self._sync_metadata_for_current()
                 self.dispatch("on_queue_mutated")
 
@@ -363,6 +463,17 @@ class AudioEngine:
         skip and background auto-advance work without Python in the loop."""
         self.queue = tracks
         self.current_index = min(max(0, start_index), len(self.queue) - 1) if self.queue else 0
+        if self._is_shuffle:
+            indices = list(range(len(self.queue)))
+            if 0 <= self.current_index < len(self.queue):
+                indices.remove(self.current_index)
+                random.shuffle(indices)
+                self._shuffle_order = [self.current_index] + indices
+            else:
+                random.shuffle(indices)
+                self._shuffle_order = indices
+        else:
+            self._shuffle_order = []
         self.dispatch("on_queue_mutated")
         self._sync_metadata_for_current()
         if self._page and self.queue:
@@ -454,13 +565,32 @@ class AudioEngine:
             self._page.run_task(self._audio.play)
             return
         self._arm_queue_gate(0.8)
-        if self.is_shuffle and len(self.queue) > 1:
-            candidates = [i for i in range(len(self.queue)) if i != self.current_index]
-            target = random.choice(candidates)
-            self.current_index = target
-            self._sync_metadata_for_current()
-            self._page.run_task(self._audio.skip_to_index, target)
-            return
+        if self._is_shuffle and len(self.queue) > 1 and getattr(self, "_shuffle_order", None):
+            try:
+                curr_shuf_idx = self._shuffle_order.index(self.current_index)
+            except ValueError:
+                curr_shuf_idx = -1
+            
+            if curr_shuf_idx != -1 and curr_shuf_idx < len(self._shuffle_order) - 1:
+                target_shuf_idx = curr_shuf_idx + 1
+                target = self._shuffle_order[target_shuf_idx]
+                self.current_index = target
+                self._sync_metadata_for_current()
+                self._page.run_task(self._audio.skip_to_index, target_shuf_idx)
+                return
+            elif self.repeat_mode == "all":
+                target = self._shuffle_order[0]
+                self.current_index = target
+                self._sync_metadata_for_current()
+                self._page.run_task(self._audio.skip_to_index, 0)
+                return
+            else:
+                if getattr(self, "jarvis_controlled", False):
+                    self.dispatch("on_jarvis_continue")
+                else:
+                    self.stop()
+                return
+
         if self.current_index < len(self.queue) - 1:
             self.current_index += 1
             self._sync_metadata_for_current()
@@ -481,6 +611,21 @@ class AudioEngine:
             return
         if not self._audio or not self._page:
             return
+        if self._is_shuffle and len(self.queue) > 1 and getattr(self, "_shuffle_order", None):
+            try:
+                curr_shuf_idx = self._shuffle_order.index(self.current_index)
+            except ValueError:
+                curr_shuf_idx = -1
+            
+            if curr_shuf_idx > 0:
+                target_shuf_idx = curr_shuf_idx - 1
+                target = self._shuffle_order[target_shuf_idx]
+                self._arm_queue_gate(0.8)
+                self.current_index = target
+                self._sync_metadata_for_current()
+                self._page.run_task(self._audio.skip_to_index, target_shuf_idx)
+                return
+
         if self.current_index > 0:
             self._arm_queue_gate(0.8)
             self.current_index -= 1
@@ -495,16 +640,34 @@ class AudioEngine:
             return
         insert_at = min(self.current_index + 1, len(self.queue))
         self.queue.insert(insert_at, track)
+        
+        native_idx = insert_at
+        if self._is_shuffle:
+            self._on_track_added_to_shuffle(insert_at, play_next=True)
+            try:
+                native_idx = self._shuffle_order.index(insert_at)
+            except ValueError:
+                native_idx = insert_at
+
         self.dispatch("on_queue_mutated")
         if self._page:
             self._arm_queue_gate()
-            self._page.run_task(self._native_add_queue_item, track, insert_at)
+            self._page.run_task(self._native_add_queue_item, track, native_idx)
 
     def queue_last(self, track: dict):
         if not self.queue:
             self.set_queue([track])
             return
         self.queue.append(track)
+        
+        native_idx = len(self.queue) - 1
+        if self._is_shuffle:
+            self._on_track_added_to_shuffle(native_idx, play_next=False)
+            try:
+                native_idx = self._shuffle_order.index(native_idx)
+            except ValueError:
+                native_idx = len(self.queue) - 1
+
         self.dispatch("on_queue_mutated")
         if self._page:
             self._arm_queue_gate()
@@ -512,7 +675,7 @@ class AudioEngine:
             # native insert index. Dart clamps to the actual playlist length,
             # so any drift between the two sides resolves to a tail append.
             self._page.run_task(
-                self._native_add_queue_item, track, len(self.queue) - 1
+                self._native_add_queue_item, track, native_idx
             )
 
     async def _native_add_queue_item(self, track: dict, index: int):
@@ -555,15 +718,29 @@ class AudioEngine:
         self._arm_queue_gate(0.8)
         self.current_index = index
         self._sync_metadata_for_current()
-        self._page.run_task(self._audio.skip_to_index, index)
+        
+        target = index
+        if self._is_shuffle and getattr(self, "_shuffle_order", None):
+            try:
+                target = self._shuffle_order.index(index)
+            except ValueError:
+                target = index
+                
+        self._page.run_task(self._audio.skip_to_index, target)
         self._page.run_task(self._audio.play)
 
     def remove_from_queue(self, index: int):
         if not 0 <= index < len(self.queue):
             return
         removed_active = (index == self.current_index)
-        # Capture the index to send to Dart BEFORE adjusting Python's view.
         native_index = index
+        if self._is_shuffle and getattr(self, "_shuffle_order", None):
+            try:
+                native_index = self._shuffle_order.index(index)
+            except ValueError:
+                native_index = index
+            self._on_track_removed_from_shuffle(index)
+
         self.queue.pop(index)
         if not self.queue:
             self.stop()
@@ -575,9 +752,6 @@ class AudioEngine:
         self.dispatch("on_queue_mutated")
         if self._page:
             self._arm_queue_gate()
-            # Removing the active source: just_audio auto-advances to the
-            # next item, so we don't need a follow-up skip. Removing a
-            # non-active item: in-place remove, no position change.
             self._page.run_task(self._native_remove_queue_item, native_index)
 
     async def _native_remove_queue_item(self, index: int):
@@ -603,6 +777,20 @@ class AudioEngine:
         if not (0 <= old_index < len(self.queue) and 0 <= new_index < len(self.queue)):
             return
         current_obj = self.queue[self.current_index] if self.queue else None
+        
+        native_old_index = old_index
+        native_new_index = new_index
+        if self._is_shuffle and getattr(self, "_shuffle_order", None):
+            try:
+                native_old_index = self._shuffle_order.index(old_index)
+            except ValueError:
+                pass
+            self._on_track_moved_in_shuffle(old_index, new_index)
+            try:
+                native_new_index = self._shuffle_order.index(new_index)
+            except ValueError:
+                pass
+
         item = self.queue.pop(old_index)
         self.queue.insert(new_index, item)
         if current_obj is not None and current_obj in self.queue:
@@ -611,7 +799,7 @@ class AudioEngine:
         if self._page:
             self._arm_queue_gate()
             self._page.run_task(
-                self._native_move_queue_item, old_index, new_index
+                self._native_move_queue_item, native_old_index, native_new_index
             )
 
     async def _native_move_queue_item(self, old_index: int, new_index: int):
@@ -648,6 +836,17 @@ class AudioEngine:
         # Condense to 25 items
         self.queue = tracks[:25]
         self.current_index = min(max(0, index), len(self.queue) - 1)
+        if self._is_shuffle:
+            indices = list(range(len(self.queue)))
+            if 0 <= self.current_index < len(self.queue):
+                indices.remove(self.current_index)
+                random.shuffle(indices)
+                self._shuffle_order = [self.current_index] + indices
+            else:
+                random.shuffle(indices)
+                self._shuffle_order = indices
+        else:
+            self._shuffle_order = []
         track = tracks[self.current_index]
         path  = track.get("path", "")
         title = (track.get("track_title") or os.path.basename(path)) if path else "Unknown"

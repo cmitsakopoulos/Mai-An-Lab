@@ -54,27 +54,6 @@ def list_bundles() -> list[str]:
     return [p for _, p in items]
 
 
-def _read_regressor_summary(db_path: str) -> dict[str, int]:
-    """Open the snapshotted DB read-only and return `{mood: n_samples}` for
-    every row in `mood_regressors`. Used to enrich the bundle manifest with
-    an at-a-glance preview of trained state; failures are silent because the
-    bundle is still valid without the summary."""
-    if not os.path.exists(db_path) or os.path.getsize(db_path) == 0:
-        return {}
-    try:
-        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-        try:
-            cur = conn.execute(
-                "SELECT mood, n_samples FROM mood_regressors"
-            )
-            return {row[0]: int(row[1]) for row in cur.fetchall()}
-        finally:
-            conn.close()
-    except sqlite3.Error as ex:
-        logger.debug("regressor summary unavailable (%s)", ex)
-        return {}
-
-
 def _snapshot_sqlite(src_path: str, dst_path: str) -> None:
     """Use SQLite's online backup API so we get a consistent snapshot even if
     the live DB is in WAL mode or has open transactions. Falls back to a raw
@@ -111,9 +90,7 @@ def export_state(
 
     `custom_moods_path`, when supplied and present on disk, is included in
     the bundle so user-created islets and their thresholds survive
-    export/import. Phase-2 regressor weights live in the SQLite DB itself
-    and ride along inside `library.db` automatically — no extra arg needed
-    on this side."""
+    export/import."""
     out_dir = out_dir or _default_bundle_dir()
     os.makedirs(out_dir, exist_ok=True)
 
@@ -145,17 +122,10 @@ def export_state(
                     "bytes": os.path.getsize(custom_moods_path)
                 }
 
-            # Snapshot-time peek at the regressor table — gives import dialogs
-            # a quick "this bundle has N trained moods (M total samples)"
-            # preview without unpacking the BLOB column. Quiet on failure;
-            # the bundle is still valid without the summary.
-            mood_regressors_summary = _read_regressor_summary(tmp_db)
-
             manifest = {
                 "bundle_version": BUNDLE_VERSION,
                 "exported_at": ts,
                 "contents": contents,
-                "mood_regressors": mood_regressors_summary,
             }
             zf.writestr("manifest.json", json.dumps(manifest, indent=2))
     finally:

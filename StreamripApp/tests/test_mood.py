@@ -32,21 +32,106 @@ def _blob(vec: np.ndarray) -> bytes:
 
 class FakeMoodDB:
     """In-memory db_manager surface needed by tg.tracks_by_mood + the
-    percentile cache. Tracks are passed in directly; signal map is mutable
-    so tests can install per-track feedback to verify re-ranking."""
+    percentile cache. Tracks are passed in directly; PCA + taste model
+    storage is stubbed so the new partition + EQ scoring pipeline can run
+    without a real SQLite. Cached PCA coords are computed lazily by the
+    track_graph helpers, written back here, and survive subsequent calls."""
 
     def __init__(self, rows: list[dict]):
         self.rows = rows
         self.signal: dict[str, float] = {}
+        self._pca_space: tuple | None = None
+        self._pca_coords: dict[str, list[float]] = {}
+        self._adjusted_profiles: dict[str, dict[str, tuple[float, float]]] = {}
+        self._partition: dict[str, str] = {}
+        self._taste_model: tuple | None = None
+        
+        # Prepopulate adjusted profiles with mock quartiles for testing
+        from utils import track_graph as tg
+        mock_profiles = {
+            "chill": {
+                "bpm": (1.0, 1.0),      # Very Low
+                "energy": (1.0, 1.0),   # Very Low
+            },
+            "energetic": {
+                "bpm": (4.0, 1.0),      # Very High
+                "energy": (4.0, 1.0),   # Very High
+            },
+            "dark": {
+                "energy": (1.0, 1.0),   # Very Low
+            },
+            "upbeat": {
+                "bpm": (4.0, 1.0),      # Very High
+                "energy": (4.0, 1.0),   # Very High
+            },
+            "rock": {
+                "bpm": (3.0, 1.0),      # High
+                "brightness": (4.0, 1.0), # Very High
+            },
+            "beats": {
+                "beat_strength": (4.0, 1.0), # Very High
+            },
+            "intense": {
+                "energy": (4.0, 1.0),   # Very High
+                "beat_strength": (4.0, 1.0), # Very High
+            }
+        }
+        for mood in list(tg.MOODS.keys()) + ["energetic"]:
+            prof = mock_profiles.get(mood, {})
+            self._adjusted_profiles[mood] = prof
 
     async def get_tracks_with_features(self, features_version):
         return list(self.rows)
 
-    async def listen_signal_map(self):
-        return dict(self.signal)
+    async def get_adjusted_mood_profile(self, mood: str):
+        return self._adjusted_profiles.get(mood)
 
-    async def get_adjusted_mood_profile(self, mood: str) -> dict[str, float] | None:
-        return None
+    async def save_adjusted_mood_profile(self, mood: str, profile):
+        # Coerce to v2 (target, weight) so reads round-trip.
+        out: dict[str, tuple[float, float]] = {}
+        for f, v in profile.items():
+            if isinstance(v, tuple) and len(v) == 2:
+                out[f] = (float(v[0]), float(v[1]))
+            else:
+                out[f] = (float(v), 1.0)
+        self._adjusted_profiles[mood] = out
+
+    async def save_pca_space(self, means, stds, V_keep, eigenvalues=None):
+        import numpy as np
+        self._pca_space = (
+            np.asarray(means, dtype=np.float32),
+            np.asarray(stds,  dtype=np.float32),
+            np.asarray(V_keep, dtype=np.float32),
+        )
+
+    async def load_pca_space(self):
+        return self._pca_space
+
+    async def update_track_pca_coords(self, path: str, coords):
+        self._pca_coords[path] = [float(x) for x in coords]
+
+    async def update_tracks_pca_coords_batch(self, batch_data):
+        for path, coords in batch_data:
+            self._pca_coords[path] = [float(x) for x in coords]
+
+    async def get_tracks_pca_coords(self):
+        return [
+            {"path": p, "pca_coords": list(c)}
+            for p, c in self._pca_coords.items()
+        ]
+
+    async def get_mood_partition_pca(self, mood: str):
+        return [
+            self._pca_coords[p]
+            for p, m in self._partition.items()
+            if m == mood and p in self._pca_coords
+        ]
+
+    async def get_tracks_in_mood(self, mood: str):
+        return [p for p, m in self._partition.items() if m == mood]
+
+    async def get_taste_model(self, features_version: int):
+        return self._taste_model
 
 
 def _row(path, **kwargs):
@@ -155,115 +240,13 @@ class TestMoodScoring(unittest.TestCase):
         self.assertEqual([r["path"] for r in a], [r["path"] for r in b])
 
 
-class TestWeightedEuclidean(unittest.TestCase):
-    """The Phase-1 (target, weight) profile shape must be honoured by
-    _score_against_profile — higher-weight features dominate the metric,
-    weight=0 silences a feature entirely."""
-
-    def setUp(self):
-        tg.invalidate_mood_cache()
-        from utils.track_graph import MoodSpec
-        # Extreme targets (bpm low, flatness high) so percentile-distance
-        # winners are unambiguous; flatness gets 5× the weight of bpm.
-        self._old = tg.MOODS.get("synth_test")
-        tg.MOODS["synth_test"] = MoodSpec(
-            "synth_test",
-            {
-                "bpm":               (0.0, 1.0),
-                "spectral_flatness": (1.0, 5.0),   # heavy weight
-            },
-        )
-
-    def tearDown(self):
-        if self._old is None:
-            tg.MOODS.pop("synth_test", None)
-        else:
-            tg.MOODS["synth_test"] = self._old
-
-    def test_weighted_euclidean_prefers_high_weight_feature(self):
-        """match_heavy nails the heavy-weighted feature but is the worst on
-        the light-weighted one; match_light is the reverse. The 5× weight on
-        flatness must decide the winner.
-
-        With only 2 rows, percentile rank is binary {0.0, 1.0} so the math
-        is exact:
-          match_heavy: sqrt(1.0·(1.0-0.0)² + 5.0·(1.0-1.0)²) = 1.000
-          match_light: sqrt(1.0·(0.0-0.0)² + 5.0·(0.0-1.0)²) = √5 ≈ 2.236
-        """
-        rows = [
-            _row("match_heavy", bpm=200.0, spectral_flatness=0.95),
-            _row("match_light", bpm=50.0,  spectral_flatness=0.05),
-        ]
-        db = FakeMoodDB(rows)
-        results = _run(tg.tracks_by_mood(db, "synth_test", limit=1))
-        self.assertEqual(results[0]["path"], "match_heavy",
-                         "Heavy-weight feature should outrank light-weight feature.")
-
-    def test_weight_zero_silences_feature(self):
-        """A feature with weight=0 must have zero influence on ranking. We
-        configure bpm-only scoring and verify the bpm-perfect track wins
-        even when its silenced feature is the worst in the library."""
-        from utils.track_graph import MoodSpec
-        tg.MOODS["zero_test"] = MoodSpec(
-            "zero_test",
-            {
-                "bpm":               (0.0, 1.0),
-                "spectral_flatness": (1.0, 0.0),   # silenced
-            },
-        )
-        try:
-            rows = [
-                # 'a' is bpm-perfect (lowest); flatness is the worst in the
-                # library (would lose under equal weighting).
-                _row("a", bpm=50.0,  spectral_flatness=0.05),
-                # 'b' has worst bpm but perfect flatness.
-                _row("b", bpm=200.0, spectral_flatness=0.95),
-                # Filler spreads percentiles.
-                _row("c", bpm=100.0, spectral_flatness=0.5),
-            ]
-            db = FakeMoodDB(rows)
-            results = _run(tg.tracks_by_mood(db, "zero_test", limit=1))
-            self.assertEqual(results[0]["path"], "a",
-                             "weight=0 should remove flatness from the metric.")
-        finally:
-            tg.MOODS.pop("zero_test", None)
-
-
-class TestListenFeedback(unittest.TestCase):
-    def setUp(self):
-        tg.invalidate_mood_cache()
-        from utils.track_graph import MoodSpec
-        self._old_noisy = tg.MOODS.get("noisy")
-        tg.MOODS["noisy"] = MoodSpec("noisy", {"spectral_flatness": 0.90})
-
-    def tearDown(self):
-        if self._old_noisy is None:
-            tg.MOODS.pop("noisy", None)
-        else:
-            tg.MOODS["noisy"] = self._old_noisy
-
-    def test_signal_demotes_skipped_track(self):
-        # Use the single-feature "noisy" mood (target spectral_flatness percentile 0.90) so
-        # the ranking is deterministic from a one-column percentile rank.
-        # 8 quiet distractors land at percentiles 0.0 .. 0.78; "skipped"
-        # (spectral_flatness 0.89) ends up at 0.89 (≈ target) and "kept" at 1.0 (slightly
-        # above target). Without feedback, skipped wins by ~0.09 on the
-        # mood distance; β=0.20 listen-signal of −1 on skipped is more than
-        # enough to flip the ranking.
-        rows = [_row(f"d{i}", spectral_flatness=0.1 + i * 0.05) for i in range(8)]
-        rows.append(_row("skipped", spectral_flatness=0.90))
-        rows.append(_row("kept", spectral_flatness=0.95))
-        db = FakeMoodDB(rows)
-
-        baseline = _run(tg.tracks_by_mood(db, "noisy", limit=2))
-        baseline_top = {r["path"] for r in baseline}
-        self.assertEqual(baseline_top, {"kept", "skipped"})
-
-        tg.invalidate_mood_cache()
-        db.signal["skipped"] = -1.0
-        db.signal["kept"] = +0.5
-        biased = _run(tg.tracks_by_mood(db, "noisy", limit=1))
-        self.assertEqual(biased[0]["path"], "kept")
+# Note: TestWeightedEuclidean and TestListenFeedback used to live here. They
+# tested raw-feature (`bpm`, `spectral_flatness`) mood scoring and the
+# listen_signal_map re-rank — both ablated by the PC-space + partition + taste
+# refactor. Equivalent coverage now lives in
+# tests/test_mood_feedback.py::TestTracksByMoodWithPartition (centroid
+# scoring) and tests/test_mood_feedback.py::TestTasteModelIntegration
+# (preference re-rank).
 
 
 class TestGreedySequenceTransitionCost(unittest.TestCase):

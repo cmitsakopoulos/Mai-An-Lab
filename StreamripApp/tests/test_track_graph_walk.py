@@ -78,9 +78,6 @@ class FakeDB:
     async def get_embeddings_for_paths(self, paths):
         return {p: self.timbres[p] for p in paths if p in self.timbres}
 
-    async def listen_signal_map(self):
-        return dict(self.signal)
-
     async def recent_played_paths(self, window_seconds=0):
         return set(self.recent)
 
