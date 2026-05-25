@@ -481,6 +481,7 @@ async def walk(
     negative_embs: Optional[list[np.ndarray]] = None,
     negative_lambda: float = 0.6,
     seed_rng: Optional[random.Random] = None,
+    teleport_path: Optional[str] = None,
 ) -> list[str]:
     """Personalised-PageRank-flavoured random walk over the track graph.
 
@@ -622,11 +623,18 @@ async def walk(
                 )
                 for i, r in enumerate(rows_all):
                     taste_pcs[r["path"]] = percentile_matrix[i]
+                logger.warning(
+                    "walk: Taste model is ACTIVE. Personalized re-ranking enabled (weight=%.2f, ne=%d, ni=%d). w=%s, b=%.4f",
+                    taste_weight, ne, ni, np.round(taste_w, 4).tolist(), taste_b
+                )
             else:
                 taste_active = False  # cold model, skip the per-step work
+                logger.warning("walk: Taste model is COLD (0 feedback events). Personalized re-ranking skipped.")
         except Exception as exc:
-            logger.debug("walk: taste model unavailable (%s); skipping re-rank", exc)
+            logger.warning("walk: Taste model loading failed (%s); skipping re-rank", exc)
             taste_active = False
+    else:
+        logger.warning("walk: Taste model is disabled (taste_weight=0). Purely acoustic/artist walk.")
 
     def _merge_candidates(raw: list[dict]) -> list[dict]:
         """De-duplicate on `path`, taking the maximum effective weight across
@@ -644,12 +652,13 @@ async def walk(
         return list(merged.values())
 
     current = seed_path
+    teleport_target = teleport_path or seed_path
     for _ in range(length):
         # Restart roll. We always step from `current` afterwards, so toggling
-        # current back to the seed implements the personalised-PageRank
+        # current back to the teleport target implements the personalised-PageRank
         # teleport without special-casing the selection.
         if restart_prob > 0 and rng.random() < restart_prob:
-            current = seed_path
+            current = teleport_target
 
         raw = horizon.get(current)
         if raw is None:
@@ -662,11 +671,11 @@ async def walk(
 
         cands = _merge_candidates(raw)
         if not cands:
-            # If we're stuck mid-walk but the seed still has fresh options,
+            # If we're stuck mid-walk but the teleport target still has fresh options,
             # one-shot restart and try again. If both are dry, we're done.
-            if current != seed_path:
-                current = seed_path
-                cands = _merge_candidates(horizon.get(seed_path, []))
+            if current != teleport_target:
+                current = teleport_target
+                cands = _merge_candidates(horizon.get(teleport_target, []))
             if not cands:
                 break
 
@@ -733,6 +742,21 @@ async def walk(
 
         chosen = cands[chosen_idx]
         next_path = chosen["path"]
+        
+        # Calculate the taste model prediction P(like) if active
+        p_like = 0.5
+        if taste_active and taste_w is not None:
+            pc = taste_pcs.get(next_path)
+            if pc is not None:
+                z = float(np.dot(taste_w, pc)) + taste_b
+                z = max(-30.0, min(30.0, z))
+                p_like = 1.0 / (1.0 + float(np.exp(-z)))
+        
+        logger.warning(
+            "walk step: Selected candidate '%s' (P(like)=%.2f%%, final logit=%.4f)",
+            os.path.basename(next_path), p_like * 100.0, logits[chosen_idx]
+        )
+        
         path_seq.append(next_path)
         visited.add(next_path)
         if diversity_active:
@@ -1177,11 +1201,16 @@ async def _load_taste_model(
     if row is None:
         w, b = _tm.fresh()
         _TASTE_CACHE = (w, b, 0, 0)
+        logger.warning("taste_model: Loaded COLD model (0 samples, default w=zeros, b=0.0)")
     else:
         try:
             w = _tm.unpack_weights(row[0])
             b = float(row[1])
             _TASTE_CACHE = (w, b, int(row[2]), int(row[3]))
+            logger.warning(
+                "taste_model: Loaded trained model. Samples (explicit=%d, implicit=%d) -> w=%s, b=%.4f",
+                int(row[2]), int(row[3]), np.round(w, 4).tolist(), b
+            )
         except ValueError as exc:
             logger.warning("taste_model: weights blob malformed (%s); resetting", exc)
             w, b = _tm.fresh()
@@ -1201,6 +1230,7 @@ async def record_explicit_feedback(
     from utils import taste_model as _tm
     pcs = await _get_track_pcs(db_manager, track_path, features_version)
     if pcs is None:
+        logger.warning("taste_model: feedback ignored; track '%s' lacks analyzed features.", os.path.basename(track_path))
         return
     w, b, ne, ni = await _load_taste_model(db_manager, features_version)
     y = 1 if like else 0
@@ -1209,6 +1239,10 @@ async def record_explicit_feedback(
     )
     await db_manager.save_taste_model(
         _tm.pack_weights(w), b, ne + 1, ni, features_version,
+    )
+    logger.warning(
+        "taste_model: SGD EXPLICIT feedback trained. track='%s' like=%s. Samples (explicit=%d, implicit=%d) -> w=%s, b=%.4f",
+        os.path.basename(track_path), like, ne + 1, ni, np.round(w, 4).tolist(), b
     )
     invalidate_taste_cache()
 
@@ -1226,9 +1260,14 @@ async def record_play_event(
     from utils import taste_model as _tm
     y = _tm.classify_play_event(float(played_seconds), float(duration_seconds))
     if y is None:
+        logger.warning(
+            "taste_model: Play event too short to interpret (played %.1fs / dur %.1fs). Discarding sample.",
+            played_seconds, duration_seconds
+        )
         return
     pcs = await _get_track_pcs(db_manager, track_path, features_version)
     if pcs is None:
+        logger.warning("taste_model: play event ignored; track '%s' lacks analyzed features.", os.path.basename(track_path))
         return
     w, b, ne, ni = await _load_taste_model(db_manager, features_version)
     w, b = _tm.online_update(
@@ -1236,6 +1275,10 @@ async def record_play_event(
     )
     await db_manager.save_taste_model(
         _tm.pack_weights(w), b, ne, ni + 1, features_version,
+    )
+    logger.warning(
+        "taste_model: SGD IMPLICIT play event trained (y=%d). track='%s' (played %.1fs / dur %.1fs). Samples (explicit=%d, implicit=%d) -> w=%s, b=%.4f",
+        y, os.path.basename(track_path), played_seconds, duration_seconds, ne, ni + 1, np.round(w, 4).tolist(), b
     )
     invalidate_taste_cache()
 

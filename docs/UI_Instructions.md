@@ -39,21 +39,41 @@ To keep Flet’s widget tree extremely tiny and guarantee memory-safe, ultra-flu
   - **Interactive Boundary Ghost Cards**: Custom glassmorphic boundary ghost cards appear at the top and bottom of the list when scrolled to the limits. These cards are fully interactive and clickable; clicking the top ghost card instantly navigates to the previous page, and clicking the bottom ghost card instantly navigates to the next page.
   - *Note*: Horizontal swipe gestures for page turning are explicitly removed to prevent accidental or uncontrollable page switching during standard scrolling.
 
-### 1.6 Default Moods, Feedback Controls & Regressor Adaptation
+### 1.6 Default Moods, Feedback Controls & Profile Adaptation
 
-The **Default Moods** pane (accessible under the Default tab) organizes your library into **6 pre-curated, sonically distinct core moods** (`chill`, `dark`, `upbeat`, `rock`, `beats`, `intense`). 
+The **Default Moods** pane (accessible under the Default tab) organizes your library into **6 pre-curated, sonically distinct core moods** (`chill`, `dark`, `upbeat`, `rock`, `beats`, `intense`).
 
 - **Library-Relative Adaptation**: Rather than relying on rigid, pre-compiled genre tags, the default moods automatically adapt and calibrate to the unique distribution of your music collection. The engine calculates column-wise percentile ranks $\in [0, 1]$ over 8 continuous acoustic DSP features (BPM, brightness, energy, spectral rolloff, beat strength, spectral flatness, spectral contrast, and key mode), ensuring that "chill" or "intense" always represents your library's relative extremes.
-- **Dynamic On-Device SGD Regressor Optimisation**: As you interact with tracks, a Phase-2 on-device **Logistic Regression Layer** runs in the background. It dynamically optimizes the feature weights for each mood profile based on your Likes and Dislikes using online Stochastic Gradient Descent (SGD) with $L_2$ Ridge Regularization to prevent parameters from drifting or over-fitting.
-- **Task-Safe Serialized Concurrency Queue**: Liking or disliking multiple tracks in quick succession (or batch-updating feedback) is fully protected under the hood. The system coordinates concurrent database reads and writes using a **Per-Mood Serializing Lock Registry** (`asyncio.Lock()`). This marshals all batch feedback into a strict, mathematically sequential queue, preserving sequential SGD learning accuracy and eliminating database race conditions (lost updates).
-- **Interactive Feedback Controls**:
-  - **Like Interaction**: Tapping the thumbs-up icon pins the track to the current default mood and sends a $y=1$ positive sample to that mood's regressor. The icon glows with a vibrant **cyan accent** when active.
-  - **Dislike Interaction**: Tapping the thumbs-down icon immediately excludes the track from that default mood, sends a $y=0$ negative sample to the regressor, and automatically re-routes the track to its second-best matching default mood (displaying a confirmation snackbar).
-- **Feedback Reset**: A glassmorphic **Reset Feedback** header button (using the restart icon `ft.Icons.RESTART_ALT_ROUNDED`) is made visible when browsing default moods. Clicking this button clears all likes, dislikes, and dynamic DSP tuning, and **completely wipes the `mood_regressors` and `mood_profiles` tables**. This immediately restores all moods to their pristine factory-default profiles, resets the online SGD models, and triggers a clean recalculation of all track partition assignments.
+- **Dynamic PCA-Driven Feature Mappings (Dynamic EQ Sliders)**: Click the slider/tuning icon next to a mood to open the **Quartile Optimization** dialog. The application loads the SVD projection space and eigenvalues from the database to map features dynamically into three primary Principal Components:
+  - **Timbre (PC1 - Cyan)**: Represents texture, noise levels, and orchestration density.
+  - **Tempo (PC2 - Purple)**: Represents overall speed, beat strength, and rhythmic pacing.
+  - **Harmonic (PC3 - Amber)**: Represents keys, modes, and harmonic profiles.
+  The slider controls and their respective value indicators are color-coded in real-time according to their dominant principal component loading, acting as an acoustic EQ.
+- **Mood Profile Gradient Calibration**: Providing feedback directly on the **Moods Page** modifies the target DSP percentiles of that mood partition:
+  - **Like Interaction**: Tapping the thumbs-up icon pins the track to the current mood partition and runs a gradient target shift (`adjust_mood_profile`) to pull the mood's target percentiles *closer* to the liked track's features, widening the category to include similar tracks.
+  - **Dislike Interaction**: Tapping the thumbs-down icon immediately excludes the track from that mood, runs a gradient shift to repel the mood's target percentiles *away* from the track's features, and automatically re-routes the track to its second-best matching default mood partition.
+- **Feedback & Calibration Reset**: A glassmorphic **Reset Feedback** header button (using the restart icon `ft.Icons.RESTART_ALT_ROUNDED`) is visible when browsing default moods. Clicking this button clears all custom mood profiles, dynamic DSP calibrations, and user feedback. It resets all moods to their pristine factory-default configurations and triggers a clean recalculation of all track partition assignments.
 
 ---
 
-## 2. Search Functionality
+## 2. Playback Taste Modeling & Play Similar
+
+The **Playback Pane** (including the Now Playing full-screen card and the Mini Player) contains standard Like/Dislike controls that directly train the **Stochastic Gradient Descent (SGD) Taste Model**.
+
+### 2.1 The Global SGD Taste Model
+Unlike mood partitions, your personal taste cuts across moods. The system deploys a single, global on-device **Logistic Regression Layer** over the 3-dimensional Principal Component projection space:
+- **Real-Time Learning**: Liking ($y=1$) or Disliking ($y=0$) a track during playback executes a single-step online SGD weight update with $L_2$ Ridge Regularization to prevent overfitting or extreme runaway weights.
+- **Sample-Weight Awareness**: The model separates explicit feedback (Likes/Dislikes) from implicit playback cues (e.g. playing a song past the skip threshold). Explicit events have a higher sample weight ($1.0$) than implicit signals ($0.5$).
+- **Cold-Start Graceful Degradation**: On a fresh install with zero feedback events, the taste model remains cold ($w=0, b=0$), resulting in a uniform $P(\text{like}) \approx 0.5$ prediction, which acts as a safe, neutral baseline.
+
+### 2.2 Play Similar & Jarvis Graph Walks
+When using the **Play Similar** feature or the **Jarvis continuous playback walk**, the personalized random walk engine leverages the active Taste Model to direct queue choices:
+- **Personalized Re-Ranking**: During a PageRank-based walk across the $k$-NN acoustic similarity graph, all candidate tracks are passed through the SGD Taste Model. The candidate logits are adjusted by adding a weighted fraction of the taste prediction: $\gamma \cdot (P(\text{like}) - 0.5)$. This heavily biases the walk to choose paths aligned with your acoustic taste.
+- **Interactive Session-Level Skips**: Disliking a song during playback immediately adds it to a temporary, high-priority session avoidance list (`_session_bad_paths`), preventing the walker from re-queuing that track or similar paths during the current listening session.
+
+---
+
+## 3. Search Functionality
 
 The Search view (accessible via the **Search** tab) mimics the Library's layout to provide a consistent user experience while browsing remote sources (e.g., Qobuz).
 

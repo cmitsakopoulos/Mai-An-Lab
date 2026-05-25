@@ -55,6 +55,7 @@ class AudioEngine:
         self.queue: list[dict] = []
         self.current_index: int = 0
         self.jarvis_controlled = False
+        self.play_similar_seed_path = ""
 
         self._audio: AudioServiceControl | None = None
         self._is_loaded: bool = False
@@ -181,8 +182,9 @@ class AudioEngine:
         logger.warning("ADB_AUDIO: setup() called")
         if self._page is page and self._audio is not None:
             return  # already set up on this page
-        if self._audio is not None and self._page is not page:
-            logger.warning("ADB_AUDIO: page changed; discarding stale audio control")
+        if self._page is not page:
+            logger.warning("ADB_AUDIO: page changed; clearing stale observers and discarding stale audio control")
+            self.clear_observers()
             self._audio = None
             self._is_loaded = False
         self._page = page
@@ -433,6 +435,11 @@ class AudioEngine:
                 except ValueError:
                     pass
 
+    def clear_observers(self):
+        with self._obs_lock:
+            self._observers.clear()
+            logger.warning("ADB_AUDIO: Cleared all old observers")
+
     def dispatch(self, name: str, value=None):
         with self._obs_lock:
             fns = list(self._observers.get(name, []))
@@ -440,7 +447,10 @@ class AudioEngine:
             try:
                 fn(self, value)
             except Exception as exc:
-                logger.error("AudioEngine dispatch error (%s): %s", name, exc)
+                if "destroyed session" in str(exc):
+                    logger.warning("AudioEngine dispatch suppressed stale session callback (%s): %s", name, exc)
+                else:
+                    logger.error("AudioEngine dispatch error (%s): %s", name, exc)
 
     def _set(self, attr: str, value):
         if getattr(self, attr, None) == value:

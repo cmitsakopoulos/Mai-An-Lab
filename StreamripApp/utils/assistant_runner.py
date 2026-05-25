@@ -1631,10 +1631,13 @@ class AssistantRunner:
                 displayed="No current track — start something first, then ask for similar tracks.",
                 success=False,
             )
-
+ 
         avoid = await self._avoid_set()
         avoid.add(seed_path)
-
+        
+        # Save the original seed track on the engine for subsequent continuation walks
+        self.engine.play_similar_seed_path = seed_path
+ 
         # One pooled walk over acoustic + artist tiers. The walk picks the
         # first step itself (restart probability + softmax handle anchoring
         # and exploration), and the multi-tier pool means we don't need a
@@ -1649,6 +1652,7 @@ class AssistantRunner:
                 restart_prob=0.15,
                 diversity_lambda=0.3,
                 temperature=0.08,
+                teleport_path=seed_path,
             )
         except Exception as exc:
             logger.warning("track_graph.walk failed: %s", exc)

@@ -2844,6 +2844,17 @@ class LibraryView:
             "key_mode": "Key Mode (Major/Minor)"
         }
         
+        feature_explanations = {
+            "bpm": "Aligns the overall playback tempo and speed.",
+            "brightness": "Boosts high frequencies for crisp vocals and acoustics.",
+            "energy": "Loud, intense tracks vs. quiet, minimal soundscapes.",
+            "rolloff": "Warm, mellow tones vs. sharp, crisp treble.",
+            "beat_strength": "Pronounced rhythm and percussion vs. ambient washes.",
+            "spectral_flatness": "Noisy, complex textures vs. clean melodic tones.",
+            "spectral_contrast": "Rich orchestration vs. focused, narrow synth sounds.",
+            "key_mode": "Major keys (bright/optimistic) vs. minor keys (dark/somber).",
+        }
+        
         projection = None
         eigenvalues = None
         try:
@@ -2920,6 +2931,59 @@ class LibraryView:
                     padding=10,
                     margin=ft.Margin.only(bottom=8),
                     border=ft.Border.all(1, apply_opacity(0.08, TEXT)),
+                ),
+                ft.Text("Feature Dimension Coding", color=CYAN, size=11, weight=ft.FontWeight.BOLD),
+                ft.Container(
+                    content=ft.Row(
+                        [
+                            ft.Row(
+                                [
+                                    ft.Container(
+                                        width=8,
+                                        height=8,
+                                        border_radius=4,
+                                        bgcolor=ft.Colors.CYAN,
+                                    ),
+                                    ft.Text("Timbre", color=TEXT, size=10, weight=ft.FontWeight.W_600),
+                                ],
+                                spacing=4,
+                                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                            ),
+                            ft.Row(
+                                [
+                                    ft.Container(
+                                        width=8,
+                                        height=8,
+                                        border_radius=4,
+                                        bgcolor=ft.Colors.PURPLE,
+                                    ),
+                                    ft.Text("Tempo", color=TEXT, size=10, weight=ft.FontWeight.W_600),
+                                ],
+                                spacing=4,
+                                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                            ),
+                            ft.Row(
+                                [
+                                    ft.Container(
+                                        width=8,
+                                        height=8,
+                                        border_radius=4,
+                                        bgcolor=ft.Colors.AMBER_500,
+                                    ),
+                                    ft.Text("Harmonic", color=TEXT, size=10, weight=ft.FontWeight.W_600),
+                                ],
+                                spacing=4,
+                                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                            ),
+                        ],
+                        alignment=ft.MainAxisAlignment.SPACE_AROUND,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
+                    bgcolor=apply_opacity(0.04, TEXT),
+                    border_radius=8,
+                    padding=10,
+                    margin=ft.Margin.only(bottom=8),
+                    border=ft.Border.all(1, apply_opacity(0.08, TEXT)),
                 )
             ])
 
@@ -2987,6 +3051,7 @@ class LibraryView:
             sliders[feature] = slider
             
             label_text = friendly_names.get(feature, feature)
+            explanation = feature_explanations.get(feature, "")
             
             dot = ft.Container(
                 width=8,
@@ -3015,11 +3080,17 @@ class LibraryView:
                             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                             vertical_alignment=ft.CrossAxisAlignment.CENTER,
                         ),
-                        ft.Row(
-                            [
-                                ft.Text(f"{feature} • {pc_label}", color=pc_color, size=9.5, weight=ft.FontWeight.W_600, margin=ft.Margin.only(left=14)),
-                            ],
-                            alignment=ft.MainAxisAlignment.START,
+                        # Explanatory subtext with text wrapping instead of technical code columns
+                        ft.Container(
+                            content=ft.Text(
+                                explanation,
+                                color=DIM,
+                                size=9.5,
+                                weight=ft.FontWeight.W_400,
+                                no_wrap=False,
+                            ),
+                            margin=ft.Margin.only(left=14, right=4),
+                            padding=ft.Padding.only(bottom=2),
                         ),
                         ft.Container(
                             content=slider,
@@ -7481,6 +7552,7 @@ class NowPlayingSheet:
         # stop before the first dynamic replenishment fires via _on_current_path.
         if self.app.play_similar_mode:
             path = audio_engine.current_path
+            audio_engine.play_similar_seed_path = path or ""
             if path and audio_engine.current_index >= len(audio_engine.queue) - 1:
                 self.app.page.run_task(self.app._recommend_similar_async, path)
 
@@ -9984,11 +10056,26 @@ class StreamripFletApp:
         import os
         from utils import track_graph as tg
         try:
+            # Build comprehensive avoid set (currently queued + session skipped/disliked + 7-day recently played + current path)
+            avoid = {t["path"] for t in audio_engine.queue if t.get("path")}
+            avoid.add(path)
+            for bad in self._session_bad_paths:
+                avoid.add(bad)
+            try:
+                recent = await self.db_manager.recent_played_paths(window_seconds=7 * 86400)
+                avoid.update(recent)
+            except Exception:
+                pass
+
+            # Anchored PageRank: step from the current track, but teleport back to the original seed to prevent genre drift
+            teleport = getattr(audio_engine, "play_similar_seed_path", "") or path
             walk_tracks = await tg.walk(
                 self.db_manager,
                 path,
                 length=3,
                 edge_kinds=(tg.KIND_ACOUSTIC, tg.KIND_ARTIST),
+                teleport_path=teleport,
+                avoid=avoid,
             )
             if walk_tracks:
                 queue_paths = {t["path"] for t in audio_engine.queue}
@@ -10019,8 +10106,8 @@ class StreamripFletApp:
     def _on_jarvis_continue(self, _inst, _val=None):
         """Sync callback dispatched by AudioEngine when the Jarvis-controlled
         queue runs dry. Bridges into the async continuation coroutine safely."""
-        if self._page:
-            self._page.run_task(self._jarvis_auto_continue_queue)
+        if self.page:
+            self.page.run_task(self._jarvis_auto_continue_queue)
 
     async def _jarvis_auto_continue_queue(self):
         """Automatically extend a Jarvis-managed queue with 5 acoustically
@@ -10072,6 +10159,10 @@ class StreamripFletApp:
             except Exception:
                 pass
         avoid.add(seed_path)
+        # Add all currently queued tracks to avoid set to prevent duplicate recommendations
+        for t in audio_engine.queue:
+            if t.get("path"):
+                avoid.add(t["path"])
         # Bad paths from this session are always avoided outright — the
         # centroid penalises *similar* tracks, the avoid set blocks the
         # exact ones.
@@ -10099,6 +10190,8 @@ class StreamripFletApp:
         # On the trip-wire path, drop taste exploration so the walk leans
         # fully on the (now-anchored) seed plus the negative centroid.
         try:
+            # Anchored PageRank: teleport back to original seed track to prevent genre drift
+            teleport = getattr(audio_engine, "play_similar_seed_path", "") or seed_path
             walk_paths = await tg.walk(
                 self.db_manager,
                 seed_path,
@@ -10110,6 +10203,7 @@ class StreamripFletApp:
                 temperature=0.08,
                 taste_explore=0.0 if tripwire else 0.05,
                 negative_embs=negative_embs or None,
+                teleport_path=teleport,
             )
         except Exception as exc:
             logger.warning("Jarvis continuation: graph walk failed: %s", exc)
