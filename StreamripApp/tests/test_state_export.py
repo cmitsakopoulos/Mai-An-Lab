@@ -1,11 +1,9 @@
 """Round-trip tests for the bundle export/import path.
 
-Three primary concerns:
-  * custom_moods.json — added to the bundle in phase 3 task 9.
-  * mood_regressors BLOB column — rides inside library.db automatically;
-    these tests prove byte-identity of the weights across export/import.
-  * manifest summary — phase 3 task 11 adds a per-mood n_samples block so
-    the import dialog can preview what's being shipped.
+Primary concerns:
+  * custom_moods.json — included in the bundle so user-created islets and
+    their thresholds/blacklists survive export/import.
+  * bundle_version gate — refuses imports from incompatible bundles.
 """
 
 import asyncio
@@ -24,10 +22,7 @@ _cfg = _types.ModuleType("utils.config")
 _cfg.APP_DIR = tempfile.mkdtemp(prefix="dsptest_app_")
 sys.modules["utils.config"] = _cfg
 
-import numpy as np
 from utils import state_export
-from utils import mood_regressor as mr
-from utils import track_graph as tg
 from utils.db_manager import DatabaseManager
 
 
@@ -118,55 +113,6 @@ class TestBundleRoundTrip(unittest.TestCase):
         with zipfile.ZipFile(bundle, "r") as zf:
             self.assertNotIn("custom_moods.json", zf.namelist())
 
-    # ── Task 10 ─────────────────────────────────────────────────────────
-
-    def test_mood_regressor_weights_survive_bundle_round_trip(self):
-        """Plant a known regressor, export, wipe DB, import. Re-read the
-        regressor and assert byte identity on the weights BLOB + equality
-        on bias + n_samples. mood_regressors lives in library.db so the
-        existing sqlite-snapshot path carries it — but this test catches
-        any future schema change that silently breaks the round-trip."""
-        w_original = np.array(
-            [0.11, -0.22, 0.33, -0.44, 0.55, -0.66, 0.77, -0.88],
-            dtype=np.float32,
-        )
-        b_original = 0.42
-        n_original = 17
-        _run(self.db.save_mood_regressor(
-            "chill", mr.pack_weights(w_original), b_original, n_original,
-            tg.FEATURES_VERSION,
-        ))
-
-        bundle = self._export()
-
-        # Wipe the DB so the import really has to restore it.
-        _run(self.db.close())
-        os.remove(self.db_path)
-        # Pre-initialise an empty DB so import overwrites a real schema.
-        self.db = DatabaseManager(self.db_path)
-        _run(self.db.initialize())
-        _run(self.db.close())
-
-        state_export.import_state(
-            zip_path=bundle,
-            db_path=self.db_path,
-            config_path=self.config_path,
-            search_history_path=None,
-            custom_moods_path=self.custom_moods_path,
-        )
-
-        # Reopen the imported DB and read the regressor back.
-        self.db = DatabaseManager(self.db_path)
-        _run(self.db.initialize())
-        reg = _run(self.db.get_mood_regressor("chill", tg.FEATURES_VERSION))
-        self.assertIsNotNone(reg, "Regressor row vanished across bundle round-trip.")
-        weights_blob, bias, n_samples = reg
-        w_restored = mr.unpack_weights(weights_blob)
-        np.testing.assert_array_equal(w_restored, w_original,
-                                      err_msg="Weights BLOB mutated.")
-        self.assertAlmostEqual(bias, b_original, places=5)
-        self.assertEqual(n_samples, n_original)
-
     def test_bundle_version_mismatch_rejected(self):
         """A v1 (or any non-current) bundle must be refused with a clear
         error. We bumped BUNDLE_VERSION 1 → 2 in task 9."""
@@ -197,28 +143,6 @@ class TestBundleRoundTrip(unittest.TestCase):
         # Reopen for tearDown.
         self.db = DatabaseManager(self.db_path)
         _run(self.db.initialize())
-
-    # ── Task 11 (added below in the implementation) ─────────────────────
-
-    def test_manifest_includes_regressor_summary(self):
-        """The bundle manifest must carry a per-mood n_samples summary so
-        the import dialog can preview what's being shipped without parsing
-        the SQLite blob."""
-        w = np.zeros(mr.MOOD_REGRESSOR_DIM, dtype=np.float32)
-        _run(self.db.save_mood_regressor(
-            "energetic", mr.pack_weights(w), 0.0, 42, tg.FEATURES_VERSION,
-        ))
-        _run(self.db.save_mood_regressor(
-            "intense", mr.pack_weights(w), 0.0, 7, tg.FEATURES_VERSION,
-        ))
-
-        bundle = self._export()
-        manifest = state_export.inspect_bundle(bundle)
-        self.assertIn("mood_regressors", manifest,
-                      "Manifest must carry a mood_regressors block.")
-        self.assertEqual(manifest["mood_regressors"].get("energetic"), 42)
-        self.assertEqual(manifest["mood_regressors"].get("intense"), 7)
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -46,6 +46,8 @@ class DatabaseManager:
             # CREATE TABLE IF NOT EXISTS is idempotent; safe on existing databases.
             await self._migrate_playlists(self._conn)
             await self._migrate_partitions(self._conn)
+            await self._migrate_pca(self._conn)
+            await self._migrate_taste_model(self._conn)
         return self._conn
 
     async def get_total_tracks(self) -> int:
@@ -125,7 +127,8 @@ class DatabaseManager:
                         last_played INTEGER,
                         bpm         REAL DEFAULT 0,
                         energy      REAL DEFAULT 0,
-                        brightness  REAL DEFAULT 0
+                        brightness  REAL DEFAULT 0,
+                        pca_coords  BLOB
                     )
                 ''')
 
@@ -254,24 +257,10 @@ class DatabaseManager:
                 except Exception:
                     pass  # column already exists
 
-                # Per-mood logistic regressor (phase 2 of the DSP plan).
-                # `weights` is a float32 LE BLOB of length MOOD_REGRESSOR_DIM
-                # (currently 8, matches _MOOD_FEATURES). `features_version`
-                # gates against schema drift — bulk_analyze invalidates these
-                # rows when the feature space changes so stale weights never
-                # score against the wrong vector layout. `n_samples` tracks
-                # how many like/dislike events the regressor has seen, used
-                # by the blend(prior, regressor) confidence ramp.
-                await conn.execute('''
-                    CREATE TABLE IF NOT EXISTS mood_regressors (
-                        mood              TEXT PRIMARY KEY,
-                        weights           BLOB NOT NULL,
-                        bias              REAL NOT NULL,
-                        n_samples         INTEGER NOT NULL DEFAULT 0,
-                        features_version  INTEGER NOT NULL DEFAULT 0,
-                        updated_at        REAL NOT NULL
-                    )
-                ''')
+                # Note: legacy `mood_regressors` table is no longer created on
+                # new DBs (islet membership now uses cosine + JSON blacklist).
+                # Existing user DBs may still carry the table; it is left
+                # in place harmlessly rather than dropped destructively.
 
                 await conn.commit()
             except Exception as exc:
@@ -1042,92 +1031,6 @@ class DatabaseManager:
                 logger.error(f"Failed to clear adjusted mood profiles: {e}")
                 raise
 
-    # ── Mood regressors (phase 2) ───────────────────────────────────────────
-    # Pure persistence layer; no training logic lives here. The regressor
-    # math is in utils/mood_regressor.py and called from track_graph.
-
-    async def get_mood_regressor(
-        self, mood: str, features_version: int,
-    ) -> tuple[bytes, float, int] | None:
-        """Lock-free read. Returns (weights_blob, bias, n_samples) for the
-        regressor associated with `mood`, or None if absent or the persisted
-        features_version doesn't match (stale weights against a different
-        feature layout are silently ignored — caller bootstraps fresh)."""
-        conn = await self.get_connection()
-        async with conn.execute(
-            "SELECT weights, bias, n_samples, features_version "
-            "FROM mood_regressors WHERE mood = ?",
-            (mood,),
-        ) as cursor:
-            row = await cursor.fetchone()
-        if row is None:
-            return None
-        if int(row["features_version"]) != features_version:
-            return None
-        return (bytes(row["weights"]), float(row["bias"]), int(row["n_samples"]))
-
-    async def save_mood_regressor(
-        self,
-        mood: str,
-        weights_blob: bytes,
-        bias: float,
-        n_samples: int,
-        features_version: int,
-    ) -> None:
-        """Upsert one regressor row. Caller is responsible for the BLOB
-        layout (float32 LE of length MOOD_REGRESSOR_DIM)."""
-        async with self._write_lock:
-            conn = await self.get_connection()
-            try:
-                await conn.execute(
-                    """
-                    INSERT OR REPLACE INTO mood_regressors
-                        (mood, weights, bias, n_samples,
-                         features_version, updated_at)
-                    VALUES (?, ?, ?, ?, ?, strftime('%s','now'))
-                    """,
-                    (mood, weights_blob, float(bias), int(n_samples),
-                     int(features_version)),
-                )
-                await conn.commit()
-            except Exception as e:
-                await conn.rollback()
-                logger.error(f"Failed to save mood regressor: {e}")
-                raise
-
-    async def get_all_mood_regressors(
-        self, features_version: int,
-    ) -> dict[str, tuple[bytes, float, int]]:
-        """Lock-free read of every regressor matching `features_version`.
-        Used by the bulk recalculator so it can score the whole library
-        across every mood in one DB pass."""
-        conn = await self.get_connection()
-        async with conn.execute(
-            "SELECT mood, weights, bias, n_samples FROM mood_regressors "
-            "WHERE features_version = ?",
-            (features_version,),
-        ) as cursor:
-            rows = await cursor.fetchall()
-        return {
-            r["mood"]: (bytes(r["weights"]), float(r["bias"]), int(r["n_samples"]))
-            for r in rows
-        }
-
-    async def clear_all_mood_regressors(self) -> None:
-        """Mutation: wipe all regressors. Call after bulk_analyze when
-        FEATURES_VERSION changes (the version gate would silently ignore
-        them anyway, but the row count creeps if we never sweep)."""
-        async with self._write_lock:
-            conn = await self.get_connection()
-            try:
-                await conn.execute("DELETE FROM mood_regressors")
-                await conn.commit()
-            except Exception as e:
-                await conn.rollback()
-                logger.error(f"Failed to clear mood regressors: {e}")
-                raise
-
-
     # ─── Playlist CRUD ─────────────────────────────────────────────────────────
 
     async def get_all_playlists(self, search_query: str = "", sort_mode: str = "date") -> list[dict]:
@@ -1669,29 +1572,6 @@ class DatabaseManager:
         async with conn.execute(sql, (window_seconds,)) as cursor:
             return {r[0] for r in await cursor.fetchall()}
 
-    async def listen_signal_map(self) -> dict[str, float]:
-        """Returns {path: normalised_signal} in roughly [-1, 1] computed as
-            (completed - skipped_early) / max(plays, 5)
-        Plays are denominator-floored at 5 so a single skip on a brand-new
-        track only pushes its signal to -0.2 rather than -1.0. Tracks with
-        no history are simply absent from the map (the consumer treats
-        absence as zero)."""
-        conn = await self.get_connection()
-        sql = '''
-            SELECT track_path,
-                   SUM(CASE WHEN event = 'completed'     THEN 1 ELSE 0 END) AS done,
-                   SUM(CASE WHEN event = 'skipped_early' THEN 1 ELSE 0 END) AS skip,
-                   SUM(CASE WHEN event = 'played'        THEN 1 ELSE 0 END) AS plays
-            FROM playback_history
-            GROUP BY track_path
-        '''
-        out: dict[str, float] = {}
-        async with conn.execute(sql) as cursor:
-            for r in await cursor.fetchall():
-                denom = max(int(r["plays"] or 0), 5)
-                out[r["track_path"]] = (int(r["done"] or 0) - int(r["skip"] or 0)) / float(denom)
-        return out
-
     async def get_track_full(self, path: str) -> dict | None:
         """Single-row lookup returning title/artist/album/genre and the DSP
         timbre BLOB for a path. The LEFT JOIN on play_counts means callers
@@ -1837,3 +1717,267 @@ class DatabaseManager:
                     last_played = EXCLUDED.last_played
             ''', data)
             await conn.commit()
+
+    # ─── PCA Schema Migration & Helpers ───────────────────────────────────────
+
+    async def _migrate_pca(self, conn):
+        """
+        Idempotent migration: creates the pca_space table and adds columns for
+        3D PCA coordinates to play_counts.
+        """
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS pca_space (
+                id          INTEGER PRIMARY KEY CHECK (id = 1),
+                means       BLOB NOT NULL,
+                stds        BLOB NOT NULL,
+                projection  BLOB NOT NULL,
+                eigenvalues BLOB,
+                updated_at  REAL NOT NULL
+            )
+        ''')
+        try:
+            await conn.execute("ALTER TABLE play_counts ADD COLUMN pca_coords BLOB")
+            await conn.commit()
+        except Exception:
+            pass # Column already exists
+        await conn.commit()
+
+    async def save_pca_space(self, means: np.ndarray, stds: np.ndarray, V_keep: np.ndarray, eigenvalues: np.ndarray = None):
+        """Mutation: Saves the 3D PCA projection state."""
+        means_bytes = means.astype(np.float32).tobytes()
+        stds_bytes = stds.astype(np.float32).tobytes()
+        V_bytes = V_keep.astype(np.float32).tobytes()
+        eig_bytes = eigenvalues.astype(np.float32).tobytes() if eigenvalues is not None else b""
+        
+        async with self._write_lock:
+            conn = await self.get_connection()
+            await conn.execute('''
+                INSERT OR REPLACE INTO pca_space (id, means, stds, projection, eigenvalues, updated_at)
+                VALUES (1, ?, ?, ?, ?, strftime('%s','now'))
+            ''', (means_bytes, stds_bytes, V_bytes, eig_bytes))
+            await conn.commit()
+            logger.info("PCA projection space saved to database successfully.")
+
+    async def load_pca_space(self) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+        """Lock-free read. Loads the PCA space parameters (means, stds, V_keep)."""
+        conn = await self.get_connection()
+        async with conn.execute("SELECT means, stds, projection FROM pca_space WHERE id = 1") as cursor:
+            row = await cursor.fetchone()
+            if not row:
+                return None
+            try:
+                means = np.frombuffer(row['means'], dtype=np.float32)
+                stds = np.frombuffer(row['stds'], dtype=np.float32)
+                projection = np.frombuffer(row['projection'], dtype=np.float32).reshape(8, 3)
+                return means, stds, projection
+            except Exception as e:
+                logger.error(f"Error decoding PCA space from database: {e}")
+                return None
+
+    async def update_track_pca_coords(self, track_path: str, coords: np.ndarray):
+        """Mutation: Caches the 3D PC coordinates for a track in play_counts."""
+        coords_bytes = coords.astype(np.float32).tobytes()
+        async with self._write_lock:
+            conn = await self.get_connection()
+            await conn.execute('''
+                UPDATE play_counts
+                SET pca_coords = ?
+                WHERE track_path = ?
+            ''', (coords_bytes, track_path))
+            await conn.commit()
+
+    async def update_tracks_pca_coords_batch(self, batch_data: list[tuple[str, np.ndarray]]):
+        """Mutation: Efficiently updates PCA coordinates for a batch of tracks."""
+        formatted_data = [
+            (coords.astype(np.float32).tobytes(), path)
+            for path, coords in batch_data
+        ]
+        async with self._write_lock:
+            conn = await self.get_connection()
+            await conn.executemany('''
+                UPDATE play_counts
+                SET pca_coords = ?
+                WHERE track_path = ?
+            ''', formatted_data)
+            await conn.commit()
+            logger.info(f"Batched {len(batch_data)} PCA coordinate updates in play_counts.")
+
+    async def get_tracks_pca_coords(self) -> list[dict]:
+        """Lock-free read. Returns tracks joined with metadata and their projected 3D coordinates."""
+        conn = await self.get_connection()
+        sql = '''
+            SELECT pc.track_path AS path, pc.pca_coords,
+                   t.title, t.duration,
+                   ar.name  AS artist,
+                   al.title AS album
+            FROM play_counts pc
+            LEFT JOIN tracks  t  ON t.path  = pc.track_path
+            LEFT JOIN albums  al ON al.id   = t.album_id
+            LEFT JOIN artists ar ON ar.id   = al.artist_id
+            WHERE pc.pca_coords IS NOT NULL
+        '''
+        async with conn.execute(sql) as cursor:
+            results = []
+            for r in await cursor.fetchall():
+                row_dict = dict(r)
+                try:
+                    row_dict["pca_coords"] = np.frombuffer(row_dict["pca_coords"], dtype=np.float32).tolist()
+                except Exception:
+                    row_dict["pca_coords"] = [0.0, 0.0, 0.0]
+                results.append(row_dict)
+            return results
+
+    # ─── User Taste Model (global preference regressor) ───────────────────────
+    #
+    # Single-row table holding one logistic-regression model over PC features.
+    # Trained online from like/dislike events + implicit playback signals
+    # (≥45 s OR ≥30 % duration → positive; skip > 5 s → negative). The model
+    # is consumed by walk() as a re-rank term and by tracks_by_mood as the
+    # final shaping pass over the top-K candidates.
+
+    async def _migrate_taste_model(self, conn):
+        """Idempotent migration for the single-row user_taste_model table."""
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS user_taste_model (
+                id          INTEGER PRIMARY KEY CHECK (id = 1),
+                weights     BLOB NOT NULL,
+                bias        REAL NOT NULL,
+                n_explicit  INTEGER NOT NULL DEFAULT 0,
+                n_implicit  INTEGER NOT NULL DEFAULT 0,
+                features_version INTEGER NOT NULL,
+                updated_at  REAL NOT NULL
+            )
+        ''')
+        await conn.commit()
+
+    async def get_taste_model(
+        self, features_version: int,
+    ) -> tuple[bytes, float, int, int] | None:
+        """Lock-free read. Returns (weights_blob, bias, n_explicit, n_implicit)
+        or None if absent or features_version mismatched (stale model under a
+        different PC layout is treated as missing — caller cold-starts)."""
+        conn = await self.get_connection()
+        async with conn.execute(
+            "SELECT weights, bias, n_explicit, n_implicit, features_version "
+            "FROM user_taste_model WHERE id = 1"
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None:
+            return None
+        if int(row["features_version"]) != features_version:
+            return None
+        return (
+            bytes(row["weights"]),
+            float(row["bias"]),
+            int(row["n_explicit"]),
+            int(row["n_implicit"]),
+        )
+
+    async def save_taste_model(
+        self,
+        weights_blob: bytes,
+        bias: float,
+        n_explicit: int,
+        n_implicit: int,
+        features_version: int,
+    ) -> None:
+        """Upsert the single-row taste model."""
+        async with self._write_lock:
+            conn = await self.get_connection()
+            try:
+                await conn.execute(
+                    """
+                    INSERT OR REPLACE INTO user_taste_model
+                        (id, weights, bias, n_explicit, n_implicit,
+                         features_version, updated_at)
+                    VALUES (1, ?, ?, ?, ?, ?, strftime('%s','now'))
+                    """,
+                    (weights_blob, float(bias), int(n_explicit),
+                     int(n_implicit), int(features_version)),
+                )
+                await conn.commit()
+            except Exception as e:
+                await conn.rollback()
+                logger.error(f"Failed to save taste model: {e}")
+                raise
+
+    async def clear_taste_model(self) -> None:
+        """Mutation: wipe the taste model. Called when FEATURES_VERSION moves
+        forward and the persisted weights no longer align with the PC layout."""
+        async with self._write_lock:
+            conn = await self.get_connection()
+            try:
+                await conn.execute("DELETE FROM user_taste_model")
+                await conn.commit()
+            except Exception as e:
+                await conn.rollback()
+                logger.error(f"Failed to clear taste model: {e}")
+                raise
+
+    # ─── Incremental partition helpers ────────────────────────────────────────
+    #
+    # `save_partitions` is a full-overwrite API suited to bulk recompute. UI
+    # flows (drag track into mood, remove track) need single-row mutations
+    # without trampling unrelated assignments. PRIMARY KEY on track_path
+    # enforces strict one-to-many: re-assigning a track moves it.
+
+    async def assign_track_to_mood(self, track_path: str, mood: str) -> None:
+        """Assign a track to a mood, overwriting any prior assignment."""
+        async with self._write_lock:
+            conn = await self.get_connection()
+            await conn.execute(
+                "INSERT OR REPLACE INTO track_partitions (track_path, mood, islet_id) "
+                "VALUES (?, ?, NULL)",
+                (track_path, mood),
+            )
+            await conn.commit()
+
+    async def unassign_track(self, track_path: str) -> None:
+        """Remove a track from whichever mood it's currently in."""
+        async with self._write_lock:
+            conn = await self.get_connection()
+            await conn.execute(
+                "DELETE FROM track_partitions WHERE track_path = ?",
+                (track_path,),
+            )
+            await conn.commit()
+
+    async def get_tracks_in_mood(self, mood: str) -> list[str]:
+        """Return all track paths assigned to `mood`."""
+        conn = await self.get_connection()
+        async with conn.execute(
+            "SELECT track_path FROM track_partitions WHERE mood = ?",
+            (mood,),
+        ) as cursor:
+            return [r["track_path"] for r in await cursor.fetchall()]
+
+    async def get_mood_partition_counts(self) -> dict[str, int]:
+        """Return {mood: count} across all current partition assignments."""
+        conn = await self.get_connection()
+        async with conn.execute(
+            "SELECT mood, COUNT(*) AS n FROM track_partitions "
+            "WHERE mood IS NOT NULL GROUP BY mood"
+        ) as cursor:
+            return {r["mood"]: int(r["n"]) for r in await cursor.fetchall()}
+
+    async def get_mood_partition_pca(self, mood: str) -> list[list[float]]:
+        """Return the PCA coordinates of every track assigned to `mood`.
+        Used by the centroid recompute path so it can mean-pool without
+        materialising the full track rows."""
+        conn = await self.get_connection()
+        sql = '''
+            SELECT pc.pca_coords
+            FROM track_partitions tp
+            JOIN play_counts pc ON pc.track_path = tp.track_path
+            WHERE tp.mood = ? AND pc.pca_coords IS NOT NULL
+        '''
+        coords: list[list[float]] = []
+        async with conn.execute(sql, (mood,)) as cursor:
+            for r in await cursor.fetchall():
+                try:
+                    coords.append(
+                        np.frombuffer(r["pca_coords"], dtype=np.float32).tolist()
+                    )
+                except Exception:
+                    continue
+        return coords

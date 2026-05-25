@@ -43,25 +43,6 @@ class TestPlaybackHistory(unittest.TestCase):
         recent = _run(self.db.recent_played_paths(window_seconds=-1))
         self.assertEqual(recent, set())
 
-    def test_listen_signal_balance(self):
-        # Two completions, one skip, two plays → numerator = 2 − 1 = 1,
-        # denominator = max(plays=2, 5) = 5 → signal = 0.2.
-        _run(self.db.record_playback("/m/x.flac", "played"))
-        _run(self.db.record_playback("/m/x.flac", "played"))
-        _run(self.db.record_playback("/m/x.flac", "completed"))
-        _run(self.db.record_playback("/m/x.flac", "completed"))
-        _run(self.db.record_playback("/m/x.flac", "skipped_early"))
-        signal = _run(self.db.listen_signal_map())
-        self.assertAlmostEqual(signal["/m/x.flac"], 0.2, places=5)
-
-    def test_listen_signal_floor_softens_single_skip(self):
-        # A single skip on a brand-new track yields signal −0.2, not −1.0,
-        # because the denominator is floored at 5.
-        _run(self.db.record_playback("/m/y.flac", "played"))
-        _run(self.db.record_playback("/m/y.flac", "skipped_early"))
-        signal = _run(self.db.listen_signal_map())
-        self.assertAlmostEqual(signal["/m/y.flac"], -0.2, places=5)
-
     def test_empty_path_is_noop(self):
         _run(self.db.record_playback("", "played"))
         self.assertEqual(_run(self.db.recent_played_paths(3600)), set())
