@@ -7199,7 +7199,7 @@ class NowPlayingSheet:
             on_click=lambda e: self.app.toggle_shuffle(),
         )
         self._play_similar_btn = ft.IconButton(
-            icon=ft.Icons.LINK_ROUNDED,
+            icon=ft.Icons.LINK_ROUNDED if self.app.play_similar_mode else ft.Icons.LINK_OFF_ROUNDED,
             icon_color=CYAN if self.app.play_similar_mode else DIM,
             icon_size=20,
             tooltip="Play Similar (Dynamic Recommendation Walk)",
@@ -7476,9 +7476,17 @@ class NowPlayingSheet:
             f"Play Similar: {verb}",
             icon=ft.Icons.LINK_ROUNDED if self.app.play_similar_mode else ft.Icons.LINK_OFF_ROUNDED
         )
+        # If the user just enabled the mode and the queue is at (or past) the
+        # last track, kick off a recommendation immediately so playback doesn't
+        # stop before the first dynamic replenishment fires via _on_current_path.
+        if self.app.play_similar_mode:
+            path = audio_engine.current_path
+            if path and audio_engine.current_index >= len(audio_engine.queue) - 1:
+                self.app.page.run_task(self.app._recommend_similar_async, path)
 
     def update_play_similar(self, enabled: bool):
         self._ensure_initialized()
+        self._play_similar_btn.icon       = ft.Icons.LINK_ROUNDED if enabled else ft.Icons.LINK_OFF_ROUNDED
         self._play_similar_btn.icon_color = CYAN if enabled else DIM
         
         lib = getattr(self.app, "library_view", None)
@@ -9105,6 +9113,25 @@ class StreamripFletApp:
         self._explicit_feedback_cache: dict[str, bool] = {}
         self.play_similar_mode: bool = False
 
+        # ── Session-scoped negative centroid ─────────────────────────────
+        # Transient signal that powers the "this chain went bad" guardrail
+        # on top of the global taste model. None of this is persisted —
+        # the goal is to react inside one listening session, then reset.
+        #   * _session_bad_paths: paths the user just rejected (skip/dislike).
+        #     Walk() penalises candidates whose timbre is close to any of
+        #     these, similar to the existing MMR diversity term.
+        #   * _session_last_liked_path: most recent track that earned a
+        #     positive signal in this session. Used as a fallback seed
+        #     when the trip-wire trips, so we anchor back to something
+        #     known-good instead of the bad track currently playing.
+        #   * _session_recent_outcomes: rolling label for the last few
+        #     continuation picks (True = kept/engaged, False = rejected).
+        #     Trip-wire fires when ≥2 of the last 3 went bad.
+        from collections import deque
+        self._session_bad_paths: deque[str] = deque(maxlen=10)
+        self._session_last_liked_path: str | None = None
+        self._session_recent_outcomes: deque[bool] = deque(maxlen=3)
+
     def _show_error(self, e=None):
         """Surfaces critical errors to the full-screen ErrorBoundary."""
         if hasattr(self, "error_boundary"):
@@ -9757,29 +9784,7 @@ class StreamripFletApp:
         # Play Similar dynamic queue replenishment hook
         if self.play_similar_mode and path and not getattr(self, "is_restoring_session", False):
             if audio_engine.current_index >= len(audio_engine.queue) - 1:
-                async def _recommend_similar():
-                    from utils import track_graph as tg
-                    try:
-                        walk_tracks = await tg.walk(self.db_manager, path, length=3, edge_kinds=(tg.KIND_ACOUSTIC, tg.KIND_ARTIST))
-                        if walk_tracks:
-                            queue_paths = {t["path"] for t in audio_engine.queue}
-                            next_track_path = None
-                            for wt in walk_tracks:
-                                if wt not in queue_paths:
-                                    next_track_path = wt
-                                    break
-                            
-                            if not next_track_path:
-                                next_track_path = walk_tracks[0]
-                            
-                            track_details = await self.db_manager.get_track_by_path(next_track_path)
-                            if track_details:
-                                audio_engine.queue_last(track_details)
-                                logger.info("Play Similar: Appended recommended track '%s' to queue.", next_track_path)
-                    except Exception as exc:
-                        logger.exception("Play Similar: Failed to generate dynamic recommendation: %s", exc)
-                
-                self.page.run_task(_recommend_similar)
+                self.page.run_task(self._recommend_similar_async, path)
 
         def _atomic_update():
             track  = audio_engine.current_track  or ""
@@ -9813,8 +9818,11 @@ class StreamripFletApp:
 
     async def _record_play_event_safe(self, path: str, played: float, duration: float):
         """Background-safe wrapper around tg.record_play_event so the engine's
-        sync dispatch doesn't get coupled to import-time / DB errors."""
+        sync dispatch doesn't get coupled to import-time / DB errors. Also
+        feeds the session-scoped negative centroid / trip-wire so consecutive
+        bad continuations get steered away from in the next walk."""
         from utils import track_graph as tg
+        from utils import taste_model as _tm
         try:
             await tg.record_play_event(
                 self.db_manager,
@@ -9824,6 +9832,21 @@ class StreamripFletApp:
             )
         except Exception as exc:
             logger.debug("record_play_event failed for %s: %s", path, exc)
+
+        # Session signal mirrors the same classifier the taste model uses,
+        # so "what the model considers a skip" and "what the centroid
+        # treats as bad" can't drift apart.
+        try:
+            y = _tm.classify_play_event(float(played or 0.0), float(duration or 0.0))
+        except Exception:
+            y = None
+        if y == 1:
+            self._session_last_liked_path = path
+            self._session_recent_outcomes.append(True)
+        elif y == 0:
+            if path and path not in self._session_bad_paths:
+                self._session_bad_paths.append(path)
+            self._session_recent_outcomes.append(False)
 
     def _refresh_feedback_buttons(self, path: str):
         """Sync the playback-bar like/dislike icons to whatever explicit
@@ -9894,6 +9917,14 @@ class StreamripFletApp:
             self._explicit_feedback_cache[current_path] = like
             new_state = like
 
+        # Explicit click is a stronger signal than an implicit skip — feed
+        # it straight into the session centroid / last-liked anchor.
+        if new_state is True:
+            self._session_last_liked_path = current_path
+        elif new_state is False:
+            if current_path not in self._session_bad_paths:
+                self._session_bad_paths.append(current_path)
+
         self._refresh_feedback_buttons(current_path)
 
         if not like and self.play_similar_mode:
@@ -9949,6 +9980,42 @@ class StreamripFletApp:
         except Exception:
             pass
 
+    async def _recommend_similar_async(self, path: str):
+        import os
+        from utils import track_graph as tg
+        try:
+            walk_tracks = await tg.walk(
+                self.db_manager,
+                path,
+                length=3,
+                edge_kinds=(tg.KIND_ACOUSTIC, tg.KIND_ARTIST),
+            )
+            if walk_tracks:
+                queue_paths = {t["path"] for t in audio_engine.queue}
+                next_track_path = None
+                for wt in walk_tracks:
+                    if wt not in queue_paths:
+                        next_track_path = wt
+                        break
+                
+                if not next_track_path:
+                    next_track_path = walk_tracks[0]
+                
+                row = await self.db_manager.get_track_full(next_track_path)
+                if row:
+                    track_dict = {
+                        "path":        row.get("path"),
+                        "track_title": row.get("title") or row.get("track_title") or os.path.basename(next_track_path),
+                        "artist_name": row.get("artist") or row.get("artist_name") or "Unknown Artist",
+                        "album_title": row.get("album")  or row.get("album_title")  or "Unknown Album",
+                        "duration":    row.get("duration", 0.0) or 0.0,
+                        "image_url":   row.get("image_url", "") or "",
+                    }
+                    audio_engine.queue_last(track_dict)
+                    logger.info("Play Similar: Appended recommended track '%s' to queue.", next_track_path)
+        except Exception as exc:
+            logger.exception("Play Similar: Failed to generate dynamic recommendation: %s", exc)
+
     def _on_jarvis_continue(self, _inst, _val=None):
         """Sync callback dispatched by AudioEngine when the Jarvis-controlled
         queue runs dry. Bridges into the async continuation coroutine safely."""
@@ -9973,7 +10040,23 @@ class StreamripFletApp:
         from utils import track_graph as tg
 
         # ── Seed resolution ──────────────────────────────────────────────────
-        seed_path = audio_engine.current_path
+        # Default seed is the currently-playing track. When the trip-wire
+        # fires (≥2 of the last 3 continuation picks rejected) we re-anchor
+        # to the last track that earned a positive signal this session, so
+        # restarts pull back to something known-good instead of compounding
+        # a bad chain. Falls through to current_path when there's nothing
+        # liked yet this session.
+        recent = list(self._session_recent_outcomes)
+        tripwire = len(recent) >= 2 and recent.count(False) >= 2
+        seed_path = ""
+        if tripwire and self._session_last_liked_path:
+            seed_path = self._session_last_liked_path
+            logger.info(
+                "Jarvis continuation: trip-wire fired, re-seeding from "
+                "last-liked path %s", seed_path,
+            )
+        if not seed_path:
+            seed_path = audio_engine.current_path
         if not seed_path and audio_engine.queue:
             seed_path = audio_engine.queue[-1].get("path", "")
         if not seed_path:
@@ -9989,8 +10072,32 @@ class StreamripFletApp:
             except Exception:
                 pass
         avoid.add(seed_path)
+        # Bad paths from this session are always avoided outright — the
+        # centroid penalises *similar* tracks, the avoid set blocks the
+        # exact ones.
+        for bad in self._session_bad_paths:
+            avoid.add(bad)
+
+        # ── Session negative centroid ────────────────────────────────────────
+        # Fetch embeddings for the session's rejected tracks once per
+        # continuation. Bounded by `_session_bad_paths.maxlen`, so this is
+        # ≤10 rows and a single batched query.
+        negative_embs: list = []
+        if self._session_bad_paths:
+            try:
+                blobs = await self.db_manager.get_embeddings_for_paths(
+                    list(self._session_bad_paths)
+                )
+                for blob in blobs.values():
+                    v = tg._unpack_embedding(blob)
+                    if v is not None:
+                        negative_embs.append(v)
+            except Exception as exc:
+                logger.debug("Jarvis continuation: negative emb load failed: %s", exc)
 
         # ── Acoustic graph walk ───────────────────────────────────────────────
+        # On the trip-wire path, drop taste exploration so the walk leans
+        # fully on the (now-anchored) seed plus the negative centroid.
         try:
             walk_paths = await tg.walk(
                 self.db_manager,
@@ -10001,6 +10108,8 @@ class StreamripFletApp:
                 restart_prob=0.15,
                 diversity_lambda=0.3,
                 temperature=0.08,
+                taste_explore=0.0 if tripwire else 0.05,
+                negative_embs=negative_embs or None,
             )
         except Exception as exc:
             logger.warning("Jarvis continuation: graph walk failed: %s", exc)

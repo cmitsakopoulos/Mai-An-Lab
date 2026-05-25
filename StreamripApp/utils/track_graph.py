@@ -478,6 +478,8 @@ async def walk(
     temperature: float = 0.08,
     taste_weight: float = 0.15,
     taste_explore: float = 0.05,
+    negative_embs: Optional[list[np.ndarray]] = None,
+    negative_lambda: float = 0.6,
     seed_rng: Optional[random.Random] = None,
 ) -> list[str]:
     """Personalised-PageRank-flavoured random walk over the track graph.
@@ -519,6 +521,16 @@ async def walk(
     taste_explore : ε ∈ [0, 1]. At each step, with probability ε the taste
         term is skipped for that step. Counters the filter-bubble effect
         where the walk only surfaces tracks the user already likes.
+    negative_embs : session-scoped embeddings of tracks the user just
+        rejected (skips, dislikes). Candidates close to any of these in the
+        timbre sub-space get a penalty proportional to
+        `negative_lambda * max_cos_to_negative`. Symmetric to the MMR
+        diversity term, but the centroid is "things actively disliked in
+        this session" instead of "things already played in this walk."
+        Pass `None`/empty to disable.
+    negative_lambda : weight on the per-step negative-centroid penalty.
+        Larger than `diversity_lambda` by default because a skip is a
+        stronger signal than "we've already seen something similar."
 
     Returns
     -------
@@ -560,11 +572,14 @@ async def walk(
 
     # ── MMR setup ─────────────────────────────────────────────────────────
     # Pull embeddings for the seed + any node we might reach in two hops.
-    # The visited-embedding set is what the diversity term scores against.
+    # The visited-embedding set is what the diversity term scores against;
+    # the negative-centroid term reuses the same per-candidate vectors.
+    neg_active = bool(negative_embs) and negative_lambda > 0
     diversity_active = diversity_lambda > 0
+    need_candidate_embs = diversity_active or neg_active
     seed_emb: Optional[np.ndarray] = None
     candidate_embs: dict[str, np.ndarray] = {}
-    if diversity_active:
+    if need_candidate_embs:
         emb_paths = {seed_path}
         for nbrs in horizon.values():
             for n in nbrs:
@@ -579,6 +594,14 @@ async def walk(
     visited_embs: list[np.ndarray] = []
     if seed_emb is not None:
         visited_embs.append(seed_emb)
+
+    neg_emb_arr: Optional[np.ndarray] = None
+    if neg_active:
+        cleaned = [v for v in (negative_embs or []) if v is not None]
+        if cleaned:
+            neg_emb_arr = np.asarray(cleaned, dtype=np.float32)
+        else:
+            neg_active = False
 
     # ── Taste-model setup ─────────────────────────────────────────────────
     # One DB read for the model, one (cached) library load for path→PC. The
@@ -663,14 +686,21 @@ async def walk(
         logits = np.empty(len(cands), dtype=np.float32)
         for i, c in enumerate(cands):
             eff = float(c["_eff"])
-            if diversity_active and visited_embs:
-                emb = candidate_embs.get(c["path"])
-                if emb is not None:
-                    sims = np.array(
-                        [float(np.dot(emb, v)) for v in visited_embs],
-                        dtype=np.float32,
-                    )
-                    eff -= float(diversity_lambda) * float(sims.max())
+            cand_emb: Optional[np.ndarray] = None
+            if diversity_active or neg_active:
+                cand_emb = candidate_embs.get(c["path"])
+            if diversity_active and visited_embs and cand_emb is not None:
+                sims = np.array(
+                    [float(np.dot(cand_emb, v)) for v in visited_embs],
+                    dtype=np.float32,
+                )
+                eff -= float(diversity_lambda) * float(sims.max())
+            if neg_active and neg_emb_arr is not None and cand_emb is not None:
+                # Max cosine to any session-rejected track. The candidate
+                # embedding is already L2-normalised by `_unpack_embedding`,
+                # so a plain dot product is the cosine.
+                neg_sims = neg_emb_arr @ cand_emb
+                eff -= float(negative_lambda) * float(neg_sims.max())
             if step_taste_active:
                 pc = taste_pcs.get(c["path"])
                 if pc is not None:
