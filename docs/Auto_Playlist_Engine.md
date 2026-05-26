@@ -610,3 +610,97 @@ If a track's `features_version` is current in the bundle DB, it's already filter
 * **No host-side audio files retained beyond the work directory.** No upload to remote services; everything stays on your laptop.
 * **Bundle round-trip is non-destructive**: the original `<bundle>.zip` is untouched unless `--in-place` is passed.
 * **`FEATURES_VERSION` is read from the app's `utils/dsp.py`**; the script can never write features that disagree with the on-device extractor's expected version, because they share one source of truth.
+
+---
+
+## 8. PCA Engine & Unsupervised Feature Redundancy Cleaving *(v1.1.0)*
+
+The Global SGD Taste Model (§4.6.E) operates in the 3-D Principal Component space produced by an SVD decomposition of the library's 8-dimensional scalar feature matrix. Version 1.1.0 upgrades this projection pipeline from a single-pass SVD to a fully unsupervised **double-pass architecture** that automatically detects and removes acoustically redundant features before the projection is committed.
+
+### 8.1 The Problem: Correlated Features Collapse Separation
+
+Consider `brightness` (spectral centroid) and `rolloff` (85th-percentile frequency). In most music libraries they are highly correlated — bright tracks also have high rolloff, quiet tracks also have low rolloff. When both features participate in the SVD with equal weighting, the first principal component effectively captures the same signal twice. The resulting PCA space has artificially inflated variance on the "brightness-rolloff axis" and compressed variance everywhere else. Moods that try to target energy or beat-strength end up sharing coordinate space with the brightness redundancy, reducing their separability.
+
+The cleaving step removes the less-informative member of every such correlated pair before the projection is fixed.
+
+### 8.2 Double-Pass SVD Algorithm
+
+The full pipeline is implemented in `StreamripApp/utils/pca_engine.py → calculate_pca_projection`:
+
+```text
+Input: rows  (list of track feature dicts, N tracks × 8 scalar features)
+
+STEP 1 — First-pass SVD (full 8-feature space)
+  X       ← extract_feature_vector(rows)          # N × 8
+  μ, σ    ← column mean / std of X
+  X̃       ← (X - μ) / σ                           # Z-score standardisation
+  U, S, Vᵀ ← svd(X̃, full_matrices=False)
+  λ       ← S² / (N−1)                            # eigenvalues (variance per PC)
+  Λ       ← Vᵀᵀ                                   # loadings: columns are PCs
+
+STEP 2 — Pearson correlation analysis & greedy cleaving
+  R       ← corrcoef(X̃ᵀ)                          # 8×8 Pearson correlation matrix
+  weight_i ← Σ_{pc=0}^{min(3,rank)-1} Λ[i,pc]² · λ[pc]   # variance-weighted influence
+  sort features descending by weight_i              # high-influence features checked first
+  redundant ← {}
+  for i in sorted_order:
+    for j in sorted_order[:i]:                      # compare against all higher-ranked features
+      if j ∉ redundant and |R[i,j]| ≥ 0.85:
+        mark i as redundant; break                  # remove the lower-ranked one
+
+STEP 3 — Second-pass SVD (active features only)
+  active  ← {f : f ∉ redundant}
+  X_p     ← X[:, active]
+  μ_p, σ_p ← column mean / std of X_p
+  X̃_p    ← (X_p - μ_p) / σ_p
+  U_p, S_p, Vᵀ_p ← svd(X̃_p)
+  λ_p     ← S_p² / (N−1)
+
+STEP 4 — Zero-padded 8×3 projection matrix
+  V_keep  ← zeros(8, 3)
+  for each active feature i at sequential index s:
+    V_keep[i, :] ← Vᵀ_p[:3, s]ᵀ                  # insert its PC loadings
+  # Redundant rows remain zero → zero contribution to any projection
+
+Output: μ (8), σ (8), V_keep (8×3), λ_p (8, zero-padded), kaiser_k (int)
+```
+
+**Fallback guards**:
+- If $N < 50$ or fewer than 2 active features survive cleaving, the algorithm falls back to the full first-pass projection (no cleaving). This prevents unstable correlation estimates on tiny synthetic test libraries.
+- If the SVD rank is less than 3 (only possible when $N < 8$), eigenvalue indexing is bounded to `min(3, rank)` to prevent `IndexError`.
+
+### 8.3 Correlation Threshold & Greedy Strategy
+
+The threshold $r \ge 0.85$ is the standard "strong correlation" cutoff in psychometrics and signal-processing literature (Cohen 1988). The greedy comparator is:
+
+$$\text{remove } i \iff \exists\, j < i \text{ (higher variance-weight), } j \notin \text{redundant}, \text{ and } |R_{ij}| \ge 0.85$$
+
+Iterating features in descending variance-weight order guarantees that when two features are correlated, the one contributing *less* marginal separation is removed — the more informative feature is always preserved. The loop is $O(D^2)$ in the number of scalar features ($D = 8$), so it is negligible even for large libraries.
+
+### 8.4 Mood EQ UI Integration
+
+After `optimize_pca_spacing` commits the new projection, `track_graph.get_redundant_features` is called to materialise the current redundant set into the module-level `REDUNDANT_FEATURES` cache. When the user opens the Mood EQ dialog in `main.py`:
+
+1. Sliders for features in `REDUNDANT_FEATURES` are **hidden** from the UI.
+2. Their weights are **force-set to `0.0`** in the outgoing profile vector.
+3. The dialog header shows "Most variance explained by:" based on the feature with the highest absolute loading on PC1 — dynamically recomputed from the live eigenvalue matrix.
+
+This means the EQ surface exposed to the user is always consistent with the actual separation geometry of their specific library.
+
+### 8.5 On-Device Mathematical Truth Report
+
+After every successful PCA rebuild (`optimize_pca_spacing`), the engine calls `pca_engine.plot_pca_report(rows, output_dir)` to generate four PNG figures:
+
+| File | Content |
+|---|---|
+| `covariance_heatmap_full.png` | Pearson correlation heatmap — all 8 features, lower-triangle mask |
+| `pca_scatter_full.png` | PC1 vs. PC2 biplot scatter coloured by energy; eigenvector arrows for all 8 features |
+| `covariance_heatmap_pruned.png` | Correlation heatmap of the pruned active-feature subset |
+| `pca_scatter_pruned.png` | Biplot scatter after cleaving, using the second-pass SVD loadings |
+
+Files are written to `<library_folder>/pca_report/` — the path the user has set under **Settings → Library folder** — making them immediately accessible through any file browser on the device. If no library folder is configured (abnormal; PCA requires scanned tracks), the fallback path is `APP_DIR/pca_report/`.
+
+The report function uses `matplotlib.use("Agg")` (headless, no display required on Android) and guards both `matplotlib` and `seaborn` imports with `try/except ImportError`, so the entire visualization pipeline is a graceful no-op on environments where those packages are absent. The projection and analysis pipelines are not affected.
+
+The identical figure logic also runs in the standalone desktop analysis tool `tools/pca_analysis.py`, which automatically discovers the most recent `.analysed.zip` in `tools/analyzed_states/` and produces the same four figures from the extracted `library.db`.
+

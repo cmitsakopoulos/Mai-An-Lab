@@ -56,6 +56,60 @@ android {
 // Flet's template generates a vanilla MainActivity extending FlutterActivity
 // and there's no Flet config to customize it; so we patch the file at build
 // time before Kotlin compilation. Idempotent: skips if already patched.
+// Fix duplicate libc++_shared.so files when numpy/seaborn/matplotlib are used
+// This is executed during the configuration/evaluation phase of the build.
+rootProject.subprojects { proj ->
+    if (proj.path == ':app') {
+        // 1. Task-based JNI duplicate cleanup during execution phase
+        proj.tasks.matching { it.name.startsWith('merge') && it.name.endsWith('NativeLibs') }.configureEach { task ->
+            task.doFirst {
+                println "flet_audio_service: Running pre-merge cleanup of duplicate libc++_shared.so files..."
+                try {
+                    def jniDir = new File(proj.projectDir.parentFile.parentFile, "build/flet_audio_service/intermediates/library_jni")
+                    if (jniDir.exists()) {
+                        fileTree(jniDir) {
+                            include '**/libc++_shared.so'
+                        }.each { file ->
+                            println "flet_audio_service: Deleting duplicate libc++_shared.so: ${file.absolutePath}"
+                            file.delete()
+                        }
+                    }
+                } catch (Exception e) {
+                    println "flet_audio_service: Failed to clean up duplicate libc++_shared.so: ${e.message}"
+                }
+            }
+        }
+
+        // 2. Physical file patcher as a permanent self-healing backup
+        try {
+            def buildFile = file("${proj.projectDir}/build.gradle.kts")
+            if (buildFile.exists()) {
+                def content = buildFile.text
+                if (!content.contains('pickFirsts.add("lib/arm64-v8a/libc++_shared.so")')) {
+                    // Clean up any old partial patch first
+                    if (content.contains('pickFirsts.add("**/libc++_shared.so")')) {
+                        content = content.replace('            pickFirsts.add("**/libc++_shared.so")\n', '')
+                        content = content.replace('            pickFirsts.add("**/libc++_shared.so")', '')
+                    }
+                    def target = 'useLegacyPackaging = true'
+                    def replacement = '''useLegacyPackaging = true
+            pickFirsts.add("lib/arm64-v8a/libc++_shared.so")
+            pickFirsts.add("lib/armeabi-v7a/libc++_shared.so")
+            pickFirsts.add("lib/x86/libc++_shared.so")
+            pickFirsts.add("lib/x86_64/libc++_shared.so")
+            pickFirsts.add("**/libc++_shared.so")'''
+                    if (content.contains(target)) {
+                        buildFile.text = content.replace(target, replacement)
+                        println "flet_audio_service: successfully patched app/build.gradle.kts to handle libc++_shared.so"
+                    }
+                }
+            }
+        } catch (Exception e) {
+            println "flet_audio_service: failed to patch app/build.gradle.kts: ${e.message}"
+        }
+    }
+}
+
 project.gradle.projectsEvaluated {
     rootProject.allprojects.each { proj ->
         if (proj.path == ':app') {

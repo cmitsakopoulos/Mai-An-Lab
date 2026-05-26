@@ -11,6 +11,7 @@ This document covers the structural components of Mai-An Lab and the optimizatio
 | [audio_engine.py](../StreamripApp/utils/audio_engine.py) | Android player state and queue management; ExoPlayer integration. |
 | [audio_engine_macos.py](../StreamripApp/utils/audio_engine_macos.py) | macOS player state and queue management; native AVFoundation integration. |
 | [flet_audio_service](../flet_audio_service) | Python ↔ Dart ↔ Kotlin bridge for system-level media controls on Android. |
+| [pca_engine.py](../StreamripApp/utils/pca_engine.py) | Unsupervised double-pass SVD PCA: Pearson correlation cleaving, zero-padded 8×3 projection matrix, and on-device visualization report. |
 
 ---
 
@@ -40,6 +41,7 @@ The data layer is optimized for fast hierarchical browsing and prefix-based sear
 | `playlist_tracks` | Junction table for playlist membership. | `playlist_id`, `track_path`, `order_index` |
 | `play_counts` | Extended sound profile, feature space, and play history. | `track_path`, `count`, `last_played`, `bpm`, `energy`, `brightness`, `rolloff`, `beat_strength`, `spectral_flatness`, `spectral_contrast`, `key_index`, `timbre` (52D BLOB), `features_version` |
 | `track_neighbors` | Sparse adjacency table representing the $k$-NN acoustic/metadata graph. | `track_path`, `neighbor_path`, `weight`, `edge_kind` |
+| `pca_space` | Persists the active PCA projection produced by the double-pass SVD engine. | `id` (always 1), `means` (8×float32 BLOB), `stds` (8×float32 BLOB), `projection` (8×3 float32 BLOB), `eigenvalues` (8×float32 BLOB) |
 
 > [!NOTE]
 > **Sound Profile BLOB Layout (v3)**; The high-dimensional feature profile is packed as a single 52-float, little-endian binary BLOB inside the `play_counts.timbre` column (208 bytes total) to keep database size minimal and query speeds fast. The BLOB contains the 20D MFCC Mean, 20D MFCC First-Order Derivative (Delta Mean), and 12D Chroma Pitch Profile. A `features_version` column acts as a schema version, letting the engine dynamically invalidate and re-analyze features if extraction logic evolves.

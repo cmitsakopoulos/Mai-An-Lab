@@ -3103,10 +3103,14 @@ class LibraryView:
                 padding=ft.Padding.only(bottom=4),
             )
 
+        # Get redundant features from track_graph
+        redundant_features = getattr(tg, "REDUNDANT_FEATURES", set())
+        active_features = [f for f in raw_features if f not in redundant_features]
+
         rows = []
         if header_controls:
             rows.extend(header_controls)
-        rows.extend([_make_row(f) for f in raw_features])
+        rows.extend([_make_row(f) for f in active_features])
 
         dlg = ft.AlertDialog(
             title=ft.Text(f"{label_value or canonical.capitalize()} Quartile Optimization", color=TEXT),
@@ -3125,9 +3129,12 @@ class LibraryView:
             self.page.update()
 
         def _on_apply(_e):
-            weights_to_save = {
-                f: float(sliders[f].value) for f in raw_features
-            }
+            weights_to_save = {}
+            for f in raw_features:
+                if f in redundant_features:
+                    weights_to_save[f] = 0.0
+                else:
+                    weights_to_save[f] = float(sliders[f].value)
             
             _close()
             self.page.run_task(self._apply_mood_eq, canonical, weights_to_save)
@@ -6335,13 +6342,22 @@ class SettingsView:
             ft.Container(
                 content=ft.Column([
                     ft.Text("Mai An Lab", size=28, weight=ft.FontWeight.W_900, color=CYAN),
-                    ft.Text("Version 1.0.0", color=DIM, size=14),
+                    ft.Text("Version 1.1.0", color=DIM, size=14),
                 ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=4),
                 alignment=ft.Alignment(0, 0),
                 padding=ft.Padding.only(bottom=20),
             ),
             ft.Text("Summary", weight=ft.FontWeight.BOLD, color=TEXT),
             ft.Text("A deployment friendly restructure of Streamrip (Qobuz only), packaged with Flet alongside custom Flutter (audio engine) extensions.", color=DIM, size=12),
+            ft.Divider(color=BORDER, height=30),
+            ft.Text("What's New in 1.1.0", weight=ft.FontWeight.BOLD, color=TEXT),
+            ft.Column([
+                ft.Text("• Unsupervised PCA engine with automatic double-pass SVD and Pearson correlation cleaving of redundant acoustic features", color=DIM, size=12),
+                ft.Text("• Mood EQ sliders dynamically hide zero-weight features detected as redundant by the PCA engine", color=DIM, size=12),
+                ft.Text("• On-device mathematical truth report: heatmap and biplot scatter PNGs written to your library folder after each PCA rebuild", color=DIM, size=12),
+                ft.Text("• Play Similar now replaces the current song (consistent behaviour between Jarvis and the playback pane)", color=DIM, size=12),
+                ft.Text("• PCA analysis script automatically locates the most recent analyzed state zip in tools/analyzed_states", color=DIM, size=12),
+            ], spacing=4),
             ft.Divider(color=BORDER, height=30),
             ft.Text("Developer", weight=ft.FontWeight.BOLD, color=TEXT),
             ft.Text("Christophoros Mitsakopoulos", color=DIM, size=13),
@@ -7495,12 +7511,14 @@ class NowPlayingSheet:
 
     # ── state sync ──────────────────────────────────────────────────────────
     def update_meta(self, title: str, artist: str, album: str):
+        self._ensure_initialized()
         self._title.value  = title  or "Unknown"
         self._artist.value = artist or "Unknown"
         self._album.value  = album  or "Unknown"
         self._subtitle_text.value = f"{self._artist.value}  ·  {self._album.value}"
 
     def update_artwork(self, src: str):
+        self._ensure_initialized()
         if src:
             self._artwork.src        = src
             self._artwork.src_base64 = ""
@@ -7510,11 +7528,13 @@ class NowPlayingSheet:
             self._artwork.visible    = False
 
     def update_state(self, is_playing: bool):
+        self._ensure_initialized()
         self._play_btn.icon = ft.Icons.PAUSE if is_playing else ft.Icons.PLAY_ARROW
         if self._play_btn.page:
             self._play_btn.update()
 
     def update_progress(self, position: float, duration: float):
+        self._ensure_initialized()
         if self.app.is_scrubbing:
             return
         pct = (position / duration * 100) if duration > 0 else 0
@@ -7522,12 +7542,15 @@ class NowPlayingSheet:
         self._time_cur.value = fmt_time(position)
 
     def update_duration(self, duration: float):
+        self._ensure_initialized()
         self._time_tot.value = fmt_time(duration)
 
     def update_shuffle(self, is_shuffle: bool):
+        self._ensure_initialized()
         self._shuffle_btn.icon_color = CYAN if is_shuffle else DIM
 
     def update_repeat(self, mode: str):
+        self._ensure_initialized()
         self._repeat_btn.icon_color = CYAN if mode != "none" else DIM
         self._repeat_btn.icon = ft.Icons.REPEAT_ONE if mode == "one" else ft.Icons.REPEAT
 
@@ -7553,8 +7576,8 @@ class NowPlayingSheet:
         if self.app.play_similar_mode:
             path = audio_engine.current_path
             audio_engine.play_similar_seed_path = path or ""
-            if path and audio_engine.current_index >= len(audio_engine.queue) - 1:
-                self.app.page.run_task(self.app._recommend_similar_async, path)
+            if path:
+                self.app.page.run_task(self.app._initiate_play_similar_queue_async, path)
 
     def update_play_similar(self, enabled: bool):
         self._ensure_initialized()
@@ -9365,6 +9388,12 @@ class StreamripFletApp:
         # wire ft.Audio into the page
         audio_engine.setup(self.page)
 
+        # Restore saved shuffle and repeat preferences
+        audio_engine.is_shuffle = bool(self._prefs.get("is_shuffle", False))
+        audio_engine.repeat_mode = self._prefs.get("repeat_mode", "none")
+        self.now_playing.update_shuffle(audio_engine.is_shuffle)
+        self.now_playing.update_repeat(audio_engine.repeat_mode)
+
         # bind audio engine events
         audio_engine.bind(
             current_path=self._on_current_path,
@@ -9874,8 +9903,10 @@ class StreamripFletApp:
             if audio_engine.queue and audio_engine.current_index < len(audio_engine.queue):
                 img_url = audio_engine.queue[audio_engine.current_index].get("image_url", "")
             
-            self.mini_player.update_artwork(img_url)
-            self.now_playing.update_artwork(img_url)
+            # Use cached local artwork if available, avoiding redundant background extraction
+            art_val = audio_engine.current_art or img_url
+            self.mini_player.update_artwork(art_val)
+            self.now_playing.update_artwork(art_val)
 
             # Highlight the currently-playing row in both views
             self.search_view.refresh_now_playing()
@@ -9883,7 +9914,7 @@ class StreamripFletApp:
 
             if isinstance(img_url, str) and img_url.startswith("http"):
                 self._fetch_artwork_url_async(img_url)
-            elif track and path:
+            elif not audio_engine.current_art and track and path:
                 self._extract_artwork_async(path)
 
         self.safe_update(_atomic_update)
@@ -10051,6 +10082,48 @@ class StreamripFletApp:
             )
         except Exception:
             pass
+
+    async def _initiate_play_similar_queue_async(self, path: str):
+        import os
+        from utils import track_graph as tg
+        try:
+            avoid = {path}
+            for bad in self._session_bad_paths:
+                avoid.add(bad)
+            try:
+                recent = await self.db_manager.recent_played_paths(window_seconds=7 * 86400)
+                avoid.update(recent)
+            except Exception:
+                pass
+
+            walk_paths = await tg.walk(
+                self.db_manager,
+                path,
+                length=12,
+                edge_kinds=(tg.KIND_ACOUSTIC, tg.KIND_ARTIST),
+                teleport_path=path,
+                avoid=avoid,
+            )
+            if walk_paths:
+                engine_tracks = []
+                for p in walk_paths:
+                    row = await self.db_manager.get_track_full(p)
+                    if not row:
+                        continue
+                    engine_tracks.append({
+                        "path":        row.get("path"),
+                        "track_title": row.get("title") or row.get("track_title") or os.path.basename(p),
+                        "artist_name": row.get("artist") or row.get("artist_name") or "Unknown Artist",
+                        "album_title": row.get("album")  or row.get("album_title")  or "Unknown Album",
+                        "duration":    row.get("duration", 0.0) or 0.0,
+                        "image_url":   row.get("image_url", "") or "",
+                    })
+                if engine_tracks:
+                    audio_engine.jarvis_controlled = False
+                    audio_engine.set_queue(engine_tracks, start_index=0)
+                    logger.info("Play Similar: Successfully rebuilt queue with %d similar tracks.", len(engine_tracks))
+        except Exception as exc:
+            logger.exception("Play Similar: Failed to initiate similar queue: %s", exc)
 
     async def _recommend_similar_async(self, path: str):
         import os
@@ -10625,6 +10698,17 @@ class StreamripFletApp:
         # Yield to event loop to keep UI responsive
         await asyncio.sleep(0)
 
+        # Skip ahead to target track if it already exists in the queue, rather than rebuilding it
+        if audio_engine.queue:
+            existing_idx = -1
+            for i, t in enumerate(audio_engine.queue):
+                if t.get("path") == target_path:
+                    existing_idx = i
+                    break
+            if existing_idx != -1:
+                audio_engine.play_track_at(existing_idx)
+                return
+
         db = self.db_manager
 
         # ── Resolve the candidate item list based on tap context ──────────
@@ -10687,6 +10771,7 @@ class StreamripFletApp:
     def toggle_shuffle(self):
         audio_engine.is_shuffle = not audio_engine.is_shuffle
         self.now_playing.update_shuffle(audio_engine.is_shuffle)
+        self._save_pref("is_shuffle", audio_engine.is_shuffle)
         self.page.update()
 
     def cycle_repeat(self):
@@ -10694,6 +10779,7 @@ class StreamripFletApp:
         mode  = modes[(modes.index(audio_engine.repeat_mode) + 1) % 3]
         audio_engine.repeat_mode = mode
         self.now_playing.update_repeat(mode)
+        self._save_pref("repeat_mode", mode)
         self.page.update()
 
     # ── download queue UI relay ───────────────────────────────────────────────
