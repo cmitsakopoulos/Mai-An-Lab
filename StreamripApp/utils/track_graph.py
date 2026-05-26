@@ -943,6 +943,69 @@ MOOD_KEYWORDS: tuple[str, ...] = tuple(MOOD_PROFILES.keys())
 # continuous binary mode (1.0 for major, 0.0 for minor) from key_index.
 _MOOD_FEATURES = ("PC1", "PC2", "PC3")
 
+# Module-level dynamically populated set of redundant features.
+# Populated automatically by correlation coefficient analysis on-the-fly.
+REDUNDANT_FEATURES: set[str] = set()
+
+def get_redundant_features(rows, projection, eigenvalues, threshold=0.85) -> set[str]:
+    if len(rows) < 50 or projection is None or eigenvalues is None:
+        return set()
+        
+    raw_features = ["bpm", "brightness", "energy", "rolloff", "beat_strength", "spectral_flatness", "spectral_contrast", "key_mode"]
+    N = len(rows)
+    D = len(raw_features)
+    
+    # 1. Build the data matrix X
+    X = np.zeros((N, D), dtype=np.float32)
+    for idx, r in enumerate(rows):
+        feat_vec = []
+        for f in raw_features:
+            if f == "key_mode":
+                ki = r.get("key_index", 0) or 0
+                val = 1.0 if ki < 12 else 0.0
+            else:
+                val = float(r.get(f, 0) or 0)
+            feat_vec.append(val)
+        X[idx, :] = feat_vec
+        
+    # 2. Compute Pearson correlation coefficient matrix
+    stds = np.std(X, axis=0)
+    stds[stds == 0] = 1.0
+    X_norm = (X - np.mean(X, axis=0)) / stds
+    corr_matrix = np.dot(X_norm.T, X_norm) / (N - 1)
+    
+    # 3. Calculate explained variance weights
+    overall_weights = []
+    for feat_idx, feat in enumerate(raw_features):
+        weight = float(
+            (projection[feat_idx, 0] ** 2) * eigenvalues[0] +
+            (projection[feat_idx, 1] ** 2) * eigenvalues[1] +
+            (projection[feat_idx, 2] ** 2) * eigenvalues[2]
+        )
+        overall_weights.append((feat, feat_idx, weight))
+        
+    # Sort descending by explained variance weight
+    sorted_features = sorted(overall_weights, key=lambda x: x[2], reverse=True)
+    
+    redundant = set()
+    # 4. Check correlations sequentially
+    for i in range(len(sorted_features)):
+        feat_i, idx_i, weight_i = sorted_features[i]
+        # Check if it correlates with any feature that has higher explained variance and is not redundant
+        for j in range(i):
+            feat_j, idx_j, weight_j = sorted_features[j]
+            if feat_j in redundant:
+                continue
+            r = abs(corr_matrix[idx_i, idx_j])
+            if r >= threshold:
+                redundant.add(feat_i)
+                logger.warning(
+                    "Dynamic Redundancy: Feature '%s' is highly correlated with '%s' (r=%.2f). Pruning '%s' (variance weight=%.4f < %.4f).",
+                    feat_i, feat_j, r, feat_i, weight_i, weight_j
+                )
+                break
+                
+    return redundant
 
 # Cache for the projected PCA matrix to avoid database calls and SVD projections on every query.
 _PERCENTILE_CACHE: dict[tuple, tuple] = {}
@@ -961,6 +1024,10 @@ async def optimize_pca_spacing(db_manager, features_version: int):
     means, stds, V_keep, eigenvalues, kaiser_k = calculate_pca_projection(rows)
     await db_manager.save_pca_space(means, stds, V_keep, eigenvalues)
     
+    # Dynamically discover redundant features and cache them
+    global REDUNDANT_FEATURES
+    REDUNDANT_FEATURES = get_redundant_features(rows, V_keep, eigenvalues)
+    
     batch_data = []
     for r in rows:
         z = project_track(r, means, stds, V_keep)
@@ -969,6 +1036,37 @@ async def optimize_pca_spacing(db_manager, features_version: int):
     await db_manager.update_tracks_pca_coords_batch(batch_data)
     _PERCENTILE_CACHE.clear()
     logger.info(f"PCA library spacing optimized successfully (Kaiser count={kaiser_k}).")
+
+    # ── Generate on-device mathematical truth report ──────────────────────────
+    try:
+        from utils.pca_engine import plot_pca_report
+        from utils.streamrip_api import load_config
+
+        cfg = load_config()
+        library_folder = (cfg.get("downloads") or {}).get("folder") or ""
+        library_folder = str(library_folder).strip()
+
+        if library_folder and os.path.isdir(library_folder):
+            report_dir = os.path.join(library_folder, "pca_report")
+        else:
+            # User hasn't set a library path yet — shouldn't normally happen
+            # since PCA requires scanned tracks, but guard gracefully.
+            logger.warning(
+                "optimize_pca_spacing: downloads.folder not set or missing; "
+                "writing PCA report to APP_DIR fallback."
+            )
+            report_dir = os.path.join(APP_DIR, "pca_report")
+
+        saved = plot_pca_report(rows, report_dir)
+        if saved:
+            logger.info(
+                "PCA visual report written to: %s  (%d figures: %s)",
+                report_dir,
+                len(saved),
+                ", ".join(os.path.basename(p) for p in saved),
+            )
+    except Exception as _plot_err:
+        logger.warning("PCA visual report skipped: %s", _plot_err)
 
 
 async def _load_percentile_matrix(
@@ -993,12 +1091,26 @@ async def _load_percentile_matrix(
         await optimize_pca_spacing(db_manager, features_version)
         pca_space = await db_manager.load_pca_space()
         
+    eigenvalues = None
     if pca_space is not None:
-        means, stds, V_keep = pca_space
+        if len(pca_space) == 4:
+            means, stds, V_keep, eigenvalues = pca_space
+        else:
+            means, stds, V_keep = pca_space
     else:
         means = np.zeros(8, dtype=np.float32)
         stds = np.ones(8, dtype=np.float32)
         V_keep = np.eye(8, 3, dtype=np.float32)
+        
+    # Dynamically discover redundant features and cache them
+    global REDUNDANT_FEATURES
+    if eigenvalues is not None:
+        REDUNDANT_FEATURES = get_redundant_features(rows, V_keep, eigenvalues)
+    else:
+        # Fallback if eigenvalues aren't saved yet: retrieve them by running projection calculation on the fly
+        from utils.pca_engine import calculate_pca_projection
+        _, _, _, calc_eigenvalues, _ = calculate_pca_projection(rows)
+        REDUNDANT_FEATURES = get_redundant_features(rows, V_keep, calc_eigenvalues)
         
     matrix = np.zeros((len(rows), 3), dtype=np.float32)
     coords_rows = await db_manager.get_tracks_pca_coords()
@@ -1124,6 +1236,9 @@ async def recompute_mood_centroid(
         
     new_profile = {}
     for f in raw_features:
+        if f in REDUNDANT_FEATURES:
+            new_profile[f] = (0.0, 0.0)
+            continue
         active_pcts = [track_ranks[f].get(p, 0.5) for p in assigned_paths if p in track_ranks[f]]
         if active_pcts:
             avg_pct = np.mean(active_pcts)
@@ -1341,6 +1456,8 @@ def score_tracks_for_repartition(
             dist_sq_sum = 0.0
             active_count = 0
             for f in raw_features:
+                if f in REDUNDANT_FEATURES:
+                    continue
                 target, weight = profile.get(f, (0.0, 0.0))
                 if weight > 0.0 and target > 0.0:
                     pct = track_ranks[f].get(path, 0.5)
@@ -1440,6 +1557,8 @@ async def tracks_by_mood(
         dist_sq_sum = 0.0
         active_count = 0
         for f in raw_features:
+            if f in REDUNDANT_FEATURES:
+                continue
             target, weight = stored.get(f, (0.0, 0.0))
             if weight > 0.0 and target > 0.0:
                 pct = track_ranks[f].get(path, 0.5)

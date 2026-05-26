@@ -232,6 +232,26 @@ class AudioEngine:
         except Exception:
             return p
 
+    def _get_artwork_path(self, track: dict) -> str:
+        art = track.get("artwork_path") or track.get("_resolved_artwork_path") or ""
+        if not art:
+            path = track.get("path") or ""
+            if path:
+                folder = os.path.dirname(path)
+                if not hasattr(self, "_folder_artwork_cache"):
+                    self._folder_artwork_cache = {}
+                if folder in self._folder_artwork_cache:
+                    art = self._folder_artwork_cache[folder]
+                else:
+                    for name in ("cover.jpg", "folder.jpg", "cover.png", "front.jpg"):
+                        p = os.path.join(folder, name)
+                        if os.path.exists(p):
+                            art = p
+                            break
+                    self._folder_artwork_cache[folder] = art
+                track["_resolved_artwork_path"] = art
+        return art
+
     def _track_to_playlist_item(self, track: dict) -> dict | None:
         """Convert a queue track dict into the payload set_playlist expects.
         Returns None if the track has no playable source."""
@@ -240,14 +260,7 @@ class AudioEngine:
             return None
         title = track.get("track_title") or os.path.basename(path) or "Unknown"
         artist = track.get("artist_name", "Unknown Artist")
-        art = track.get("artwork_path") or ""
-        if not art and path:
-            folder = os.path.dirname(path)
-            for name in ("cover.jpg", "folder.jpg", "cover.png", "front.jpg"):
-                p = os.path.join(folder, name)
-                if os.path.exists(p):
-                    art = p
-                    break
+        art = self._get_artwork_path(track)
         return {
             "src": self._to_uri(path),
             "title": title,
@@ -356,11 +369,20 @@ class AudioEngine:
             self._set("is_playing", False)
 
         if processing_state == "completed":
-            # Dart handles auto-advance via ConcatenatingAudioSource; we just
-            # reflect end-of-queue state here.
-            self._set("is_playing", False)
-            if getattr(self, "jarvis_controlled", False):
-                self.dispatch("on_jarvis_continue")
+            # Auto-loop back to the first song if repeat_mode is "all"
+            if self.repeat_mode == "all" and self.queue:
+                target_idx = 0
+                if self._is_shuffle and getattr(self, "_shuffle_order", None) and len(self._shuffle_order) > 0:
+                    target_idx = self._shuffle_order[0]
+                self.current_index = target_idx
+                self._sync_metadata_for_current()
+                if self._page:
+                    self._arm_queue_gate()
+                    self._page.run_task(self._push_queue_native, target_idx, True)
+            else:
+                self._set("is_playing", False)
+                if getattr(self, "jarvis_controlled", False):
+                    self.dispatch("on_jarvis_continue")
         elif processing_state == "ready":
             self._is_loaded = True
             # Apply any seek that was queued before the source finished
@@ -386,19 +408,12 @@ class AudioEngine:
         title = (track.get("track_title") or os.path.basename(path)) if path else "Unknown"
         self._set("position", 0.0)
         self._set("duration", 0.0)
+        art = self._get_artwork_path(track)
+        self._set("current_art", art)
         self._set("current_artist", track.get("artist_name", "Unknown Artist"))
         self._set("current_album",  track.get("album_title",  "Unknown Album"))
         self._set("current_track",  title)
         self._set("current_path",   path)
-        art = track.get("artwork_path") or ""
-        if not art and path:
-            folder = os.path.dirname(path)
-            for name in ("cover.jpg", "folder.jpg", "cover.png", "front.jpg"):
-                p = os.path.join(folder, name)
-                if os.path.exists(p):
-                    art = p
-                    break
-        self._set("current_art", art)
 
     def _on_position_change(self, e):
         # Dart already throttles position emits (see flet_audio_service.dart);
@@ -744,9 +759,11 @@ class AudioEngine:
             return
         removed_active = (index == self.current_index)
         native_index = index
+        curr_shuf_idx = -1
         if self._is_shuffle and getattr(self, "_shuffle_order", None):
             try:
                 native_index = self._shuffle_order.index(index)
+                curr_shuf_idx = native_index
             except ValueError:
                 native_index = index
             self._on_track_removed_from_shuffle(index)
@@ -758,7 +775,12 @@ class AudioEngine:
         if index < self.current_index:
             self.current_index -= 1
         elif removed_active:
-            self.current_index = min(self.current_index, len(self.queue) - 1)
+            if self._is_shuffle and getattr(self, "_shuffle_order", None) and len(self._shuffle_order) > 0:
+                shuf_pos = min(curr_shuf_idx, len(self._shuffle_order) - 1) if curr_shuf_idx != -1 else 0
+                self.current_index = self._shuffle_order[shuf_pos]
+            else:
+                self.current_index = min(self.current_index, len(self.queue) - 1)
+            self._sync_metadata_for_current()
         self.dispatch("on_queue_mutated")
         if self._page:
             self._arm_queue_gate()
@@ -843,8 +865,8 @@ class AudioEngine:
                       duration: float = 0.0):
         if not tracks or not self._page:
             return
-        # Condense to 25 items
-        self.queue = tracks[:25]
+        # Restore all items (caching avoids UI blocking)
+        self.queue = tracks
         self.current_index = min(max(0, index), len(self.queue) - 1)
         if self._is_shuffle:
             indices = list(range(len(self.queue)))

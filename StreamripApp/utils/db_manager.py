@@ -1758,10 +1758,10 @@ class DatabaseManager:
             await conn.commit()
             logger.info("PCA projection space saved to database successfully.")
 
-    async def load_pca_space(self) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
-        """Lock-free read. Loads the PCA space parameters (means, stds, V_keep)."""
+    async def load_pca_space(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray | None] | None:
+        """Lock-free read. Loads the PCA space parameters (means, stds, V_keep, eigenvalues)."""
         conn = await self.get_connection()
-        async with conn.execute("SELECT means, stds, projection FROM pca_space WHERE id = 1") as cursor:
+        async with conn.execute("SELECT means, stds, projection, eigenvalues FROM pca_space WHERE id = 1") as cursor:
             row = await cursor.fetchone()
             if not row:
                 return None
@@ -1769,7 +1769,8 @@ class DatabaseManager:
                 means = np.frombuffer(row['means'], dtype=np.float32)
                 stds = np.frombuffer(row['stds'], dtype=np.float32)
                 projection = np.frombuffer(row['projection'], dtype=np.float32).reshape(8, 3)
-                return means, stds, projection
+                eigenvalues = np.frombuffer(row['eigenvalues'], dtype=np.float32) if row['eigenvalues'] else None
+                return means, stds, projection, eigenvalues
             except Exception as e:
                 logger.error(f"Error decoding PCA space from database: {e}")
                 return None

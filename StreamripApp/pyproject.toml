@@ -1,6 +1,6 @@
 [project]
 name = "mai-an-lab"
-version = "1.0.0"
+version = "1.1.0"
 description = "High-fidelity music player and downloader built with Python and Flet."
 authors = [
     { name = "Christophoros Mitsakopoulos", email = "mitsacopoulos@gmail.com" }
@@ -16,7 +16,9 @@ dependencies = [
     "certifi",
     "numpy",
     "tinytag",
-    "flet_audio_service @ file:///Users/chrismitsacopoulos/Desktop/Mai-An-Lab/flet_audio_service"
+    "seaborn",
+    "matplotlib",
+    "flet_audio_service @ file:///C:/Users/CHMI/Downloads/Music_Local/flet_audio_service"
 ]
 
 [tool.setuptools]

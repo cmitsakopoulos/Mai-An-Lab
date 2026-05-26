@@ -194,10 +194,6 @@ class AudioEngine:
         title = (track.get("track_title") or os.path.basename(path)) if path else "Unknown"
         self._set("position", 0.0)
         self._set("duration", 0.0)
-        self._set("current_artist", track.get("artist_name", "Unknown Artist"))
-        self._set("current_album",  track.get("album_title",  "Unknown Album"))
-        self._set("current_track",  title)
-        self._set("current_path",   path)
         art = track.get("artwork_path") or ""
         if not art and path:
             folder = os.path.dirname(path)
@@ -207,6 +203,10 @@ class AudioEngine:
                     art = p
                     break
         self._set("current_art", art)
+        self._set("current_artist", track.get("artist_name", "Unknown Artist"))
+        self._set("current_album",  track.get("album_title",  "Unknown Album"))
+        self._set("current_track",  title)
+        self._set("current_path",   path)
 
         if path and os.path.exists(path):
             try:
@@ -506,7 +506,12 @@ class AudioEngine:
             if not 0 <= index < len(self.queue):
                 return
             removed_active = (index == self.current_index)
+            curr_shuf_idx = -1
             if self._is_shuffle and getattr(self, "_shuffle_order", None):
+                try:
+                    curr_shuf_idx = self._shuffle_order.index(index)
+                except ValueError:
+                    pass
                 self._on_track_removed_from_shuffle(index)
             self.queue.pop(index)
             if not self.queue:
@@ -515,7 +520,11 @@ class AudioEngine:
             if index < self.current_index:
                 self.current_index -= 1
             elif removed_active:
-                self.current_index = min(self.current_index, len(self.queue) - 1)
+                if self._is_shuffle and getattr(self, "_shuffle_order", None) and len(self._shuffle_order) > 0:
+                    shuf_pos = min(curr_shuf_idx, len(self._shuffle_order) - 1) if curr_shuf_idx != -1 else 0
+                    self.current_index = self._shuffle_order[shuf_pos]
+                else:
+                    self.current_index = min(self.current_index, len(self.queue) - 1)
                 if self._page:
                     self._page.run_task(self.play_current)
             self.dispatch("on_queue_mutated")
@@ -545,7 +554,7 @@ class AudioEngine:
         with self._lock:
             if not tracks or not self._page:
                 return
-            self.queue = tracks[:25]
+            self.queue = tracks
             self.current_index = min(max(0, index), len(self.queue) - 1)
             track = tracks[self.current_index]
             path  = track.get("path", "")

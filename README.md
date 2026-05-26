@@ -17,28 +17,67 @@ The player implements native engine fallbacks; background services and hardware 
 
 ## Interactive UI Panes
 
-### 1. Global Search & Downloader
+---
+
+### Search & Downloader
+
 Search across streaming endpoints, preview snippets, and download albums or tracks to your system directory with visual progress tracking.
 
 <p align="center">
-  <img src="assets/search_pane_walkthrough.gif" width="600" alt="Search & Download Pane Walkthrough" style="border-radius: 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); border: 1px solid rgba(255, 255, 255, 0.1);">
+  <img src="assets/search_example.gif" width="48%" alt="Search & Download Pane" style="border-radius: 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); border: 1px solid rgba(255, 255, 255, 0.1);">
 </p>
 
-### 2. Music Library, Preset Moods, & Acoustic Islets
-Browse catalogs by artist, album, or track through SQL Joins. Play music in two additional ways:
-- **Automatic Preset Moods**: Start playlists using built-in mood profiles like `chill`, `happy`, or `tonal`, which use library-relative percentile scoring to fit the sonic distribution of your specific tracks.
-- **Acoustic Islets (Custom Moods)**: Create custom moods from a single exemplar track centroid ($C = T_{\text{exemplar}}$). The player uses a 60-D $k$-NN similarity graph to select tracks matching the cosine similarity threshold ($\cos(T_i, C) \ge \theta_{\text{islet}}$) for tempo-aligned playback.
+---
+
+### Music Library & Playback Controls
+
+Browse your catalog by artist, album, or track through SQL joins. The playback pane sits alongside the library, providing full queue management, scrubbing, and volume control.
+
+> [!WARNING]
+> **Preset Moods are heavily under construction.** The built-in profiles (`chill`, `happy`, `tonal`, etc.) use library-relative percentile scoring and are functional, but the mood definitions and threshold calibration are actively being revised. Expect behaviour to change between versions.
+
+- **Automatic Preset Moods**: Start playlists using built-in mood profiles that score tracks against library-wide percentile distributions to match the sonic character of your collection.
+- **Acoustic Islets (Custom Moods)**: Create custom moods from a single exemplar track centroid ($C = T_{\text{exemplar}}$). The player walks a 60-D $k$-NN similarity graph and selects tracks satisfying the cosine similarity threshold ($\cos(T_i, C) \ge \theta_{\text{islet}}$) for tempo-aligned playback.
 
 <p align="center">
-  <img src="assets/library_pane_walkthrough.gif" width="600" alt="Music Library & Clustering Pane Walkthrough" style="border-radius: 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); border: 1px solid rgba(255, 255, 255, 0.1);">
+  <img src="assets/library_example.gif" width="48%" alt="Music Library Pane" style="border-radius: 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); border: 1px solid rgba(255, 255, 255, 0.1);">
+  &nbsp;
+  <img src="assets/playback_pane_example.gif" width="48%" alt="Playback Controls Pane" style="border-radius: 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); border: 1px solid rgba(255, 255, 255, 0.1);">
 </p>
 
-### 3. Jarvis Voice Assistant
-Use voice controls or chat, to walk similarity graphs, search tracks, manage queues, make playlists, save custom islets, and start downloads using local keyword parsing and audio ducking. Say "Hello" and see what happens (magic).
+---
+
+### Jarvis Voice Assistant
+
+Use voice controls or chat to walk similarity graphs, search tracks, manage queues, make playlists, save custom Acoustic Islets, and trigger downloads — all via local keyword parsing and audio focus ducking. Say "Hello" and see what happens.
 
 <p align="center">
-  <img src="assets/jarvis_walkthrough.gif" width="600" alt="Jarvis Voice Assistant Walkthrough" style="border-radius: 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); border: 1px solid rgba(255, 255, 255, 0.1);">
+  <img src="assets/idiot_example.gif" width="48%" alt="Jarvis Voice Assistant" style="border-radius: 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); border: 1px solid rgba(255, 255, 255, 0.1);">
 </p>
+
+---
+
+### PCA & Covariance Analysis *(v1.1.0)*
+
+After every library rebuild the PCA engine generates four diagnostic figures (written to `<library>/pca_report/`) showing the full and pruned feature spaces. These plots expose which acoustic features survive the unsupervised Pearson correlation cleaving pass ($|r| \ge 0.85$) and how the surviving dimensions separate your tracks in the orthogonal projection.
+
+**Correlation Heatmaps** — Pearson $r$ across all 8 raw features (left: full space, right: after redundant-feature pruning):
+
+<p align="center">
+  <img src="assets/covariance_heatmap_full.png" width="48%" alt="Covariance Heatmap — Full 8-Feature Space" style="border-radius: 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); border: 1px solid rgba(255, 255, 255, 0.1);">
+  &nbsp;
+  <img src="assets/covariance_heatmap_pruned.png" width="48%" alt="Covariance Heatmap — Pruned Feature Space" style="border-radius: 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); border: 1px solid rgba(255, 255, 255, 0.1);">
+</p>
+
+**PCA Biplots** — Tracks projected onto PC1/PC2; arrows are feature loading vectors coloured by energy (left: full, right: pruned after cleaving):
+
+<p align="center">
+  <img src="assets/pca_scatter_full.png" width="48%" alt="PCA Biplot — Full 8-Feature Space" style="border-radius: 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); border: 1px solid rgba(255, 255, 255, 0.1);">
+  &nbsp;
+  <img src="assets/pca_scatter_pruned.png" width="48%" alt="PCA Biplot — Pruned Feature Space" style="border-radius: 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); border: 1px solid rgba(255, 255, 255, 0.1);">
+</p>
+
+See [PCA Engine & Unsupervised Feature Cleaving](./docs/Auto_Playlist_Engine.md#8-pca-engine--unsupervised-feature-redundancy-cleaving-v110) for the double-pass SVD implementation details.
 
 ---
 
@@ -67,6 +106,7 @@ Mobile playback utilizes Flutter's modular background architecture to interface 
 > **Portability & Build Parity**; this project is a modified port of `streamrip 2.1.0`. All native C-extension compilation dependencies are removed, allowing the same Python codebase to target Android (ARM64) and macOS (Intel & Apple Silicon) with zero-configuration build compatibility. Qobuz is supported.
 
 - **Acoustic Auto-Playlists**; extracts a 52-D timbre representation combined with 8-D structural attributes to form a 60-D vector space. Features library-relative preset moods and custom Acoustic Islets integrated with a $k$-NN similarity graph solver for tempo-aligned music queues.
+- **Unsupervised PCA Engine** *(v1.1.0)*; double-pass SVD with automatic Pearson correlation cleaving prunes acoustically redundant scalar features before the 3-D projection is committed. The Mood EQ hides zero-weight features and the projection geometry adapts to each library. After every rebuild, four diagnostic PNG figures (full and pruned correlation heatmap + biplot scatter) are written to `<library>/pca_report/`.
 - **Jarvis Voice Control**; parses spoken intent with boundary-anchored patterns and voice hesitation stripping to trigger similarity walks and downloads.
 - **Glassmorphic UI**; a responsive interface leveraging Flet containers, backdrop filters, custom color palettes, and transitions.
 - **SQLite Indexing**; uses an `aiosqlite` connection with WAL journaling and a 64 MB page cache to index tracks without blocking the UI thread.
@@ -81,6 +121,7 @@ For information on the internals of Mai-An Lab, refer to the following documenta
 - [System Architecture & Database Design](./docs/Architecture.md)
 - [Jarvis Voice Assistant & Background Pipelines](./docs/Development_Reference.md#5-jarvis-voice-assistant--background-pipelines)
 - [Auto-Playlist Engine & DSP Deep-Dive](./docs/Auto_Playlist_Engine.md); includes the host-side **DSP Offload** workflow (`tools/dsp_offload.py`), which moves library-wide feature extraction off the mobile device and onto your computer over ADB.
+- [PCA Engine & Unsupervised Feature Cleaving](./docs/Auto_Playlist_Engine.md#8-pca-engine--unsupervised-feature-redundancy-cleaving-v110) *(v1.1.0)*; double-pass SVD, correlation pruning, on-device visualization report.
 - [UI Instructions: Library & Search](./docs/UI_Instructions.md)
 - [Build & Deployment Guide](#running--deployment)
 
