@@ -60,16 +60,54 @@ The **Default Moods** pane (accessible under the Default tab) organizes your lib
 
 The **Playback Pane** (including the Now Playing full-screen card and the Mini Player) contains standard Like/Dislike controls that directly train the **Stochastic Gradient Descent (SGD) Taste Model**.
 
+```mermaid
+flowchart TD
+    subgraph "Feedback Loop"
+        A["User Action<br/>(like / skip / play)"] --> B["record_explicit_feedback /<br/>record_play_event"]
+        B --> C["classify_play_event<br/>(implicit: y ∈ {0, 1, None})"]
+        C --> D["online_update (SGD step)"]
+    end
+
+    subgraph "Taste Model (taste_model.py)"
+        D --> E["Dynamic η = 0.06 / √n"]
+        D --> F["Dynamic L₂ = 1 / √n"]
+        D --> G["Weight Decay: w ← w × 0.95"]
+        E & F & G --> H["Updated w, b persisted to DB"]
+    end
+
+    subgraph "Walk Engine (track_graph.py)"
+        I["walk(seed, length=12, τ=0.08)"] --> J{"Step mod 6?"}
+        J -- "Normal" --> K["τ_step = τ × 0.75 = 0.06<br/>(cohesive)"]
+        J -- "Every 6th" --> L["τ_step = τ × 1.5 = 0.12<br/>(gentle reset)"]
+        K & L --> M["Softmax sampling over<br/>edge weight + diversity + taste"]
+    end
+
+    H -.-> M
+```
+
 ### 2.1 The Global SGD Taste Model
 Unlike mood partitions, your personal taste cuts across moods. The system deploys a single, global on-device **Logistic Regression Layer** over the 3-dimensional Principal Component projection space:
 - **Real-Time Learning**: Liking ($y=1$) or Disliking ($y=0$) a track during playback executes a single-step online SGD weight update with $L_2$ Ridge Regularization to prevent overfitting or extreme runaway weights.
 - **Sample-Weight Awareness**: The model separates explicit feedback (Likes/Dislikes) from implicit playback cues (e.g. playing a song past the skip threshold). Explicit events have a higher sample weight ($1.0$) than implicit signals ($0.5$).
 - **Cold-Start Graceful Degradation**: On a fresh install with zero feedback events, the taste model remains cold ($w=0, b=0$), resulting in a uniform $P(\text{like}) \approx 0.5$ prediction, which acts as a safe, neutral baseline.
 
-### 2.2 Play Similar & Jarvis Graph Walks
-When using the **Play Similar** feature or the **Jarvis continuous playback walk**, the personalized random walk engine leverages the active Taste Model to direct queue choices:
-- **Personalized Re-Ranking**: During a PageRank-based walk across the $k$-NN acoustic similarity graph, all candidate tracks are passed through the SGD Taste Model. The candidate logits are adjusted by adding a weighted fraction of the taste prediction: $\gamma \cdot (P(\text{like}) - 0.5)$. This heavily biases the walk to choose paths aligned with your acoustic taste.
-- **Interactive Session-Level Skips**: Disliking a song during playback immediately adds it to a temporary, high-priority session avoidance list (`_session_bad_paths`), preventing the walker from re-queuing that track or similar paths during the current listening session.
+### 2.2 Play Similar & Centralized Queue Lifecycle
+
+When using the **Play Similar** feature or the **Jarvis continuous playback walk**, the personalized random walk engine leverages the active Taste Model to direct queue choices. Play Similar has been re-architected to use a seamless, centralized state manager:
+
+- **Centralized Toggle & Instant Execution**: Activating or deactivating Play Similar immediately triggers the centralized manager (`set_play_similar_mode`), bypassing any confirmation dialogs for an instantaneous, frictionless user experience.
+- **Visual Status Borders**: When Play Similar mode is active, the album artwork in both the **Mini Player** and the full-screen **Now Playing sheet** dynamically displays a vibrant, hardware-accelerated **Cyan border outline** (`#00FFFF`). This provides an immediate, premium visual indicator that similarity-based walk recommendations are guiding the playback.
+- **Mutual Exclusivity with Shuffle**: Play Similar is strictly mutually exclusive with Shuffle mode. Activating Play Similar immediately deactivates Shuffle. Conversely, toggling Shuffle *on* will gracefully turn *off* Play Similar mode, restoring the original queue structure.
+- **Non-Destructive Queue Backup**: To ensure you never lose your active queue, enabling Play Similar immediately snapshots and stores your current playlist and track position. The 12 recommendation walk tracks are spliced seamlessly *after* the currently playing track, preserving active playback.
+- **Dynamic Continuous Replenishment**: The engine keeps the music flowing infinitely. When you transition to a new track, the system detects if the newly active track is the last item in the queue. If so, a background coroutine performs a single-step walk and appends a new sonically-similar track automatically.
+- **Symmetrical Non-Destructive Queue Restoration**: Deactivating Play Similar immediately restores your original queue back into the active playback stream. The restoration adapts dynamically to preserve continuity:
+  - *Original Track Active*: If the currently playing track belongs to your original queue, the live queue is kept up to that track, and the remaining portion of the original saved queue is spliced seamlessly back in immediately after it. Playback continues uninterrupted.
+  - *Walk Track Active*: If you are currently listening to a walk-injected track when deactivating similar mode, that track is prepended at index `0` so it can finish playing, and your entire original saved queue is appended directly behind it.
+- **Personalized Re-Ranking & Session-Level Skips**:
+  - *Taste Bias*: Walk candidate logits are adjusted by adding a weighted fraction of the taste prediction: $\gamma \cdot (P(\text{like}) - 0.5)$, biasing the walk toward your active musical taste.
+  - *Anti-Skip Avoidance*: Disliking a song during playback immediately appends it to a high-priority session avoidance list (`_session_bad_paths`), preventing the walker from re-queuing that track or similar timbres in the active listening session.
+- **Asynchronous Generation Guard**: To prevent rapid multi-taps or network latency from corrupting the queue, all async walk tasks are validated against a monotonic generation counter (`_play_similar_gen`). If the active generation changes before mutation completes, the background task bails silently.
+- **Fully Shuffle-Aware Queue Sheet**: The active queue panel (`QueueSheet`) is fully aware of both shuffle and similar states, utilizing a dynamic `position_offset` to guarantee that track listings, scroll anchors, and visual highlights remain mathematically accurate.
 
 ---
 
