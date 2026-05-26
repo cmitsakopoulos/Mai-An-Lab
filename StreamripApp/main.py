@@ -4528,6 +4528,7 @@ class LibraryView:
                 
                 # Fetch saved partitions from SQLite database to avoid expensive recalculation on startup
                 saved_partitions = await db.get_saved_partitions()
+                self._has_partitions = bool(saved_partitions)
                 self._mood_feedback_map = await db.get_mood_feedback()
                 
                 # Populate caches if not already warm. Moods come from the
@@ -4919,7 +4920,7 @@ class LibraryView:
                         self._empty_label.content.controls[2].value = "Try checking your filters or search query."
                     
                     # Update layout: if default moods sub-mode, embed the vertical dial wheel
-                    if self.partition_sub_mode == "moods" and not is_empty:
+                    if self.partition_sub_mode == "moods" and getattr(self, "_has_partitions", False) and not is_empty:
                         is_row_already_set = (
                             isinstance(self._animated_list_wrapper.content, ft.Row) and
                             len(self._animated_list_wrapper.content.controls) == 2 and
@@ -7075,7 +7076,21 @@ class MiniPlayerBar:
             border_radius=ft.BorderRadius.all(6),
             visible=False,
         )
+        self._artwork_container = ft.Container(
+            content=self._artwork,
+            width=44, height=44,
+            border_radius=6,
+            border=None,
+        )
         self._music_icon = ft.Icon(ft.Icons.MUSIC_NOTE, color=CYAN, size=24)
+        self._music_icon_container = ft.Container(
+            content=self._music_icon,
+            width=44, height=44,
+            bgcolor=SURFACE2,
+            border_radius=6,
+            alignment=ft.Alignment(0, 0),
+            border=None,
+        )
         self._progress   = ft.ProgressBar(value=0, color=CYAN, bgcolor=None, height=2)
 
         self._like_btn = ft.IconButton(
@@ -7105,14 +7120,8 @@ class MiniPlayerBar:
                                 [
                                     ft.Stack(
                                         [
-                                            ft.Container(
-                                                content=self._music_icon,
-                                                width=44, height=44,
-                                                bgcolor=SURFACE2,
-                                                border_radius=6,
-                                                alignment=ft.Alignment(0, 0),
-                                            ),
-                                            self._artwork,
+                                            self._music_icon_container,
+                                            self._artwork_container,
                                         ]
                                     ),
                                     ft.Column(
@@ -7192,14 +7201,30 @@ class MiniPlayerBar:
         else:
             self._artwork.visible    = False
 
+    def update_play_similar(self, enabled: bool):
+        self._artwork_container.border = ft.Border.all(2, CYAN) if enabled else None
+        self._music_icon_container.border = ft.Border.all(2, CYAN) if enabled else None
+        try:
+            self._artwork_container.update()
+        except (RuntimeError, AssertionError):
+            pass
+        try:
+            self._music_icon_container.update()
+        except (RuntimeError, AssertionError):
+            pass
+
     def update_state(self, is_playing: bool):
         self._play_btn.icon = ft.Icons.PAUSE if is_playing else ft.Icons.PLAY_ARROW
-        if self._play_btn.page:
+        try:
             self._play_btn.update()
+        except (RuntimeError, AssertionError):
+            pass
         
         self.container.border = ft.Border.all(1, apply_opacity(0.7, "#FFFFFF")) if is_playing else ft.Border.all(1, BORDER)
-        if self.container.page:
+        try:
             self.container.update()
+        except (RuntimeError, AssertionError):
+            pass
 
     def update_progress(self, pct: float):
         self._progress.value = pct / 100
@@ -7249,13 +7274,21 @@ class NowPlayingSheet:
             expand=True,
             content=ft.Icon(ft.Icons.ALBUM, color=CYAN, size=96),
             alignment=ft.Alignment(0, 0),
+            border=None,
+        )
+        self._artwork_container = ft.Container(
+            content=self._artwork,
+            shadow=ft.BoxShadow(blur_radius=30, color=CYAN+"33"),
+            border_radius=20,
+            border=None,
+            expand=True,
         )
         self._overlay_icon = ft.Icon(ft.Icons.PLAY_ARROW, size=64, color=TEXT, opacity=0, animate_opacity=400)
         
         self._art_stack = ft.GestureDetector(
             content=ft.Stack([
                 self._art_placeholder,
-                ft.Container(self._artwork, shadow=ft.BoxShadow(blur_radius=30, color=CYAN+"33"), expand=True),
+                self._artwork_container,
                 ft.Container(self._overlay_icon, alignment=ft.Alignment(0, 0), expand=True)
             ], expand=True),
             on_tap=self._toggle_playback,
@@ -7530,8 +7563,10 @@ class NowPlayingSheet:
     def update_state(self, is_playing: bool):
         self._ensure_initialized()
         self._play_btn.icon = ft.Icons.PAUSE if is_playing else ft.Icons.PLAY_ARROW
-        if self._play_btn.page:
+        try:
             self._play_btn.update()
+        except (RuntimeError, AssertionError):
+            pass
 
     def update_progress(self, position: float, duration: float):
         self._ensure_initialized()
@@ -7563,21 +7598,7 @@ class NowPlayingSheet:
         self.page.update()
 
     def _toggle_play_similar(self, e):
-        self.app.play_similar_mode = not self.app.play_similar_mode
-        self.update_play_similar(self.app.play_similar_mode)
-        verb = "Enabled" if self.app.play_similar_mode else "Disabled"
-        self.app.show_snackbar(
-            f"Play Similar: {verb}",
-            icon=ft.Icons.LINK_ROUNDED if self.app.play_similar_mode else ft.Icons.LINK_OFF_ROUNDED
-        )
-        # If the user just enabled the mode and the queue is at (or past) the
-        # last track, kick off a recommendation immediately so playback doesn't
-        # stop before the first dynamic replenishment fires via _on_current_path.
-        if self.app.play_similar_mode:
-            path = audio_engine.current_path
-            audio_engine.play_similar_seed_path = path or ""
-            if path:
-                self.app.page.run_task(self.app._initiate_play_similar_queue_async, path)
+        self.app.set_play_similar_mode(not self.app.play_similar_mode)
 
     def update_play_similar(self, enabled: bool):
         self._ensure_initialized()
@@ -7594,12 +7615,29 @@ class NowPlayingSheet:
         self._like_btn.visible = show_feedback
         self._dislike_btn.visible = show_feedback
         
-        if self._play_similar_btn.page:
+        self._artwork_container.border = ft.Border.all(3, CYAN) if enabled else None
+        self._art_placeholder.border   = ft.Border.all(3, CYAN) if enabled else None
+
+        try:
             self._play_similar_btn.update()
-        if self._like_btn.page:
+        except (RuntimeError, AssertionError):
+            pass
+        try:
             self._like_btn.update()
-        if self._dislike_btn.page:
+        except (RuntimeError, AssertionError):
+            pass
+        try:
             self._dislike_btn.update()
+        except (RuntimeError, AssertionError):
+            pass
+        try:
+            self._artwork_container.update()
+        except (RuntimeError, AssertionError):
+            pass
+        try:
+            self._art_placeholder.update()
+        except (RuntimeError, AssertionError):
+            pass
 
 
 # ─── Queue Sheet ───────────────────────────────────────────────────────────────
@@ -7628,6 +7666,30 @@ class QueueSheet:
             ),
             alignment=ft.Alignment(0, 0),
             expand=True,
+            visible=False,
+        )
+
+        self._status_icon = ft.Icon(ft.Icons.REPEAT_ONE_ROUNDED, color=CYAN, size=16)
+        self._status_text = ft.Text(
+            "",
+            color=CYAN,
+            size=12,
+            weight=ft.FontWeight.W_600,
+            expand=True,
+        )
+        self._status_notice = ft.Container(
+            content=ft.Row(
+                [
+                    self._status_icon,
+                    self._status_text,
+                ],
+                alignment=ft.MainAxisAlignment.CENTER,
+                spacing=8,
+            ),
+            bgcolor=apply_opacity(0.1, CYAN),
+            padding=ft.Padding.symmetric(vertical=8, horizontal=12),
+            border_radius=8,
+            margin=ft.Margin.symmetric(horizontal=12, vertical=8),
             visible=False,
         )
 
@@ -7666,6 +7728,7 @@ class QueueSheet:
                         ),
                         ft.Divider(color=BORDER),
                         self._empty_label,
+                        self._status_notice,
                         self._queue_list,
                     ],
                     spacing=0,
@@ -7706,17 +7769,22 @@ class QueueSheet:
         cur_idx    = audio_engine.current_index
         cur_artist = audio_engine.current_artist
         remaining  = max(0, len(audio_engine.queue) - cur_idx - 1)
+        is_repeat_one = (audio_engine.repeat_mode == "one")
+        is_repeat_all = (audio_engine.repeat_mode == "all")
+        is_shuffle = bool(audio_engine.is_shuffle)
+
+        is_similar = bool(getattr(self.app, "play_similar_mode", False))
 
         self._count_text.value = (
             f"{remaining} track{'s' if remaining != 1 else ''} remaining"
             if audio_engine.queue else "Nothing queued"
         )
 
-        def track_row(i: int, t: dict) -> ft.Control:
+        def track_row(i: int, t: dict, position_offset: int) -> ft.Control:
             is_active = (i == cur_idx)
             same_art  = (not is_active and bool(cur_artist)
                          and t.get("artist_name", "") == cur_artist)
-            position  = i - cur_idx  # 0 = now playing, 1+ = up next
+            position  = position_offset  # 0 = now playing, 1+ = up next
 
             accent = CYAN if is_active else (LIB_TRACK_COLOR if same_art else "transparent")
             bg     = apply_opacity(0.1, CYAN) if is_active else (
@@ -7755,10 +7823,10 @@ class QueueSheet:
                         ft.Row(
                             [
                                 ft.IconButton(icon=ft.Icons.ARROW_UPWARD, icon_color=DIM, icon_size=16,
-                                              visible=not is_active and i > cur_idx + 1,
+                                              visible=not is_active and not is_shuffle and i > cur_idx + 1,
                                               on_click=lambda e, idx=i: self._move(idx, idx - 1)),
                                 ft.IconButton(icon=ft.Icons.ARROW_DOWNWARD, icon_color=DIM, icon_size=16,
-                                              visible=not is_active,
+                                              visible=not is_active and not is_shuffle,
                                               on_click=lambda e, idx=i: self._move(idx, idx + 1)),
                                 ft.IconButton(icon=ft.Icons.REMOVE_CIRCLE_OUTLINE, icon_color="#FF4444",
                                               icon_size=16,
@@ -7776,6 +7844,7 @@ class QueueSheet:
                 border_radius=10,
                 height=60,
                 padding=ft.Padding.only(left=0, right=4, top=4, bottom=4),
+                opacity=0.4 if is_repeat_one else 1.0,
             )
 
             return AnimatedEntry(
@@ -7807,15 +7876,61 @@ class QueueSheet:
                 target_height=60,
             )
 
-        # Cap at 15 items to avoid DOM explosion and performance drops on mobile
-        upcoming = audio_engine.queue[cur_idx:]
+        shuf_order = getattr(audio_engine, "_shuffle_order", None)
+        upcoming = []
+        if is_shuffle and shuf_order and len(shuf_order) == len(audio_engine.queue):
+            try:
+                curr_shuf_idx = shuf_order.index(cur_idx)
+            except ValueError:
+                curr_shuf_idx = -1
+            
+            if curr_shuf_idx != -1:
+                shuffled_indices = shuf_order[curr_shuf_idx:]
+                for idx in shuffled_indices:
+                    upcoming.append((idx, audio_engine.queue[idx]))
+        
+        if not upcoming:
+            for idx in range(cur_idx, len(audio_engine.queue)):
+                upcoming.append((idx, audio_engine.queue[idx]))
+
         rows = [
-            track_row(cur_idx + i, t)
-            for i, t in enumerate(upcoming[:15])
+            track_row(idx, t, position_offset=pos)
+            for pos, (idx, t) in enumerate(upcoming[:15])
         ]
 
         is_empty = len(rows) == 0
         self._empty_label.visible = is_empty
+
+        if is_repeat_one:
+            self._status_icon.name = ft.Icons.REPEAT_ONE_ROUNDED
+            self._status_text.value = "Repeat Current Song is active. Normal queue progression is paused."
+            self._status_notice.visible = True
+        elif is_similar:
+            self._status_icon.name = ft.Icons.ALL_INCLUSIVE_ROUNDED
+            self._status_text.value = "Similar Tracks Walk is active. Jarvis will dynamically append acoustically matching recommendations."
+            self._status_notice.visible = True
+        elif is_shuffle and is_repeat_all:
+            self._status_icon.name = ft.Icons.SHUFFLE_ROUNDED
+            self._status_text.value = "Shuffle & Repeat Queue is active. Tracks will play in a randomized loop indefinitely."
+            self._status_notice.visible = True
+        elif is_shuffle:
+            self._status_icon.name = ft.Icons.SHUFFLE_ROUNDED
+            self._status_text.value = "Shuffle Play is active. Tracks will play in a randomized order."
+            self._status_notice.visible = True
+        elif is_repeat_all:
+            self._status_icon.name = ft.Icons.REPEAT_ROUNDED
+            self._status_text.value = "Repeat Queue is active. The queue will loop back to the beginning after the last song."
+            self._status_notice.visible = True
+        else:
+            self._status_notice.visible = False
+
+        try:
+            self._status_icon.update()
+            self._status_text.update()
+            self._status_notice.update()
+        except Exception:
+            pass
+
         # Single synchronous assignment; no async chunking.
         # Chunked async writes race with subsequent refresh() calls and corrupt
         # the Flet control tree (RangeError in Control.applyPatch on Dart side).
@@ -9207,6 +9322,7 @@ class StreamripFletApp:
         self._last_play_duration: float = 0.0
         self._explicit_feedback_cache: dict[str, bool] = {}
         self.play_similar_mode: bool = False
+        self._play_similar_gen: int = 0
 
         # ── Session-scoped negative centroid ─────────────────────────────
         # Transient signal that powers the "this chain went bad" guardrail
@@ -9388,11 +9504,14 @@ class StreamripFletApp:
         # wire ft.Audio into the page
         audio_engine.setup(self.page)
 
-        # Restore saved shuffle and repeat preferences
+        # Restore saved shuffle, repeat and similar playback preferences
         audio_engine.is_shuffle = bool(self._prefs.get("is_shuffle", False))
         audio_engine.repeat_mode = self._prefs.get("repeat_mode", "none")
+        self.play_similar_mode = bool(self._prefs.get("play_similar_mode", False))
         self.now_playing.update_shuffle(audio_engine.is_shuffle)
         self.now_playing.update_repeat(audio_engine.repeat_mode)
+        self.now_playing.update_play_similar(self.play_similar_mode)
+        self.mini_player.update_play_similar(self.play_similar_mode)
 
         # bind audio engine events
         audio_engine.bind(
@@ -9885,7 +10004,7 @@ class StreamripFletApp:
         # Play Similar dynamic queue replenishment hook
         if self.play_similar_mode and path and not getattr(self, "is_restoring_session", False):
             if audio_engine.current_index >= len(audio_engine.queue) - 1:
-                self.page.run_task(self._recommend_similar_async, path)
+                self.page.run_task(self._recommend_similar_async, path, self._play_similar_gen)
 
         def _atomic_update():
             track  = audio_engine.current_track  or ""
@@ -10083,10 +10202,14 @@ class StreamripFletApp:
         except Exception:
             pass
 
-    async def _initiate_play_similar_queue_async(self, path: str):
+    async def _initiate_play_similar_queue_async(self, path: str, gen: int = 0):
         import os
         from utils import track_graph as tg
         try:
+            # Race guard: bail if the mode was toggled while we were awaiting
+            if gen != self._play_similar_gen or not self.play_similar_mode:
+                return
+
             avoid = {path}
             for bad in self._session_bad_paths:
                 avoid.add(bad)
@@ -10104,6 +10227,11 @@ class StreamripFletApp:
                 teleport_path=path,
                 avoid=avoid,
             )
+
+            # Re-check after the await — user may have toggled off mid-walk
+            if gen != self._play_similar_gen or not self.play_similar_mode:
+                return
+
             if walk_paths:
                 engine_tracks = []
                 for p in walk_paths:
@@ -10119,16 +10247,37 @@ class StreamripFletApp:
                         "image_url":   row.get("image_url", "") or "",
                     })
                 if engine_tracks:
+                    # Final race check before mutating queue
+                    if gen != self._play_similar_gen or not self.play_similar_mode:
+                        return
+                    cur_idx = audio_engine.current_index
+                    if 0 <= cur_idx < len(audio_engine.queue):
+                        new_q = list(audio_engine.queue[:cur_idx + 1])
+                        existing_paths = {t.get("path") for t in new_q if t.get("path")}
+                        for et in engine_tracks:
+                            if et.get("path") not in existing_paths:
+                                new_q.append(et)
+                        audio_engine.queue = new_q
+                    else:
+                        audio_engine.queue = engine_tracks
+                        audio_engine.current_index = 0
+                    
                     audio_engine.jarvis_controlled = False
-                    audio_engine.set_queue(engine_tracks, start_index=0)
-                    logger.info("Play Similar: Successfully rebuilt queue with %d similar tracks.", len(engine_tracks))
+                    audio_engine.dispatch("on_queue_mutated")
+                    if hasattr(self, "queue_sheet") and self.queue_sheet and self.queue_sheet._initialized:
+                        self.queue_sheet.refresh()
+                    logger.info("Play Similar: Successfully appended %d similar tracks to the queue.", len(engine_tracks))
         except Exception as exc:
             logger.exception("Play Similar: Failed to initiate similar queue: %s", exc)
 
-    async def _recommend_similar_async(self, path: str):
+    async def _recommend_similar_async(self, path: str, gen: int = 0):
         import os
         from utils import track_graph as tg
         try:
+            # Race guard: bail if the mode was toggled while we were awaiting
+            if gen != self._play_similar_gen or not self.play_similar_mode:
+                return
+
             # Build comprehensive avoid set (currently queued + session skipped/disliked + 7-day recently played + current path)
             avoid = {t["path"] for t in audio_engine.queue if t.get("path")}
             avoid.add(path)
@@ -10150,6 +10299,11 @@ class StreamripFletApp:
                 teleport_path=teleport,
                 avoid=avoid,
             )
+
+            # Re-check after the await — user may have toggled off mid-walk
+            if gen != self._play_similar_gen or not self.play_similar_mode:
+                return
+
             if walk_tracks:
                 queue_paths = {t["path"] for t in audio_engine.queue}
                 next_track_path = None
@@ -10163,6 +10317,9 @@ class StreamripFletApp:
                 
                 row = await self.db_manager.get_track_full(next_track_path)
                 if row:
+                    # Final race check before mutating queue
+                    if gen != self._play_similar_gen or not self.play_similar_mode:
+                        return
                     track_dict = {
                         "path":        row.get("path"),
                         "track_title": row.get("title") or row.get("track_title") or os.path.basename(next_track_path),
@@ -10698,8 +10855,14 @@ class StreamripFletApp:
         # Yield to event loop to keep UI responsive
         await asyncio.sleep(0)
 
-        # Skip ahead to target track if it already exists in the queue, rather than rebuilding it
-        if audio_engine.queue:
+        # Skip ahead to target track if it already exists in the queue, rather than rebuilding it,
+        # but only if we are in the general view (not a playlist, album, or search context).
+        is_general_view = False
+        if source is None or (isinstance(source, tuple) and len(source) > 0 and source[0] == "library"):
+            if not self.library_view or not getattr(self.library_view, "search_query", None):
+                is_general_view = True
+
+        if is_general_view and audio_engine.queue:
             existing_idx = -1
             for i, t in enumerate(audio_engine.queue):
                 if t.get("path") == target_path:
@@ -10768,10 +10931,99 @@ class StreamripFletApp:
         audio_engine.jarvis_controlled = False
         audio_engine.set_queue(tracks, start_index=target_idx)
 
+    def set_play_similar_mode(self, enabled: bool):
+        if self.play_similar_mode == enabled:
+            return
+
+        # Bump the generation counter FIRST so any in-flight async tasks
+        # from the previous session see a stale gen and bail out before
+        # they mutate the queue.
+        self._play_similar_gen += 1
+        gen = self._play_similar_gen
+
+        self.play_similar_mode = enabled
+        self._save_pref("play_similar_mode", enabled)
+        
+        self.now_playing.update_play_similar(enabled)
+        self.mini_player.update_play_similar(enabled)
+        
+        verb = "Enabled" if enabled else "Disabled"
+        self.show_snackbar(
+            f"Play Similar: {verb}",
+            icon=ft.Icons.LINK_ROUNDED if enabled else ft.Icons.LINK_OFF_ROUNDED
+        )
+        
+        if enabled:
+            # 1. Mutual exclusivity: turn off shuffle
+            if audio_engine.is_shuffle:
+                audio_engine.is_shuffle = False
+                self.now_playing.update_shuffle(False)
+                self._save_pref("is_shuffle", False)
+            
+            # 2. Save original queue before modifying it
+            self.play_similar_saved_queue = list(audio_engine.queue)
+            self.play_similar_saved_index = audio_engine.current_index
+            
+            # 3. Initiate similar tracks walk starting from currently playing song
+            path = audio_engine.current_path
+            audio_engine.play_similar_seed_path = path or ""
+            if path:
+                self.page.run_task(self._initiate_play_similar_queue_async, path, gen)
+        else:
+            # 1. Clear seed path so stale replenishment hooks don't fire
+            audio_engine.play_similar_seed_path = ""
+
+            # 2. Restore original queue if saved
+            saved_q = getattr(self, "play_similar_saved_queue", None)
+            if saved_q:
+                cur_path = audio_engine.current_path
+                orig_idx = -1
+                if cur_path:
+                    for idx, t in enumerate(saved_q):
+                        if t.get("path") == cur_path:
+                            orig_idx = idx
+                            break
+                
+                if orig_idx != -1:
+                    # Current track exists in the original queue — splice:
+                    # keep the live queue up to the current track, then
+                    # append the remainder of the saved queue after it.
+                    new_q = list(audio_engine.queue[:audio_engine.current_index + 1])
+                    new_q.extend(saved_q[orig_idx + 1:])
+                    audio_engine.queue = new_q
+                    audio_engine.current_index = audio_engine.current_index  # unchanged
+                else:
+                    # Current track was injected by the walk and is not in
+                    # the saved queue. Keep playing it, but restore the
+                    # original queue behind it by inserting it at position 0.
+                    cur_track = None
+                    ci = audio_engine.current_index
+                    if 0 <= ci < len(audio_engine.queue):
+                        cur_track = audio_engine.queue[ci]
+                    if cur_track:
+                        new_q = [cur_track] + list(saved_q)
+                        audio_engine.queue = new_q
+                        audio_engine.current_index = 0
+                    else:
+                        audio_engine.queue = list(saved_q)
+                        audio_engine.current_index = getattr(self, "play_similar_saved_index", 0)
+                
+                # Clear saved queue to avoid memory leaks
+                self.play_similar_saved_queue = None
+                self.play_similar_saved_index = None
+                audio_engine.dispatch("on_queue_mutated")
+        
+        if hasattr(self, "queue_sheet") and self.queue_sheet and self.queue_sheet._initialized:
+            self.queue_sheet.refresh()
+
     def toggle_shuffle(self):
         audio_engine.is_shuffle = not audio_engine.is_shuffle
         self.now_playing.update_shuffle(audio_engine.is_shuffle)
         self._save_pref("is_shuffle", audio_engine.is_shuffle)
+        if audio_engine.is_shuffle and self.play_similar_mode:
+            self.set_play_similar_mode(False)
+        if hasattr(self, "queue_sheet") and self.queue_sheet and self.queue_sheet._initialized:
+            self.queue_sheet.refresh()
         self.page.update()
 
     def cycle_repeat(self):
@@ -10780,6 +11032,8 @@ class StreamripFletApp:
         audio_engine.repeat_mode = mode
         self.now_playing.update_repeat(mode)
         self._save_pref("repeat_mode", mode)
+        if hasattr(self, "queue_sheet") and self.queue_sheet and self.queue_sheet._initialized:
+            self.queue_sheet.refresh()
         self.page.update()
 
     # ── download queue UI relay ───────────────────────────────────────────────
@@ -10823,6 +11077,82 @@ class StreamripFletApp:
             self.show_snackbar("Failed to update metadata. Check file permissions.")
         
         await self.library_view.load_library()
+
+    def show_play_similar_dialog(self):
+        def close_dialog(e):
+            dlg.open = False
+            self.page.update()
+
+        dlg = ft.AlertDialog(
+            modal=False,
+            bgcolor="transparent",
+            content_padding=0,
+            content=ft.Container(
+                content=ft.Column(
+                    [
+                        # Pulsing/Glowing Icon container
+                        ft.Container(
+                            content=ft.Icon(
+                                ft.Icons.ALL_INCLUSIVE_ROUNDED,
+                                color=CYAN,
+                                size=44,
+                            ),
+                            alignment=ft.Alignment(0, 0),
+                            padding=18,
+                            border_radius=26,
+                            bgcolor=apply_opacity(0.1, CYAN),
+                            margin=ft.margin.only(bottom=16),
+                        ),
+                        # Title
+                        ft.Text(
+                            "Similarity Walk Active",
+                            color=TEXT,
+                            size=18,
+                            weight=ft.FontWeight.W_800,
+                            text_align=ft.TextAlign.CENTER,
+                        ),
+                        ft.Container(height=10),
+                        # Description with text wrapping enabled
+                        ft.Text(
+                            "Jarvis has initiated an acoustic similarity walk. "
+                            "We will dynamically analyze acoustic features and append recommended, "
+                            "acoustically matching tracks to keep your playback going indefinitely, sir.",
+                            color=DIM,
+                            size=13,
+                            text_align=ft.TextAlign.CENTER,
+                            max_lines=6,
+                            expand=True,
+                        ),
+                        ft.Divider(color=BORDER, height=24),
+                        # Action button
+                        ft.Container(
+                            content=ft.Button(
+                                content=ft.Text("EXCELLENT, JARVIS", weight=ft.FontWeight.BOLD, color=BG),
+                                style=ft.ButtonStyle(
+                                    bgcolor=CYAN,
+                                    color=BG,
+                                    padding=ft.Padding.symmetric(vertical=12, horizontal=24),
+                                    shape=ft.RoundedRectangleBorder(radius=18),
+                                ),
+                                on_click=close_dialog,
+                            ),
+                            alignment=ft.Alignment(0, 0),
+                        ),
+                    ],
+                    spacing=0,
+                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                    tight=True,
+                ),
+                bgcolor=SURFACE,
+                border_radius=20,
+                border=ft.Border.all(1, apply_opacity(0.25, CYAN)),
+                padding=24,
+                width=320,
+            ),
+        )
+        self.page.overlay.append(dlg)
+        dlg.open = True
+        self.page.update()
 
     def confirm_delete_track(self, path: str, title: str):
         def execute(_e):

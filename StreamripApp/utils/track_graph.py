@@ -723,7 +723,14 @@ async def walk(
         if temperature <= 0:
             chosen_idx = int(np.argmax(logits))
         else:
-            scaled = (logits - logits.max()) / float(temperature)
+            # Long-Flow, Gentle-Reset dynamic modulation:
+            # Standard steps are highly cohesive (3/4 of baseline, e.g. 0.06 when baseline is 0.08).
+            # Every 6th step is a controlled, gentle reset jump (1.5x of baseline, e.g. 0.12).
+            step_idx = len(path_seq)
+            is_reset = (step_idx + 1) % 6 == 0
+            step_temp = temperature * 1.5 if is_reset else temperature * 0.75
+
+            scaled = (logits - logits.max()) / float(step_temp)
             probs = np.exp(scaled)
             total = float(probs.sum())
             if not np.isfinite(total) or total <= 0:
@@ -1350,7 +1357,7 @@ async def record_explicit_feedback(
     w, b, ne, ni = await _load_taste_model(db_manager, features_version)
     y = 1 if like else 0
     w, b = _tm.online_update(
-        pcs, y, w, b, sample_weight=_tm.WEIGHT_EXPLICIT,
+        pcs, y, w, b, sample_weight=_tm.WEIGHT_EXPLICIT, n_samples=ne + ni,
     )
     await db_manager.save_taste_model(
         _tm.pack_weights(w), b, ne + 1, ni, features_version,
@@ -1386,7 +1393,7 @@ async def record_play_event(
         return
     w, b, ne, ni = await _load_taste_model(db_manager, features_version)
     w, b = _tm.online_update(
-        pcs, y, w, b, sample_weight=_tm.WEIGHT_IMPLICIT,
+        pcs, y, w, b, sample_weight=_tm.WEIGHT_IMPLICIT, n_samples=ne + ni,
     )
     await db_manager.save_taste_model(
         _tm.pack_weights(w), b, ne, ni + 1, features_version,

@@ -115,10 +115,10 @@ Implementation is in `StreamripApp/utils/dsp.py` (`_hpss`, `_median_filter_axis`
 
 ## 2. Graph Construction Mechanics
 
-The backend [DatabaseManager](file:///c:/Users/CHMI/Downloads/Music_Local/StreamripApp/utils/db_manager.py#L10) and [track_graph.py](file:///c:/Users/CHMI/Downloads/Music_Local/StreamripApp/utils/track_graph.py#L1) build a sparse $k$-NN database table (`track_neighbors`) split into two distinct tiers.
+The backend [DatabaseManager](file:///Users/chrismitsacopoulos/Desktop/Mai-An-Lab/StreamripApp/utils/db_manager.py) and [track_graph.py](file:///Users/chrismitsacopoulos/Desktop/Mai-An-Lab/StreamripApp/utils/track_graph.py) build a sparse $k$-NN database table (`track_neighbors`) split into two distinct tiers.
 
 ### A. The Acoustic Similarity Tier (`edge_kind = 'acoustic'`)
-To build the acoustic similarity tier, the engine loads every track that has a current-version feature BLOB and concatenates the 52-D timbre vector with 4 scalars (`bpm`, `brightness`, `energy`, `rolloff`) into a 56-D row vector per track.
+To build the acoustic similarity tier, the engine loads every track that has a current-version feature BLOB and concatenates the 52-D timbre vector with all 8 scalar descriptors (`bpm`, `brightness`, `energy`, `rolloff`, `beat_strength`, `spectral_flatness`, `spectral_contrast`, `key_mode`) into a **60-D row vector** per track.
 
 * **Standardisation (Z-Scoring)**; putting every feature on a common ruler. BPM lives in 60–200, MFCCs sit in roughly ±20, energy is in [0, 1]. Without scaling, BPM alone would dominate any Euclidean or cosine comparison simply because its raw magnitudes are an order of magnitude larger. Z-scoring centres each column on mean 0 and scales it to unit standard deviation:
   $$Z_{ij} = \frac{X_{ij} - \mu_j}{\sigma_j}$$
@@ -144,7 +144,7 @@ When acoustic data is missing or needs to be augmented, the engine falls back to
 
 ## 3. Stateful Graph Traversal (Personalised-PageRank Walker)
 
-To replace the static, blocky playlists produced by traditional clustering (MCL), the voice assistant runs a **personalised-PageRank-flavoured random walk** with four behavioural levers the legacy walker lacked: anchoring (restart), exploration (softmax temperature), diversity (MMR), and tier-aware pooling. When a user says *"play more like this"*, the walker traverses the graph from the current track's seed.
+The voice assistant runs a **personalised-PageRank-flavoured random walk** with six behavioural levers: anchoring (restart), exploration (softmax temperature), diversity (MMR), tier-aware pooling, taste-model re-ranking, and negative-centroid avoidance. When a user says *"play more like this"*, the walker traverses the graph from the current track's seed.
 
 Each step does three things: **gather candidates → score them → sample one**. The subsections below cover each of these in turn.
 
@@ -158,71 +158,102 @@ with $\mu_{\text{acoustic}} = 1.0$, $\mu_{\text{artist}} = 0.4$, $\mu_{\text{alb
 
 When the same track appears in two tiers (e.g. an acoustic neighbour that's also same-artist), the merge keeps the **maximum effective weight** so the stronger signal wins and the candidate appears exactly once in the pool.
 
-### 3.2 Score; softmax temperature with optional MMR diversity penalty
+### 3.2 Score; composite logit with four additive terms
 
-The legacy walker did `weight ** 2` and sampled proportionally; an implicit, hard-to-reason-about bias. The new code uses **softmax temperature**, the standard parameterisation for "how greedy am I being right now?":
+The per-candidate logit is a composite of four additive terms computed before the softmax:
 
-$$p_i = \frac{e^{w_i / \tau}}{\sum_j e^{w_j / \tau}}$$
+$$\text{logit}_c = \underbrace{w_c \cdot \mu_{\text{tier}}}_\text{effective edge weight} - \underbrace{\lambda_{\text{MMR}} \cdot \max_{v \in \text{visited}} \cos(e_c, e_v)}_\text{diversity penalty} - \underbrace{\lambda_{\text{neg}} \cdot \max_{r \in \text{rejected}} \cos(e_c, e_r)}_\text{negative-centroid penalty} + \underbrace{\gamma \cdot (P(\text{like} | \mathbf{x}_c) - 0.5)}_\text{taste re-rank}$$
 
-The temperature $\tau$ is the **one tunable knob** and its limits are intuitive:
+| Term | Default | Purpose |
+|---|---|---|
+| $\lambda_{\text{MMR}}$ | 0.3 | Penalises candidates close in timbre to already-visited nodes |
+| $\lambda_{\text{neg}}$ | 0.6 | Penalises candidates close in timbre to session-rejected tracks (skips/dislikes) |
+| $\gamma$ | 0.15 | Taste-model nudge; $P(\text{like})$ from the global SGD logistic regressor |
 
-* $\tau \to 0^+$ ⇒ probability mass concentrates entirely on $\arg\max_i w_i$ (fully greedy; most-similar always wins).
-* $\tau \to \infty$ ⇒ uniform over candidates (pure random discovery).
-* $\tau = 0.08$ (default for *play similar*) ⇒ heavily favours the top 1–2 candidates while still leaving a few percent for the rest; tight anchoring with the occasional surprise.
+At each step, with probability $\epsilon = 0.05$, the taste term ($\gamma$) is skipped entirely for that step. This counters the filter-bubble effect where the walk would only surface tracks the user already likes.
 
-For numerical stability the code subtracts $\max_j w_j$ before exponentiating; the resulting probabilities are mathematically identical because softmax is shift-invariant.
+### 3.3 Score; Long-Flow / Gentle-Reset softmax temperature
 
-The **MMR diversity penalty** (Maximal Marginal Relevance) is applied to the weights *before* the softmax. For each candidate $c$ we compute its maximum cosine to anything already in the walk:
+The softmax converts logits to probabilities:
 
-$$w_c \leftarrow w_c - \lambda \cdot \max_{v \in \text{visited}} \cos(\text{timbre}_c, \text{timbre}_v)$$
+$$p_i = \frac{e^{\text{logit}_i / \tau_{\text{step}}}}{\sum_j e^{\text{logit}_j / \tau_{\text{step}}}}$$
 
-with $\lambda = 0.3$ by default. Intuitively: if candidate $c$ sounds very similar to a track we already added, subtract $\lambda \times$ that similarity from its weight. The walker still prefers candidates similar to the *seed* (high raw cosine via the edge) but inside that pool it now prefers candidates that are *different from each other*. The trade-off is a small sliver of seed-similarity for noticeably more variety across repeated *play similar* calls from the same seed.
+The baseline temperature is $\tau = 0.08$, but the effective per-step temperature follows a **Long-Flow / Gentle-Reset** schedule:
 
-### 3.3 Sample; Personalised-PageRank restart
+| Step type | Formula | Effective $\tau$ | Behaviour |
+|---|---|---|---|
+| Normal (steps 1–5, 7–11, …) | $\tau_{\text{step}} = \tau \times 0.75$ | 0.06 | Near-greedy: the walk stays tightly in the acoustic neighbourhood |
+| Reset (every 6th step) | $\tau_{\text{step}} = \tau \times 1.5$ | 0.12 | Gentle exploration: compatible novelty injected without jarring leaps |
 
-Before sampling from the softmax, with probability $\alpha = 0.15$, the walker **teleports back to the seed** instead of stepping forward from `current`. This is exactly the trick Brin & Page introduced as *personalised PageRank*; the random surfer occasionally jumps to a preferred page rather than following an outlink. The stationary distribution is then:
+This prevents local-minimum traps — e.g. a slow acoustic metal ballad's low-energy features mapping it near dark trap beats would cause a near-greedy walker to get permanently stuck.
 
-$$P_{\text{stationary}}(v) = \alpha \cdot \mathbb{1}[v = \text{seed}] + (1-\alpha) \sum_u P(u) \cdot \text{transition}(u, v)$$
+For numerical stability the code subtracts $\max_j \text{logit}_j$ before exponentiating; the resulting probabilities are mathematically identical because softmax is shift-invariant.
+
+The **MMR diversity penalty** (Maximal Marginal Relevance) is the first subtractive term in the composite logit. For each candidate $c$ we compute its maximum cosine to anything already in the walk:
+
+$$\text{logit}_c \mathrel{-}= \lambda \cdot \max_{v \in \text{visited}} \cos(\text{timbre}_c, \text{timbre}_v)$$
+
+with $\lambda = 0.3$ by default. Intuitively: if candidate $c$ sounds very similar to a track we already added, subtract $\lambda \times$ that similarity from its logit. The walker still prefers candidates similar to the *seed* (high raw cosine via the edge) but inside that pool it now prefers candidates that are *different from each other*. The trade-off is a small sliver of seed-similarity for noticeably more variety across repeated *play similar* calls from the same seed.
+
+### 3.4 Sample; Personalised-PageRank restart
+
+Before sampling from the softmax, with probability $\alpha = 0.15$, the walker **teleports back to the teleport target** instead of stepping forward from `current`. The teleport target defaults to the seed but can be overridden (e.g. to anchor back to the original seed when Play Similar mode dynamically appends tracks from the current playing position). This is the *personalised PageRank* trick; the random surfer occasionally jumps to a preferred page rather than following an outlink. The stationary distribution is:
+
+$$P_{\text{stationary}}(v) = \alpha \cdot \mathbb{1}[v = \text{teleport}] + (1-\alpha) \sum_u P(u) \cdot \text{transition}(u, v)$$
 
 That $\alpha$ fraction is the **anchor**. Without it, the walker's distance from the seed grows roughly linearly with step count and you end up far afield; a "play similar" sequence ten steps in would have basically forgotten the seed. With it, the walker effectively averages over "where do I get to in $1/\alpha \approx 6.6$ steps before being yanked back?"; and the resulting playlist concentrates around the seed's true neighbourhood regardless of length.
 
-### 3.4 Persistent avoidance and batched prefetch
+### 3.5 Persistent avoidance and batched prefetch
 
 * **Persistent avoidance set**: the `avoid` set passed into `walk()` unions the assistant's in-memory recent list with the on-disk `playback_history` table (7-day window). Tracks the user heard yesterday don't reappear today, even across app restarts. See §4.3 for the table schema.
 
-* **Batched 2-hop prefetch**: the old walk did one SQL query per step. The new walk issues **one** query at the start that materialises the seed's 1-hop neighbours and then the 1-hop neighbours of every 1-hop neighbour (the 2-hop horizon). The walker then steps entirely in memory through that subgraph. Length-12 walks now cost one DB round-trip plus the small fan-out queries, instead of twelve sequential awaits.
+* **Batched 2-hop prefetch**: `walk()` issues **one** query at the start that materialises the seed's 1-hop neighbours and then the 1-hop neighbours of every 1-hop neighbour (the 2-hop horizon). The walker then steps entirely in memory through that subgraph. Length-12 walks cost one DB round-trip plus the small fan-out queries, instead of twelve sequential awaits.
 
-### 3.5 The walker in pseudocode
+### 3.6 The walker in pseudocode
 
 ```text
-fn walk(seed, length, kinds, weights, α, λ, τ, avoid):
-    horizon = prefetch_two_hop(seed, kinds)        # one SQL round-trip
-    visited = avoid ∪ {seed}
-    visited_embs = [embedding(seed)] if available else []
-    current = seed
-    output = []
+fn walk(seed, length, kinds, weights, α, λ_mmr, λ_neg, τ, γ, ε, avoid, teleport):
+    horizon       = prefetch_two_hop(seed, kinds)     # one SQL round-trip
+    visited       = avoid ∪ {seed}
+    visited_embs  = [embedding(seed)] if available else []
+    neg_embs      = [embedding(r) for r in session_rejected]
+    taste_w, taste_b = load_taste_model()             # cold → skip re-rank
+    current       = seed
+    output        = []
 
     repeat length times:
-        # 3.3: anchor
+        step = len(output)
+
+        # 3.4: anchor (Personalised-PageRank teleport)
         if uniform() < α:
-            current = seed
+            current = teleport
 
         # 3.1: gather
         candidates = horizon[current]
         candidates = merge_tiers(candidates, weights, exclude=visited)
         if candidates is empty:
-            if current ≠ seed: current = seed; continue
+            if current ≠ teleport: current = teleport; continue
             else: break
 
-        # 3.2: score
+        # 3.2: composite logit
         logits = [c.effective_weight for c in candidates]
-        if λ > 0 and visited_embs:
+        if λ_mmr > 0 and visited_embs:
             for i, c in enumerate(candidates):
-                emb = embedding(c)
-                logits[i] -= λ * max(cos(emb, v) for v in visited_embs)
+                logits[i] -= λ_mmr * max(cos(emb(c), v) for v in visited_embs)
+        if λ_neg > 0 and neg_embs:
+            for i, c in enumerate(candidates):
+                logits[i] -= λ_neg * max(cos(emb(c), r) for r in neg_embs)
+        if taste_w is not None and uniform() >= ε:     # exploration toggle
+            for i, c in enumerate(candidates):
+                logits[i] += γ * (σ(taste_w · pc(c) + taste_b) − 0.5)
 
-        # 3.2: sample
-        probs = softmax(logits / τ)
+        # 3.3: Long-Flow / Gentle-Reset temperature
+        if (step + 1) % 6 == 0:
+            τ_step = τ × 1.5                           # gentle reset
+        else:
+            τ_step = τ × 0.75                          # cohesive flow
+
+        probs  = softmax(logits / τ_step)
         chosen = sample(candidates, probs)
 
         output.append(chosen)
@@ -234,7 +265,7 @@ fn walk(seed, length, kinds, weights, α, λ, τ, avoid):
     return output
 ```
 
-The reference implementation is in `track_graph.walk()`; the function signature exposes every knob (`restart_prob`, `diversity_lambda`, `temperature`, `edge_kind_weights`, …) so future intents can re-tune the walker without touching the algorithm. A hypothetical *play discovery* intent would use $\tau = 0.2$, $\alpha = 0.05$, $\lambda = 0.5$; same code path, different point in the trade-off space.
+The reference implementation is in [track_graph.walk()](file:///Users/chrismitsacopoulos/Desktop/Mai-An-Lab/StreamripApp/utils/track_graph.py#L468); the function signature exposes every knob (`restart_prob`, `diversity_lambda`, `negative_lambda`, `temperature`, `taste_weight`, `taste_explore`, `edge_kind_weights`, `teleport_path`, …) so different intents can re-tune the walker without touching the algorithm. A hypothetical *play discovery* intent would use $\tau = 0.2$, $\alpha = 0.05$, $\lambda = 0.5$; same code path, different point in the trade-off space.
 
 ---
 
@@ -394,27 +425,50 @@ Disliking a track applies a persistent, hard exclusion constraint on the track-m
 Users can erase all manual adjustments at any time. Activating the reset option deletes all rows from the `mood_feedback` and `mood_profiles` tables, wipes the `user_taste_model` table, and invalidates the cached percentile matrix. This immediately restores all moods to their factory-default configurations and resets the online SGD taste parameters.
 
 #### E. The Global SGD Taste Model Architecture
-While Phase 1 handles coarse-grained target-profile partitions, a single **Global SGD Taste Model (Logistic Regressor)** runs on-device to capture overall listener preferences across all play sessions. 
+While Phase 1 handles coarse-grained target-profile partitions, a single **Global SGD Taste Model (Logistic Regressor)** runs on-device to capture overall listener preferences across all play sessions. The implementation lives in [taste_model.py](file:///Users/chrismitsacopoulos/Desktop/Mai-An-Lab/StreamripApp/utils/taste_model.py).
 
-The taste model operates in the low-dimensional **3-D Principal Component space** (PC1 Timbre, PC2 Tempo, PC3 Harmonic) derived from the library's SVD projection eigenvalues. It models the probability of the user liking a track as:
+The taste model operates in the low-dimensional **3-D Principal Component space** (`TASTE_MODEL_DIM = 3`) derived from the library's SVD projection eigenvalues. It models the probability of the user liking a track as:
 
 $$P(\text{like} \mid \mathbf{x}) = \sigma(\mathbf{w} \cdot \mathbf{x} + b)$$
 
-where $\mathbf{x} \in \mathbb{R}^3$ represents the projection coordinates of the track.
+where $\mathbf{x} \in \mathbb{R}^3$ represents the PCA projection coordinates of the track.
 
-1. **Online Stochastic Gradient Descent (SGD)**:
-   When a user likes ($y=1$) or dislikes ($y=0$) a track in the playback bar, the engine runs a single-step SGD update with $L_2$ Ridge Regularization to prevent runaway weight drift:
-   $$\mathbf{w} \leftarrow \mathbf{w} + \eta \cdot ((y - \sigma(\mathbf{w} \cdot \mathbf{x} + b)) \cdot \mathbf{x} - \lambda \cdot \mathbf{w})$$
-   $$b \leftarrow b + \eta \cdot (y - \sigma(\mathbf{w} \cdot \mathbf{x} + b))$$
-   *Parameters*: $\eta = 0.04$ (learning rate), $\lambda = 10^{-4}$ (regularization weight decay).
+1. **Online Stochastic Gradient Descent (SGD) with Dynamic Heuristic Scaling**:
+   When a user likes ($y=1$) or dislikes ($y=0$) a track in the playback bar, the engine runs a single-step SGD update with $L_2$ Ridge Regularization:
+   $$\mathbf{w} \leftarrow \mathbf{w} + \eta_{\text{eff}} \cdot (\alpha \cdot (y - \sigma(\mathbf{w} \cdot \mathbf{x} + b)) \cdot \mathbf{x} - \lambda_{\text{eff}} \cdot \mathbf{w})$$
+   $$\mathbf{w} \leftarrow \mathbf{w} \times 0.95 \qquad \text{(exponential weight decay)}$$
+   $$b \leftarrow b + \eta_{\text{eff}} \cdot \alpha \cdot (y - \sigma(\mathbf{w} \cdot \mathbf{x} + b))$$
+   where $\alpha$ is the sample weight (`WEIGHT_EXPLICIT = 1.0` or `WEIGHT_IMPLICIT = 0.5`).
 
-2. **Sample-Weight Awareness**:
+   Both the learning rate and regulariser scale dynamically with the total number of feedback samples $n$:
+
+   | Parameter | Cold ($n = 0$) | Warm ($n > 0$) |
+   |---|---|---|
+   | $\eta_{\text{eff}}$ | `DEFAULT_ETA = 0.06` | $0.06 / \sqrt{n}$ |
+   | $\lambda_{\text{eff}}$ | `DEFAULT_L2 = 10⁻⁴` | $1.0 / \sqrt{n}$ |
+
+   This eliminates manual hyperparameter tuning — the model self-calibrates as it collects more feedback (aggressive early learning, conservative later).
+
+2. **Exponential Weight Decay (Filter-Bubble Prevention)**:
+   After every SGD step, weights are multiplied by $0.95$. This continuously decays old preferences so the model does not permanently lock into one genre. ~50% of a preference's influence fades after ~14 updates, allowing the model to track gradual shifts in listening habits.
+
+3. **Sample-Weight Awareness**:
    Feedback samples are weighted based on their source. Explicit user clicks (Likes/Dislikes) carry maximum weight ($1.0$), while implicit listening signals (e.g. playing past the skip threshold or skipping early) carry half weight ($0.5$).
 
-3. **PageRank Walker Integration**:
-   During similarity walks, candidate logits are dynamically re-ranked using the taste model:
-   $$w_c \leftarrow w_c + \gamma \cdot \big(P(\text{like} \mid \mathbf{x}_c) - 0.5\big)$$
-   where $\gamma = 0.15$ is the taste weight. A small exploration parameter $\epsilon = 0.05$ introduces step-level randomness by occasionally skipping taste re-ranking, promoting healthy sonic discovery.
+4. **Implicit Event Classification**:
+   Raw playback telemetry is mapped to training labels by [classify_play_event](file:///Users/chrismitsacopoulos/Desktop/Mai-An-Lab/StreamripApp/utils/taste_model.py#L136):
+
+   | Condition | Label | Rationale |
+   |---|---|---|
+   | `played < 5s` | `None` (discard) | Too short — accidental tap or queue correction |
+   | `played ≥ 45s` | `1` (positive) | Absolute engagement threshold |
+   | `played / duration ≥ 30%` | `1` (positive) | Relative threshold for short tracks |
+   | Everything else | `0` (negative) | Deliberate bail |
+
+5. **PageRank Walker Integration**:
+   During similarity walks, candidate logits are dynamically re-ranked using the taste model (see §3.2):
+   $$\text{logit}_c \mathrel{+}= \gamma \cdot \big(P(\text{like} \mid \mathbf{x}_c) - 0.5\big)$$
+   where $\gamma = 0.15$ is the taste weight. A step-level exploration parameter $\epsilon = 0.05$ introduces randomness by occasionally skipping taste re-ranking, promoting healthy sonic discovery.
 
 #### F. Task-Safe Serialized updates
 Because feedback actions and random walks can execute concurrently in background tasks, multiple updates to the taste model weights can occur simultaneously. 
@@ -623,6 +677,9 @@ Consider `brightness` (spectral centroid) and `rolloff` (85th-percentile frequen
 
 The cleaving step removes the less-informative member of every such correlated pair before the projection is fixed.
 
+> [!IMPORTANT]
+> `chroma_entropy` is explicitly excluded from participating in the SVD space. Because completely different genres can share complex, broad chroma pitch spreads, including it in the SVD coordinate projection collides projections and severely degrades genre separation.
+
 ### 8.2 Double-Pass SVD Algorithm
 
 The full pipeline is implemented in `StreamripApp/utils/pca_engine.py → calculate_pca_projection`:
@@ -704,3 +761,65 @@ The report function uses `matplotlib.use("Agg")` (headless, no display required 
 
 The identical figure logic also runs in the standalone desktop analysis tool `tools/pca_analysis.py`, which automatically discovers the most recent `.analysed.zip` in `tools/analyzed_states/` and produces the same four figures from the extracted `library.db`.
 
+---
+
+## 9. Play Similar Mode — Queue Lifecycle & Race Safety
+
+To provide a seamless, non-destructive recommendation experience, Play Similar mode implements an advanced queue state machine with automated backup, restore, and asynchronous race-safety guards.
+
+### 9.1 Queue State Machine & Restoration Logic
+
+When the user activates Play Similar mode, the system preserves the existing listening session rather than clearing it. The state transition flow operates as follows:
+
+```mermaid
+stateDiagram-v2
+    [*] --> Off
+    Off --> On : Toggle Play Similar (gen++)
+    On --> Off : Deactivate / Shuffle Enabled (gen++)
+
+    state On {
+        [*] --> SaveQueue : Backup original queue & current index
+        SaveQueue --> LaunchWalk : Trigger _initiate_play_similar_queue_async
+        LaunchWalk --> Replenish : Append 12-track walk after current track
+        Replenish --> Replenish : Append next track when user reaches last track
+    }
+
+    state Off {
+        [*] --> ClearSeed : Reset play_similar_seed_path
+        ClearSeed --> RestoreQueue : Splice/Prepend backup state
+        RestoreQueue --> DispatchMutated : Notify UI & Refresh Queue Sheet
+    }
+```
+
+#### A. Enable Path (Centralized State Transition)
+1. **Shuffle Deactivation & Mutual Exclusivity**: Play Similar mode is mutually exclusive with Shuffle mode. Activating Play Similar automatically toggles Shuffle off.
+2. **Queue Snapshot & Backup**: The active queue list and the current playback index are saved into `play_similar_saved_queue` and `play_similar_saved_index` respectively.
+3. **Walk Initialization**: An asynchronous coroutine `_initiate_play_similar_queue_async(path, gen)` executes a 12-step similarity walk starting from the seed track.
+4. **Splicing Execution**: The similarity walk results are spliced into the active queue immediately *after* the currently playing track. This ensures that the user's playback is completely uninterrupted while the upcoming queue is populated with recommendation-based tracks.
+5. **Continuous Replenish Hook**: When the player transitions to a new track, the system checks if the newly active track is the last track in the queue. If it is, `_recommend_similar_async` performs a single-step walk and appends the new candidate to the end of the queue, enabling an infinite playback stream.
+
+#### B. Disable Path (Non-Destructive Restoration)
+When deactivating Play Similar mode (or when Shuffle is enabled, which automatically deactivates it), the system restores the user's original queue context:
+1. **Seed Invalidation**: The `audio_engine.play_similar_seed_path` is cleared to `""` immediately, preventing background tasks from triggering stale replenishment hooks.
+2. **Queue Recovery**: The restore operation handles two distinct scenarios based on whether the currently playing track belongs to the original queue or was dynamically injected:
+
+| Scenario | Condition | Restoration Behavior |
+|---|---|---|
+| **Original Track Active** | Current track exists in the saved queue. | **Queue Splicing**: The live queue is kept up to the current track, and the remaining portion of the saved queue is appended immediately after it. Playback is uninterrupted. |
+| **Walk-Injected Track Active** | Current track is NOT present in the saved queue. | **Queue Prepending**: The current walk-injected track is prepended at index `0` so it can finish playing, and the entire saved queue is appended directly behind it. Playback continues on the current track, and the original playlist sequence resumes once it ends. |
+
+3. **Context Cleanup**: The backup states `play_similar_saved_queue` and `play_similar_saved_index` are reset to `None`.
+4. **UI Notification**: The `on_queue_mutated` handler is dispatched, and `QueueSheet.refresh` forces a UI sync.
+
+### 9.2 Asynchronous Generation-Counter Race Guard
+
+Because similarity walks and queue updates are handled via fire-and-forget background coroutines (`run_task`), a rapid sequence of toggles could lead to race conditions where stale walk results overwrite a newly restored or modified queue.
+
+To guarantee absolute race-safety, the state manager utilizes a monotonic integer generation counter (`_play_similar_gen`):
+
+1. **Increment on Mutation**: The generation counter is incremented by 1 *before* executing any state change or queue transition in `set_play_similar_mode`.
+2. **Tri-Point Verification**: Every asynchronous playback recommendation routine (`_initiate_play_similar_queue_async` and `_recommend_similar_async`) is passed the generation token at launch and checks it at three crucial checkpoints:
+   - **On Entry**: Before any network or database I/O is performed.
+   - **Post-Await**: Immediately after the async `tg.walk()` call returns, catching any state transitions that occurred while waiting for the walk to complete.
+   - **Pre-Mutation**: Directly before writing the new candidates into the active `audio_engine.queue`.
+3. **Graceful Abort**: If the check fails at any of these points (meaning the generation has changed), the coroutine aborts silently without mutating the queue or player state.

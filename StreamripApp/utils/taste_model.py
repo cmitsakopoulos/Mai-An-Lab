@@ -28,7 +28,7 @@ TASTE_MODEL_DIM = 3
 # SGD hyperparameters. Slightly more conservative than the per-mood
 # regressor — taste drifts more slowly than mood and is used in more
 # places, so a noisy update would have wider blast radius.
-DEFAULT_ETA = 0.04
+DEFAULT_ETA = 0.06
 DEFAULT_L2 = 1e-4
 
 # Default per-sample weights. Implicit signals are noisier (a 45 s play
@@ -89,8 +89,9 @@ def online_update(
     weights: np.ndarray,
     bias: float,
     sample_weight: float = 1.0,
-    eta: float = DEFAULT_ETA,
-    l2: float = DEFAULT_L2,
+    eta: float | None = None,
+    l2: float | None = None,
+    n_samples: int = 0,
 ) -> tuple[np.ndarray, float]:
     """One weighted SGD step of logistic regression with L2 ridge.
 
@@ -103,10 +104,21 @@ def online_update(
     """
     if y not in (0, 1):
         raise ValueError(f"online_update: y must be 0 or 1, got {y!r}")
+
+    # Heuristic shortcuts: dynamically scale parameters if n_samples > 0
+    if n_samples > 0:
+        effective_eta = (DEFAULT_ETA / np.sqrt(n_samples)) if eta is None else eta
+        effective_l2 = (1.0 / np.sqrt(n_samples)) if l2 is None else l2
+    else:
+        effective_eta = DEFAULT_ETA if eta is None else eta
+        effective_l2 = DEFAULT_L2 if l2 is None else l2
+
     p = score(x, weights, bias)
     err = float(sample_weight) * (float(y) - float(p))
-    new_w = weights + eta * (err * x - l2 * weights)
-    new_b = bias + eta * err
+    new_w = weights + effective_eta * (err * x - effective_l2 * weights)
+    # Apply exponential weight decay (5% forgetting factor / decay back to center)
+    new_w = new_w * 0.95
+    new_b = bias + effective_eta * err
     return new_w.astype(np.float32), float(new_b)
 
 
