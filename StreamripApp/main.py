@@ -5595,7 +5595,7 @@ class LibraryView:
         
         def play_partition_track(_e):
             self._tracks_cache = partition_tracks
-            self._tracks_cache_key = ("tracks", self.search_query, self.sort_mode)
+            self._tracks_cache_key = ("partitions", self.search_query, self.sort_mode)
             self.page.run_task(self.app.play_track, path, ("library", None))
             
         tile.on_click = play_partition_track
@@ -6326,9 +6326,28 @@ class SettingsView:
             ft.Divider(color=BORDER, height=40),
             ft.Text("Maintenance", weight=ft.FontWeight.BOLD, color=DIM),
             ft.Row([
-                ft.TextButton("Clear Cache", icon=ft.Icons.DELETE_SWEEP, on_click=lambda _: self.app.clear_preview_cache()),
+                ft.TextButton("Album Cache", icon=ft.Icons.IMAGE_ROUNDED, on_click=lambda _: self.app.clear_album_artwork_cache()),
+                ft.TextButton("Preview Cache", icon=ft.Icons.MUSIC_NOTE_ROUNDED, on_click=lambda _: self.app.clear_preview_cache()),
+                ft.TextButton("Library Index", icon=ft.Icons.FORMAT_LIST_BULLETED_ROUNDED, on_click=lambda _: self.app.open_maintenance_confirmation(
+                    "Clear Library Index?", 
+                    "This will clear all indexed music, playlists, and metadata from the local database, leaving configuration, history, and play counts intact.\n\nYour actual music files will NOT be touched.", 
+                    "Clear Index", 
+                    self.app.clear_library_index
+                )),
+                ft.TextButton("DSP Features", icon=ft.Icons.GRAPHIC_EQ_ROUNDED, on_click=lambda _: self.app.open_maintenance_confirmation(
+                    "Clear DSP Features?", 
+                    "This will purge all extracted acoustic DSP features and PCA space definitions, forcing a full recalculation/re-scan on your next sweep.\n\nYour library index will remain intact.", 
+                    "Clear DSP", 
+                    self.app.clear_dsp_features
+                )),
+                ft.TextButton("Taste Model", icon=ft.Icons.FAVORITE_ROUNDED, on_click=lambda _: self.app.open_maintenance_confirmation(
+                    "Reset Taste Model?", 
+                    "This will reset all user preference learning parameters and weights back to zero. The taste model will start cold.\n\nThis cannot be undone.", 
+                    "Reset Model", 
+                    self.app.clear_taste_model_weights
+                )),
                 ft.TextButton("Wipe DB", icon=ft.Icons.DELETE_FOREVER, icon_color="#FF4444", on_click=lambda _: self._on_wipe_db_click()),
-            ]),
+            ], wrap=True, spacing=10),
             ft.Divider(color=BORDER, height=40),
             ft.Text("Raw Configuration (TOML)", weight=ft.FontWeight.BOLD, color=DIM),
             ft.Text("Directly edit the Streamrip TOML configuration file for advanced control.", color=DIM, size=12),
@@ -9721,6 +9740,16 @@ class StreamripFletApp:
                 self.library_view._mood_feedback_map.clear()
                 self.library_view._mood_recalc_pending = False
 
+            # Clear all queue state files
+            audio_engine.clear_queue()
+            for filename in ("queue_state.json", "queue_regular.json", "queue_shuffle.json", "queue_similar.json"):
+                q_path = os.path.join(os.environ["XDG_CACHE_HOME"] if filename != "queue_state.json" else DATA_DIR, filename)
+                try:
+                    if os.path.exists(q_path):
+                        os.remove(q_path)
+                except Exception:
+                    pass
+
             # Refresh UI
             await self.library_view.load_library()
             self.show_snackbar("Library database wiped successfully.")
@@ -10683,6 +10712,10 @@ class StreamripFletApp:
             if not queue:
                 return
 
+            # Issue A: Restore "Play Similar" saved queue and index
+            self.play_similar_saved_queue = state.get("play_similar_saved_queue", None)
+            self.play_similar_saved_index = state.get("play_similar_saved_index", None)
+
             # Bound `index` defensively; a stale snapshot may reference a
             # row that no longer exists in the persisted queue.
             index = max(0, min(int(index or 0), len(queue) - 1))
@@ -10740,6 +10773,53 @@ class StreamripFletApp:
         except Exception:
             return None
 
+    def _save_queue_to_file(self, filename: str, queue_list: list[dict], current_index: int, position: float, duration: float):
+        path = os.path.join(os.environ["XDG_CACHE_HOME"], filename)
+        if not queue_list:
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except Exception:
+                pass
+            return
+
+        state = {
+            "queue":         queue_list,
+            "current_index": current_index,
+            "position":      position,
+            "duration":      duration,
+            "play_similar_saved_queue": getattr(self, "play_similar_saved_queue", None),
+            "play_similar_saved_index": getattr(self, "play_similar_saved_index", None),
+        }
+        tmp = path + ".tmp"
+        try:
+            with open(tmp, "w") as fh:
+                safe_json_dump(state, fh)
+                fh.flush()
+                try:
+                    os.fsync(fh.fileno())
+                except OSError:
+                    pass
+            os.replace(tmp, path)
+        except Exception as exc:
+            logger.warning("Could not save context queue to %s: %s", filename, exc)
+            try:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+            except Exception:
+                pass
+
+    def _load_queue_from_file(self, filename: str) -> dict | None:
+        path = os.path.join(os.environ["XDG_CACHE_HOME"], filename)
+        if not os.path.exists(path):
+            return None
+        try:
+            with open(path) as fh:
+                return json.load(fh)
+        except Exception as exc:
+            logger.warning("Could not load context queue from %s: %s", filename, exc)
+            return None
+
     def _restore_queue_state(self):
         """Synchronous compat wrapper kept for any external callers; the
         runtime path now uses _restore_queue_state_async on the event loop
@@ -10769,6 +10849,13 @@ class StreamripFletApp:
                     os.remove(path)
             except Exception:
                 pass
+            # Also clear the specific partitioned files
+            if self.play_similar_mode:
+                self._save_queue_to_file("queue_similar.json", [], 0, 0.0, 0.0)
+            elif audio_engine.is_shuffle:
+                self._save_queue_to_file("queue_shuffle.json", [], 0, 0.0, 0.0)
+            else:
+                self._save_queue_to_file("queue_regular.json", [], 0, 0.0, 0.0)
             return
 
         state = {
@@ -10780,6 +10867,9 @@ class StreamripFletApp:
             # duration_ms. Without this the slider's max defaults to 0 and
             # any pre-load scrub computes a meaningless target.
             "duration":      audio_engine.duration,
+            # Issue A: Persist "Play Similar" saved queue and index
+            "play_similar_saved_queue": getattr(self, "play_similar_saved_queue", None),
+            "play_similar_saved_index": getattr(self, "play_similar_saved_index", None),
         }
         tmp = path + ".tmp"
         try:
@@ -10800,6 +10890,14 @@ class StreamripFletApp:
                     os.remove(tmp)
             except Exception:
                 pass
+
+        # Also mirror to context-specific queue partition in XDG_CACHE_HOME
+        if self.play_similar_mode:
+            self._save_queue_to_file("queue_similar.json", audio_engine.queue, audio_engine.current_index, audio_engine.position, audio_engine.duration)
+        elif audio_engine.is_shuffle:
+            self._save_queue_to_file("queue_shuffle.json", audio_engine.queue, audio_engine.current_index, audio_engine.position, audio_engine.duration)
+        else:
+            self._save_queue_to_file("queue_regular.json", audio_engine.queue, audio_engine.current_index, audio_engine.position, audio_engine.duration)
 
     def _schedule_queue_save(self, delay: float = 0.4):
         """Coalesce save requests over a short window. A burst of mutations
@@ -10874,6 +10972,68 @@ class StreamripFletApp:
 
         db = self.db_manager
 
+        if audio_engine.is_shuffle:
+            # Physical playback in shuffle mode shuffles from the ENTIRE library
+            all_tracks = await db.get_all_tracks()
+            library_tracks = []
+            target_item = None
+            for t in all_tracks:
+                p = t.get("path", "")
+                if p:
+                    library_tracks.append({
+                        "path":        p,
+                        "track_title": t.get("title") or os.path.basename(p),
+                        "artist_name": t.get("artist") or "Unknown",
+                        "album_title": t.get("album")  or "Unknown",
+                    })
+
+            # Find target index
+            target_idx = -1
+            for i, t in enumerate(library_tracks):
+                if t.get("path") == target_path:
+                    target_idx = i
+                    break
+
+            if target_idx == -1:
+                # clicked track is not in library (e.g. streaming search result). Resolve from active view items.
+                view_items = []
+                if source and source[0] == "album":
+                    _, arti, alb = source
+                    view_items = await db.get_tracks_by_album(alb, arti)
+                elif source and source[0] == "playlist":
+                    _, pl_id = source
+                    view_items = await db.get_tracks_in_playlist(pl_id)
+                else:
+                    lv = self.library_view
+                    want_key = (lv.view_mode, lv.search_query, lv.sort_mode)
+                    if lv._tracks_cache is not None and lv._tracks_cache_key == want_key:
+                        view_items = lv._tracks_cache
+                    else:
+                        view_items = await db.get_all_tracks(search_query=lv.search_query, sort_mode=lv.sort_mode)
+
+                for t in view_items:
+                    if t.get("path") == target_path:
+                        target_item = {
+                            "path":        target_path,
+                            "track_title": t.get("title") or os.path.basename(target_path),
+                            "artist_name": t.get("artist") or "Unknown",
+                            "album_title": t.get("album")  or "Unknown",
+                        }
+                        break
+                if not target_item:
+                    target_item = {
+                        "path":        target_path,
+                        "track_title": os.path.basename(target_path),
+                        "artist_name": "Unknown",
+                        "album_title": "Unknown",
+                    }
+                library_tracks.insert(0, target_item)
+                target_idx = 0
+
+            audio_engine.jarvis_controlled = False
+            audio_engine.set_queue(library_tracks, start_index=target_idx)
+            return
+
         # ── Resolve the candidate item list based on tap context ──────────
         # Album / playlist taps query a small, scoped set directly; far
         # cheaper than re-fetching every track in the library. Library taps
@@ -10888,7 +11048,7 @@ class StreamripFletApp:
             items = await db.get_tracks_in_playlist(pl_id)
         else:
             lv = self.library_view
-            want_key = ("tracks", lv.search_query, lv.sort_mode)
+            want_key = (lv.view_mode, lv.search_query, lv.sort_mode)
             if lv._tracks_cache is not None and lv._tracks_cache_key == want_key:
                 items = lv._tracks_cache
             else:
@@ -11017,11 +11177,95 @@ class StreamripFletApp:
             self.queue_sheet.refresh()
 
     def toggle_shuffle(self):
-        audio_engine.is_shuffle = not audio_engine.is_shuffle
-        self.now_playing.update_shuffle(audio_engine.is_shuffle)
-        self._save_pref("is_shuffle", audio_engine.is_shuffle)
-        if audio_engine.is_shuffle and self.play_similar_mode:
+        self.page.run_task(self._toggle_shuffle_async)
+
+    async def _toggle_shuffle_async(self):
+        new_shuffle = not audio_engine.is_shuffle
+        self.now_playing.update_shuffle(new_shuffle)
+        self._save_pref("is_shuffle", new_shuffle)
+        if new_shuffle and self.play_similar_mode:
             self.set_play_similar_mode(False)
+
+        # ── Toggle ON: regular queue -> entire library shuffle queue ─────────
+        if new_shuffle:
+            # 1. Save currently playing/active queue to regular cache
+            self._save_queue_to_file("queue_regular.json", audio_engine.queue, audio_engine.current_index, audio_engine.position, audio_engine.duration)
+            
+            # 2. Fetch all tracks from the entire library
+            all_tracks = await self.db_manager.get_all_tracks()
+            library_tracks = []
+            for t in all_tracks:
+                p = t.get("path", "")
+                if p:
+                    library_tracks.append({
+                        "path":        p,
+                        "track_title": t.get("title") or os.path.basename(p),
+                        "artist_name": t.get("artist") or "Unknown",
+                        "album_title": t.get("album")  or "Unknown",
+                    })
+
+            if library_tracks:
+                current_track = audio_engine.queue[audio_engine.current_index] if audio_engine.queue else None
+                found_idx = -1
+                if current_track:
+                    # Find currently playing track in the library
+                    for i, t in enumerate(library_tracks):
+                        if t.get("path") == current_track.get("path"):
+                            found_idx = i
+                            break
+                    if found_idx == -1:
+                        # Append currently playing track if it is not in the library database
+                        library_tracks.insert(0, current_track)
+                        found_idx = 0
+                else:
+                    found_idx = 0
+
+                # 3. Transition to shuffle queue without redundant early pushes
+                audio_engine._is_shuffle = True
+                audio_engine.set_queue(library_tracks, start_index=found_idx)
+                # Save the new shuffle queue state
+                self._save_queue_to_file("queue_shuffle.json", audio_engine.queue, audio_engine.current_index, audio_engine.position, audio_engine.duration)
+            else:
+                audio_engine._is_shuffle = True
+                audio_engine._on_shuffle_changed()
+
+        # ── Toggle OFF: shuffle queue -> restore regular queue ───────────────
+        else:
+            # 1. Save currently playing shuffle queue
+            self._save_queue_to_file("queue_shuffle.json", audio_engine.queue, audio_engine.current_index, audio_engine.position, audio_engine.duration)
+            
+            # 2. Read regular queue from cache
+            state = await asyncio.to_thread(self._load_queue_from_file, "queue_regular.json")
+            if state:
+                regular_queue = state.get("queue", [])
+                regular_index = state.get("current_index", 0)
+                regular_pos   = state.get("position", 0.0)
+                regular_dur   = state.get("duration", 0.0)
+                
+                if regular_queue:
+                    current_track = audio_engine.queue[audio_engine.current_index] if audio_engine.queue else None
+                    found_idx = -1
+                    if current_track:
+                        for i, t in enumerate(regular_queue):
+                            if t.get("path") == current_track.get("path"):
+                                found_idx = i
+                                break
+                    
+                    audio_engine._is_shuffle = False
+                    if found_idx != -1:
+                        # Seamless transition: continue playing current track at its regular queue position
+                        audio_engine.set_queue(regular_queue, start_index=found_idx)
+                    else:
+                        # Insert current track at regular's index to prevent audio interruption
+                        regular_index = max(0, min(regular_index, len(regular_queue)))
+                        if current_track:
+                            regular_queue.insert(regular_index, current_track)
+                        audio_engine.set_queue(regular_queue, start_index=regular_index)
+                else:
+                    audio_engine.is_shuffle = False
+            else:
+                audio_engine.is_shuffle = False
+
         if hasattr(self, "queue_sheet") and self.queue_sheet and self.queue_sheet._initialized:
             self.queue_sheet.refresh()
         self.page.update()
@@ -11239,6 +11483,145 @@ class StreamripFletApp:
             self.show_snackbar("Preview cache cleared.")
         except Exception as exc:
             self.show_snackbar(f"Could not clear cache: {exc}")
+
+    def clear_album_artwork_cache(self):
+        temp_dir = get_temp_artwork_dir()
+        try:
+            if os.path.exists(temp_dir):
+                for name in os.listdir(temp_dir):
+                    if name == ".nomedia":
+                        continue
+                    p = os.path.join(temp_dir, name)
+                    try:
+                        if os.path.isfile(p):
+                            os.remove(p)
+                        elif os.path.isdir(p):
+                            shutil.rmtree(p)
+                    except:
+                        pass
+            _ARTWORK_CACHE.clear()
+            self.show_snackbar("Album artwork cache cleared.")
+        except Exception as exc:
+            self.show_snackbar(f"Failed to clear album cache: {exc}")
+
+    async def clear_library_index(self):
+        try:
+            conn = await self.db_manager.get_connection()
+            async with self.db_manager._write_lock:
+                await conn.execute("PRAGMA foreign_keys = OFF")
+                await conn.execute("BEGIN")
+                try:
+                    await conn.execute("DELETE FROM playlist_tracks")
+                    await conn.execute("DELETE FROM playlists")
+                    await conn.execute("DELETE FROM track_neighbors")
+                    await conn.execute("DELETE FROM tracks")
+                    await conn.execute("DELETE FROM albums")
+                    await conn.execute("DELETE FROM artists")
+                    try:
+                        await conn.execute("DELETE FROM fts_search")
+                    except: pass
+                    await conn.commit()
+                except Exception:
+                    await conn.rollback()
+                    raise
+                finally:
+                    await conn.execute("PRAGMA foreign_keys = ON")
+            try:
+                await conn.execute("VACUUM")
+            except: pass
+            
+            self.db_manager.clear_caches()
+            if hasattr(self, "library_view") and self.library_view:
+                self.library_view._tracks_cache = None
+                self.library_view._tracks_cache_key = None
+                self.library_view._cached_moods = None
+                self.library_view._cached_islets = None
+                self.library_view._cached_unanalysed = None
+                self.library_view._mood_feedback_map.clear()
+                self.library_view._mood_recalc_pending = False
+            
+            # Clear all queue state files
+            audio_engine.clear_queue()
+            for filename in ("queue_state.json", "queue_regular.json", "queue_shuffle.json", "queue_similar.json"):
+                q_path = os.path.join(os.environ["XDG_CACHE_HOME"] if filename != "queue_state.json" else DATA_DIR, filename)
+                try:
+                    if os.path.exists(q_path):
+                        os.remove(q_path)
+                except Exception:
+                    pass
+
+            await self.library_view.load_library()
+            self.show_snackbar("Library index cleared successfully.")
+        except Exception as exc:
+            self.show_snackbar(f"Failed to clear library index: {exc}")
+
+    async def clear_dsp_features(self):
+        try:
+            conn = await self.db_manager.get_connection()
+            async with self.db_manager._write_lock:
+                await conn.execute("BEGIN")
+                try:
+                    await conn.execute("UPDATE play_counts SET timbre = NULL, features_version = 0, pca_coords = NULL")
+                    await conn.execute("DELETE FROM track_neighbors WHERE edge_kind = 'acoustic'")
+                    await conn.execute("DELETE FROM pca_space")
+                    await conn.commit()
+                except Exception:
+                    await conn.rollback()
+                    raise
+            
+            # Flush in-memory percentile & mood caches
+            from utils import track_graph as tg
+            tg.invalidate_mood_cache()
+            
+            if hasattr(self, "library_view") and self.library_view:
+                self.library_view._tracks_cache = None
+                self.library_view._tracks_cache_key = None
+                self.library_view._cached_moods = None
+                self.library_view._cached_islets = None
+                self.library_view._cached_unanalysed = None
+                await self.library_view.load_library()
+                
+            self.show_snackbar("Acoustic DSP features cleared successfully.")
+        except Exception as exc:
+            self.show_snackbar(f"Failed to clear DSP features: {exc}")
+
+    async def clear_taste_model_weights(self):
+        try:
+            await self.db_manager.clear_taste_model()
+            from utils import track_graph as tg
+            tg.invalidate_taste_cache()
+            self.show_snackbar("User taste model weights reset successfully.")
+        except Exception as exc:
+            self.show_snackbar(f"Failed to reset taste model: {exc}")
+
+    def open_maintenance_confirmation(self, title: str, description: str, button_text: str, action_coro):
+        """Generic confirmation dialog for maintenance tasks."""
+        def on_confirm(e):
+            dialog.open = False
+            self.page.update()
+            self.page.run_task(action_coro)
+            
+        def on_cancel(e):
+            dialog.open = False
+            self.page.update()
+
+        dialog = ft.AlertDialog(
+            modal=True,
+            title=ft.Text(title),
+            content=ft.Text(description, size=13),
+            actions=[
+                ft.TextButton("Cancel", on_click=on_cancel),
+                ft.TextButton(
+                    content=ft.Text(button_text, weight=ft.FontWeight.BOLD, color="#FF4444"), 
+                    on_click=on_confirm
+                ),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        self.page.overlay.append(dialog)
+        self.page.dialog = dialog
+        dialog.open = True
+        self.page.update()
 
     # ── config / prefs ───────────────────────────────────────────────────────
     def sync_config_to_ui(self):

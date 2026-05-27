@@ -49,3 +49,15 @@ assets_dir = "assets"
 serious_python = "^0.9.0"
 serious_python_android = "^0.9.0"
 
+[tool.flet.app]
+exclude = [
+    "scratch",
+    "tests",
+    "offload_temp",
+    ".git",
+    ".DS_Store",
+    "__pycache__",
+    "*.pyc"
+]
+
+
