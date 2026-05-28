@@ -475,7 +475,7 @@ async def walk(
     avoid: Optional[set[str]] = None,
     restart_prob: float = 0.15,
     diversity_lambda: float = 0.3,
-    temperature: float = 0.12,
+    temperature: float = 0.04,
     taste_weight: float = 0.0,
     taste_explore: float = 0.05,
     negative_embs: Optional[list[np.ndarray]] = None,

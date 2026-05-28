@@ -1624,6 +1624,17 @@ class AssistantRunner:
         )
 
     async def _handle_play_similar(self, intent: ai.Intent) -> AssistantResponse:
+        try:
+            missing = await self.db.get_tracks_missing_features(track_graph.FEATURES_VERSION)
+            if len(missing) > 0:
+                return AssistantResponse(
+                    spoken=f"I notice {len(missing)} tracks are not analyzed yet, sir. Please complete the DSP analysis before initiating a similarity walk.",
+                    displayed=f"Play Similar is unavailable. {len(missing)} tracks lack DSP features. Run the Jarvis analyzer first.",
+                    success=False,
+                )
+        except Exception as exc:
+            logger.warning("Failed to verify missing features in assistant: %s", exc)
+
         seed_path = intent.extras.get("seed_path_override") or self.engine.current_path
         if not seed_path:
             return AssistantResponse(
@@ -1651,7 +1662,7 @@ class AssistantRunner:
                 avoid=avoid,
                 restart_prob=0.15,
                 diversity_lambda=0.3,
-                temperature=0.08,
+                temperature=0.05,
                 teleport_path=seed_path,
             )
         except Exception as exc:
@@ -1824,12 +1835,7 @@ class AssistantRunner:
         )
 
     async def _handle_clear_queue(self, _intent: ai.Intent) -> AssistantResponse:
-        self.engine.stop()
-        self.engine.queue = []
-        try:
-            self.engine.dispatch("on_queue_mutated")
-        except Exception:
-            pass
+        self.engine.clear_queue()
         return AssistantResponse(
             spoken=self._say("playback_control", action="Queue cleared"),
             displayed="Queue cleared."
