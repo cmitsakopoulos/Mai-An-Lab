@@ -18,7 +18,7 @@ dependencies = [
     "tinytag",
     "seaborn",
     "matplotlib",
-    "flet_audio_service @ file:///C:/Users/CHMI/Downloads/Music_Local/flet_audio_service"
+    "flet_audio_service @ file:///Users/chrismitsacopoulos/Desktop/Mai-An-Lab/flet_audio_service"
 ]
 
 [tool.setuptools]

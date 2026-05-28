@@ -58,7 +58,7 @@ The **Default Moods** pane (accessible under the Default tab) organizes your lib
 
 ## 2. Playback Taste Modeling & Play Similar
 
-The **Playback Pane** (including the Now Playing full-screen card and the Mini Player) contains standard Like/Dislike controls that directly train the **Stochastic Gradient Descent (SGD) Taste Model**.
+The **Playback Pane** (specifically the Now Playing full-screen card) contains Like/Dislike controls when in a Mood Partition or when Auto-DJ is enabled. These controls directly train the **Stochastic Gradient Descent (SGD) Taste Model**. These controls are completely hidden when **Play Similar** is active, as similarity walks are strictly based on pure acoustic similarity and decoupled from the taste model regressor.
 
 ```mermaid
 flowchart TD
@@ -87,13 +87,14 @@ flowchart TD
 
 ### 2.1 The Global SGD Taste Model
 Unlike mood partitions, your personal taste cuts across moods. The system deploys a single, global on-device **Logistic Regression Layer** over the 3-dimensional Principal Component projection space:
+- **Exclusively for the Moods Pane**: The taste model is used exclusively to re-rank the top candidates inside the **Moods Pane** so that your personal taste biases the top of the automatic mood partitions.
 - **Real-Time Learning**: Liking ($y=1$) or Disliking ($y=0$) a track during playback executes a single-step online SGD weight update with $L_2$ Ridge Regularization to prevent overfitting or extreme runaway weights.
 - **Sample-Weight Awareness**: The model separates explicit feedback (Likes/Dislikes) from implicit playback cues (e.g. playing a song past the skip threshold). Explicit events have a higher sample weight ($1.0$) than implicit signals ($0.5$).
 - **Cold-Start Graceful Degradation**: On a fresh install with zero feedback events, the taste model remains cold ($w=0, b=0$), resulting in a uniform $P(\text{like}) \approx 0.5$ prediction, which acts as a safe, neutral baseline.
 
 ### 2.2 Play Similar & Centralized Queue Lifecycle
 
-When using the **Play Similar** feature or the **Jarvis continuous playback walk**, the personalized random walk engine leverages the active Taste Model to direct queue choices. Play Similar has been re-architected to use a seamless, centralized state manager:
+The **Play Similar** feature and **Jarvis continuous playback walk** utilize pure acoustic similarity walks over the $k$-NN graph and are no longer tied to the taste model regressor. This ensures extremely tight, predictable sonic consistency without drift. Play Similar has been re-architected to use a seamless, centralized state manager:
 
 - **Centralized Toggle & Instant Execution**: Activating or deactivating Play Similar immediately triggers the centralized manager (`set_play_similar_mode`), bypassing any confirmation dialogs for an instantaneous, frictionless user experience.
 - **Visual Status Borders**: When Play Similar mode is active, the album artwork in both the **Mini Player** and the full-screen **Now Playing sheet** dynamically displays a vibrant, hardware-accelerated **Cyan border outline** (`#00FFFF`). This provides an immediate, premium visual indicator that similarity-based walk recommendations are guiding the playback.
@@ -103,9 +104,9 @@ When using the **Play Similar** feature or the **Jarvis continuous playback walk
 - **Symmetrical Non-Destructive Queue Restoration**: Deactivating Play Similar immediately restores your original queue back into the active playback stream. The restoration adapts dynamically to preserve continuity:
   - *Original Track Active*: If the currently playing track belongs to your original queue, the live queue is kept up to that track, and the remaining portion of the original saved queue is spliced seamlessly back in immediately after it. Playback continues uninterrupted.
   - *Walk Track Active*: If you are currently listening to a walk-injected track when deactivating similar mode, that track is prepended at index `0` so it can finish playing, and your entire original saved queue is appended directly behind it.
-- **Personalized Re-Ranking & Session-Level Skips**:
-  - *Taste Bias*: Walk candidate logits are adjusted by adding a weighted fraction of the taste prediction: $\gamma \cdot (P(\text{like}) - 0.5)$, biasing the walk toward your active musical taste.
-  - *Anti-Skip Avoidance*: Disliking a song during playback immediately appends it to a high-priority session avoidance list (`_session_bad_paths`), preventing the walker from re-queuing that track or similar timbres in the active listening session.
+- **Acoustic Coherency & Session-Level Skips**:
+  - *Acoustic Focus*: Walk recommendations focus entirely on physical timbre and tempo similarity on the hybrid $k$-NN graph, ensuring tight, predictable sonic consistency.
+  - *Anti-Skip Avoidance*: Skipping a song early during playback immediately appends it to a high-priority session avoidance list (`_session_bad_paths`), preventing the walker from re-queuing that track or similar timbres in the active listening session.
 - **Asynchronous Generation Guard**: To prevent rapid multi-taps or network latency from corrupting the queue, all async walk tasks are validated against a monotonic generation counter (`_play_similar_gen`). If the active generation changes before mutation completes, the background task bails silently.
 - **Fully Shuffle-Aware Queue Sheet**: The active queue panel (`QueueSheet`) is fully aware of both shuffle and similar states, utilizing a dynamic `position_offset` to guarantee that track listings, scroll anchors, and visual highlights remain mathematically accurate.
 

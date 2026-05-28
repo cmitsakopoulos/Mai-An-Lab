@@ -168,9 +168,10 @@ $$\text{logit}_c = \underbrace{w_c \cdot \mu_{\text{tier}}}_\text{effective edge
 |---|---|---|
 | $\lambda_{\text{MMR}}$ | 0.3 | Penalises candidates close in timbre to already-visited nodes |
 | $\lambda_{\text{neg}}$ | 0.6 | Penalises candidates close in timbre to session-rejected tracks (skips/dislikes) |
-| $\gamma$ | 0.15 | Taste-model nudge; $P(\text{like})$ from the global SGD logistic regressor |
+| $\gamma$ | 0.00 | Taste-model nudge; set to 0.0 for Play Similar to focus purely on acoustic similarity |
 
-At each step, with probability $\epsilon = 0.05$, the taste term ($\gamma$) is skipped entirely for that step. This counters the filter-bubble effect where the walk would only surface tracks the user already likes.
+> [!NOTE]
+> While the traversal algorithm supports taste-model re-ranking ($\gamma = 0.15$), it is disabled ($\gamma = 0.0$) by default for **Play Similar** and **Jarvis continuous walks** to keep playback strictly aligned with acoustic properties and avoid genre drift. The taste model regressor is instead utilized to personalize automatic mood partitions in the **Moods Pane**.
 
 ### 3.3 Score; Long-Flow / Gentle-Reset softmax temperature
 
@@ -434,7 +435,7 @@ $$P(\text{like} \mid \mathbf{x}) = \sigma(\mathbf{w} \cdot \mathbf{x} + b)$$
 where $\mathbf{x} \in \mathbb{R}^3$ represents the PCA projection coordinates of the track.
 
 1. **Online Stochastic Gradient Descent (SGD) with Dynamic Heuristic Scaling**:
-   When a user likes ($y=1$) or dislikes ($y=0$) a track in the playback bar, the engine runs a single-step SGD update with $L_2$ Ridge Regularization:
+   When a user likes ($y=1$) or dislikes ($y=0$) a track in the playback bar (when visible in Mood Partitions or Auto-DJ mode), the engine runs a single-step SGD update with $L_2$ Ridge Regularization:
    $$\mathbf{w} \leftarrow \mathbf{w} + \eta_{\text{eff}} \cdot (\alpha \cdot (y - \sigma(\mathbf{w} \cdot \mathbf{x} + b)) \cdot \mathbf{x} - \lambda_{\text{eff}} \cdot \mathbf{w})$$
    $$\mathbf{w} \leftarrow \mathbf{w} \times 0.95 \qquad \text{(exponential weight decay)}$$
    $$b \leftarrow b + \eta_{\text{eff}} \cdot \alpha \cdot (y - \sigma(\mathbf{w} \cdot \mathbf{x} + b))$$
@@ -466,9 +467,7 @@ where $\mathbf{x} \in \mathbb{R}^3$ represents the PCA projection coordinates of
    | Everything else | `0` (negative) | Deliberate bail |
 
 5. **PageRank Walker Integration**:
-   During similarity walks, candidate logits are dynamically re-ranked using the taste model (see §3.2):
-   $$\text{logit}_c \mathrel{+}= \gamma \cdot \big(P(\text{like} \mid \mathbf{x}_c) - 0.5\big)$$
-   where $\gamma = 0.15$ is the taste weight. A step-level exploration parameter $\epsilon = 0.05$ introduces randomness by occasionally skipping taste re-ranking, promoting healthy sonic discovery.
+   During similarity walks, candidate logits can be re-ranked using the taste model (see §3.2). For the **Moods Pane**, candidate rankings are dynamically shifted by the taste model to align with active listener preferences. For **Play Similar** and Jarvis walks, taste re-ranking is disabled ($\gamma = 0.0$) to guarantee pure acoustic-similarity transitions.
 
 #### F. Task-Safe Serialized updates
 Because feedback actions and random walks can execute concurrently in background tasks, multiple updates to the taste model weights can occur simultaneously. 
