@@ -1127,6 +1127,10 @@ class StreamripFletApp:
             except Exception:
                 pass
 
+            from utils.streamrip_api import load_config
+            cfg = load_config()
+            temp = float(cfg.get("general", {}).get("play_similar_temperature", 0.05))
+
             walk_paths = await tg.walk(
                 self.db_manager,
                 path,
@@ -1136,7 +1140,7 @@ class StreamripFletApp:
                 avoid=avoid,
                 restart_prob=0.15,
                 diversity_lambda=0.15,   # lighter MMR — no embedding fetch
-                temperature=0.05,
+                temperature=temp,
                 taste_weight=0.0,        # acoustic-only, regressor reserved for DJ
                 negative_embs=None,      # no negative centroid — avoid set handles it
                 prefetch_k=20,           # half the DJ/Jarvis k — cheaper DB fetch
@@ -1216,7 +1220,10 @@ class StreamripFletApp:
             except Exception:
                 pass
 
-            teleport = getattr(audio_engine, "play_similar_seed_path", "") or path
+            from utils.streamrip_api import load_config
+            cfg = load_config()
+            temp = float(cfg.get("general", {}).get("play_similar_temperature", 0.05))
+
             walk_tracks = await tg.walk(
                 self.db_manager,
                 path,
@@ -1226,7 +1233,7 @@ class StreamripFletApp:
                 avoid=avoid,
                 restart_prob=0.15,
                 diversity_lambda=0.0,   # single-track pick — diversity unused
-                temperature=0.05,
+                temperature=temp,
                 taste_weight=0.0,
                 negative_embs=None,
                 prefetch_k=20,
@@ -1300,6 +1307,10 @@ class StreamripFletApp:
         except Exception:
             pass
 
+        from utils.streamrip_api import load_config
+        cfg = load_config()
+        temp = float(cfg.get("general", {}).get("play_similar_temperature", 0.05))
+
         try:
             teleport = getattr(audio_engine, "play_similar_seed_path", "") or seed_path
             walk_paths = await tg.walk(
@@ -1310,7 +1321,7 @@ class StreamripFletApp:
                 avoid=avoid,
                 restart_prob=0.15,
                 diversity_lambda=0.15,
-                temperature=0.05,
+                temperature=temp,
                 taste_weight=0.0,
                 negative_embs=None,
                 teleport_path=teleport,
@@ -1439,6 +1450,10 @@ class StreamripFletApp:
         # ── Acoustic graph walk ───────────────────────────────────────────────
         # On the trip-wire path, drop taste exploration so the walk leans
         # fully on the (now-anchored) seed plus the negative centroid.
+        from utils.streamrip_api import load_config
+        cfg = load_config()
+        temp = float(cfg.get("general", {}).get("play_similar_temperature", 0.05))
+
         try:
             # Anchored PageRank: teleport back to original seed track to prevent genre drift
             teleport = getattr(audio_engine, "play_similar_seed_path", "") or seed_path
@@ -1450,7 +1465,7 @@ class StreamripFletApp:
                 avoid=avoid,
                 restart_prob=0.15,
                 diversity_lambda=0.3,
-                temperature=0.05,
+                temperature=temp,
                 taste_explore=0.0 if tripwire else 0.05,
                 negative_embs=negative_embs or None,
                 teleport_path=teleport,

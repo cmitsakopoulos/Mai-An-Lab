@@ -1654,6 +1654,10 @@ class AssistantRunner:
         # and exploration), and the multi-tier pool means we don't need a
         # separate "acoustic neighbours empty → fall back to artist" branch
         # at the seed; the walk does it implicitly per step.
+        from utils.streamrip_api import load_config
+        cfg = load_config()
+        temp = float(cfg.get("general", {}).get("play_similar_temperature", 0.05))
+
         try:
             walk_paths = await track_graph.walk(
                 self.db, seed_path,
@@ -1662,7 +1666,7 @@ class AssistantRunner:
                 avoid=avoid,
                 restart_prob=0.15,
                 diversity_lambda=0.3,
-                temperature=0.05,
+                temperature=temp,
                 teleport_path=seed_path,
             )
         except Exception as exc:
