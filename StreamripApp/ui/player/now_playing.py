@@ -378,7 +378,25 @@ class NowPlayingSheet:
         self.page.update()
 
     def _toggle_play_similar(self, e):
-        self.app.set_play_similar_mode(not self.app.play_similar_mode)
+        self.page.run_task(self._toggle_play_similar_async)
+
+    async def _toggle_play_similar_async(self):
+        target = not self.app.play_similar_mode
+        if target:
+            from utils import track_graph as tg
+            try:
+                missing = await self.app.db_manager.get_tracks_missing_features(tg.FEATURES_VERSION)
+                if len(missing) > 0:
+                    self.app.show_snackbar(
+                        f"Play Similar is unavailable. {len(missing)} tracks lack DSP features. Run Jarvis analyzer first.",
+                        color=AMBER,
+                        icon=ft.Icons.WARNING_ROUNDED
+                    )
+                    return
+            except Exception as exc:
+                logger.exception("Play-Similar: Failed to verify missing features: %s", exc)
+
+        self.app.set_play_similar_mode(target)
 
     def update_play_similar(self, enabled: bool):
         self._ensure_initialized()

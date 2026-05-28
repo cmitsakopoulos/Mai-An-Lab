@@ -1136,7 +1136,7 @@ class StreamripFletApp:
                 avoid=avoid,
                 restart_prob=0.15,
                 diversity_lambda=0.15,   # lighter MMR — no embedding fetch
-                temperature=0.12,
+                temperature=0.05,
                 taste_weight=0.0,        # acoustic-only, regressor reserved for DJ
                 negative_embs=None,      # no negative centroid — avoid set handles it
                 prefetch_k=20,           # half the DJ/Jarvis k — cheaper DB fetch
@@ -1179,6 +1179,14 @@ class StreamripFletApp:
                     audio_engine.jarvis_controlled = False
                     audio_engine._sync_metadata_for_current()
                     audio_engine.dispatch("on_queue_mutated")
+                    if hasattr(audio_engine, "_push_queue_native") and audio_engine._page:
+                        if hasattr(audio_engine, "_arm_queue_gate"):
+                            audio_engine._arm_queue_gate()
+                        audio_engine._page.run_task(
+                            audio_engine._push_queue_native,
+                            audio_engine.current_index,
+                            audio_engine.is_playing
+                        )
                     if hasattr(self, "queue_sheet") and self.queue_sheet and self.queue_sheet._initialized:
                         self.queue_sheet.refresh()
                     logger.info("Play Similar: Successfully appended %d similar tracks to the queue.", len(engine_tracks))
@@ -1218,7 +1226,7 @@ class StreamripFletApp:
                 avoid=avoid,
                 restart_prob=0.15,
                 diversity_lambda=0.0,   # single-track pick — diversity unused
-                temperature=0.12,
+                temperature=0.05,
                 taste_weight=0.0,
                 negative_embs=None,
                 prefetch_k=20,
@@ -1302,7 +1310,7 @@ class StreamripFletApp:
                 avoid=avoid,
                 restart_prob=0.15,
                 diversity_lambda=0.15,
-                temperature=0.12,
+                temperature=0.05,
                 taste_weight=0.0,
                 negative_embs=None,
                 teleport_path=teleport,
@@ -1442,7 +1450,7 @@ class StreamripFletApp:
                 avoid=avoid,
                 restart_prob=0.15,
                 diversity_lambda=0.3,
-                temperature=0.12,
+                temperature=0.05,
                 taste_explore=0.0 if tripwire else 0.05,
                 negative_embs=negative_embs or None,
                 teleport_path=teleport,
@@ -2246,6 +2254,14 @@ class StreamripFletApp:
                 # Force sync visual metadata and notify UI
                 audio_engine._sync_metadata_for_current()
                 audio_engine.dispatch("on_queue_mutated")
+                if hasattr(audio_engine, "_push_queue_native") and audio_engine._page:
+                    if hasattr(audio_engine, "_arm_queue_gate"):
+                        audio_engine._arm_queue_gate()
+                    audio_engine._page.run_task(
+                        audio_engine._push_queue_native,
+                        audio_engine.current_index,
+                        audio_engine.is_playing
+                    )
         
         if hasattr(self, "queue_sheet") and self.queue_sheet and self.queue_sheet._initialized:
             self.queue_sheet.refresh()

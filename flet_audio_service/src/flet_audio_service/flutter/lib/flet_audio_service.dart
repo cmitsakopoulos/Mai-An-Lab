@@ -344,9 +344,21 @@ class AudioPlayerHandler extends BaseAudioHandler with QueueHandler, SeekHandler
   Future<void> skipToQueueItem(int index) =>
       _player.seek(Duration.zero, index: index);
 
+  AudioSource _buildAudioSource(String src, MediaItem item) {
+    try {
+      final uri = Uri.parse(src);
+      if (uri.isScheme('file')) {
+        return AudioSource.file(uri.toFilePath(), tag: item);
+      }
+      return AudioSource.uri(uri, tag: item);
+    } catch (_) {
+      return AudioSource.uri(Uri.parse(src), tag: item);
+    }
+  }
+
   Future<void> setPlaylist(List<MediaItem> items) async {
     final sources = items
-        .map((item) => AudioSource.uri(Uri.parse(item.id), tag: item))
+        .map((item) => _buildAudioSource(item.id, item))
         .toList();
     _playlist = ConcatenatingAudioSource(
       children: sources,
@@ -362,7 +374,7 @@ class AudioPlayerHandler extends BaseAudioHandler with QueueHandler, SeekHandler
     final sources = List<AudioSource>.from(_playlist.children);
     sources.insert(
       index.clamp(0, sources.length),
-      AudioSource.uri(Uri.parse(item.id), tag: item),
+      _buildAudioSource(item.id, item),
     );
     await _rebuildPlaylist(sources);
     final updated = List<MediaItem>.from(queue.value);
@@ -391,7 +403,7 @@ class AudioPlayerHandler extends BaseAudioHandler with QueueHandler, SeekHandler
         // when play() is called. This prevents blocking the Flet invoke_method
         // channel (10-second timeout) while the OS resolves the audio source.
         await _player.setAudioSource(
-          AudioSource.uri(Uri.parse(url), tag: item),
+          _buildAudioSource(url, item),
           preload: false,
         );
       } catch (e) {

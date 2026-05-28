@@ -878,9 +878,21 @@ class AudioPlayerHandler extends BaseAudioHandler with QueueHandler, SeekHandler
     await _player.setLoopMode(loopMode);
   }
 
+  AudioSource _buildAudioSource(String src, MediaItem item) {
+    try {
+      final uri = Uri.parse(src);
+      if (uri.isScheme('file')) {
+        return AudioSource.file(uri.toFilePath(), tag: item);
+      }
+      return AudioSource.uri(uri, tag: item);
+    } catch (_) {
+      return AudioSource.uri(Uri.parse(src), tag: item);
+    }
+  }
+
   Future<void> setPlaylist(List<MediaItem> items, [int startIndex = 0]) async {
     final sources = items
-        .map((item) => AudioSource.uri(Uri.parse(item.id), tag: item))
+        .map((item) => _buildAudioSource(item.id, item))
         .toList();
     _playlist = ConcatenatingAudioSource(
       children: sources,
@@ -920,7 +932,7 @@ class AudioPlayerHandler extends BaseAudioHandler with QueueHandler, SeekHandler
     final clamped = index.clamp(0, _playlist.children.length);
     await _playlist.insert(
       clamped,
-      AudioSource.uri(Uri.parse(item.id), tag: item),
+      _buildAudioSource(item.id, item),
     );
     final updated = List<MediaItem>.from(queue.value);
     updated.insert(index.clamp(0, updated.length), item);
@@ -965,7 +977,7 @@ class AudioPlayerHandler extends BaseAudioHandler with QueueHandler, SeekHandler
         // No _player.stop() first: setAudioSource replaces the previous
         // source, and stop() can deadlock against a previously-pending source.
         await _player.setAudioSource(
-          AudioSource.uri(Uri.parse(url), tag: item),
+          _buildAudioSource(url, item),
           preload: false,
         );
       } catch (e) {
