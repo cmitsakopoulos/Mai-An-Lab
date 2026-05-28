@@ -446,9 +446,9 @@ async def neighbors(
 # softmax. Acoustic edges are already cosine ∈ [-1, 1]; metadata edges are
 # fixed at 1.0 so the multipliers double as their effective preference.
 _DEFAULT_EDGE_KIND_WEIGHTS: dict[str, float] = {
-    KIND_ACOUSTIC: 1.0,
-    KIND_ARTIST:   0.4,
-    KIND_ALBUM:    0.2,
+    KIND_ACOUSTIC: 5.0,
+    KIND_ARTIST:   2.0,
+    KIND_ALBUM:    1.5,
 }
 
 
@@ -475,13 +475,14 @@ async def walk(
     avoid: Optional[set[str]] = None,
     restart_prob: float = 0.15,
     diversity_lambda: float = 0.3,
-    temperature: float = 0.08,
-    taste_weight: float = 0.15,
+    temperature: float = 0.12,
+    taste_weight: float = 0.0,
     taste_explore: float = 0.05,
     negative_embs: Optional[list[np.ndarray]] = None,
     negative_lambda: float = 0.6,
     seed_rng: Optional[random.Random] = None,
     teleport_path: Optional[str] = None,
+    prefetch_k: int = 40,
 ) -> list[str]:
     """Personalised-PageRank-flavoured random walk over the track graph.
 
@@ -533,6 +534,10 @@ async def walk(
         Larger than `diversity_lambda` by default because a skip is a
         stronger signal than "we've already seen something similar."
 
+    prefetch_k : number of neighbours to fetch per node in the 2-hop horizon
+        prefetch. Default 40 (full quality). Pass 20 for the cheap Play
+        Similar path; the graph is still well-connected at that depth.
+
     Returns
     -------
     list[str] : paths in walk order (the seed itself is not included),
@@ -560,7 +565,7 @@ async def walk(
     # 1-hop from the seed, then 2-hop on the union of seed + 1-hop. Walking
     # in memory avoids `length` round-trips and dominates the DB cost.
     seed_neighbours = await db_manager.get_neighbors_multi(
-        seed_path, kinds, k=40,
+        seed_path, kinds, k=prefetch_k,
     )
     horizon: dict[str, list[dict]] = {seed_path: seed_neighbours}
     second_hop_paths = [
@@ -569,7 +574,7 @@ async def walk(
     # De-dup the 1-hop fan-out before issuing 2-hop queries.
     second_hop_paths = list(dict.fromkeys(second_hop_paths))
     for p in second_hop_paths:
-        horizon[p] = await db_manager.get_neighbors_multi(p, kinds, k=40)
+        horizon[p] = await db_manager.get_neighbors_multi(p, kinds, k=prefetch_k)
 
     # ── MMR setup ─────────────────────────────────────────────────────────
     # Pull embeddings for the seed + any node we might reach in two hops.
@@ -723,14 +728,12 @@ async def walk(
         if temperature <= 0:
             chosen_idx = int(np.argmax(logits))
         else:
-            # Long-Flow, Gentle-Reset dynamic modulation:
-            # Standard steps are highly cohesive (3/4 of baseline, e.g. 0.06 when baseline is 0.08).
-            # Every 6th step is a controlled, gentle reset jump (1.5x of baseline, e.g. 0.12).
-            step_idx = len(path_seq)
-            is_reset = (step_idx + 1) % 6 == 0
-            step_temp = temperature * 1.5 if is_reset else temperature * 0.75
-
-            scaled = (logits - logits.max()) / float(step_temp)
+            # Flat temperature: every step has the same low transition cost
+            # so the walk stays acoustically close to the seed throughout.
+            # The previous "Long-Flow Gentle-Reset" modulation (0.75× normal,
+            # 1.5× every 6th step) introduced deliberate hot jumps that broke
+            # similarity chains — removed per user intent.
+            scaled = (logits - logits.max()) / float(temperature)
             probs = np.exp(scaled)
             total = float(probs.sum())
             if not np.isfinite(total) or total <= 0:
@@ -759,7 +762,7 @@ async def walk(
                 z = max(-30.0, min(30.0, z))
                 p_like = 1.0 / (1.0 + float(np.exp(-z)))
         
-        logger.warning(
+        logger.debug(
             "walk step: Selected candidate '%s' (P(like)=%.2f%%, final logit=%.4f)",
             os.path.basename(next_path), p_like * 100.0, logits[chosen_idx]
         )

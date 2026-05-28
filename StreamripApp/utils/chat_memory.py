@@ -82,3 +82,39 @@ class ChatMemoryManager:
             "init_greeted": False,
             "last_active_timestamp": 0.0
         }
+
+    def load_graph_state(self) -> dict:
+        """Loads and returns the graph build state from disk."""
+        path = self._get_graph_state_path()
+        if not os.path.exists(path):
+            return {"total_tracks": -1, "missing_count": -1}
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            logger.warning("Failed to load graph state: %s", e)
+            return {"total_tracks": -1, "missing_count": -1}
+
+    def save_graph_state(self, total_tracks: int, missing_count: int) -> None:
+        """Saves the graph build state to disk."""
+        path = self._get_graph_state_path()
+        data = {
+            "total_tracks": total_tracks,
+            "missing_count": missing_count,
+            "timestamp": time.time()
+        }
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=4)
+        except Exception as e:
+            logger.error("Failed to save graph state: %s", e)
+
+    def _get_graph_state_path(self) -> str:
+        """Resolves the path to the graph state cache file."""
+        import sys
+        IS_ANDROID = hasattr(sys, 'getandroidapilevel')
+        if IS_ANDROID:
+            base_dir = os.getenv("FLET_APP_STORAGE_DATA") or os.getenv("APP_FILES_PATH") or "/data/user/0"
+        else:
+            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        return os.path.join(base_dir, "graph_state.json")

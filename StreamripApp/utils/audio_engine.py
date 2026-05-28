@@ -383,6 +383,8 @@ class AudioEngine:
                 self._set("is_playing", False)
                 if getattr(self, "jarvis_controlled", False):
                     self.dispatch("on_jarvis_continue")
+                elif getattr(self, "play_similar_seed_path", ""):
+                    self.dispatch("on_similar_continue")
         elif processing_state == "ready":
             self._is_loaded = True
             # Apply any seek that was queued before the source finished
@@ -612,6 +614,8 @@ class AudioEngine:
             else:
                 if getattr(self, "jarvis_controlled", False):
                     self.dispatch("on_jarvis_continue")
+                elif getattr(self, "play_similar_seed_path", ""):
+                    self.dispatch("on_similar_continue")
                 else:
                     self.stop()
                 return
@@ -627,6 +631,8 @@ class AudioEngine:
         else:
             if getattr(self, "jarvis_controlled", False):
                 self.dispatch("on_jarvis_continue")
+            elif getattr(self, "play_similar_seed_path", ""):
+                self.dispatch("on_similar_continue")
             else:
                 self.stop()
 

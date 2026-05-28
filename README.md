@@ -13,11 +13,12 @@ Mai-An Lab is a dual-platform music player and streamrip download client for And
 
 The player implements native engine fallbacks; background services and hardware speech engines on mobile, and an Apple `AVAudioPlayer` loop on desktop. It features a Jarvis styled voice assistant, SQLite library search, and an auto-playlist engine based on $k$-NN acoustic similarity.
 
----
+## Developer Note
+
+> [!NOTE]
+> I am a bioinformatician by training, not a professional software engineer. This is a non-professionally driven passion project; please take this into consideration when encountering issues. Any advice or willingness to contribute is appreciated.
 
 ## Interactive UI Panes
-
----
 
 ### Search & Downloader
 
@@ -85,6 +86,12 @@ See [PCA Engine & Unsupervised Feature Cleaving](./docs/Auto_Playlist_Engine.md#
 
 Mai-An Lab implements specialized subsystems on each operating system to handle execution without relying on native C-extension blocks.
 
+### Android Native Audio & Assistant Services
+Mobile playback utilizes Flutter's modular background architecture to interface with system-level resources. Importantly, a trial and error born backend, using Dart and Kotlin, was built as part of a custom Flet extension. See:
+- **Background Media Services**: Interfaces with `just_audio` and Android ExoPlayer via a custom `flet_audio_service` wrapper to manage background playback.
+- **Power Management**: Integrates wake locks to prevent the CPU from sleeping during downloads.
+- **Speech Subsystem**: Uses native Android `SpeechRecognizer` (Speech-to-Text) and `TextToSpeech` engines with audio focus ducking to parse commands offline.
+
 ### macOS Native Audio Engine
 Desktop playback uses Apple `AVAudioPlayer` (`AVFoundation` via dynamic `pyobjc-framework-AVFoundation` loading) running in the Python process.
 - **Thread Safety**: Uses a `threading.RLock` queue synchronizer to coordinate playlist updates and track transitions.
@@ -92,18 +99,12 @@ Desktop playback uses Apple `AVAudioPlayer` (`AVFoundation` via dynamic `pyobjc-
 - **Zero Subprocess Overhead**: Eliminates command-line subprocess decoders, reducing CPU overhead and zombie processes.
 - **State Dispatching**: Coordinates sub-millisecond track position updates with the Flet UI thread via a 5 Hz throttled dispatch loop.
 
-### Android Native Audio & Assistant Services
-Mobile playback utilizes Flutter's modular background architecture to interface with system-level resources. Importantly, a trial and error born backend, using Dart and Kotlin, was built as part of a custom Flet extension. See:
-- **Background Media Services**: Interfaces with `just_audio` and Android ExoPlayer via a custom `flet_audio_service` wrapper to manage background playback.
-- **Power Management**: Integrates wake locks to prevent the CPU from sleeping during downloads.
-- **Speech Subsystem**: Uses native Android `SpeechRecognizer` (Speech-to-Text) and `TextToSpeech` engines with audio focus ducking to parse commands offline.
-
 ---
 
 ## Headline Features
 
 > [!IMPORTANT]
-> **Portability & Build Parity**; this project is a modified port of `streamrip 2.1.0`. All native C-extension compilation dependencies are removed, allowing the same Python codebase to target Android (ARM64) and macOS (Intel & Apple Silicon) with zero-configuration build compatibility. Qobuz is supported.
+> **Portability & Build Parity**; this project contains a modified port of `streamrip 2.1.0`. All native C-extension compilation dependencies are removed, allowing the same Python codebase to target Android (ARM64) and macOS (Intel & Apple Silicon) with zero-configuration build compatibility. ONLY Qobuz is supported.
 
 - **Acoustic Auto-Playlists**; extracts a 52-D timbre representation combined with 8-D structural attributes to form a 60-D vector space. Features library-relative preset moods and custom Acoustic Islets integrated with a $k$-NN similarity graph solver for tempo-aligned music queues.
 - **Unsupervised PCA Engine** *(v1.1.0)*; double-pass SVD with automatic Pearson correlation cleaving prunes acoustically redundant scalar features before the 3-D projection is committed. The Mood EQ hides zero-weight features and the projection geometry adapts to each library. After every rebuild, four diagnostic PNG figures (full and pruned correlation heatmap + biplot scatter) are written to `<library>/pca_report/`.
@@ -131,10 +132,10 @@ For information on the internals of Mai-An Lab, refer to the following documenta
 
 This application is verified on the following hardware/software stack:
 - **Devices**: Google Pixel 8 and MacBook Air (2020) M1.
-- **OS**: Android 16 (Fuck if I know) and MacOS Sequoia (15.7.3 (24G419))
+- **OS**: Android 16 (IDK) and MacOS Sequoia (15.7.3 (24G419))
 - **Build Number**: CP1A.260405.005
 
-**Performance Baseline**: ~20% baseline CPU usage. View pagination limits overhead during scrolling; search and playback execute without blocking the UI.
+**Performance Baseline**: ~15% baseline CPU usage. Usage can spike to ~60% during constant UI updates (skipping through pages constantly; forcing heavy UI redraws to push Python to the extreme)
 
 ---
 
@@ -169,7 +170,7 @@ You can run the music player and indexer natively on macOS.
 
 3. **Launch the player**:
    ```bash
-   flet run main.py
+   flet run
    ```
 
 ---
@@ -225,13 +226,6 @@ chmod +x build_android.sh
 | `POST_NOTIFICATIONS` | Required to show playback controls in the notification shade | 13+ |
 | `WAKE_LOCK` | Prevents the CPU from sleeping during downloads | All |
 | `READ_EXTERNAL_STORAGE` | Legacy filesystem access (superseded by `READ_MEDIA_AUDIO`) | < 13 |
-
----
-
-## Developer Note
-
-> [!NOTE]
-> I am a bioinformatician by training, not a professional software engineer. This is a non-professionally driven passion project; please take this into consideration when encountering issues. Any advice or willingness to contribute is appreciated.
 
 ---
 
