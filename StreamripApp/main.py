@@ -1808,11 +1808,6 @@ class StreamripFletApp:
         try:
             with open(tmp, "w") as fh:
                 safe_json_dump(state, fh)
-                fh.flush()
-                try:
-                    os.fsync(fh.fileno())
-                except OSError:
-                    pass
             os.replace(tmp, path)
         except Exception as exc:
             logger.warning("Could not save context queue to %s: %s", filename, exc)
@@ -1854,6 +1849,10 @@ class StreamripFletApp:
         Empty queue ⇒ delete the file rather than write `{"queue": []}` so
         that an explicit `stop()` doesn't leave a phantom session for the
         next launch to "restore" into nothing.
+
+        Partition files (queue_regular/shuffle/similar.json) are refreshed
+        only at mode-transition points — mirroring them on every save just
+        duplicates the I/O without buying any extra recoverability.
         """
         path = os.path.join(DATA_DIR, "queue_state.json")
         if not audio_engine.queue:
@@ -1862,13 +1861,6 @@ class StreamripFletApp:
                     os.remove(path)
             except Exception:
                 pass
-            # Also clear the specific partitioned files
-            if self.play_similar_mode:
-                self._save_queue_to_file("queue_similar.json", [], 0, 0.0, 0.0)
-            elif audio_engine.is_shuffle:
-                self._save_queue_to_file("queue_shuffle.json", [], 0, 0.0, 0.0)
-            else:
-                self._save_queue_to_file("queue_regular.json", [], 0, 0.0, 0.0)
             return
 
         state = {
@@ -1889,13 +1881,6 @@ class StreamripFletApp:
         try:
             with open(tmp, "w") as fh:
                 safe_json_dump(state, fh)
-                fh.flush()
-                try:
-                    os.fsync(fh.fileno())
-                except OSError:
-                    # fsync isn't supported on every Android FS layer;
-                    # rename still gives us all-or-nothing semantics.
-                    pass
             os.replace(tmp, path)
         except Exception as exc:
             logger.warning("Could not save queue state: %s", exc)
@@ -1904,14 +1889,6 @@ class StreamripFletApp:
                     os.remove(tmp)
             except Exception:
                 pass
-
-        # Also mirror to context-specific queue partition in XDG_CACHE_HOME
-        if self.play_similar_mode:
-            self._save_queue_to_file("queue_similar.json", audio_engine.queue, audio_engine.current_index, audio_engine.position, audio_engine.duration)
-        elif audio_engine.is_shuffle:
-            self._save_queue_to_file("queue_shuffle.json", audio_engine.queue, audio_engine.current_index, audio_engine.position, audio_engine.duration)
-        else:
-            self._save_queue_to_file("queue_regular.json", audio_engine.queue, audio_engine.current_index, audio_engine.position, audio_engine.duration)
 
     def _schedule_queue_save(self, delay: float = 0.4):
         """Coalesce save requests over a short window. A burst of mutations
@@ -1934,6 +1911,25 @@ class StreamripFletApp:
             # Called before the loop is running (e.g. during shutdown);
             # fall back to a synchronous write so we don't lose the snapshot.
             self._save_queue_state()
+
+    def _schedule_partition_save(self, filename: str, queue_list: list[dict], current_index: int, position: float, duration: float):
+        # Snapshot the queue list now so a later mutation on the event loop
+        # can't corrupt the bytes we're about to serialise on the worker thread.
+        snapshot = list(queue_list) if queue_list else []
+        try:
+            self.page.run_task(
+                self._partition_save_async,
+                filename, snapshot, current_index, position, duration,
+            )
+        except Exception:
+            # No loop available (shutdown); fall back to a blocking write so
+            # we don't lose the partition snapshot.
+            self._save_queue_to_file(filename, snapshot, current_index, position, duration)
+
+    async def _partition_save_async(self, filename: str, queue_list: list[dict], current_index: int, position: float, duration: float):
+        await asyncio.to_thread(
+            self._save_queue_to_file, filename, queue_list, current_index, position, duration
+        )
 
     async def _position_save_loop(self):
         """Periodically flush position so the restored offset is close to
@@ -2111,9 +2107,9 @@ class StreamripFletApp:
             
             # 2. Partition Cache: Write this new context queue to disk immediately
             if getattr(self, "play_similar_saved_shuffle", False):
-                self._save_queue_to_file("queue_shuffle.json", tracks, target_idx, 0.0, 0.0)
+                self._schedule_partition_save("queue_shuffle.json", tracks, target_idx, 0.0, 0.0)
             else:
-                self._save_queue_to_file("queue_regular.json", tracks, target_idx, 0.0, 0.0)
+                self._schedule_partition_save("queue_regular.json", tracks, target_idx, 0.0, 0.0)
             
             # 3. Set active queue to just the clicked track and start play
             audio_engine.jarvis_controlled = False
@@ -2132,9 +2128,9 @@ class StreamripFletApp:
             
             # 2. Partition Cache: Write this new context queue to disk immediately
             if getattr(self, "play_similar_saved_shuffle", False):
-                self._save_queue_to_file("queue_shuffle.json", tracks, target_idx, 0.0, 0.0)
+                self._schedule_partition_save("queue_shuffle.json", tracks, target_idx, 0.0, 0.0)
             else:
-                self._save_queue_to_file("queue_regular.json", tracks, target_idx, 0.0, 0.0)
+                self._schedule_partition_save("queue_regular.json", tracks, target_idx, 0.0, 0.0)
             
             # 3. Set active queue to just the clicked track and start play
             audio_engine.jarvis_controlled = False
@@ -2187,9 +2183,9 @@ class StreamripFletApp:
             
             # Save it to appropriate partition file immediately for session recovery
             if was_shuffle:
-                self._save_queue_to_file("queue_shuffle.json", self.play_similar_saved_queue, self.play_similar_saved_index, audio_engine.position, audio_engine.duration)
+                self._schedule_partition_save("queue_shuffle.json", self.play_similar_saved_queue, self.play_similar_saved_index, audio_engine.position, audio_engine.duration)
             else:
-                self._save_queue_to_file("queue_regular.json", self.play_similar_saved_queue, self.play_similar_saved_index, audio_engine.position, audio_engine.duration)
+                self._schedule_partition_save("queue_regular.json", self.play_similar_saved_queue, self.play_similar_saved_index, audio_engine.position, audio_engine.duration)
             
             # 3. Initiate similar tracks walk starting from currently playing song
             path = audio_engine.current_path
@@ -2198,7 +2194,7 @@ class StreamripFletApp:
                 self.page.run_task(self._initiate_play_similar_queue_async, path, gen)
         else:
             # Save the current similar queue to its partitioned file
-            self._save_queue_to_file("queue_similar.json", audio_engine.queue, audio_engine.current_index, audio_engine.position, audio_engine.duration)
+            self._schedule_partition_save("queue_similar.json", audio_engine.queue, audio_engine.current_index, audio_engine.position, audio_engine.duration)
 
             # 1. Clear seed path so stale replenishment hooks don't fire
             audio_engine.play_similar_seed_path = ""
@@ -2279,7 +2275,7 @@ class StreamripFletApp:
                     )
         
         if hasattr(self, "queue_sheet") and self.queue_sheet and self.queue_sheet._initialized:
-            self.queue_sheet.refresh()
+            self.safe_update(self.queue_sheet.refresh)
 
     def set_auto_dj_mode(self, enabled: bool):
         if self.auto_dj_mode == enabled:
@@ -2316,15 +2312,15 @@ class StreamripFletApp:
 
             # Save to partitioned files for recovery
             if was_shuffle:
-                self._save_queue_to_file("queue_shuffle.json", self.play_similar_saved_queue, self.play_similar_saved_index, audio_engine.position, audio_engine.duration)
+                self._schedule_partition_save("queue_shuffle.json", self.play_similar_saved_queue, self.play_similar_saved_index, audio_engine.position, audio_engine.duration)
             else:
-                self._save_queue_to_file("queue_regular.json", self.play_similar_saved_queue, self.play_similar_saved_index, audio_engine.position, audio_engine.duration)
+                self._schedule_partition_save("queue_regular.json", self.play_similar_saved_queue, self.play_similar_saved_index, audio_engine.position, audio_engine.duration)
 
             # 3. Initiate Auto-DJ curation
             self.page.run_task(self._initiate_auto_dj_queue_async)
         else:
             # Save current Auto-DJ queue
-            self._save_queue_to_file("queue_similar.json", audio_engine.queue, audio_engine.current_index, audio_engine.position, audio_engine.duration)
+            self._schedule_partition_save("queue_similar.json", audio_engine.queue, audio_engine.current_index, audio_engine.position, audio_engine.duration)
 
             # Restore original queue
             saved_q = getattr(self, "play_similar_saved_queue", None)
@@ -2375,7 +2371,7 @@ class StreamripFletApp:
             audio_engine.dispatch("on_queue_mutated")
 
         if hasattr(self, "queue_sheet") and self.queue_sheet and self.queue_sheet._initialized:
-            self.queue_sheet.refresh()
+            self.safe_update(self.queue_sheet.refresh)
 
     async def _initiate_auto_dj_queue_async(self):
         """Build the initial Auto-DJ queue of curated tracks and start playing."""
@@ -2581,7 +2577,7 @@ class StreamripFletApp:
         # ── Toggle ON: regular queue -> entire library shuffle queue ─────────
         if new_shuffle:
             # 1. Save currently playing/active queue to regular cache
-            self._save_queue_to_file("queue_regular.json", audio_engine.queue, audio_engine.current_index, audio_engine.position, audio_engine.duration)
+            self._schedule_partition_save("queue_regular.json", audio_engine.queue, audio_engine.current_index, audio_engine.position, audio_engine.duration)
             
             # 2. Fetch all tracks from the entire library
             all_tracks = await self.db_manager.get_all_tracks()
@@ -2616,7 +2612,7 @@ class StreamripFletApp:
                 audio_engine._is_shuffle = True
                 audio_engine.set_queue(library_tracks, start_index=found_idx)
                 # Save the new shuffle queue state
-                self._save_queue_to_file("queue_shuffle.json", audio_engine.queue, audio_engine.current_index, audio_engine.position, audio_engine.duration)
+                self._schedule_partition_save("queue_shuffle.json", audio_engine.queue, audio_engine.current_index, audio_engine.position, audio_engine.duration)
             else:
                 audio_engine._is_shuffle = True
                 audio_engine._on_shuffle_changed()
@@ -2624,7 +2620,7 @@ class StreamripFletApp:
         # ── Toggle OFF: shuffle queue -> restore regular queue ───────────────
         else:
             # 1. Save currently playing shuffle queue
-            self._save_queue_to_file("queue_shuffle.json", audio_engine.queue, audio_engine.current_index, audio_engine.position, audio_engine.duration)
+            self._schedule_partition_save("queue_shuffle.json", audio_engine.queue, audio_engine.current_index, audio_engine.position, audio_engine.duration)
             
             # 2. Read regular queue from cache
             state = await asyncio.to_thread(self._load_queue_from_file, "queue_regular.json")
@@ -2659,7 +2655,7 @@ class StreamripFletApp:
                 audio_engine.is_shuffle = False
 
         if hasattr(self, "queue_sheet") and self.queue_sheet and self.queue_sheet._initialized:
-            self.queue_sheet.refresh()
+            self.safe_update(self.queue_sheet.refresh)
         self.page.update()
 
     def cycle_repeat(self):
@@ -2669,7 +2665,7 @@ class StreamripFletApp:
         self.now_playing.update_repeat(mode)
         self._save_pref("repeat_mode", mode)
         if hasattr(self, "queue_sheet") and self.queue_sheet and self.queue_sheet._initialized:
-            self.queue_sheet.refresh()
+            self.safe_update(self.queue_sheet.refresh)
         self.page.update()
 
     # ── download queue UI relay ───────────────────────────────────────────────
