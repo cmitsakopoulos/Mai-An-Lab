@@ -248,7 +248,3 @@ As the creator of Streamrip notes:
 
 > [!IMPORTANT]
 > **Thanks to the open-source communities of Streamrip and Flet** for providing the foundational tools and libraries that make this project possible.
-
-## Extra Credits
-
-NO THANKS to MICROSLOP, for creating the worst piece of software to ever exist. Windows is DISGUSTING; a DISGRACE that deserves no place in the pages of history. Even the worst country on earth decided to mandate Linux for government offices; why can't we get the UN to ban it completely? Why does everything have to run on that horrible excuse of an (non)operating "system"? Using Windows means you're getting cucked by a silicone slab that zaps you. Pay thousands to get a proper piece of hardware and the worst thing to ever happen to humanity CUCKS you out of 350000% CPU/RAM so that copilot can laugh at you while it steals your credit card information. MICROSLOP should be classified as a terrorist organisation. Thank you for reading!
