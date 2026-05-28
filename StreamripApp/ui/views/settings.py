@@ -148,6 +148,18 @@ class SettingsView:
         self._show_most_listened_switch = ft.Switch(value=True, active_color=CYAN)
         self._show_library_stats_switch  = ft.Switch(value=True, active_color=CYAN)
 
+        # Play Similar temperature slider
+        self._temp_slider = ft.Slider(
+            min=0.01,
+            max=0.20,
+            divisions=19,
+            label="{value}",
+            value=0.05,
+            active_color=CYAN,
+            on_change=self._on_temp_change,
+        )
+        self._temp_value_text = ft.Text("0.05", color=TEXT, size=13, weight=ft.FontWeight.W_700)
+
         self._scroll_column = ft.Column(
             scroll=ft.ScrollMode.AUTO,
             spacing=12,
@@ -430,6 +442,13 @@ class SettingsView:
                     on_click=self._on_import_state_click,
                 ),
             ]),
+            ft.Divider(color=BORDER, height=40),
+            ft.Text("Play Similar Recommendation Temperature", weight=ft.FontWeight.BOLD, color=CYAN),
+            ft.Text("Controls the random softmax exploration of similarity walks. A lower value keeps transitions tight and genre-consistent, while a higher value adds variety.", color=DIM, size=12),
+            ft.Row([
+                ft.Container(content=self._temp_slider, expand=True),
+                ft.Container(content=self._temp_value_text, margin=ft.Margin.only(right=10)),
+            ], vertical_alignment=ft.CrossAxisAlignment.CENTER),
             ft.Divider(color=BORDER, height=40),
             ft.Text("Maintenance", weight=ft.FontWeight.BOLD, color=DIM),
             ft.Row([
@@ -773,6 +792,8 @@ class SettingsView:
             gen = cfg.get("general", {})
             self._startup_page_dropdown.value = gen.get("startup_page", "Library")
             self._default_sort_dropdown.value = gen.get("library_sort", "date")
+            self._temp_slider.value = float(gen.get("play_similar_temperature", 0.05))
+            self._temp_value_text.value = f"{self._temp_slider.value:.2f}"
 
             qobuz = cfg.get("qobuz", {})
             self._qobuz_user_id_field.value = str(qobuz.get("email_or_userid", ""))
@@ -894,6 +915,17 @@ class SettingsView:
             lib_view.sort_mode = sort
             if hasattr(lib_view, "load_library"):
                 self.page.run_task(lib_view.load_library)
+
+    def _on_temp_change(self, e):
+        val = round(self._temp_slider.value, 2)
+        self._temp_value_text.value = f"{val:.2f}"
+        self._temp_value_text.update()
+        from utils.streamrip_api import update_config_params
+        update_config_params({
+            "general": {
+                "play_similar_temperature": val
+            }
+        })
 
     def _save_config(self):
         try:
