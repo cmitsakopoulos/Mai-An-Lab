@@ -293,6 +293,39 @@ class SearchView:
             animate_opacity=ft.Animation(250, ft.AnimationCurve.EASE_OUT),
         )
 
+        # Search connection progress card
+        self._search_progress_status = ft.Text("Searching Qobuz...", color=TEXT, size=13, weight=ft.FontWeight.W_700)
+        self._search_progress_detail = ft.Text("Connecting to Qobuz API...", color=DIM, size=11, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS)
+        self._search_progress_spinner = ft.ProgressRing(width=18, height=18, stroke_width=2, color=CYAN)
+
+        self._search_progress_card = ft.Container(
+            content=ft.Row(
+                [
+                    self._search_progress_spinner,
+                    ft.Column(
+                        [
+                            self._search_progress_status,
+                            self._search_progress_detail,
+                        ],
+                        spacing=2,
+                        expand=True,
+                    ),
+                ],
+                spacing=12,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            bgcolor=SURFACE,
+            border=ft.Border.all(1, CYAN + "55"),
+            border_radius=12,
+            padding=14,
+            margin=ft.Margin.symmetric(horizontal=12),
+            visible=False,
+            offset=ft.Offset(0, 0.4),
+            animate_offset=ft.Animation(300, ft.AnimationCurve.EASE_OUT_BACK),
+            opacity=0,
+            animate_opacity=ft.Animation(250, ft.AnimationCurve.EASE_OUT),
+        )
+
         # pending queue list
         self._pending_list = ft.ListView(spacing=6, padding=ft.Padding.symmetric(horizontal=12))
 
@@ -383,6 +416,7 @@ class SearchView:
                 ),
 
                 self._progress_card,
+                self._search_progress_card,
                 
                 # Main Results Area
                 ft.Stack(
@@ -739,6 +773,7 @@ class SearchView:
         # Bump current_search_id so any in-flight searcher.search callback
         # fails its id-equality guard in _on_results and gets dropped.
         self.current_search_id += 1
+        self.hide_search_progress()
 
         def _mutate():
             self._stop_skeleton_pulse()
@@ -795,6 +830,9 @@ class SearchView:
         self._search_indicator.visible = True
         self._clear_btn.visible = True
 
+        # Show connection stages progress card
+        self.show_search_progress("Initializing...", "Starting search query...")
+
         # Skeleton rows
         cards = [SkeletonRow(delay=i * 0.08) for i in range(8)]
         def _mutate_start():
@@ -803,15 +841,21 @@ class SearchView:
             self._results_list.offset = ft.Offset(0, 0)
         self.app.safe_update(_mutate_start)
 
+        def search_progress_callback(status, detail):
+            if self.current_search_id == search_id:
+                self.update_search_progress(status, detail)
+
         def results_callback(results):
             if self.current_search_id == search_id:
+                self.hide_search_progress()
                 self._on_results(results)
 
         asyncio.create_task(asyncio.to_thread(
             self.searcher.search,
             query, self.selected_source, results_callback,
             media_types=["track", "album", "artist"],
-            limit=250, offset=0
+            limit=250, offset=0,
+            progress_callback=search_progress_callback
         ))
 
     def _on_results(self, results, *args, **kwargs):
@@ -1377,6 +1421,36 @@ class SearchView:
         def _mutate():
             self._progress_card.visible = False
             self._progress_bar.value    = 0
+        self.app.safe_update(_mutate)
+
+    def show_search_progress(self, status: str, detail: str = ""):
+        def _mutate():
+            self._search_progress_status.value = status
+            self._search_progress_detail.value = detail
+            self._search_progress_card.visible = True
+            self._search_progress_card.opacity = 1
+            self._search_progress_card.offset = ft.Offset(0, 0)
+        self.app.safe_update(_mutate)
+
+    def update_search_progress(self, status: str, detail: str = ""):
+        def _mutate():
+            self._search_progress_status.value = status
+            self._search_progress_detail.value = detail
+        self.app.safe_update(_mutate)
+
+    def hide_search_progress(self):
+        def _mutate():
+            self._search_progress_card.opacity = 0
+            self._search_progress_card.offset = ft.Offset(0, 0.4)
+        self.app.safe_update(_mutate)
+        async def _delayed_hide():
+            await asyncio.sleep(0.3)
+            self._hide_search_card_done()
+        asyncio.create_task(_delayed_hide())
+
+    def _hide_search_card_done(self):
+        def _mutate():
+            self._search_progress_card.visible = False
         self.app.safe_update(_mutate)
 
     def update_progress(self, status: str, pct: float | None, detail: str = ""):

@@ -21,8 +21,9 @@ from __future__ import annotations
 import numpy as np
 
 
-# Must match `track_graph._MOOD_FEATURES` length. Bumping requires bumping
-# FEATURES_VERSION so stale weights get invalidated by the version gate.
+# Dimensionality of the (currently deprecated/disconnected) taste model. If
+# revived, this must match the coordinate space it is trained on; bumping it
+# requires bumping FEATURES_VERSION so stale weights get invalidated.
 TASTE_MODEL_DIM = 3
 
 # SGD hyperparameters. Slightly more conservative than the per-mood

@@ -25,8 +25,13 @@ class QueueSheet:
             return
 
         self._count_text = ft.Text("", color=DIM, size=11, weight=ft.FontWeight.W_700)
-        self._queue_list = ft.ListView(expand=True, spacing=4,
-                                        padding=ft.Padding.symmetric(horizontal=12))
+        self._queue_list = ft.ReorderableListView(
+            expand=True,
+            spacing=4,
+            padding=ft.Padding.symmetric(horizontal=12),
+            show_default_drag_handles=False,
+            on_reorder=self._handle_queue_reorder,
+        )
         self._empty_label = ft.Container(
             content=ft.Column(
                 [
@@ -194,12 +199,10 @@ class QueueSheet:
                         ),
                         ft.Row(
                             [
-                                ft.IconButton(icon=ft.Icons.ARROW_UPWARD, icon_color=DIM, icon_size=16,
-                                              visible=not is_active and not is_shuffle and i > cur_idx + 1,
-                                              on_click=lambda e, idx=i: self._move(idx, idx - 1)),
-                                ft.IconButton(icon=ft.Icons.ARROW_DOWNWARD, icon_color=DIM, icon_size=16,
-                                              visible=not is_active and not is_shuffle,
-                                              on_click=lambda e, idx=i: self._move(idx, idx + 1)),
+                                ft.ReorderableDragHandle(
+                                    content=ft.Icon(ft.Icons.DRAG_HANDLE_ROUNDED, color=DIM, size=16),
+                                    visible=not is_active and not is_shuffle,
+                                ),
                                 ft.IconButton(icon=ft.Icons.REMOVE_CIRCLE_OUTLINE, icon_color="#FF4444",
                                               icon_size=16,
                                               on_click=lambda e, idx=i: self._remove(idx)),
@@ -243,9 +246,10 @@ class QueueSheet:
                         padding=ft.Padding.only(right=20),
                     ),
                     dismiss_direction=ft.DismissDirection.HORIZONTAL, # Enables swiping in both directions
-                    on_dismiss=lambda e, idx=i: self._remove(idx),
+                    on_dismiss=lambda e, idx=i: self._on_dismiss(idx),
                 ),
                 target_height=60,
+                key=f"q_{i}",
             )
 
         shuf_order = getattr(audio_engine, "_shuffle_order", None)
@@ -307,6 +311,49 @@ class QueueSheet:
         self._queue_list.controls = rows
         self._queue_list.update()
 
+    def _handle_queue_reorder(self, e: ft.OnReorderEvent):
+        old_idx = e.old_index
+        new_idx = e.new_index
+        if new_idx > old_idx:
+            new_idx -= 1
+
+        cur_idx    = audio_engine.current_index
+        is_shuffle = bool(audio_engine.is_shuffle)
+        shuf_order = getattr(audio_engine, "_shuffle_order", None)
+        upcoming = []
+        if is_shuffle and shuf_order and len(shuf_order) == len(audio_engine.queue):
+            try:
+                curr_shuf_idx = shuf_order.index(cur_idx)
+            except ValueError:
+                curr_shuf_idx = -1
+            if curr_shuf_idx != -1:
+                shuffled_indices = shuf_order[curr_shuf_idx:]
+                for idx in shuffled_indices:
+                    upcoming.append((idx, audio_engine.queue[idx]))
+        if not upcoming:
+            for idx in range(cur_idx, len(audio_engine.queue)):
+                upcoming.append((idx, audio_engine.queue[idx]))
+
+        visible_upcoming = upcoming[:15]
+        if not (0 <= old_idx < len(visible_upcoming) and 0 <= new_idx < len(visible_upcoming)):
+            self.refresh()
+            return
+
+        if old_idx == 0 or new_idx == 0:
+            self.refresh()
+            return
+
+        from_queue_idx = visible_upcoming[old_idx][0]
+        to_queue_idx = visible_upcoming[new_idx][0]
+
+        # Update visual controls list in-place first to prevent flicker
+        controls = e.control.controls
+        item = controls.pop(e.old_index)
+        controls.insert(new_idx, item)
+
+        audio_engine.move_queue_item(from_queue_idx, to_queue_idx)
+        self.app.safe_update(self.refresh)
+
     def _move(self, from_idx: int, to_idx: int):
         audio_engine.move_queue_item(from_idx, to_idx)
         self.app.safe_update(self.refresh)
@@ -314,6 +361,10 @@ class QueueSheet:
     def _remove(self, idx: int):
         audio_engine.remove_from_queue(idx)
         self.app.safe_update(self.refresh)
+
+    def _on_dismiss(self, idx: int):
+        self.app.trigger_haptic("swipe_dismiss")
+        self._remove(idx)
 
     def _clear_all(self):
         audio_engine.clear_queue()

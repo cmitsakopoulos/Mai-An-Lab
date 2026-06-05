@@ -53,19 +53,6 @@ class MiniPlayerBar:
         )
         self._progress   = ft.ProgressBar(value=0, color=CYAN, bgcolor=None, height=2)
 
-        self._like_btn = ft.IconButton(
-            icon=ft.Icons.THUMB_UP_OUTLINED,
-            icon_color=DIM, icon_size=20,
-            tooltip="Like this track",
-            on_click=lambda e: self.app._on_feedback_click(True),
-        )
-        self._dislike_btn = ft.IconButton(
-            icon=ft.Icons.THUMB_DOWN_OUTLINED,
-            icon_color=DIM, icon_size=20,
-            tooltip="Dislike this track",
-            on_click=lambda e: self.app._on_feedback_click(False),
-        )
-
         self._ever_shown  = False   # True once a title has been set at least once
         self._last_title  = ""
         self._last_artist = ""

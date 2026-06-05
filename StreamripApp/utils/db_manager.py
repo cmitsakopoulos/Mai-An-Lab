@@ -1,6 +1,8 @@
+# pyrefly: ignore [missing-import]
 import aiosqlite
 import os
 import asyncio
+import json
 import logging
 import re
 import numpy as np
@@ -48,6 +50,7 @@ class DatabaseManager:
             await self._migrate_partitions(self._conn)
             await self._migrate_pca(self._conn)
             await self._migrate_taste_model(self._conn)
+            await self._migrate_clusters(self._conn)
         return self._conn
 
     async def get_total_tracks(self) -> int:
@@ -849,13 +852,41 @@ class DatabaseManager:
         Idempotent migration: creates the track_partitions table and its indexes
         if they don't already exist. Called once per fresh connection.
         """
+        # Composite PK (track_path, mood) → a track may be pinned to several
+        # moods (many-to-many, revised 2026-06-04).
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS track_partitions (
-                track_path TEXT PRIMARY KEY REFERENCES tracks(path) ON DELETE CASCADE,
+                track_path TEXT REFERENCES tracks(path) ON DELETE CASCADE,
                 mood       TEXT,
-                islet_id   INTEGER
+                islet_id   INTEGER,
+                PRIMARY KEY (track_path, mood)
             )
         ''')
+        # Migrate a legacy single-column-PK table (strict one-to-many) to the
+        # composite PK. SQLite can't alter a PK in place, so rebuild once.
+        try:
+            cur = await conn.execute("PRAGMA table_info(track_partitions)")
+            info = await cur.fetchall()
+            pk_cols = [c["name"] for c in info if c["pk"]]
+            if pk_cols == ["track_path"]:
+                await conn.execute("ALTER TABLE track_partitions RENAME TO track_partitions_legacy")
+                await conn.execute('''
+                    CREATE TABLE track_partitions (
+                        track_path TEXT REFERENCES tracks(path) ON DELETE CASCADE,
+                        mood       TEXT,
+                        islet_id   INTEGER,
+                        PRIMARY KEY (track_path, mood)
+                    )
+                ''')
+                await conn.execute(
+                    "INSERT OR IGNORE INTO track_partitions (track_path, mood, islet_id) "
+                    "SELECT track_path, mood, islet_id FROM track_partitions_legacy WHERE mood IS NOT NULL"
+                )
+                await conn.execute("DROP TABLE track_partitions_legacy")
+                await conn.commit()
+                logger.info("Migrated track_partitions to composite (track_path, mood) PK.")
+        except Exception as e:
+            logger.warning("track_partitions PK migration skipped: %s", e)
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_tp_mood ON track_partitions(mood)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_tp_islet_id ON track_partitions(islet_id)")
 
@@ -1501,11 +1532,13 @@ class DatabaseManager:
         placeholders = ",".join("?" * len(edge_kinds))
         sql = f'''
             SELECT n.neighbor_path AS path, n.weight, n.edge_kind,
-                   t.title, ar.name AS artist, al.title AS album
+                   t.title, ar.name AS artist, al.title AS album,
+                   pc.cluster_id
             FROM track_neighbors n
             LEFT JOIN tracks  t  ON t.path     = n.neighbor_path
             LEFT JOIN albums  al ON al.id      = t.album_id
             LEFT JOIN artists ar ON ar.id      = al.artist_id
+            LEFT JOIN play_counts pc ON pc.track_path = n.neighbor_path
             WHERE n.track_path = ? AND n.edge_kind IN ({placeholders})
             ORDER BY n.weight DESC
             LIMIT ?
@@ -1727,12 +1760,13 @@ class DatabaseManager:
         """
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS pca_space (
-                id          INTEGER PRIMARY KEY CHECK (id = 1),
-                means       BLOB NOT NULL,
-                stds        BLOB NOT NULL,
-                projection  BLOB NOT NULL,
-                eigenvalues BLOB,
-                updated_at  REAL NOT NULL
+                id           INTEGER PRIMARY KEY CHECK (id = 1),
+                means        BLOB NOT NULL,
+                stds         BLOB NOT NULL,
+                projection   BLOB NOT NULL,
+                eigenvalues  BLOB,
+                feature_spec TEXT,
+                updated_at   REAL NOT NULL
             )
         ''')
         try:
@@ -1740,37 +1774,73 @@ class DatabaseManager:
             await conn.commit()
         except Exception:
             pass # Column already exists
+        # One-time geometry bump: upgrading a DB whose pca_space predates the
+        # unified graph Zr. Adding feature_spec succeeds once; in the same block
+        # we drop the stale 3-D pca_coords so the next build repopulates them at
+        # the new (~20-D) dimensionality. (Variable projection shape is inferred
+        # from means length on load, so no shape columns are needed.)
+        try:
+            await conn.execute("ALTER TABLE pca_space ADD COLUMN feature_spec TEXT")
+            await conn.execute("UPDATE play_counts SET pca_coords = NULL")
+            await conn.commit()
+        except Exception:
+            pass # feature_spec already present (fresh DB or already migrated)
         await conn.commit()
 
-    async def save_pca_space(self, means: np.ndarray, stds: np.ndarray, V_keep: np.ndarray, eigenvalues: np.ndarray = None):
-        """Mutation: Saves the 3D PCA projection state."""
+    async def save_pca_space(self, means: np.ndarray, stds: np.ndarray, V_keep: np.ndarray, eigenvalues: np.ndarray = None, feature_spec: dict | None = None):
+        """Mutation: Saves the unified graph-Zr projection state.
+
+        `V_keep` is the (D, k) projection matrix (Zr = z @ V_keep); its shape is
+        recovered on load from `len(means)`. `feature_spec` carries the surviving
+        scalar list + scalar_weight + embed_dims needed to project new tracks
+        identically (see track_graph.project_to_zr)."""
         means_bytes = means.astype(np.float32).tobytes()
         stds_bytes = stds.astype(np.float32).tobytes()
         V_bytes = V_keep.astype(np.float32).tobytes()
         eig_bytes = eigenvalues.astype(np.float32).tobytes() if eigenvalues is not None else b""
-        
+        spec_text = json.dumps(feature_spec) if feature_spec is not None else None
+
         async with self._write_lock:
             conn = await self.get_connection()
             await conn.execute('''
-                INSERT OR REPLACE INTO pca_space (id, means, stds, projection, eigenvalues, updated_at)
-                VALUES (1, ?, ?, ?, ?, strftime('%s','now'))
-            ''', (means_bytes, stds_bytes, V_bytes, eig_bytes))
+                INSERT OR REPLACE INTO pca_space (id, means, stds, projection, eigenvalues, feature_spec, updated_at)
+                VALUES (1, ?, ?, ?, ?, ?, strftime('%s','now'))
+            ''', (means_bytes, stds_bytes, V_bytes, eig_bytes, spec_text))
             await conn.commit()
-            logger.info("PCA projection space saved to database successfully.")
+            logger.info("PCA projection space saved (D=%d, proj cols inferred on load).", len(means))
 
-    async def load_pca_space(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray | None] | None:
-        """Lock-free read. Loads the PCA space parameters (means, stds, V_keep, eigenvalues)."""
+    async def load_pca_space(self) -> dict | None:
+        """Lock-free read. Returns the unified projection as a dict:
+        {means(D,), stds(D,), projection(D,k), eigenvalues, surviving,
+        scalar_weight, embed_dims, z_score}, or None if unset. Projection shape
+        is inferred as (D, len/D) so the dimensionality is not hardcoded."""
         conn = await self.get_connection()
-        async with conn.execute("SELECT means, stds, projection, eigenvalues FROM pca_space WHERE id = 1") as cursor:
+        async with conn.execute("SELECT means, stds, projection, eigenvalues, feature_spec FROM pca_space WHERE id = 1") as cursor:
             row = await cursor.fetchone()
             if not row:
                 return None
             try:
                 means = np.frombuffer(row['means'], dtype=np.float32)
                 stds = np.frombuffer(row['stds'], dtype=np.float32)
-                projection = np.frombuffer(row['projection'], dtype=np.float32).reshape(8, 3)
+                D = len(means)
+                projection = np.frombuffer(row['projection'], dtype=np.float32)
+                if D:
+                    projection = projection.reshape(D, -1)
                 eigenvalues = np.frombuffer(row['eigenvalues'], dtype=np.float32) if row['eigenvalues'] else None
-                return means, stds, projection, eigenvalues
+                try:
+                    spec = json.loads(row['feature_spec']) if row['feature_spec'] else {}
+                except Exception:
+                    spec = {}
+                return {
+                    "means": means,
+                    "stds": stds,
+                    "projection": projection,
+                    "eigenvalues": eigenvalues,
+                    "surviving": spec.get("surviving"),
+                    "scalar_weight": float(spec.get("scalar_weight", 1.0)),
+                    "embed_dims": int(spec.get("embed_dims", 52)),
+                    "z_score": bool(spec.get("z_score", True)),
+                }
             except Exception as e:
                 logger.error(f"Error decoding PCA space from database: {e}")
                 return None
@@ -1824,7 +1894,7 @@ class DatabaseManager:
                 try:
                     row_dict["pca_coords"] = np.frombuffer(row_dict["pca_coords"], dtype=np.float32).tolist()
                 except Exception:
-                    row_dict["pca_coords"] = [0.0, 0.0, 0.0]
+                    row_dict["pca_coords"] = None  # variable-dim now; let callers skip/re-project
                 results.append(row_dict)
             return results
 
@@ -1902,6 +1972,71 @@ class DatabaseManager:
                 logger.error(f"Failed to save taste model: {e}")
                 raise
 
+    # ── Track Clustering ───────────────────────────────────────────────────────
+
+    async def _migrate_clusters(self, conn):
+        """Idempotent migration: adds the cluster_id column to play_counts
+        (Louvain community per track, consumed by the walk's cross-cluster
+        penalty)."""
+        try:
+            await conn.execute(
+                "ALTER TABLE play_counts ADD COLUMN cluster_id INTEGER"
+            )
+            await conn.commit()
+        except Exception:
+            pass  # Column already exists
+
+    async def save_track_clusters(
+        self, path_cluster_pairs: list[tuple[str, int]]
+    ) -> None:
+        """Batch-update cluster_id in play_counts for every (path, cluster_id)
+        pair. Called once per graph rebuild."""
+        if not path_cluster_pairs:
+            return
+        async with self._write_lock:
+            conn = await self.get_connection()
+            await conn.executemany(
+                "UPDATE play_counts SET cluster_id = ? WHERE track_path = ?",
+                [(cid, path) for path, cid in path_cluster_pairs],
+            )
+            await conn.commit()
+            logger.info(
+                "Saved cluster assignments for %d tracks.",
+                len(path_cluster_pairs),
+            )
+
+    async def get_track_cluster(self, path: str) -> int | None:
+        """Single-row cluster lookup."""
+        conn = await self.get_connection()
+        async with conn.execute(
+            "SELECT cluster_id FROM play_counts WHERE track_path = ?",
+            (path,),
+        ) as cursor:
+            row = await cursor.fetchone()
+            return int(row[0]) if row and row[0] is not None else None
+
+    async def get_track_clusters_bulk(
+        self, paths: list[str]
+    ) -> dict[str, int | None]:
+        """Bulk cluster lookup. Returns {path: cluster_id} for every path in
+        the input list. Missing / un-clustered tracks map to None."""
+        if not paths:
+            return {}
+        conn = await self.get_connection()
+        out: dict[str, int | None] = {p: None for p in paths}
+        for i in range(0, len(paths), 500):
+            chunk = paths[i:i + 500]
+            placeholders = ",".join("?" * len(chunk))
+            sql = (
+                "SELECT track_path, cluster_id FROM play_counts "
+                f"WHERE track_path IN ({placeholders})"
+            )
+            async with conn.execute(sql, chunk) as cursor:
+                for r in await cursor.fetchall():
+                    cid = r[1]
+                    out[r[0]] = int(cid) if cid is not None else None
+        return out
+
     async def clear_taste_model(self) -> None:
         """Mutation: wipe the taste model. Called when FEATURES_VERSION moves
         forward and the persisted weights no longer align with the PC layout."""
@@ -1923,7 +2058,8 @@ class DatabaseManager:
     # enforces strict one-to-many: re-assigning a track moves it.
 
     async def assign_track_to_mood(self, track_path: str, mood: str) -> None:
-        """Assign a track to a mood, overwriting any prior assignment."""
+        """Pin a track to a mood (many-to-many; a track may sit in several
+        moods). Idempotent on (track_path, mood)."""
         async with self._write_lock:
             conn = await self.get_connection()
             await conn.execute(
@@ -1934,12 +2070,22 @@ class DatabaseManager:
             await conn.commit()
 
     async def unassign_track(self, track_path: str) -> None:
-        """Remove a track from whichever mood it's currently in."""
+        """Remove a track from *all* its mood pins."""
         async with self._write_lock:
             conn = await self.get_connection()
             await conn.execute(
                 "DELETE FROM track_partitions WHERE track_path = ?",
                 (track_path,),
+            )
+            await conn.commit()
+
+    async def unassign_track_from_mood(self, track_path: str, mood: str) -> None:
+        """Remove a track from one specific mood pin (leaves its other moods)."""
+        async with self._write_lock:
+            conn = await self.get_connection()
+            await conn.execute(
+                "DELETE FROM track_partitions WHERE track_path = ? AND mood = ?",
+                (track_path, mood),
             )
             await conn.commit()
 

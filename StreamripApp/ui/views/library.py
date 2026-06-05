@@ -42,13 +42,36 @@ class LibraryView:
         from utils.streamrip_api import load_config
         self.app            = app
         self.page           = app.page
-        self.view_mode      = "tracks"
-        # Resolve default sort from config
+        
+        # Resolve default sort and initial view mode from config
         try:
             cfg = load_config()
             self.sort_mode = cfg.get("general", {}).get("library_sort", "date")
+            appearance = cfg.get("appearance", {})
         except:
             self.sort_mode = "date"
+            appearance = {}
+
+        show_moods = bool(appearance.get("show_moods", False))
+        show_islets = bool(appearance.get("show_islets", False))
+        show_partitions = show_moods or show_islets
+        show_playlists = bool(appearance.get("show_playlists", True))
+        show_artists = bool(appearance.get("show_artists", True))
+        show_albums = bool(appearance.get("show_albums", True))
+        show_tracks = bool(appearance.get("show_tracks", True))
+
+        if show_tracks:
+            self.view_mode = "tracks"
+        elif show_albums:
+            self.view_mode = "albums"
+        elif show_artists:
+            self.view_mode = "artists"
+        elif show_playlists:
+            self.view_mode = "playlists"
+        elif show_partitions:
+            self.view_mode = "partitions"
+        else:
+            self.view_mode = "tracks"
 
         self.search_query   = ""
         self.expanded_nodes: set[str] = set()
@@ -495,7 +518,7 @@ class LibraryView:
             logger.exception("EQ dialog: failed to fetch mood definition: %s", exc)
             definition = None
 
-        # Load SVD projection space and eigenvalues for dynamic raw feature mapping and variance calculations
+        # Raw scalar features the EQ exposes as 1–4 bands (these map to MOOD_TARGETS).
         raw_features = ["bpm", "brightness", "energy", "rolloff", "beat_strength", "spectral_flatness", "spectral_contrast", "key_mode"]
         
         friendly_names = {
@@ -520,122 +543,11 @@ class LibraryView:
             "key_mode": "Major keys (bright/optimistic) vs. minor keys (dark/somber).",
         }
         
-        projection = None
-        eigenvalues = None
-        try:
-            conn = await db.get_connection()
-            async with conn.execute("SELECT projection, eigenvalues FROM pca_space WHERE id = 1") as cursor:
-                row = await cursor.fetchone()
-            
-            # If not optimized or empty, compute SVD on-the-fly to get eigenvalues/projection
-            if row is None or not row['eigenvalues']:
-                logger.info("EQ dialog: PCA space empty, optimizing on-the-fly...")
-                await tg.optimize_pca_spacing(db, tg.FEATURES_VERSION)
-                async with conn.execute("SELECT projection, eigenvalues FROM pca_space WHERE id = 1") as cursor:
-                    row = await cursor.fetchone()
-            
-            if row:
-                import numpy as np
-                projection = np.frombuffer(row['projection'], dtype=np.float32).reshape(8, 3)
-                if row['eigenvalues']:
-                    eigenvalues = np.frombuffer(row['eigenvalues'], dtype=np.float32)
-        except Exception as exc:
-            logger.exception("EQ dialog: failed to load SVD space for dynamic mapping: %s", exc)
-
-        most_variance_text = ""
-        least_variance_text = ""
-        
+        # The legacy "Sonic Variance Profile" / PC-colour decoration was tied to
+        # the retired 3-D mood PCA and no longer applies under the unified graph
+        # geometry. Sliders render plain; the EQ band values drive tracks_by_mood.
         feature_pc = {f: 0 for f in raw_features}
-        
-        if projection is not None:
-            import numpy as np
-            overall_weights = []
-            for feat_idx, feat in enumerate(raw_features):
-                if eigenvalues is not None and len(eigenvalues) >= 3:
-                    weight = float(
-                        (projection[feat_idx, 0] ** 2) * eigenvalues[0] +
-                        (projection[feat_idx, 1] ** 2) * eigenvalues[1] +
-                        (projection[feat_idx, 2] ** 2) * eigenvalues[2]
-                    )
-                else:
-                    weight = float(
-                        (projection[feat_idx, 0] ** 2) +
-                        (projection[feat_idx, 1] ** 2) +
-                        (projection[feat_idx, 2] ** 2)
-                    )
-                overall_weights.append((feat, weight))
-                
-                # Determine dominant PC for this feature
-                loadings = [abs(projection[feat_idx, 0]), abs(projection[feat_idx, 1]), abs(projection[feat_idx, 2])]
-                feature_pc[feat] = int(np.argmax(loadings))
-                
-            sorted_overall = sorted(overall_weights, key=lambda x: x[1], reverse=True)
-            most_variance_features = [friendly_names[x[0]] for x in sorted_overall[:3]]
-            most_variance_text = ", ".join(most_variance_features)
-            
-            least_variance_features = [friendly_names[x[0]] for x in sorted_overall[-2:]]
-            least_variance_text = ", ".join(least_variance_features)
-            
-            # Sort raw_features by descending variance contribution
-            raw_features = [x[0] for x in sorted_overall]
-
         header_controls = []
-        if most_variance_text and least_variance_text:
-            header_controls.extend([
-                ft.Text("Sonic Variance Profile", color=CYAN, size=11, weight=ft.FontWeight.BOLD),
-                ft.Container(
-                    content=ft.Column(
-                        [
-                            ft.Text(f"Most Active: {most_variance_text}", color=TEXT, size=11, weight=ft.FontWeight.W_600),
-                            ft.Text(f"Least Active: {least_variance_text}", color=DIM, size=10),
-                        ],
-                        spacing=2,
-                    ),
-                    bgcolor=apply_opacity(0.04, TEXT),
-                    border_radius=8,
-                    padding=10,
-                    margin=ft.Margin.only(bottom=8),
-                    border=ft.Border.all(1, apply_opacity(0.08, TEXT)),
-                ),
-                ft.Text("Feature Dimension Coding", color=CYAN, size=11, weight=ft.FontWeight.BOLD),
-                ft.Container(
-                    content=ft.Row(
-                        [
-                            ft.Row(
-                                [
-                                    ft.Container(width=8, height=8, border_radius=4, bgcolor=ft.Colors.CYAN),
-                                    ft.Text("Timbre", color=TEXT, size=10, weight=ft.FontWeight.W_600),
-                                ],
-                                spacing=4,
-                                vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                            ),
-                            ft.Row(
-                                [
-                                    ft.Container(width=8, height=8, border_radius=4, bgcolor=ft.Colors.PURPLE),
-                                    ft.Text("Tempo", color=TEXT, size=10, weight=ft.FontWeight.W_600),
-                                ],
-                                spacing=4,
-                                vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                            ),
-                            ft.Row(
-                                [
-                                    ft.Container(width=8, height=8, border_radius=4, bgcolor=ft.Colors.AMBER_500),
-                                    ft.Text("Harmonic", color=TEXT, size=10, weight=ft.FontWeight.W_600),
-                                ],
-                                spacing=4,
-                                vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                            ),
-                        ],
-                        alignment=ft.MainAxisAlignment.SPACE_AROUND,
-                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                    ),
-                    bgcolor=apply_opacity(0.04, TEXT),
-                    border_radius=8,
-                    padding=10,
-                    margin=ft.Margin.only(bottom=8),
-                    border=ft.Border.all(1, apply_opacity(0.08, TEXT)),
-                )
-            ])
 
         def _weight_for(feature: str) -> float:
             if not definition:
@@ -836,7 +748,7 @@ class LibraryView:
             
             for ctrl in self._path_to_controls.get(track_path, []):
                 try:
-                    tile = ctrl.content.content
+                    tile = self._get_tile(ctrl)
                     if isinstance(tile.trailing, ft.Row) and len(tile.trailing.controls) >= 2:
                         l_btn = tile.trailing.controls[0]
                         l_btn.icon = ft.Icons.THUMB_UP_OUTLINED if is_liked else ft.Icons.THUMB_UP_ROUNDED
@@ -854,7 +766,7 @@ class LibraryView:
                             self._mood_feedback_map.setdefault(wt, {})[mood] = 1
                             for ctrl in self._path_to_controls.get(wt, []):
                                 try:
-                                    tile = ctrl.content.content
+                                    tile = self._get_tile(ctrl)
                                     if isinstance(tile.trailing, ft.Row) and len(tile.trailing.controls) >= 2:
                                         l_btn = tile.trailing.controls[0]
                                         l_btn.icon = ft.Icons.THUMB_UP_ROUNDED
@@ -882,7 +794,7 @@ class LibraryView:
                                 self._mood_feedback_map.setdefault(wt, {})[mood] = 0
                                 for ctrl in self._path_to_controls.get(wt, []):
                                     try:
-                                        tile = ctrl.content.content
+                                        tile = self._get_tile(ctrl)
                                         if isinstance(tile.trailing, ft.Row) and len(tile.trailing.controls) >= 2:
                                             l_btn = tile.trailing.controls[0]
                                             l_btn.icon = ft.Icons.THUMB_UP_OUTLINED
@@ -1000,7 +912,7 @@ class LibraryView:
                                 self._mood_feedback_map.setdefault(wt, {})[mood] = 0
                                 for ctrl in self._path_to_controls.get(wt, []):
                                     try:
-                                        tile = ctrl.content.content
+                                        tile = self._get_tile(ctrl)
                                         if isinstance(tile.trailing, ft.Row) and len(tile.trailing.controls) >= 2:
                                             l_btn = tile.trailing.controls[0]
                                             l_btn.icon = ft.Icons.THUMB_UP_OUTLINED
@@ -1084,8 +996,7 @@ class LibraryView:
             
             import numpy as np
             from utils import track_graph as tg
-            
-            await tg.optimize_pca_spacing(db, tg.FEATURES_VERSION)
+
             rows, percentile_matrix = await tg._load_percentile_matrix(db, tg.FEATURES_VERSION)
             
             all_tracks = await db.get_all_tracks()
@@ -1179,13 +1090,38 @@ class LibraryView:
             self.app.safe_update(lambda: setattr(self._search_spinner, "visible", False))
 
     def _update_partition_tabs_ui(self):
+        from utils.streamrip_api import load_config
+        try:
+            cfg = load_config()
+            appearance = cfg.get("appearance", {})
+        except:
+            appearance = {}
+
+        show_moods = bool(appearance.get("show_moods", False))
+        show_islets = bool(appearance.get("show_islets", False))
+
+        visible_submodes = []
+        if show_moods: visible_submodes.append("moods")
+        if show_islets: visible_submodes.append("islets")
+
+        if not visible_submodes:
+            visible_submodes = ["moods"]
+            show_moods = True
+
+        if self.partition_sub_mode not in visible_submodes:
+            self.partition_sub_mode = visible_submodes[0]
+
         tabs = []
-        for mode, label, icon in [
-            ("moods", "Default", ft.Icons.EMOJI_EMOTIONS_ROUNDED),
-            ("islets", "Custom", ft.Icons.DIVERSITY_3_ROUNDED),
-        ]:
+        all_submodes = [
+            ("moods", "Default", ft.Icons.EMOJI_EMOTIONS_ROUNDED, show_moods),
+            ("islets", "Custom", ft.Icons.DIVERSITY_3_ROUNDED, show_islets),
+        ]
+        
+        active_col = LIB_PARTITION_COLOR
+        for mode, label, icon, enabled in all_submodes:
+            if not enabled:
+                continue
             is_active = (self.partition_sub_mode == mode)
-            active_col = LIB_PARTITION_COLOR
             
             tabs.append(
                 ft.GestureDetector(
@@ -1209,7 +1145,7 @@ class LibraryView:
                     expand=True,
                 )
             )
-        if self.partition_sub_mode == "islets":
+        if self.partition_sub_mode == "islets" and show_islets:
             tabs.append(
                 ft.IconButton(
                     icon=ft.Icons.ADD_CIRCLE_OUTLINE_ROUNDED,
@@ -1220,7 +1156,7 @@ class LibraryView:
                     on_click=lambda _: self._open_create_islet_dialog(),
                 )
             )
-        if self.partition_sub_mode == "moods":
+        if self.partition_sub_mode == "moods" and show_moods:
             tabs.append(
                 ft.IconButton(
                     icon=ft.Icons.DELETE_OUTLINE_ROUNDED,
@@ -1568,6 +1504,36 @@ class LibraryView:
         )
 
     def _update_view_tabs(self):
+        from utils.streamrip_api import load_config
+        try:
+            cfg = load_config()
+            appearance = cfg.get("appearance", {})
+        except:
+            appearance = {}
+
+        show_moods = bool(appearance.get("show_moods", False))
+        show_islets = bool(appearance.get("show_islets", False))
+        show_partitions = show_moods or show_islets
+
+        show_playlists = bool(appearance.get("show_playlists", True))
+        show_artists = bool(appearance.get("show_artists", True))
+        show_albums = bool(appearance.get("show_albums", True))
+        show_tracks = bool(appearance.get("show_tracks", True))
+
+        visible_modes = []
+        if show_partitions: visible_modes.append("partitions")
+        if show_playlists: visible_modes.append("playlists")
+        if show_artists: visible_modes.append("artists")
+        if show_albums: visible_modes.append("albums")
+        if show_tracks: visible_modes.append("tracks")
+
+        if not visible_modes:
+            visible_modes = ["tracks"]
+            show_tracks = True
+
+        if self.view_mode not in visible_modes:
+            self.view_mode = visible_modes[0]
+
         icons = {
             "playlists": ft.Icons.QUEUE_MUSIC_ROUNDED,
             "artists":   ft.Icons.PERSON_ROUNDED,
@@ -1583,13 +1549,18 @@ class LibraryView:
             "partitions": LIB_PARTITION_COLOR,
         }
         tabs = []
-        for mode, label in [
-            ("partitions", "Moods"),
-            ("playlists", "Playlists"),
-            ("artists", "Artists"),
-            ("albums", "Albums"),
-            ("tracks", "Tracks"),
-        ]:
+        
+        all_modes = [
+            ("partitions", "Moods", show_partitions),
+            ("playlists", "Playlists", show_playlists),
+            ("artists", "Artists", show_artists),
+            ("albums", "Albums", show_albums),
+            ("tracks", "Tracks", show_tracks),
+        ]
+        
+        for mode, label, enabled in all_modes:
+            if not enabled:
+                continue
             is_active = (self.view_mode == mode)
             col = accents[mode]
             tabs.append(
@@ -2739,9 +2710,17 @@ class LibraryView:
         tile.on_click = lambda e: self.page.run_task(self._toggle_node, node_id, tile)
         return tile
 
+    def _get_tile(self, ctrl: ft.Control) -> ft.ListTile | None:
+        tile = ctrl
+        while tile and not isinstance(tile, ft.ListTile):
+            tile = getattr(tile, "content", None)
+        return tile
+
     def _update_row_highlight(self, ctrl: ft.Control, is_current: bool) -> bool:
         try:
-            tile = ctrl.content.content
+            tile = self._get_tile(ctrl)
+            if not tile:
+                return False
             active_color = apply_opacity(0.1, CYAN)
             
             icon = tile.leading.controls[1]
@@ -2833,6 +2812,38 @@ class LibraryView:
             await self.app.db_manager.move_playlist_track(playlist_id, target_rel, new_rel)
         self.page.run_task(_commit)
 
+    def _move_playlist_track_to_target(self, playlist_id, src_path, dst_path):
+        entries = self._find_playlist_track_indices(playlist_id)
+        if not entries:
+            return
+
+        controls = self._library_list.controls
+        src_entry = None
+        dst_entry = None
+        for gi, rel in entries:
+            ctrl = controls[gi]
+            d = getattr(ctrl, "data", None) or {}
+            ctrl_path = d.get("path")
+            if ctrl_path == src_path:
+                src_entry = (gi, rel)
+            if ctrl_path == dst_path:
+                dst_entry = (gi, rel)
+
+        if src_entry is None or dst_entry is None:
+            return
+
+        src_gi, src_rel = src_entry
+        dst_gi, dst_rel = dst_entry
+
+        # Move control in controls list in memory
+        ctrl = controls.pop(src_gi)
+        controls.insert(dst_gi, ctrl)
+        self._library_list.update()
+
+        async def _commit():
+            await self.app.db_manager.move_playlist_track(playlist_id, src_rel, dst_rel)
+        self.page.run_task(_commit)
+
     def _remove_playlist_track_in_place(self, playlist_id, path, title):
         controls = self._library_list.controls
         target_gi = None
@@ -2844,6 +2855,23 @@ class LibraryView:
         if target_gi is None:
             return
         controls.pop(target_gi)
+
+        # Check if the playlist is now empty in the UI list
+        has_tracks = False
+        playlist_idx = None
+        for gi, c in enumerate(controls):
+            d = getattr(c, "data", None) or {}
+            if d.get("playlist_id") == playlist_id:
+                if d.get("type") == "track":
+                    has_tracks = True
+                    break
+                elif d.get("type") == "playlist":
+                    playlist_idx = gi
+
+        if not has_tracks and playlist_idx is not None:
+            pl_depth = (getattr(controls[playlist_idx], "data", None) or {}).get("depth", 0)
+            controls.insert(playlist_idx + 1, self._empty_playlist_widget(pl_depth + 1))
+
         self._library_list.update()
 
         async def _commit():
@@ -2883,10 +2911,17 @@ class LibraryView:
 
         trailing_controls = []
         if playlist_id:
+            drag_handle = ft.Draggable(
+                group=f"playlist_{playlist_id}",
+                data=path,
+                content=ft.Container(
+                    content=ft.Icon(ft.Icons.DRAG_HANDLE_ROUNDED, color=DIM, size=18),
+                    padding=ft.Padding.symmetric(horizontal=8, vertical=4),
+                )
+            )
             trailing_controls.insert(0, ft.Row(
                 [
-                    ft.IconButton(ft.Icons.ARROW_UPWARD, icon_size=18, icon_color=DIM, on_click=move_up, tooltip="Move Up"),
-                    ft.IconButton(ft.Icons.ARROW_DOWNWARD, icon_size=18, icon_color=DIM, on_click=move_down, tooltip="Move Down"),
+                    drag_handle,
                     ft.IconButton(ft.Icons.REMOVE_CIRCLE_OUTLINE, icon_size=18, icon_color="#FF4444", on_click=remove_from_pl, tooltip="Remove from Playlist"),
                 ],
                 spacing=4, tight=True
@@ -2942,6 +2977,7 @@ class LibraryView:
         )
 
         async def _on_swipe_right(e):
+            self.app.trigger_haptic("swipe_queue")
             audio_engine.queue_next({
                 "path":        path,
                 "track_title": title,
@@ -2978,8 +3014,29 @@ class LibraryView:
         res = ft.GestureDetector(
             content=dismissible,
             data={"path": path, "depth": depth, "type": "track"},
-            on_long_press_start=lambda e: self._open_track_context_menu(meta),
+            on_long_press_start=lambda e: self._on_track_long_press(meta),
         )
+
+        if playlist_id is not None:
+            def drag_accept(e):
+                src_control = self.page.get_control(e.src_id)
+                if not src_control:
+                    return
+                src_path = src_control.data
+                dst_path = path
+                if src_path == dst_path:
+                    return
+                self._move_playlist_track_to_target(playlist_id, src_path, dst_path)
+
+            drag_target = ft.DragTarget(
+                group=f"playlist_{playlist_id}",
+                content=res,
+                on_accept=drag_accept,
+            )
+            drag_target.data = {"path": path, "depth": depth, "type": "track", "playlist_id": playlist_id}
+            self._path_to_controls.setdefault(path, []).append(drag_target)
+            return drag_target
+
         self._path_to_controls.setdefault(path, []).append(res)
         return res
 
@@ -3010,53 +3067,16 @@ class LibraryView:
         mood = tg.mood_canonical(self._mood_label.value) if self.partition_sub_mode == "moods" and hasattr(self, "_mood_label") and self._mood_label else None
 
         if mood:
-            feedback_map = getattr(self, "_mood_feedback_map", {})
-            track_feedback = feedback_map.get(path, {}).get(mood, 0)
-
-            is_liked = track_feedback == 1
-            is_disliked = track_feedback == -1
-
-            like_btn = ft.IconButton(
-                icon=ft.Icons.THUMB_UP_ROUNDED if is_liked else ft.Icons.THUMB_UP_OUTLINED,
-                icon_color=CYAN if is_liked else DIM,
-                icon_size=16,
-                tooltip="Like track in this mood (pin & random walk)",
-                on_click=lambda e, p=path, m=mood: self.page.run_task(self._toggle_mood_like, p, m, e.control),
-            )
-
-            dislike_btn = ft.IconButton(
-                icon=ft.Icons.THUMB_DOWN_ROUNDED if is_disliked else ft.Icons.THUMB_DOWN_OUTLINED,
-                icon_color=CYAN if is_disliked else DIM,
-                icon_size=16,
-                tooltip="Dislike track in this mood (exclude)",
-                on_click=lambda e, p=path, m=mood: self.page.run_task(self._register_mood_dislike, p, m, e.control),
-            )
-
             artist = t.get("artist") or "Unknown"
             tnum = t.get("track_num")
             is_current = (path == audio_engine.current_path and bool(path))
 
-            tile.subtitle = ft.Column(
-                [
-                    ft.Text(
-                        f"Track {tnum}  ·  {artist}" if tnum else artist,
-                        color=CYAN if is_current else DIM,
-                        size=11,
-                        max_lines=1,
-                        overflow=ft.TextOverflow.ELLIPSIS,
-                    ),
-                    ft.Row(
-                        [
-                            like_btn,
-                            ft.Container(width=4),
-                            dislike_btn,
-                        ],
-                        spacing=0,
-                        tight=True,
-                    ),
-                ],
-                spacing=2,
-                tight=True,
+            tile.subtitle = ft.Text(
+                f"Track {tnum}  ·  {artist}" if tnum else artist,
+                color=CYAN if is_current else DIM,
+                size=11,
+                max_lines=1,
+                overflow=ft.TextOverflow.ELLIPSIS,
             )
             tile.trailing = None
 
@@ -3069,6 +3089,10 @@ class LibraryView:
             tooltip="Edit metadata",
             on_click=lambda e, et=edit_type, m=meta: self.app.open_metadata_editor(et, m),
         )
+
+    def _on_track_long_press(self, meta: dict):
+        self.app.trigger_haptic("long_press")
+        self._open_track_context_menu(meta)
 
     def _open_track_context_menu(self, meta: dict):
         bs_holder = [None]
@@ -3090,8 +3114,7 @@ class LibraryView:
             self.app.show_snackbar(f"'{meta.get('track_title')}' added to queue", icon=ft.Icons.PLAYLIST_ADD_ROUNDED, color=CYAN)
 
         def _add_to_playlist(_e):
-            _close()
-            self.page.run_task(self._open_add_to_playlist_sheet, meta)
+            self.page.run_task(self._open_add_to_playlist_sheet, meta, bs_holder[0])
 
         def _edit_meta(_e):
             _close()
@@ -3164,9 +3187,9 @@ class LibraryView:
         bs.open = True
         self.page.update()
 
-    async def _open_add_to_playlist_sheet(self, meta: dict):
+    async def _open_add_to_playlist_sheet(self, meta: dict, existing_bs: ft.BottomSheet = None):
         playlists = await self.app.db_manager.get_all_playlists(sort_mode="name")
-        bs_holder = [None]
+        bs_holder = [existing_bs]
         
         def _close():
             if bs_holder[0]:
@@ -3239,25 +3262,31 @@ class LibraryView:
                 )
             )
 
-        bs = ft.BottomSheet(
-            content=ft.Container(
-                content=ft.Column(
-                    [
-                        ft.Text("Add to Playlist", color=TEXT, weight=ft.FontWeight.W_700, size=14),
-                        lv,
-                    ],
-                    tight=True,
-                    spacing=8,
-                ),
-                bgcolor=SURFACE,
-                padding=16,
+        container_content = ft.Container(
+            content=ft.Column(
+                [
+                    ft.Text("Add to Playlist", color=TEXT, weight=ft.FontWeight.W_700, size=14),
+                    lv,
+                ],
+                tight=True,
+                spacing=8,
             ),
             bgcolor=SURFACE,
+            padding=16,
         )
-        bs_holder[0] = bs
-        self.page.overlay.append(bs)
-        bs.open = True
-        self.page.update()
+
+        if bs_holder[0]:
+            bs_holder[0].content = container_content
+            bs_holder[0].update()
+        else:
+            bs = ft.BottomSheet(
+                content=container_content,
+                bgcolor=SURFACE,
+            )
+            bs_holder[0] = bs
+            self.page.overlay.append(bs)
+            bs.open = True
+            self.page.update()
 
     # ── library scan ─────────────────────────────────────────────────────────
     def start_scan(self):

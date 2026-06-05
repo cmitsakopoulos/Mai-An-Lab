@@ -52,30 +52,53 @@ fi
 rm -rf "$TEMP_DIR"
 mkdir -p "$TEMP_DIR"
 
-# 2. Find and Pull the Newest State Bundle from /sdcard/Download
-echo "Searching for recently exported State Bundles in your phone's Download folder..."
+# 2. Find a State Bundle on the device
+# Priority:
+#   a) Auto-snapshot in standard Download directory (no find search cost)
+#   b) Auto-snapshot search in custom library folders via find
+#   c) Manual timestamped exports in Download folder
+echo "Searching for state bundles on the device..."
 
-# Get the newest state bundle ZIP from /sdcard/Download, ignoring 'import.zip'
-NEWEST_ZIP=$(adb shell "ls -t /sdcard/Download/mai_an_lab_state_*.zip 2>/dev/null | grep -v 'import.zip' | head -n 1" | tr -d '\r\n' || true)
+AUTO_ZIP="/sdcard/Download/mai_an_lab_state_latest.zip"
+NEWEST_ZIP=""
+
+if adb shell test -f "$AUTO_ZIP" 2>/dev/null; then
+    NEWEST_ZIP="$AUTO_ZIP"
+    echo "Found auto-snapshot at standard location: $NEWEST_ZIP"
+else
+    echo "Auto-snapshot not in standard location. Searching library paths..."
+    SEARCH_ZIP=$(adb shell "find /sdcard -maxdepth 4 -name 'mai_an_lab_state_latest.zip' -type f 2>/dev/null | head -n 1" | tr -d '\r\n' || true)
+    if [ -n "$SEARCH_ZIP" ]; then
+        NEWEST_ZIP="$SEARCH_ZIP"
+        echo "Found auto-snapshot via search: $NEWEST_ZIP"
+    else
+        echo "Auto-snapshot not found. Checking for manual timestamped exports..."
+        MANUAL_ZIP=$(adb shell "ls -t /sdcard/Download/mai_an_lab_state_*.zip 2>/dev/null | grep -v 'import.zip' | head -n 1" | tr -d '\r\n' || true)
+        if [ -n "$MANUAL_ZIP" ]; then
+            NEWEST_ZIP="$MANUAL_ZIP"
+            echo "Found manual state bundle: $NEWEST_ZIP"
+        fi
+    fi
+fi
 
 if [ -z "$NEWEST_ZIP" ]; then
     echo "===================================================================="
-    echo "ERROR: No exported State Bundles (.zip files) found in /sdcard/Download/"
+    echo "ERROR: No State Bundles found on the device"
     echo "--------------------------------------------------------------------"
-    echo "Because the app is in Release Mode, we must do a one-time setup export."
-    echo "Please execute these quick steps first:"
-    echo "  1. Open Mai-An Lab on your phone."
-    echo "  2. Go to: Settings -> Advanced -> Export State."
-    echo "  3. Save the state ZIP file inside your phone's 'Download' folder."
-    echo "  4. Re-run this script!"
+    echo "The app auto-exports a snapshot to your library and Downloads folder"
+    echo "on every boot. If this is the first run, just launch Mai-An Lab"
+    echo "once, then re-run this script."
+    echo ""
+    echo "Alternatively, manually export:"
+    echo "  Settings -> Advanced -> Export State -> pick a folder"
     echo "===================================================================="
     exit 1
 fi
 
 ZIP_FILENAME=$(basename "$NEWEST_ZIP")
-echo "Found exported state: $ZIP_FILENAME"
+echo "Using state bundle: $ZIP_FILENAME"
 
-# Pull the ZIP bundle from the phone keeping its original timestamped name
+# Pull the bundle from the phone
 echo "Pulling $ZIP_FILENAME to laptop..."
 adb pull "$NEWEST_ZIP" "$TEMP_DIR/$ZIP_FILENAME"
 
