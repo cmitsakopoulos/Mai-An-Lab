@@ -140,6 +140,69 @@ class QobuzSpoofer:
         return app_id, vals
 
 
+def make_qobuz_trace_config():
+    trace_config = aiohttp.TraceConfig()
+
+    async def on_dns_resolvehost_start(session, trace_config_ctx, params):
+        ctx = getattr(trace_config_ctx, 'trace_request_ctx', None)
+        if ctx:
+            cb = ctx.get('progress_callback')
+            if cb:
+                cb("DNS Lookup", "Resolving Qobuz API hostname...")
+
+    async def on_dns_resolvehost_end(session, trace_config_ctx, params):
+        ctx = getattr(trace_config_ctx, 'trace_request_ctx', None)
+        if ctx:
+            cb = ctx.get('progress_callback')
+            if cb:
+                cb("DNS Lookup", "Hostname resolved.")
+
+    async def on_connection_create_start(session, trace_config_ctx, params):
+        ctx = getattr(trace_config_ctx, 'trace_request_ctx', None)
+        if ctx:
+            cb = ctx.get('progress_callback')
+            if cb:
+                cb("TCP Connect", "Establishing TCP socket connection...")
+
+    async def on_connection_create_end(session, trace_config_ctx, params):
+        ctx = getattr(trace_config_ctx, 'trace_request_ctx', None)
+        if ctx:
+            cb = ctx.get('progress_callback')
+            if cb:
+                cb("TLS Handshake", "Performing SSL/TLS secure handshake...")
+
+    async def on_request_start(session, trace_config_ctx, params):
+        ctx = getattr(trace_config_ctx, 'trace_request_ctx', None)
+        if ctx:
+            cb = ctx.get('progress_callback')
+            if cb:
+                cb("HTTP Request", "Sending HTTP request headers...")
+
+    async def on_request_headers_sent(session, trace_config_ctx, params):
+        ctx = getattr(trace_config_ctx, 'trace_request_ctx', None)
+        if ctx:
+            cb = ctx.get('progress_callback')
+            if cb:
+                cb("HTTP Request", "Waiting for response from Qobuz server...")
+
+    async def on_response_chunk_received(session, trace_config_ctx, params):
+        ctx = getattr(trace_config_ctx, 'trace_request_ctx', None)
+        if ctx:
+            cb = ctx.get('progress_callback')
+            if cb:
+                cb("Data Streaming", "Streaming search results data...")
+
+    trace_config.on_dns_resolvehost_start.append(on_dns_resolvehost_start)
+    trace_config.on_dns_resolvehost_end.append(on_dns_resolvehost_end)
+    trace_config.on_connection_create_start.append(on_connection_create_start)
+    trace_config.on_connection_create_end.append(on_connection_create_end)
+    trace_config.on_request_start.append(on_request_start)
+    trace_config.on_request_headers_sent.append(on_request_headers_sent)
+    trace_config.on_response_chunk_received.append(on_response_chunk_received)
+
+    return trace_config
+
+
 class QobuzClient(Client):
     source = "qobuz"
     max_quality = 4
@@ -153,8 +216,10 @@ class QobuzClient(Client):
         self.secret: Optional[str] = None
 
     async def login(self):
+        trace_config = make_qobuz_trace_config()
         self.session = await self.get_session(
-            verify_ssl=self.config.session.downloads.verify_ssl
+            verify_ssl=self.config.session.downloads.verify_ssl,
+            trace_configs=[trace_config]
         )
         """User credentials require either a user token OR a user email & password.
 
@@ -310,7 +375,7 @@ class QobuzClient(Client):
 
         return label_resp
 
-    async def search(self, media_type: str, query: str, limit: int = 500, offset: int = 0) -> list[dict]:
+    async def search(self, media_type: str, query: str, limit: int = 500, offset: int = 0, progress_callback=None) -> list[dict]:
         if media_type not in ("artist", "album", "track", "playlist"):
             raise Exception(f"{media_type} not available for search on qobuz")
 
@@ -319,7 +384,7 @@ class QobuzClient(Client):
         }
         epoint = f"{media_type}/search"
 
-        return await self._paginate(epoint, params, limit=limit, offset=offset)
+        return await self._paginate(epoint, params, limit=limit, offset=offset, progress_callback=progress_callback)
 
     async def get_featured(self, query, limit: int = 500) -> list[dict]:
         params = {
@@ -388,6 +453,7 @@ class QobuzClient(Client):
         params: dict,
         limit: int = 500,
         offset: int = 0,
+        progress_callback=None,
     ) -> list[dict]:
         """Paginate search results.
 
@@ -400,7 +466,7 @@ class QobuzClient(Client):
             Generator that yields (status code, response) tuples
         """
         params.update({"limit": limit, "offset": offset})
-        status, page = await self._api_request(epoint, params)
+        status, page = await self._api_request(epoint, params, progress_callback=progress_callback)
         assert status == 200, status
         logger.debug("paginate: initial request made with status %d", status)
         # albums, tracks, etc.
@@ -429,7 +495,7 @@ class QobuzClient(Client):
         while (offset + limit) < total:
             offset += limit
             params.update({"offset": offset})
-            requests.append(self._api_request(epoint, params.copy()))
+            requests.append(self._api_request(epoint, params.copy(), progress_callback=progress_callback))
 
         for status, resp in await asyncio.gather(*requests):
             assert status == 200
@@ -482,7 +548,7 @@ class QobuzClient(Client):
         }
         return await self._api_request("track/getFileUrl", params)
 
-    async def _api_request(self, epoint: str, params: dict, retries: int = 3) -> tuple[int, dict]:
+    async def _api_request(self, epoint: str, params: dict, retries: int = 3, progress_callback=None) -> tuple[int, dict]:
         """Make a request to the API.
         returns: status code, json parsed response
         """
@@ -492,7 +558,7 @@ class QobuzClient(Client):
         for attempt in range(retries):
             try:
                 async with self.rate_limiter:
-                    async with self.session.get(url, params=params) as response:
+                    async with self.session.get(url, params=params, trace_request_ctx={"progress_callback": progress_callback}) as response:
                         try:
                             resp_json = await response.json()
                             return response.status, resp_json

@@ -60,6 +60,7 @@ class AudioEngine:
         self._audio: AudioServiceControl | None = None
         self._is_loaded: bool = False
         self._page:  ft.Page | None = None
+        self._db_manager = None
         self._restore_position: float = 0.0
         self._load_gen: int = 0
 
@@ -72,6 +73,11 @@ class AudioEngine:
         self._observers: dict[str, list] = {}
         self._obs_lock = threading.Lock()
         self._native_lock = None
+        self._eq_gains: list[float] = [0.0] * 5
+        self._loudness_boost_db: float = 0.0
+        self.loudness_boost_db: float = 0.0
+        self._base_eq: list[float] = [0.0] * 5
+        self._dyn_offsets: list[float] = [0.0] * 5
 
     @property
     def is_shuffle(self) -> bool:
@@ -174,12 +180,13 @@ class AudioEngine:
 
     # ── Initialisation ────────────────────────────────────────────────────────
 
-    def setup(self, page: ft.Page):
+    def setup(self, page: ft.Page, db_manager=None):
         """Call from Flet main() after page is ready. Safe to call again on
         session re-entry; the existing AudioServiceControl is bound to the
         previous page's session, which becomes invalid when the OS suspends
         the app long enough. We detect a new page object and rebind."""
         logger.warning("ADB_AUDIO: setup() called")
+        self._db_manager = db_manager
         if self._page is page and self._audio is not None:
             return  # already set up on this page
         if self._page is not page:
@@ -417,13 +424,24 @@ class AudioEngine:
         self._set("current_track",  title)
         self._set("current_path",   path)
 
+        # Apply DSP settings (Dynamism and Equalizer)
+        try:
+            self.reapply_dsp()
+        except Exception as ex:
+            logger.error(f"DSP: Failed to apply track transition settings: {ex}")
+
+
+
     def _on_position_change(self, e):
         # Dart already throttles position emits (see flet_audio_service.dart);
         # no second throttle needed here. Quantise to integer seconds so _set's
         # dirty-check skips dispatch when the slider would not visibly move.
         try:
             pos_ms = int(e.data)
-            self._set("position", float(pos_ms // 1000))
+            pos = float(pos_ms // 1000)
+            if self.duration and self.duration > 0.0:
+                pos = min(pos, self.duration)
+            self._set("position", pos)
         except:
             pass
 
@@ -470,6 +488,11 @@ class AudioEngine:
                     logger.error("AudioEngine dispatch error (%s): %s", name, exc)
 
     def _set(self, attr: str, value):
+        if attr == "position":
+            if self.duration and self.duration > 0.0:
+                value = min(float(value), self.duration)
+            else:
+                value = max(0.0, float(value))
         if getattr(self, attr, None) == value:
             return
         setattr(self, attr, value)
@@ -974,6 +997,172 @@ class AudioEngine:
                     pass
 
             self._page.run_task(_safe_shutdown)
+
+    def _update_player_volume(self):
+        if self._audio and self._page:
+            applied_db = max(0.0, self.loudness_boost_db)
+            self._page.run_task(self._audio.set_loudness_boost, applied_db)
+
+    def set_loudness_boost(self, gain_db: float):
+        """Set target gain boost in decibels for loudness enhancement."""
+        self._loudness_boost_db = float(gain_db)
+        self._set("loudness_boost_db", float(gain_db))
+        self._update_player_volume()
+
+    def set_eq_band_gain(self, band_index: int, gain_db: float):
+        """Set the gain level in decibels for a specific equalizer band."""
+        if not (0 <= band_index < 5):
+            return
+        self._base_eq[band_index] = float(gain_db)
+        combined = self._base_eq[band_index] + self._dyn_offsets[band_index]
+        self._eq_gains[band_index] = combined
+        if self._audio and self._page:
+            self._page.run_task(self._audio.set_eq_band_gain, band_index, combined)
+        self._update_player_volume()
+
+    def apply_combined_dsp(self, base_eq: list[float], dyn_offsets: list[float]):
+        self._base_eq = list(base_eq)
+        self._dyn_offsets = list(dyn_offsets)
+        for idx in range(5):
+            combined = self._base_eq[idx] + self._dyn_offsets[idx]
+            self._eq_gains[idx] = combined
+            if self._audio and self._page:
+                self._page.run_task(self._audio.set_eq_band_gain, idx, combined)
+        self._update_player_volume()
+
+    @staticmethod
+    def _compute_dynamism_scaler(energy, beat_strength, spectral_contrast) -> float:
+        """Calculate a track-by-track dynamism score in [0.0, 1.0] based on energy,
+        beat strength, and spectral contrast, with no library-wide dependencies.
+        """
+        try:
+            e = float(energy) if energy is not None else 0.5
+            b = float(beat_strength) if beat_strength is not None else 0.5
+            c = float(spectral_contrast) if spectral_contrast is not None else 0.3
+            
+            # Map typical spectral contrast [0.2, 0.4] to [0.0, 1.0]
+            norm_contrast = max(0.0, min(1.0, (c - 0.2) / 0.2))
+            
+            # Weighted average score in [0.0, 1.0]
+            score = 0.4 * e + 0.3 * b + 0.3 * norm_contrast
+            return round(max(0.0, min(1.0, score)), 2)
+        except (ValueError, TypeError):
+            return 0.5
+
+    @staticmethod
+    def _compute_dynamism_gain_db(energy, beat_strength) -> float:
+        """Legacy compatibility wrapper."""
+        return 0.0
+
+    def reapply_dsp(self):
+        """Re-read configuration and re-apply combined DSP settings (EQ preset + Dynamism) for the current track."""
+        if not self.queue or not (0 <= self.current_index < len(self.queue)):
+            self.set_loudness_boost(0.0)
+            self._base_eq = [0.0] * 5
+            self._dyn_offsets = [0.0] * 5
+            self.apply_combined_dsp(self._base_eq, self._dyn_offsets)
+            return
+
+        track = self.queue[self.current_index]
+        path = track.get("path")
+        
+        from utils.streamrip_api import load_config
+        cfg = load_config()
+        dsp = cfg.get("dsp", {})
+
+        eq_enabled = bool(dsp.get("equalizer_enabled", False))
+        dyn_enabled = bool(dsp.get("dynamism_enabled", False))
+
+        # 1. Base EQ gains
+        base_eq = [0.0] * 5
+        if eq_enabled:
+            active_preset = dsp.get("active_preset", "Flat")
+            PRESETS = {
+                "Flat":         [0.0, 0.0, 0.0, 0.0, 0.0],
+                "Rock":         [4.0, 2.0, -2.0, 2.0, 4.0],
+                "Pop":          [2.0, 3.0, 1.0, -1.0, 2.0],
+                "Jazz":         [3.0, 2.0, 1.0, 2.0, 3.0],
+                "Classical":    [3.0, 2.0, -1.0, 2.0, 3.0],
+                "Electronic":   [4.0, 2.0, 0.0, 2.0, 3.0],
+                "Bass Booster": [5.0, 3.0, 0.0, 0.0, 0.0],
+                "Vocal Booster": [-2.0, -1.0, 3.0, 2.0, -1.0],
+            }
+            gains = None
+            if active_preset in PRESETS:
+                gains = PRESETS[active_preset]
+            else:
+                custom_presets = dsp.get("custom_presets", {})
+                if active_preset in custom_presets:
+                    gains = custom_presets[active_preset]
+            if gains:
+                base_eq = [float(g) for g in gains]
+
+        if not dyn_enabled:
+            self.set_loudness_boost(0.0)
+            self.apply_combined_dsp(base_eq, [0.0] * 5)
+            return
+
+        # Dynamism is enabled
+        energy = track.get("energy")
+        beat_strength = track.get("beat_strength")
+        spectral_contrast = track.get("spectral_contrast")
+
+        if energy is not None and beat_strength is not None:
+            score = self._compute_dynamism_scaler(energy, beat_strength, spectral_contrast)
+            gain_db = 1.0 + 3.0 * score
+            self.set_loudness_boost(gain_db)
+            if eq_enabled:
+                # Manual EQ has 100% exclusive control over EQ bands
+                self.apply_combined_dsp(base_eq, [0.0] * 5)
+            else:
+                # Apply dynamism contour shape to EQ bands
+                dyn_offsets = [score * b for b in [3.0, 1.5, 0.0, 1.0, 2.5]]
+                self.apply_combined_dsp([0.0] * 5, dyn_offsets)
+        elif self._db_manager and path:
+            async def _fetch_and_apply_dsp():
+                try:
+                    conn = await self._db_manager.get_connection()
+                    async with conn.execute(
+                        "SELECT energy, beat_strength, spectral_contrast FROM play_counts WHERE track_path = ?", (path,)
+                    ) as cursor:
+                        row = await cursor.fetchone()
+                        if row:
+                            e_val, b_val, c_val = row[0], row[1], row[2]
+                            track["energy"] = e_val
+                            track["beat_strength"] = b_val
+                            track["spectral_contrast"] = c_val
+                            score = self._compute_dynamism_scaler(e_val, b_val, c_val)
+                            gain_db = 1.0 + 3.0 * score
+                            self.set_loudness_boost(gain_db)
+                            if eq_enabled:
+                                self.apply_combined_dsp(base_eq, [0.0] * 5)
+                            else:
+                                dyn_offsets = [score * b for b in [3.0, 1.5, 0.0, 1.0, 2.5]]
+                                self.apply_combined_dsp([0.0] * 5, dyn_offsets)
+                        else:
+                            self.set_loudness_boost(0.0)
+                            self.apply_combined_dsp(base_eq, [0.0] * 5)
+                except Exception as exc:
+                    logger.error("DSP fetch failed: %s", exc)
+                    self.set_loudness_boost(0.0)
+                    self.apply_combined_dsp(base_eq, [0.0] * 5)
+            if self._page:
+                self._page.run_task(_fetch_and_apply_dsp)
+            else:
+                self.set_loudness_boost(0.0)
+                self.apply_combined_dsp(base_eq, [0.0] * 5)
+        else:
+            self.set_loudness_boost(0.0)
+            self.apply_combined_dsp(base_eq, [0.0] * 5)
+
+    async def get_equalizer_bands(self) -> dict:
+        """Fetch the equalizer bands from the player."""
+        if self._audio:
+            try:
+                return await self._audio.get_equalizer_bands()
+            except Exception as e:
+                logger.error(f"get_equalizer_bands failed: {e}")
+        return {"ok": False, "bands": []}
 
 
 audio_engine = AudioEngine()

@@ -292,7 +292,7 @@ class ScaleButton(ft.GestureDetector):
 
 
 class OnyxButton(ScaleButton):
-    def __init__(self, text: str, icon: str = None, on_tap=None, height=50, **kwargs):
+    def __init__(self, text: str, icon: str = None, on_tap=None, height=50, width=None, **kwargs):
         content_row = ft.Row(
             [
                 ft.Icon(icon, color=BG, size=20) if icon else ft.Container(),
@@ -306,6 +306,7 @@ class OnyxButton(ScaleButton):
                 content=content_row,
                 bgcolor=CYAN,
                 height=height,
+                width=width,
                 border_radius=12,
                 alignment=ft.Alignment(0, 0),
             ),

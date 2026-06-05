@@ -16,9 +16,11 @@ import zipfile
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-# Isolate APP_DIR so the custom-mood JSON probe doesn't see the user's real file.
 import types as _types
+import utils.config as _orig_config
 _cfg = _types.ModuleType("utils.config")
+for _k, _v in _orig_config.__dict__.items():
+    _cfg.__dict__[_k] = _v
 _cfg.APP_DIR = tempfile.mkdtemp(prefix="dsptest_app_")
 sys.modules["utils.config"] = _cfg
 
@@ -141,6 +143,109 @@ class TestBundleRoundTrip(unittest.TestCase):
             )
         self.assertIn("bundle_version", str(ctx.exception).lower())
         # Reopen for tearDown.
+        self.db = DatabaseManager(self.db_path)
+        _run(self.db.initialize())
+    def test_snapshot_writes_deterministic_filename(self):
+        """export_state_snapshot must write exactly
+        `mai_an_lab_state_latest.zip` (no timestamp), and the resulting
+        bundle must be importable by the standard import_state path."""
+        with open(self.custom_moods_path, "w", encoding="utf-8") as f:
+            json.dump({"test": True}, f)
+
+        out = state_export.export_state_snapshot(
+            db_path=self.db_path,
+            config_path=self.config_path,
+            out_dir=self.bundle_dir,
+            search_history_path=None,
+            custom_moods_path=self.custom_moods_path,
+        )
+        self.assertEqual(os.path.basename(out), "mai_an_lab_state_latest.zip")
+        self.assertTrue(os.path.isfile(out))
+
+        # Verify the bundle is importable.
+        manifest = state_export.inspect_bundle(out)
+        self.assertEqual(manifest["bundle_version"], state_export.BUNDLE_VERSION)
+        self.assertTrue(manifest.get("auto_snapshot"))
+
+        # Import into a clean target to prove round-trip works.
+        target_db = os.path.join(self.tmpdir, "imported.db")
+        target_cfg = os.path.join(self.tmpdir, "imported.toml")
+        _run(self.db.close())
+        state_export.import_state(
+            zip_path=out,
+            db_path=target_db,
+            config_path=target_cfg,
+            search_history_path=None,
+            custom_moods_path=None,
+        )
+        self.assertTrue(os.path.exists(target_db))
+        self.assertTrue(os.path.exists(target_cfg))
+        # Reopen for tearDown.
+        self.db = DatabaseManager(self.db_path)
+        _run(self.db.initialize())
+
+    def test_snapshot_overwrites_previous(self):
+        """A second call to export_state_snapshot must overwrite the file,
+        not create a second timestamped copy."""
+        state_export.export_state_snapshot(
+            db_path=self.db_path,
+            config_path=self.config_path,
+            out_dir=self.bundle_dir,
+        )
+        first_mtime = os.path.getmtime(
+            os.path.join(self.bundle_dir, "mai_an_lab_state_latest.zip")
+        )
+
+        import time
+        time.sleep(0.05)  # ensure mtime resolution differs
+
+        state_export.export_state_snapshot(
+            db_path=self.db_path,
+            config_path=self.config_path,
+            out_dir=self.bundle_dir,
+        )
+        second_mtime = os.path.getmtime(
+            os.path.join(self.bundle_dir, "mai_an_lab_state_latest.zip")
+        )
+        self.assertGreater(second_mtime, first_mtime)
+
+        # There must be exactly one file, not two.
+        zips = [f for f in os.listdir(self.bundle_dir) if f.endswith(".zip")]
+        self.assertEqual(len(zips), 1,
+                         f"Expected exactly 1 snapshot file, found: {zips}")
+
+    def test_import_state_cleans_up_stale_journals(self):
+        """Importing a state bundle must delete any stale library.db-wal and
+        library.db-shm files on disk to prevent database corruption."""
+        bundle = self._export()
+        
+        target_db = os.path.join(self.tmpdir, "imported.db")
+        target_cfg = os.path.join(self.tmpdir, "imported.toml")
+        
+        # Create dummy WAL and SHM files
+        wal_path = target_db + "-wal"
+        shm_path = target_db + "-shm"
+        with open(wal_path, "w") as f: f.write("dummy wal data")
+        with open(shm_path, "w") as f: f.write("dummy shm data")
+        
+        self.assertTrue(os.path.exists(wal_path))
+        self.assertTrue(os.path.exists(shm_path))
+        
+        _run(self.db.close())
+        state_export.import_state(
+            zip_path=bundle,
+            db_path=target_db,
+            config_path=target_cfg,
+            search_history_path=None,
+            custom_moods_path=None,
+        )
+        
+        self.assertTrue(os.path.exists(target_db))
+        # Stale journals must be deleted
+        self.assertFalse(os.path.exists(wal_path), "Stale WAL file was not deleted.")
+        self.assertFalse(os.path.exists(shm_path), "Stale SHM file was not deleted.")
+        
+        # Reopen for tearDown
         self.db = DatabaseManager(self.db_path)
         _run(self.db.initialize())
 

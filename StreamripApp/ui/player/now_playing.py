@@ -95,6 +95,8 @@ class NowPlayingSheet:
             icon_size=20,
             tooltip="Play Similar (Dynamic Recommendation Walk)",
             on_click=self._toggle_play_similar,
+            disabled=True,
+            opacity=0.4,
         )
         self._auto_dj_btn = ft.IconButton(
             icon=ft.Icons.AUTO_AWESOME_ROUNDED if self.app.auto_dj_mode else ft.Icons.AUTO_AWESOME_OUTLINED,
@@ -111,36 +113,25 @@ class NowPlayingSheet:
             on_click=lambda e: self.app.cycle_repeat(),
         )
         
-        lib = getattr(self.app, "library_view", None)
-        in_mood_partition = (
-            lib is not None
-            and getattr(lib, "view_mode", "") == "partitions"
-            and getattr(lib, "partition_sub_mode", "") == "moods"
-        )
-        show_feedback = (getattr(self.app, "auto_dj_mode", False) or in_mood_partition) and not getattr(self.app, "play_similar_mode", False)
-        
-        self._like_btn = ft.IconButton(
-            icon=ft.Icons.THUMB_UP_OUTLINED,
-            icon_color=DIM,
-            icon_size=26,
-            tooltip="Like this track",
-            visible=show_feedback,
-            on_click=lambda e: self.app._on_feedback_click(True),
-        )
-        self._dislike_btn = ft.IconButton(
-            icon=ft.Icons.THUMB_DOWN_OUTLINED,
-            icon_color=DIM,
-            icon_size=26,
-            tooltip="Dislike this track",
-            visible=show_feedback,
-            on_click=lambda e: self.app._on_feedback_click(False),
-        )
-
         self._subtitle_text = ft.Text(
             f"{self._artist.value}  ·  {self._album.value}", 
             color=DIM, size=14,
             overflow=ft.TextOverflow.ELLIPSIS, max_lines=1,
             text_align=ft.TextAlign.CENTER
+        )
+
+        self._dynamism_badge = ft.Container(
+            content=ft.Row([
+                ft.Icon(ft.Icons.FLASH_ON_ROUNDED, color=AMBER, size=14),
+                ft.Text("DYNAMISM ACTIVE", color=AMBER, size=10, weight=ft.FontWeight.W_700),
+                ft.Text("|", color=apply_opacity(0.2, AMBER), size=10),
+                ft.Text("+0.0 dB", color=TEXT, size=10, weight=ft.FontWeight.W_700),
+            ], spacing=6, alignment=ft.MainAxisAlignment.CENTER),
+            bgcolor=apply_opacity(0.08, AMBER),
+            border_radius=20,
+            padding=ft.Padding.symmetric(horizontal=12, vertical=6),
+            alignment=ft.Alignment(0, 0),
+            visible=False,
         )
 
         self._root_layout = ft.Column(
@@ -182,15 +173,14 @@ class NowPlayingSheet:
                                     opacity=0.65, text_align=ft.TextAlign.CENTER),
                             ft.Row(
                                 [
-                                    self._dislike_btn,
                                     self._title,
-                                    self._like_btn,
                                 ],
-                                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                                alignment=ft.MainAxisAlignment.CENTER,
                                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
                                 spacing=12,
                             ),
                             self._subtitle_text,
+                            ft.Container(content=self._dynamism_badge, margin=ft.Margin.only(top=4)),
                         ],
                         spacing=4,
                         horizontal_alignment=ft.CrossAxisAlignment.CENTER,
@@ -290,6 +280,8 @@ class NowPlayingSheet:
             self.container.open = True
             self.update_play_similar(self.app.play_similar_mode)
         self.app.safe_update(_mutate)
+        # Refresh button availability every time the sheet opens
+        self.page.run_task(self._check_play_similar_availability)
 
     def collapse(self):
         def _mutate():
@@ -402,16 +394,9 @@ class NowPlayingSheet:
         self._ensure_initialized()
         self._play_similar_btn.icon       = ft.Icons.LINK_ROUNDED if enabled else ft.Icons.LINK_OFF_ROUNDED
         self._play_similar_btn.icon_color = CYAN if enabled else DIM
-        
-        lib = getattr(self.app, "library_view", None)
-        in_mood_partition = (
-            lib is not None
-            and getattr(lib, "view_mode", "") == "partitions"
-            and getattr(lib, "partition_sub_mode", "") == "moods"
-        )
-        show_feedback = (in_mood_partition or getattr(self.app, "auto_dj_mode", False)) and not enabled
-        self._like_btn.visible = show_feedback
-        self._dislike_btn.visible = show_feedback
+        # Preserve disabled state if set by availability check
+        if not self._play_similar_btn.disabled:
+            self._play_similar_btn.opacity = 1.0
         
         self._artwork_container.border = ft.Border.all(3, CYAN) if enabled else (ft.Border.all(3, AMBER) if getattr(self.app, "auto_dj_mode", False) else None)
         self._art_placeholder.border   = ft.Border.all(3, CYAN) if enabled else (ft.Border.all(3, AMBER) if getattr(self.app, "auto_dj_mode", False) else None)
@@ -421,14 +406,6 @@ class NowPlayingSheet:
         except (RuntimeError, AssertionError):
             pass
         try:
-            self._like_btn.update()
-        except (RuntimeError, AssertionError):
-            pass
-        try:
-            self._dislike_btn.update()
-        except (RuntimeError, AssertionError):
-            pass
-        try:
             self._artwork_container.update()
         except (RuntimeError, AssertionError):
             pass
@@ -436,6 +413,39 @@ class NowPlayingSheet:
             self._art_placeholder.update()
         except (RuntimeError, AssertionError):
             pass
+
+    async def _check_play_similar_availability(self):
+        """Background check: disable the chain button when no tracks have DSP features."""
+        self._ensure_initialized()
+        available = False
+        try:
+            from utils import track_graph as tg
+            db = getattr(self.app, "db_manager", None)
+            if db is None:
+                return
+            conn = await db.get_connection()
+            async with conn.execute("SELECT COUNT(*) FROM tracks") as cur:
+                row = await cur.fetchone()
+                total = row[0] if row else 0
+            if total > 0:
+                missing = await db.get_tracks_missing_features(tg.FEATURES_VERSION)
+                available = len(missing) < total  # at least some tracks are analyzed
+        except Exception as exc:
+            logger.debug("_check_play_similar_availability error: %s", exc)
+        
+        def _apply():
+            self._play_similar_btn.disabled = not available
+            self._play_similar_btn.opacity  = 1.0 if available else 0.4
+            self._play_similar_btn.tooltip  = (
+                "Play Similar (Dynamic Recommendation Walk)"
+                if available else
+                "Play Similar is unavailable \u2014 run Jarvis Analyser to compute DSP features first."
+            )
+            try:
+                self._play_similar_btn.update()
+            except (RuntimeError, AssertionError):
+                pass
+        self.app.safe_update(_apply)
 
     def _toggle_auto_dj(self, e):
         self.app.set_auto_dj_mode(not self.app.auto_dj_mode)
@@ -445,29 +455,11 @@ class NowPlayingSheet:
         self._auto_dj_btn.icon       = ft.Icons.AUTO_AWESOME_ROUNDED if enabled else ft.Icons.AUTO_AWESOME_OUTLINED
         self._auto_dj_btn.icon_color = AMBER if enabled else DIM
         
-        lib = getattr(self.app, "library_view", None)
-        in_mood_partition = (
-            lib is not None
-            and getattr(lib, "view_mode", "") == "partitions"
-            and getattr(lib, "partition_sub_mode", "") == "moods"
-        )
-        show_feedback = (enabled or in_mood_partition) and not getattr(self.app, "play_similar_mode", False)
-        self._like_btn.visible = show_feedback
-        self._dislike_btn.visible = show_feedback
-        
         self._artwork_container.border = ft.Border.all(3, AMBER) if enabled else (ft.Border.all(3, CYAN) if self.app.play_similar_mode else None)
         self._art_placeholder.border   = ft.Border.all(3, AMBER) if enabled else (ft.Border.all(3, CYAN) if self.app.play_similar_mode else None)
 
         try:
             self._auto_dj_btn.update()
-        except (RuntimeError, AssertionError):
-            pass
-        try:
-            self._like_btn.update()
-        except (RuntimeError, AssertionError):
-            pass
-        try:
-            self._dislike_btn.update()
         except (RuntimeError, AssertionError):
             pass
         try:
@@ -477,4 +469,18 @@ class NowPlayingSheet:
         try:
             self._art_placeholder.update()
         except (RuntimeError, AssertionError):
+            pass
+
+    def update_loudness_boost(self, val: float):
+        self._ensure_initialized()
+        is_active = (val > 0.0)
+        self._dynamism_badge.visible = is_active
+        if is_active:
+            try:
+                self._dynamism_badge.content.controls[3].value = f"+{val:.1f} dB"
+            except Exception as e:
+                logger.debug("Failed to set dynamism badge text: %s", e)
+        try:
+            self._dynamism_badge.update()
+        except Exception:
             pass

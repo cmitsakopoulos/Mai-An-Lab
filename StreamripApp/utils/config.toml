@@ -196,3 +196,23 @@ max_search_results = 100
 version = "2.2.0"
 # Print a message if a new version of streamrip is available 
 check_for_updates = true
+
+[dsp]
+# Automatically adjust output gain based on track energy and beat strength to increase dynamic punchiness of rhythmic tracks.
+dynamism_enabled = false
+# Enable 5-band equalizer
+equalizer_enabled = false
+# The active equalizer preset name (e.g. Flat, Rock, Pop, or a custom name)
+active_preset = "Flat"
+# User-defined custom equalizer presets mapping names to list of 5 decibel gains
+custom_presets = {}
+
+[haptics]
+# Enable tactile haptic feedback for user gestures (Android/iOS only)
+haptic_feedback_enabled = true
+# Vibration intensities for specific gestures: "none", "light", "medium", "heavy"
+eq_drag_intensity = "light"
+swipe_queue_intensity = "medium"
+swipe_dismiss_intensity = "medium"
+long_press_intensity = "heavy"
+

@@ -82,7 +82,7 @@ class StreamripSearcher:
         from .streamrip_api import get_config_path
         self.config_path = config_path or get_config_path()
 
-    async def _get_client(self):
+    async def _get_client(self, progress_callback=None):
         if StreamripSearcher._client_lock is None:
             StreamripSearcher._client_lock = asyncio.Lock()
             
@@ -104,6 +104,8 @@ class StreamripSearcher:
             if StreamripSearcher._client is None or getattr(StreamripSearcher._client, "session", None) is None or StreamripSearcher._client.session.closed:
                 from .qobuz import QobuzClient
                 StreamripSearcher._client = QobuzClient(config)
+                if progress_callback:
+                    progress_callback("Authenticating", "Logging in to Qobuz API...")
                 await StreamripSearcher._client.login()
             return StreamripSearcher._client
 
@@ -179,7 +181,7 @@ class StreamripSearcher:
             t["_media_type"] = "track"
         return self._parse_results(raw_tracks, "qobuz")
 
-    def search(self, query: str, source: str, callback, media_types=None, limit: int = 50, offset: int = 0) -> None:
+    def search(self, query: str, source: str, callback, media_types=None, limit: int = 50, offset: int = 0, progress_callback=None) -> None:
         if source.lower() != "qobuz":
             callback({"error": f"Source '{source}' is not supported in this minimal build."})
             return
@@ -187,22 +189,24 @@ class StreamripSearcher:
         query = query.strip()
         loop = self._get_loop()
         asyncio.run_coroutine_threadsafe(
-            self._run_search_wrapper(query, media_types or ["track", "album"], limit, offset, callback),
+            self._run_search_wrapper(query, media_types or ["track", "album"], limit, offset, callback, progress_callback),
             loop
         )
 
-    async def _run_search_wrapper(self, query, media_types, limit, offset, callback):
+    async def _run_search_wrapper(self, query, media_types, limit, offset, callback, progress_callback=None):
         try:
-            results = await self._search_async(query, media_types, limit, offset)
+            results = await self._search_async(query, media_types, limit, offset, progress_callback)
         except Exception as exc:
             logger.error("Search failed: %s", exc, exc_info=True)
             results = {"error": str(exc)}
         callback(results)
 
-    async def _search_async(self, query: str, media_types: list, limit: int = 50, offset: int = 0) -> list:
+    async def _search_async(self, query: str, media_types: list, limit: int = 50, offset: int = 0, progress_callback=None) -> list:
         from .exceptions import MissingCredentialsError, AuthenticationError
         try:
-            client = await self._get_client()
+            if progress_callback:
+                progress_callback("Connecting", "Establishing connection to Qobuz...")
+            client = await self._get_client(progress_callback)
         except MissingCredentialsError:
             raise Exception("Qobuz credentials are missing. Please enter your User ID and Token in the Settings tab.")
         except AuthenticationError:
@@ -224,7 +228,16 @@ class StreamripSearcher:
                 logger.warning("Qobuz search %s: %s", m_type, exc)
                 return []
 
-        results_per_type = await asyncio.gather(*[_fetch_type(m) for m in media_types])
+        results_per_type = []
+        for m in media_types:
+            if progress_callback:
+                progress_callback("Searching", f"Searching {m}s on Qobuz...")
+            items = await _fetch_type(m)
+            results_per_type.append(items)
+
+        if progress_callback:
+            progress_callback("Processing", "Formatting search results...")
+
         raw = []
         for items in results_per_type:
             raw.extend(items)

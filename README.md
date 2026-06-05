@@ -22,7 +22,7 @@ The player implements native engine fallbacks; background services and hardware 
 
 ### Search & Downloader
 
-Search across streaming endpoints, preview snippets, and download albums or tracks to your system directory with visual progress tracking.
+Search across streaming endpoints, preview snippets, and download albums or tracks to your system directory. Features an interactive connection progress card showing real-time query states, paired with visual download progress tracking.
 
 <p align="center">
   <img src="assets/search_example.gif" width="48%" alt="Search & Download Pane" style="border-radius: 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); border: 1px solid rgba(255, 255, 255, 0.1);">
@@ -38,7 +38,7 @@ Browse your catalog by artist, album, or track through SQL joins. The playback p
 > **Preset Moods are heavily under construction.** The built-in profiles (`chill`, `happy`, `tonal`, etc.) use library-relative percentile scoring and are functional, but the mood definitions and threshold calibration are actively being revised. Expect behaviour to change between versions.
 
 - **Automatic Preset Moods**: Start playlists using built-in mood profiles that score tracks against library-wide percentile distributions to match the sonic character of your collection.
-- **Acoustic Islets (Custom Moods)**: Create custom moods from a single exemplar track centroid ($C = T_{\text{exemplar}}$). The player walks a 60-D $k$-NN similarity graph and selects tracks satisfying the cosine similarity threshold ($\cos(T_i, C) \ge \theta_{\text{islet}}$) for tempo-aligned playback.
+- **Acoustic Islets (Custom Moods)**: Create custom moods seeded from a single exemplar track. The player projects tracks into the unified $Z_r$ graph geometry and scores neighbors using a self-tuning Gaussian affinity to the seed, adapting dynamically to the local neighborhood density for precise, tempo-aligned playback.
 
 <p align="center">
   <img src="assets/library_example.gif" width="48%" alt="Music Library Pane" style="border-radius: 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); border: 1px solid rgba(255, 255, 255, 0.1);">
@@ -106,7 +106,8 @@ Desktop playback uses Apple `AVAudioPlayer` (`AVFoundation` via dynamic `pyobjc-
 > [!IMPORTANT]
 > **Portability & Build Parity**; this project contains a modified port of `streamrip 2.1.0`. All native C-extension compilation dependencies are removed, allowing the same Python codebase to target Android (ARM64) and macOS (Intel & Apple Silicon) with zero-configuration build compatibility. ONLY Qobuz is supported.
 
-- **Acoustic Auto-Playlists**; extracts a 52-D timbre representation combined with 8-D structural attributes to form a 60-D vector space. Features library-relative preset moods and custom Acoustic Islets integrated with a $k$-NN similarity graph solver for tempo-aligned music queues.
+- **Acoustic Auto-Playlists**; extracts a 52-D timbre representation combined with 8-D structural attributes. Built on a unified z-scored Euclidean space with Kaiser-truncated SVD, self-tuning Gaussian affinity reweighting, and Louvain community detection. Integrates automated mood scoring and self-tuning custom Islets.
+- **Advanced Equalizer & Real-time DSP** *(v1.2.0)*; features a manual 5-band manual equalizer with filtered System/Custom preset types, keyboard-editable gain values with validation and range clamping, and a live decibel boost monitor badge/card for real-time track Dynamism levels.
 - **Unsupervised PCA Engine** *(v1.1.0)*; double-pass SVD with automatic Pearson correlation cleaving prunes acoustically redundant scalar features before the 3-D projection is committed. The Mood EQ hides zero-weight features and the projection geometry adapts to each library. After every rebuild, four diagnostic PNG figures (full and pruned correlation heatmap + biplot scatter) are written to `<library>/pca_report/`.
 - **Jarvis Voice Control**; parses spoken intent with boundary-anchored patterns and voice hesitation stripping to trigger similarity walks and downloads.
 - **Glassmorphic UI**; a responsive interface leveraging Flet containers, backdrop filters, custom color palettes, and transitions.
@@ -119,7 +120,9 @@ Desktop playback uses Apple `AVAudioPlayer` (`AVFoundation` via dynamic `pyobjc-
 
 For information on the internals of Mai-An Lab, refer to the following documentation:
 
-- [System Architecture & Database Design](./docs/Architecture.md)
+- [Release Notes (v1.2.0)](./docs/release_notes_v1.2.0.md)
+- [System Architecture & Database Design](./docs/Development_Reference.md#6-database-design--schema)
+- [Bridges, Pipelines & Deletion Internals](./docs/Development_Reference.md)
 - [Jarvis Voice Assistant & Background Pipelines](./docs/Development_Reference.md#5-jarvis-voice-assistant--background-pipelines)
 - [Auto-Playlist Engine & DSP Deep-Dive](./docs/Auto_Playlist_Engine.md); includes the host-side **DSP Offload** workflow (`tools/dsp_offload.py`), which moves library-wide feature extraction off the mobile device and onto your computer over ADB.
 - [PCA Engine & Unsupervised Feature Cleaving](./docs/Auto_Playlist_Engine.md#8-pca-engine--unsupervised-feature-redundancy-cleaving-v110) *(v1.1.0)*; double-pass SVD, correlation pruning, on-device visualization report.

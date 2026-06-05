@@ -58,6 +58,7 @@ class AudioServiceControl(Service):
     on_tts_complete: Optional[EventHandler] = None
     # Internal-use event for STT transcription results.
     on_stt_result: Optional[EventHandler] = None
+    on_equalizer_bands_result: Optional[EventHandler] = None
 
     # ── Internal readiness gate ───────────────────────────────────────────────
 
@@ -95,6 +96,7 @@ class AudioServiceControl(Service):
         object.__setattr__(self, "_pending_tts", {})
         # STT results, keyed by request_id.
         object.__setattr__(self, "_pending_stt", {})
+        object.__setattr__(self, "_pending_eq_queries", {})
 
         def internal_on_decode_complete(e):
             try:
@@ -146,6 +148,9 @@ class AudioServiceControl(Service):
         )
         self.on_tts_complete = lambda e: _resolve_pending("_pending_tts", e)
         self.on_stt_result = lambda e: _resolve_pending("_pending_stt", e)
+        self.on_equalizer_bands_result = lambda e: _resolve_pending(
+            "_pending_eq_queries", e
+        )
 
         def internal_on_ready(e):
             _log("internal_on_ready FIRED; Dart said ready")
@@ -436,6 +441,22 @@ class AudioServiceControl(Service):
         """Manually stop the current STT session. No-op if not listening."""
         await self._wait_ready()
         await self._invoke_method("stt_stop")
+
+    async def set_loudness_boost(self, gain: float) -> None:
+        """Set target gain boost in decibels for loudness enhancement."""
+        await self._wait_ready()
+        await self._invoke_method("set_loudness_boost", {"gain": gain})
+
+    async def set_eq_band_gain(self, index: int, gain: float) -> None:
+        """Set the gain level in decibels for a specific equalizer band."""
+        await self._wait_ready()
+        await self._invoke_method("set_eq_band_gain", {"index": index, "gain": gain})
+
+    async def get_equalizer_bands(self) -> dict[str, Any]:
+        """Fetch the available equalizer bands from the player."""
+        return await self._await_perm_op(
+            "get_equalizer_bands", "_pending_eq_queries", {}
+        )
 
     async def _await_perm_op(
         self, method: str, pending_attr: str, extra_args: dict

@@ -22,12 +22,92 @@ def extract_feature_vector(row: dict) -> list[float]:
         feat.append(val)
     return feat
 
+
+def _redundant_features_from(
+    corr_matrix: np.ndarray,
+    threshold: float = 0.70,
+) -> set[str]:
+    """Centrality-based redundancy cleaving over ``_RAW_FEATURES``.
+
+    Two features correlating at ``|r| >= threshold`` are redundant; within a
+    correlated cluster we keep the most *central* feature — the one with the
+    highest mean |r| to its clustermates, i.e. the best single proxy for the
+    ones dropped — and drop the rest. Greedy in descending centrality so each
+    cluster's representative survives. Pure function of the Pearson matrix,
+    shared by the mood/taste PCA (`calculate_pca_projection`) and the acoustic
+    graph build (`redundant_raw_features`) so both agree on "redundant".
+
+    Why centrality and not PCA variance: after z-scoring every feature has the
+    same total variance, so a variance ranking only differentiates via the top
+    few PCs — a fragile, near-tie signal that can elect a noisy axis (e.g.
+    spectral_flatness) over an interpretable, representative one (brightness).
+    Centrality answers the actual question: which feature best stands in for
+    its redundant group.
+    """
+    C = np.nan_to_num(np.asarray(corr_matrix, dtype=float))  # zero-var cols → 0
+    D = len(_RAW_FEATURES)
+
+    # Clustermates: the features each one is redundant with (|r| ≥ threshold).
+    mates: list[list[int]] = [[] for _ in range(D)]
+    for i in range(D):
+        for j in range(D):
+            if i != j and abs(C[i, j]) >= threshold:
+                mates[i].append(j)
+
+    # Centrality = mean |r| to clustermates (0 ⇒ isolated, never dropped).
+    centrality = np.zeros(D, dtype=float)
+    for i in range(D):
+        if mates[i]:
+            centrality[i] = float(np.mean([abs(C[i, j]) for j in mates[i]]))
+
+    # Greedy: process most-central first; a kept feature drops its mates.
+    # Tie-break on lower feature index for determinism.
+    order = sorted(range(D), key=lambda i: (centrality[i], -i), reverse=True)
+    redundant: set[str] = set()
+    kept: set[int] = set()
+    for i in order:
+        if not mates[i] or _RAW_FEATURES[i] in redundant:
+            continue
+        kept.add(i)
+        for j in mates[i]:
+            if j in kept or _RAW_FEATURES[j] in redundant:
+                continue
+            redundant.add(_RAW_FEATURES[j])
+            logger.warning(
+                "PCA Engine: Cleaving redundant feature '%s' (|r|=%.2f with "
+                "more-central '%s')", _RAW_FEATURES[j], abs(C[i, j]), _RAW_FEATURES[i],
+            )
+    return redundant
+
+
+def redundant_raw_features(rows: list[dict], threshold: float = 0.70) -> set[str]:
+    """Raw scalar features the covariance analysis deems redundant for *this*
+    library. Empty for libraries < 50 tracks (too little data to trust the
+    correlations — mirrors the guard in `calculate_pca_projection`). Used by
+    the acoustic graph build so the kNN/Louvain feature space excludes
+    collinear scalars.
+    """
+    N = len(rows)
+    D = len(_RAW_FEATURES)
+    if N < 50:
+        return set()
+    X = np.zeros((N, D), dtype=np.float32)
+    for idx, r in enumerate(rows):
+        X[idx, :] = extract_feature_vector(r)
+    stds = np.std(X, axis=0)
+    stds[stds == 0] = 1.0
+    X_scaled = (X - np.mean(X, axis=0)) / stds
+    with np.errstate(invalid="ignore", divide="ignore"):
+        corr_matrix = np.corrcoef(X_scaled.T)
+    return _redundant_features_from(corr_matrix, threshold)
+
+
 def calculate_pca_projection(rows: list[dict]) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int]:
     """
     Computes PCA using a fully automated unsupervised double-pass correlation filter:
     1. First-pass PCA SVD to find initial variance loadings and eigenvalues.
     2. Covariance (Pearson correlation) analysis of the raw features.
-    3. Prunes features correlating at |r| >= 0.85 along descending explained variance order.
+    3. Prunes features correlating at |r| >= 0.70 along descending explained variance order.
     4. Second-pass PCA SVD on the active non-redundant feature subset to obtain the optimized orthogonal space.
     5. Assembles a final 8x3 projection matrix V_keep with zero-padding on redundant rows.
     
@@ -68,42 +148,17 @@ def calculate_pca_projection(rows: list[dict]) -> tuple[np.ndarray, np.ndarray, 
     try:
         U, S, Vt = np.linalg.svd(X_scaled, full_matrices=False)
         eigenvalues = (S ** 2) / (N - 1)
-        loadings = Vt.T
     except Exception as e:
         logger.error(f"First-pass SVD computation failed: {e}. Falling back.")
         return default_means, default_stds, default_V_keep, default_eigenvalues, 3
-        
+
     # === STEP 2: COVARIANCE (PEARSON CORRELATION) ANALYSIS & PRUNING ===
-    corr_matrix = np.corrcoef(X_scaled.T)
-    
-    # Calculate explained variance weights to sort features
-    # Use however many PCs the SVD actually returned (rank can be < 3 for tiny data)
-    n_pcs = min(3, len(eigenvalues))
-    overall_weights = []
-    for feat_idx, feat in enumerate(_RAW_FEATURES):
-        weight = float(sum(
-            (loadings[feat_idx, pc] ** 2) * eigenvalues[pc]
-            for pc in range(n_pcs)
-        ))
-        overall_weights.append((feat, feat_idx, weight))
-        
-    sorted_features = sorted(overall_weights, key=lambda x: x[2], reverse=True)
-    
-    redundant = set()
-    for i in range(len(sorted_features)):
-        feat_i, idx_i, weight_i = sorted_features[i]
-        for j in range(i):
-            feat_j, idx_j, weight_j = sorted_features[j]
-            if feat_j in redundant:
-                continue
-            r = abs(corr_matrix[idx_i, idx_j])
-            if r >= 0.85:
-                redundant.add(feat_i)
-                logger.warning(
-                    f"PCA Engine: Dynamic Cleaving redundant feature '{feat_i}' (correlated with '{feat_j}', r={r:.2f})"
-                )
-                break
-                
+    # Centrality-based cleaving shared with the acoustic graph build via
+    # `_redundant_features_from` so both subsystems agree on which scalars are
+    # redundant (keep the best representative of each correlated cluster).
+    with np.errstate(invalid="ignore", divide="ignore"):
+        corr_matrix = np.corrcoef(X_scaled.T)
+    redundant = _redundant_features_from(corr_matrix, threshold=0.70)
     active_indices = [idx for idx in range(D) if _RAW_FEATURES[idx] not in redundant]
     
     # Fallback to standard full PCA if library is very small (< 50 tracks) or pruning leaves too few features
@@ -166,16 +221,6 @@ def calculate_pca_projection(rows: list[dict]) -> tuple[np.ndarray, np.ndarray, 
     
     return means, stds, V_keep, eigenvalues_out, kaiser_k
 
-def project_track(row: dict, means: np.ndarray, stds: np.ndarray, V_keep: np.ndarray) -> np.ndarray:
-    """Projects a single raw track row into the 3D orthogonal PCA space."""
-    x = np.array(extract_feature_vector(row), dtype=np.float32)
-    # Standardize
-    x_scaled = (x - means) / stds
-    # Multiply by loadings to project
-    z = np.dot(x_scaled, V_keep)
-    return z
-
-
 # ─── Visualization ────────────────────────────────────────────────────────────
 
 _FRIENDLY_NAMES = {
@@ -202,13 +247,21 @@ _DARK_THEME = {
 }
 
 
-def plot_pca_report(rows: list[dict], output_dir: str) -> list[str]:
-    """Generate a four-figure PCA mathematical truth report and save PNGs to *output_dir*.
+def plot_pca_report(
+    rows: list[dict],
+    output_dir: str,
+    cluster_labels: np.ndarray | None = None,
+) -> list[str]:
+    """Generate a PCA mathematical truth report and save PNGs to *output_dir*.
 
     Produces two pairs of figures (heatmap + scatter) — one pair for the full
     8-feature space and one for the unsupervised-pruned space — exactly
     mirroring the logic in tools/pca_analysis.py so the on-device output is
     mathematically identical.
+
+    When *cluster_labels* is provided (integer array of length N), an
+    additional scatter plot is generated that colours tracks by spectral
+    cluster ID and draws convex-hull outlines around each cluster.
 
     Returns a list of absolute paths to the saved files (empty if
     matplotlib/seaborn are not available or too few tracks exist).
@@ -359,7 +412,7 @@ def plot_pca_report(rows: list[dict], output_dir: str) -> list[str]:
         for feat_j, idx_j, _ in sorted_features[:i]:
             if feat_j in redundant:
                 continue
-            if abs(corr_full[idx_i, idx_j]) >= 0.85:
+            if abs(corr_full[idx_i, idx_j]) >= 0.70:
                 redundant.add(feat_i)
                 logger.info(
                     "plot_pca_report: cleaving redundant feature '%s' (corr with '%s')",
@@ -463,5 +516,91 @@ def plot_pca_report(rows: list[dict], output_dir: str) -> list[str]:
     plt.close(fig)
     saved.append(path_sc_pruned)
     logger.info("plot_pca_report: saved %s", path_sc_pruned)
+
+    # ══════════════════════════════════════════════════════════════════════════════
+    #  FIGURE 5 — SPECTRAL CLUSTER SCATTER
+    # ══════════════════════════════════════════════════════════════════════════════
+    if cluster_labels is not None and len(cluster_labels) == N:
+        from scipy.spatial import ConvexHull
+
+        unique_clusters = np.unique(cluster_labels)
+        n_clusters = len(unique_clusters)
+
+        # Curated palette: visually distinct, dark-theme friendly.
+        _CLUSTER_PALETTE = [
+            "#00E5FF", "#FF4081", "#76FF03", "#FFD740", "#E040FB",
+            "#FF6E40", "#40C4FF", "#EEFF41", "#7C4DFF", "#69F0AE",
+            "#FF5252", "#448AFF", "#B2FF59", "#FF80AB", "#18FFFF",
+            "#FFAB40", "#536DFE", "#B388FF", "#64FFDA", "#FF8A80",
+            "#82B1FF", "#CCFF90", "#F48FB1", "#80D8FF", "#FFD180",
+            "#A7FFEB", "#EA80FC", "#8C9EFF", "#C6FF00", "#FF9E80",
+        ]
+
+        fig, ax = plt.subplots(figsize=(10, 8))
+        
+        # Enable clean grid lines matching the dark theme
+        ax.grid(True, color="#2D2D2D", linestyle=":", alpha=0.6, zorder=0)
+
+        for idx, cid in enumerate(unique_clusters):
+            mask_c = cluster_labels == cid
+            colour = _CLUSTER_PALETTE[idx % len(_CLUSTER_PALETTE)]
+            pts = X_proj_p[mask_c]
+
+            # 1. Plot the actual tracks in this cluster with clean outlines
+            ax.scatter(
+                pts[:, 0], pts[:, 1],
+                c=colour, alpha=0.75, edgecolors="#121212", linewidths=0.5, s=55,
+                zorder=3,
+                label=f"Cluster {int(cid)} ({int(mask_c.sum())} tracks)",
+            )
+
+            # 2. Compute and plot the cluster centroid
+            if len(pts) > 0:
+                centroid = pts.mean(axis=0)
+                ax.scatter(
+                    centroid[0], centroid[1],
+                    color=colour, marker="D", s=140,
+                    edgecolors="white", linewidths=1.2, zorder=5,
+                )
+
+            # 3. Convex hull (filled + outline) (needs ≥ 3 points not all collinear).
+            if mask_c.sum() >= 3:
+                try:
+                    hull = ConvexHull(pts[:, :2])
+                    hull_pts = np.append(
+                        hull.vertices, hull.vertices[0],
+                    )
+                    # Subtle filled region
+                    ax.fill(
+                        pts[hull_pts, 0], pts[hull_pts, 1],
+                        color=colour, alpha=0.08, zorder=1,
+                    )
+                    # Solid boundary line
+                    ax.plot(
+                        pts[hull_pts, 0], pts[hull_pts, 1],
+                        color=colour, linewidth=1.5, alpha=0.75, zorder=2,
+                    )
+                except Exception:
+                    pass  # Degenerate hull (collinear points)
+
+        ax.axhline(0, color="#333333", linestyle="--", linewidth=0.8, zorder=1)
+        ax.axvline(0, color="#333333", linestyle="--", linewidth=0.8, zorder=1)
+        ax.set_xlabel(f"PC1 ({ev_ratio_p[0]*100:.2f}% variance)")
+        ax.set_ylabel(f"PC2 ({ev_ratio_p[1]*100:.2f}% variance)")
+        ax.set_title(
+            f"Spectral Clusters in PCA Space ({n_clusters} Clusters)",
+            pad=20, color="white", weight="bold",
+        )
+        ax.legend(
+            loc="upper right", fontsize=8, framealpha=0.7,
+            facecolor="#1E1E1E", edgecolor="#444444",
+            labelcolor="white",
+        )
+        fig.tight_layout()
+        path_sc_cluster = os.path.join(output_dir, "pca_scatter_clusters.png")
+        fig.savefig(path_sc_cluster, dpi=200, facecolor="#121212")
+        plt.close(fig)
+        saved.append(path_sc_cluster)
+        logger.info("plot_pca_report: saved %s", path_sc_cluster)
 
     return saved

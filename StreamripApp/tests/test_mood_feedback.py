@@ -23,8 +23,10 @@ import unittest
 import numpy as np
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-
+import utils.config as _orig_config
 _cfg = _types.ModuleType("utils.config")
+for _k, _v in _orig_config.__dict__.items():
+    _cfg.__dict__[_k] = _v
 _cfg.APP_DIR = tempfile.mkdtemp(prefix="dsptest_app_")
 sys.modules["utils.config"] = _cfg
 
@@ -111,37 +113,28 @@ class TestPartitionAPI(unittest.TestCase):
             ("p_mid",  120.0, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0),
             ("p_high", 180.0, 0.9, 0.9, 0.9, 0.9, 0.5, 0.9, 0),
         ]))
-        _run(tg.optimize_pca_spacing(self.db, tg.FEATURES_VERSION))
 
     def tearDown(self):
         _run(self.db.close())
         os.unlink(self.tmp.name)
 
     def test_assign_and_unassign(self):
+        # Many-to-many: a track can be pinned to several moods at once.
         _run(tg.assign_track_to_mood(self.db, "p_low", "chill"))
-        paths = _run(tg.tracks_in_partition(self.db, "chill"))
-        self.assertEqual(paths, ["p_low"])
+        self.assertEqual(_run(tg.tracks_in_partition(self.db, "chill")), ["p_low"])
 
         _run(tg.assign_track_to_mood(self.db, "p_low", "dark"))
-        chill_paths = _run(tg.tracks_in_partition(self.db, "chill"))
-        dark_paths = _run(tg.tracks_in_partition(self.db, "dark"))
-        self.assertEqual(chill_paths, [])
-        self.assertEqual(dark_paths, ["p_low"])
+        self.assertEqual(_run(tg.tracks_in_partition(self.db, "chill")), ["p_low"])
+        self.assertEqual(_run(tg.tracks_in_partition(self.db, "dark")), ["p_low"])
 
-        _run(tg.unassign_track_from_mood(self.db, "p_low"))
+        # Per-mood unassign drops only that mood; the other pin remains.
+        _run(tg.unassign_track_from_mood(self.db, "p_low", "dark"))
         self.assertEqual(_run(tg.tracks_in_partition(self.db, "dark")), [])
+        self.assertEqual(_run(tg.tracks_in_partition(self.db, "chill")), ["p_low"])
 
-    def test_recompute_centroid_is_partition_mean(self):
-        _run(tg.assign_track_to_mood(self.db, "p_low", "chill"))
-        _run(tg.assign_track_to_mood(self.db, "p_high", "chill"))
-        profile = _run(tg.recompute_mood_centroid(self.db, "chill"))
-        self.assertIsNotNone(profile)
-        # Average percentile rank of p_low and p_high is 0.5, mapping to Quartile 3
-        self.assertEqual(profile["bpm"][0], 3.0)
-
-    def test_recompute_centroid_empty_partition_returns_none(self):
-        out = _run(tg.recompute_mood_centroid(self.db, "chill"))
-        self.assertIsNone(out)
+        # No-mood unassign clears all remaining pins.
+        _run(tg.unassign_track_from_mood(self.db, "p_low"))
+        self.assertEqual(_run(tg.tracks_in_partition(self.db, "chill")), [])
 
     def test_set_mood_eq_stores_quartiles(self):
         _run(tg.set_mood_eq(self.db, "chill", {"bpm": 3.0, "energy": 1.0}))
@@ -164,7 +157,6 @@ class TestAdjustMoodProfileShim(unittest.TestCase):
             ("s_low",  60.0,  0.1, 0.1, 0.1, 0.1, 0.5, 0.1, 0),
             ("s_high", 180.0, 0.9, 0.9, 0.9, 0.9, 0.5, 0.9, 0),
         ]))
-        _run(tg.optimize_pca_spacing(self.db, tg.FEATURES_VERSION))
 
     def tearDown(self):
         _run(self.db.close())
@@ -175,19 +167,21 @@ class TestAdjustMoodProfileShim(unittest.TestCase):
         self.assertEqual(
             _run(tg.tracks_in_partition(self.db, "chill")), ["s_low"],
         )
-        # Taste model should also have one explicit event.
-        row = _run(self.db.get_taste_model(tg.FEATURES_VERSION))
-        self.assertIsNotNone(row)
-        self.assertEqual(row[2], 1)  # n_explicit
+        # Like records a positive per-mood feedback row; taste model is
+        # deprecated/disconnected so it stays cold.
+        fb = _run(self.db.get_mood_feedback())
+        self.assertEqual(fb.get("s_low", {}).get("chill"), 1)
+        self.assertIsNone(_run(self.db.get_taste_model(tg.FEATURES_VERSION)))
 
     def test_dislike_unassigns_and_records_negative(self):
         _run(tg.adjust_mood_profile(self.db, "chill", "s_low", 1))
         _run(tg.adjust_mood_profile(self.db, "chill", "s_low", -1))
+        # Dislike removes the pin and records a per-mood exclusion.
         self.assertEqual(
             _run(tg.tracks_in_partition(self.db, "chill")), [],
         )
-        row = _run(self.db.get_taste_model(tg.FEATURES_VERSION))
-        self.assertEqual(row[2], 2)  # two explicit events
+        fb = _run(self.db.get_mood_feedback())
+        self.assertEqual(fb.get("s_low", {}).get("chill"), -1)
 
     def test_neutral_feedback_is_noop(self):
         _run(tg.adjust_mood_profile(self.db, "chill", "s_low", 0))
@@ -195,71 +189,63 @@ class TestAdjustMoodProfileShim(unittest.TestCase):
         self.assertIsNone(_run(self.db.get_taste_model(tg.FEATURES_VERSION)))
 
 
-class TestTracksByMoodWithPartition(unittest.TestCase):
+class TestTracksByMood(unittest.TestCase):
+    """tracks_by_mood now scores against MOOD_TARGETS in scalar-percentile
+    space (the right lens for energy/tempo moods), with user pins floated to
+    the top and dislikes excluded."""
+
     def setUp(self):
         self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
         self.tmp.close()
         self.db = DatabaseManager(self.tmp.name)
         _run(self.db.initialize())
         tg.invalidate_mood_cache()
-        tg.invalidate_taste_cache()
-        # Build a small library with one clearly-low and one clearly-high
-        # track on PC1; PCA will spread them along the dominant axis.
         _run(_seed_tracks(self.db, [
             ("t_low",  60.0,  0.1, 0.1, 0.1, 0.1, 0.5, 0.1, 0),
             ("t_mid",  120.0, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0),
             ("t_high", 180.0, 0.9, 0.9, 0.9, 0.9, 0.5, 0.9, 0),
         ]))
-        _run(tg.optimize_pca_spacing(self.db, tg.FEATURES_VERSION))
-        mock_profiles = {
-            "chill": {
-                "bpm": (1.0, 1.0),      # Very Low
-                "energy": (1.0, 1.0),   # Very Low
-            },
-            "energetic": {
-                "bpm": (4.0, 1.0),      # Very High
-                "energy": (4.0, 1.0),   # Very High
-            },
-            "dark": {
-                "energy": (1.0, 1.0),   # Very Low
-            },
-            "upbeat": {
-                "bpm": (4.0, 1.0),      # Very High
-                "energy": (4.0, 1.0),   # Very High
-            },
-            "rock": {
-                "bpm": (3.0, 1.0),      # High
-                "brightness": (4.0, 1.0), # Very High
-            },
-            "beats": {
-                "beat_strength": (4.0, 1.0), # Very High
-            },
-            "intense": {
-                "energy": (4.0, 1.0),   # Very High
-                "beat_strength": (4.0, 1.0), # Very High
-            }
-        }
-        for m in tg.MOODS.keys():
-            prof = mock_profiles.get(m, {})
-            _run(self.db.save_adjusted_mood_profile(m, prof))
 
     def tearDown(self):
         _run(self.db.close())
         os.unlink(self.tmp.name)
 
-    def test_partition_overrides_seeded_centroid(self):
-        # Assign t_high to chill. Without the partition the seeded chill
-        # centroid (PC1=-1.5) would put t_low at the top; with the
-        # partition the centroid shifts and t_high should rank first.
+    def test_scalar_target_orders_by_energy(self):
+        # chill targets low energy/tempo → the low track ranks above the high.
+        chill = [r["path"] for r in _run(tg.tracks_by_mood(self.db, "chill", limit=3))]
+        self.assertLess(chill.index("t_low"), chill.index("t_high"))
+        # intense targets high energy/tempo → the high track ranks above the low.
+        intense = [r["path"] for r in _run(tg.tracks_by_mood(self.db, "intense", limit=3))]
+        self.assertLess(intense.index("t_high"), intense.index("t_low"))
+
+    def test_pin_floats_to_top(self):
+        # A user pin always sits at the top regardless of scalar profile.
         _run(tg.assign_track_to_mood(self.db, "t_high", "chill"))
         results = _run(tg.tracks_by_mood(self.db, "chill", limit=3))
         self.assertEqual(results[0]["path"], "t_high")
 
-    def test_empty_partition_uses_seeded_centroid(self):
-        results = _run(tg.tracks_by_mood(self.db, "chill", limit=3))
-        # Seeded chill profile targets PC1=-1.5; t_low sits in the negative
-        # extreme of PC1 → it should rank first.
-        self.assertEqual(results[0]["path"], "t_low")
+    def test_dislike_excludes_from_mood(self):
+        _run(tg.adjust_mood_profile(self.db, "chill", "t_low", -1))
+        chill = {r["path"] for r in _run(tg.tracks_by_mood(self.db, "chill", limit=3))}
+        self.assertNotIn("t_low", chill)
+
+    def test_get_mood_definition_defaults_to_targets(self):
+        # No saved profile → out-of-box MOOD_TARGETS rendered as 1–4 bands
+        # (never raises). chill targets low energy → band 1 (Very Low).
+        d = _run(tg.get_mood_definition(self.db, "chill"))
+        self.assertIsNotNone(d)
+        self.assertEqual(d["energy"][0], 1.0)
+
+    def test_eq_override_changes_ranking(self):
+        # Out of the box, chill ranks the low track above the high.
+        default = [r["path"] for r in _run(tg.tracks_by_mood(self.db, "chill", limit=3))]
+        self.assertLess(default.index("t_low"), default.index("t_high"))
+        # User tunes chill's EQ toward HIGH energy/tempo → the ranking flips,
+        # and get_mood_definition now reflects the saved adjustment.
+        _run(tg.set_mood_eq(self.db, "chill", {"energy": 4.0, "bpm": 4.0}))
+        self.assertEqual(_run(tg.get_mood_definition(self.db, "chill"))["energy"][0], 4.0)
+        tuned = [r["path"] for r in _run(tg.tracks_by_mood(self.db, "chill", limit=3))]
+        self.assertLess(tuned.index("t_high"), tuned.index("t_low"))
 
 
 class TestTasteModelIntegration(unittest.TestCase):
@@ -274,7 +260,6 @@ class TestTasteModelIntegration(unittest.TestCase):
             ("k_low",  60.0,  0.1, 0.1, 0.1, 0.1, 0.5, 0.1, 0),
             ("k_high", 180.0, 0.9, 0.9, 0.9, 0.9, 0.5, 0.9, 0),
         ]))
-        _run(tg.optimize_pca_spacing(self.db, tg.FEATURES_VERSION))
         mock_profiles = {
             "chill": {
                 "bpm": (1.0, 1.0),      # Very Low
@@ -311,20 +296,15 @@ class TestTasteModelIntegration(unittest.TestCase):
         _run(self.db.close())
         os.unlink(self.tmp.name)
 
-    def test_explicit_feedback_persists(self):
+    def test_explicit_feedback_is_noop(self):
+        # Taste model is deprecated/disconnected — the hook must not train.
         _run(tg.record_explicit_feedback(self.db, "k_low", True))
-        row = _run(self.db.get_taste_model(tg.FEATURES_VERSION))
-        self.assertIsNotNone(row)
-        self.assertEqual(row[2], 1)  # n_explicit
-        self.assertEqual(row[3], 0)  # n_implicit
+        self.assertIsNone(_run(self.db.get_taste_model(tg.FEATURES_VERSION)))
 
-    def test_implicit_play_event_routes_through_classifier(self):
-        # 50 s / 240 s → positive (≥ 45 s absolute)
+    def test_implicit_play_event_is_noop(self):
+        # Even a clearly-positive play (50 s) trains nothing while disconnected.
         _run(tg.record_play_event(self.db, "k_high", 50.0, 240.0))
-        row = _run(self.db.get_taste_model(tg.FEATURES_VERSION))
-        self.assertIsNotNone(row)
-        self.assertEqual(row[3], 1)  # n_implicit
-        self.assertEqual(row[2], 0)  # n_explicit
+        self.assertIsNone(_run(self.db.get_taste_model(tg.FEATURES_VERSION)))
 
     def test_short_skip_does_not_train(self):
         _run(tg.record_play_event(self.db, "k_high", 2.0, 240.0))
@@ -403,13 +383,16 @@ class TestIsletsUnchanged(unittest.TestCase):
         _run(self.db.close())
         os.unlink(self.tmp.name)
 
-    def test_islet_membership_via_cosine(self):
-        """Cosine path returns the exemplar and excludes blacklisted tracks."""
+    def test_islet_membership_via_zr(self):
+        """Zr-affinity path returns the exemplar and excludes blacklisted tracks."""
+        # Islets now score in the unified graph Zr space, so the geometry must
+        # be built/persisted first.
+        _run(tg.build_metadata_edges(self.db))
+        _run(tg.build_acoustic_edges(self.db))
         with open(self.cm_path, "w", encoding="utf-8") as f:
             json.dump({
                 "test_islet": {
-                    # Centroid aligned with the 'ex'/'near' timbre direction.
-                    "centroid":      [1.0] * 52,
+                    "centroid":      [1.0] * 52,   # vestigial; scoring uses exemplar_path
                     "exemplar_path": "ex",
                     "threshold":     0.5,
                     "blacklist":     ["far"],

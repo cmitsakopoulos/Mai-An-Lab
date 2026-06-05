@@ -63,7 +63,10 @@ def _snapshot_sqlite(src_path: str, dst_path: str) -> None:
     try:
         # Open read-only via URI so we don't accidentally create a WAL file
         # on the source side. The destination is a fresh file.
-        src = sqlite3.connect(f"file:{src_path}?mode=ro", uri=True)
+        try:
+            src = sqlite3.connect(f"file:{src_path}?mode=ro", uri=True)
+        except (sqlite3.Error, ValueError, TypeError):
+            src = sqlite3.connect(src_path)
         try:
             dst = sqlite3.connect(dst_path)
             try:
@@ -170,6 +173,71 @@ def inspect_bundle(zip_path: str) -> dict:
             return {"error": f"manifest parse failed: {ex}"}
 
 
+def export_state_snapshot(
+    db_path: str,
+    config_path: str,
+    out_dir: str,
+    search_history_path: Optional[str] = None,
+    custom_moods_path: Optional[str] = None,
+) -> str:
+    """Write a deterministic state bundle (`mai_an_lab_state_latest.zip`) to
+    *out_dir*, silently overwriting any previous snapshot.
+
+    Designed for the auto-export-on-startup hook: unlike `export_state` this
+    avoids creating timestamped files (one per boot would litter the user's
+    library folder) and skips the auto-prune logic since there is only ever
+    one file.
+
+    Returns the absolute path of the written file, or raises on failure."""
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = os.path.join(out_dir, "mai_an_lab_state_latest.zip")
+
+    tmp_db = out_path + ".db.tmp"
+    _snapshot_sqlite(db_path, tmp_db)
+
+    # Write to a temp file first, then atomically replace, so a crash
+    # mid-write never leaves a truncated bundle on disk.
+    tmp_zip = out_path + ".writing.tmp"
+    contents: dict[str, dict] = {}
+    try:
+        with zipfile.ZipFile(tmp_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            if os.path.exists(tmp_db):
+                zf.write(tmp_db, "library.db")
+                contents["library.db"] = {"bytes": os.path.getsize(tmp_db)}
+            if config_path and os.path.exists(config_path):
+                zf.write(config_path, "config.toml")
+                contents["config.toml"] = {"bytes": os.path.getsize(config_path)}
+            if search_history_path and os.path.exists(search_history_path):
+                zf.write(search_history_path, "recent_searches.json")
+                contents["recent_searches.json"] = {
+                    "bytes": os.path.getsize(search_history_path)
+                }
+            if custom_moods_path and os.path.exists(custom_moods_path):
+                zf.write(custom_moods_path, "custom_moods.json")
+                contents["custom_moods.json"] = {
+                    "bytes": os.path.getsize(custom_moods_path)
+                }
+
+            manifest = {
+                "bundle_version": BUNDLE_VERSION,
+                "exported_at": time.strftime("%Y%m%d_%H%M%S"),
+                "auto_snapshot": True,
+                "contents": contents,
+            }
+            zf.writestr("manifest.json", json.dumps(manifest, indent=2))
+
+        os.replace(tmp_zip, out_path)
+    finally:
+        for f in (tmp_db, tmp_zip):
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+
+    logger.info("Auto-snapshot state bundle written to %s", out_path)
+    return out_path
+
+
 def import_state(
     zip_path: str,
     db_path: str,
@@ -212,6 +280,17 @@ def import_state(
             replaced[member] = target
 
         _replace("library.db", db_path)
+        # Delete stale journal files (WAL and SHM) to prevent SQLite from recovering using old WAL state,
+        # which would otherwise corrupt the newly imported database.
+        for suffix in ("-wal", "-shm"):
+            stale_journal = db_path + suffix
+            if os.path.exists(stale_journal):
+                try:
+                    os.remove(stale_journal)
+                    logger.info("Deleted stale SQLite journal: %s", stale_journal)
+                except Exception as e:
+                    logger.warning("Failed to delete stale SQLite journal %s: %s", stale_journal, e)
+
         _replace("config.toml", config_path)
         _replace("recent_searches.json", search_history_path)
         _replace("custom_moods.json", custom_moods_path)

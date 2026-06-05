@@ -75,7 +75,7 @@ class Client(ABC):
 
     @staticmethod
     async def get_session(
-        headers: dict | None = None, verify_ssl: bool = True
+        headers: dict | None = None, verify_ssl: bool = True, trace_configs: list | None = None
     ) -> aiohttp.ClientSession:
         if headers is None:
             headers = {}
@@ -87,4 +87,5 @@ class Client(ABC):
         return aiohttp.ClientSession(
             headers={"User-Agent": DEFAULT_USER_AGENT} | headers,
             connector=connector,
+            trace_configs=trace_configs,
         )

@@ -13,6 +13,7 @@ from unittest.mock import MagicMock, AsyncMock, patch
 # ── Mock External Modules to run dependency-free ───────────────────────────
 stub_modules = [
     "flet",
+    "flet.canvas",
     "flet_audio",
     "flet_audio_service",
     "aiohttp",
@@ -28,32 +29,57 @@ stub_modules = [
     "tomlkit",
     "tomlkit.api",
     "tomlkit.toml_document",
-    "numpy",
     "matplotlib",
     "matplotlib.pyplot",
     "seaborn",
     "certifi"
 ]
 
-for mod in stub_modules:
-    mock_mod = MagicMock()
-    if mod == "numpy":
-        mock_mod.ndarray = MagicMock
-        mock_mod.float32 = MagicMock
-    sys.modules[mod] = mock_mod
+original_modules = {}
+main = None
+audio_engine = None
 
-# Add parent dir to path
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+def setUpModule():
+    global main, audio_engine
+    
+    # 1. Back up and mock external modules
+    for mod in stub_modules:
+        if mod in sys.modules:
+            original_modules[mod] = sys.modules[mod]
+        mock_mod = MagicMock()
+        sys.modules[mod] = mock_mod
 
-# Isolate DATA_DIR & XDG_CACHE_HOME
-temp_dir = tempfile.mkdtemp(prefix="streamrip_test_")
-os.environ["HOME"] = temp_dir
-os.environ["XDG_CONFIG_HOME"] = temp_dir
-os.environ["XDG_CACHE_HOME"] = os.path.join(temp_dir, ".cache")
-os.makedirs(os.environ["XDG_CACHE_HOME"], exist_ok=True)
+    # 2. Add parent dir to path
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-import main
-from main import audio_engine
+    # 3. Isolate environment directories
+    temp_dir = tempfile.mkdtemp(prefix="streamrip_test_")
+    os.environ["HOME"] = temp_dir
+    os.environ["XDG_CONFIG_HOME"] = temp_dir
+    os.environ["XDG_CACHE_HOME"] = os.path.join(temp_dir, ".cache")
+    os.makedirs(os.environ["XDG_CACHE_HOME"], exist_ok=True)
+
+    # 4. Import the real app modules under mocked environment
+    import main as m
+    from main import audio_engine as ae
+    main = m
+    audio_engine = ae
+
+def tearDownModule():
+    for mod in stub_modules:
+        if mod in original_modules:
+            sys.modules[mod] = original_modules[mod]
+        else:
+            sys.modules.pop(mod, None)
+
+    # Unload any app modules imported during this test to prevent caching of mock references
+    to_remove = []
+    for mod in list(sys.modules.keys()):
+        lower_mod = mod.lower()
+        if "utils" in lower_mod or "ui" in lower_mod or "main" in lower_mod or "streamrip" in lower_mod:
+            to_remove.append(mod)
+    for mod in to_remove:
+        sys.modules.pop(mod, None)
 
 # Helper to run async tests
 def run_async(coro):
@@ -97,6 +123,7 @@ class TestQueueModes(unittest.TestCase):
         self.app.play_similar_mode = False
         self.app.auto_dj_mode = False
         self.app._play_similar_gen = 0
+        self.app._play_similar_recommendation_in_progress = False
         self.app._session_bad_paths = []
         self.app.db_manager = AsyncMock()
         self.app._initiate_play_similar_queue_async = AsyncMock()
@@ -129,6 +156,11 @@ class TestQueueModes(unittest.TestCase):
         self.app._save_queue_to_file = main.StreamripFletApp._save_queue_to_file.__get__(self.app, main.StreamripFletApp)
         self.app._load_queue_from_file = main.StreamripFletApp._load_queue_from_file.__get__(self.app, main.StreamripFletApp)
         self.app._save_queue_state = main.StreamripFletApp._save_queue_state.__get__(self.app, main.StreamripFletApp)
+        
+        # Mock the scheduled partition save to write synchronously in tests
+        def _mock_schedule_partition_save(filename, queue_list, current_index, position, duration):
+            self.app._save_queue_to_file(filename, queue_list, current_index, position, duration)
+        self.app._schedule_partition_save = _mock_schedule_partition_save
         self.app._play_track_core = main.StreamripFletApp._play_track_core.__get__(self.app, main.StreamripFletApp)
         self.app.toggle_shuffle = main.StreamripFletApp.toggle_shuffle.__get__(self.app, main.StreamripFletApp)
         self.app._toggle_shuffle_async = main.StreamripFletApp._toggle_shuffle_async.__get__(self.app, main.StreamripFletApp)
@@ -164,9 +196,12 @@ class TestQueueModes(unittest.TestCase):
         self.assertEqual(audio_engine.queue[audio_engine.current_index]["path"], "/music/song2.mp3")
         self.assertFalse(audio_engine.is_shuffle)
         
-        # Verify that regular queue is cached in background
+        # Verify that queue state is cached in background
         self.app._save_queue_state()
-        state = self.app._load_queue_from_file("queue_regular.json")
+        state_path = os.path.join(self.test_dir, "queue_state.json")
+        self.assertTrue(os.path.exists(state_path))
+        with open(state_path) as fh:
+            state = json.load(fh)
         self.assertIsNotNone(state)
         self.assertEqual(len(state["queue"]), 3)
         self.assertEqual(state["current_index"], 1)
@@ -201,9 +236,12 @@ class TestQueueModes(unittest.TestCase):
         self.assertEqual(len(audio_engine.queue), 3)
         self.assertEqual(audio_engine.queue[audio_engine.current_index]["path"], "/music/song3.mp3")
         
-        # Verify that shuffle queue state is cached to queue_shuffle.json
+        # Verify that shuffle queue state is cached to queue_state.json
         self.app._save_queue_state()
-        state = self.app._load_queue_from_file("queue_shuffle.json")
+        state_path = os.path.join(self.test_dir, "queue_state.json")
+        self.assertTrue(os.path.exists(state_path))
+        with open(state_path) as fh:
+            state = json.load(fh)
         self.assertIsNotNone(state)
         self.assertEqual(len(state["queue"]), 3)
 
@@ -403,6 +441,51 @@ class TestQueueModes(unittest.TestCase):
             # It should have skipped to index 1 (the first newly appended walk track)
             self.assertEqual(audio_engine.current_index, 1)
             self.assertEqual(audio_engine.queue[audio_engine.current_index]["path"], "/music/walk1.mp3")
+
+    def test_play_similar_proactive_replenishment(self):
+        self.app._session_bad_paths = []
+        self.app._replenish_similar_queue_if_needed = main.StreamripFletApp._replenish_similar_queue_if_needed.__get__(self.app, main.StreamripFletApp)
+        self.app._recommend_similar_async = AsyncMock()
+        
+        self.app.play_similar_mode = True
+        
+        # Scenario 1: Upcoming count is 4 -> no replenishment triggered
+        audio_engine.queue = [
+            {"path": "/music/song1.mp3"},
+            {"path": "/music/song2.mp3"},
+            {"path": "/music/song3.mp3"},
+            {"path": "/music/song4.mp3"},
+            {"path": "/music/song5.mp3"},
+        ]
+        audio_engine.current_index = 0
+        audio_engine.current_path = "/music/song1.mp3"
+        
+        self.app._replenish_similar_queue_if_needed()
+        self.app._recommend_similar_async.assert_not_called()
+        
+        # Scenario 2: Upcoming count is 3 (< 4) -> replenishment triggered
+        audio_engine.queue = [
+            {"path": "/music/song1.mp3"},
+            {"path": "/music/song2.mp3"},
+            {"path": "/music/song3.mp3"},
+            {"path": "/music/song4.mp3"},
+        ]
+        audio_engine.current_index = 0
+        audio_engine.current_path = "/music/song1.mp3"
+        
+        self.app._play_similar_recommendation_in_progress = False
+        self.app._replenish_similar_queue_if_needed()
+        self.app._recommend_similar_async.assert_called_once_with("/music/song4.mp3", 0)
+
+        # Scenario 3: Recommendation in progress flag is True -> no new recommendation is scheduled
+        self.app._recommend_similar_async.reset_mock()
+        self.app._replenish_similar_queue_if_needed()
+        self.app._recommend_similar_async.assert_not_called()
+
+        # Scenario 4: Reset the flag -> replenishment is scheduled again
+        self.app._play_similar_recommendation_in_progress = False
+        self.app._replenish_similar_queue_if_needed()
+        self.app._recommend_similar_async.assert_called_once_with("/music/song4.mp3", 0)
 
     def test_auto_dj_mode(self):
         # 1. Start sequential playback in normal mode

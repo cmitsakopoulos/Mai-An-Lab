@@ -6,9 +6,11 @@ import unittest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-# Isolate APP_DIR so we don't interfere with or read the user's real custom_moods.json
 import types as _types
+import utils.config as _orig_config
 _cfg = _types.ModuleType("utils.config")
+for _k, _v in _orig_config.__dict__.items():
+    _cfg.__dict__[_k] = _v
 _cfg.APP_DIR = tempfile.mkdtemp(prefix="dsptest_help_")
 sys.modules["utils.config"] = _cfg
 

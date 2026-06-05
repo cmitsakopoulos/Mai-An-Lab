@@ -221,7 +221,12 @@ def _write_history(tmp_dir: str, messages: list) -> str:
 
 def run(coro):
     """Synchronous helper to drive a coroutine in the current event loop."""
-    return asyncio.get_event_loop().run_until_complete(coro)
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    return loop.run_until_complete(coro)
 
 
 def _run_anaphora(runner, messages: list, intent):

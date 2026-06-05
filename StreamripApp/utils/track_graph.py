@@ -3,13 +3,14 @@ Track graph: sparse k-NN adjacency over the music library + mood vocabulary.
 
 Two tiers of edges:
 
-  • acoustic  — cosine similarity over the DSP feature vectors persisted by
-                dsp.analyze_track(). Top-K-per-source candidates are pruned
-                by mutual-kNN intersection (keep edge i→j iff j is in i's
-                top-K AND i is in j's top-K) so cluster-centroid "hub"
-                tracks don't dominate every walk. Tracks with fewer than 5
-                mutual partners fall back to their original top-K to keep
-                the graph connected.
+  • acoustic  — Euclidean k-NN over the z-scored, PCA-reduced DSP feature
+                vectors persisted by dsp.analyze_track(), reweighted by a
+                Zelnik-Manor self-tuning Gaussian kernel. Top-K-per-source
+                candidates are pruned by strict mutual-kNN intersection (keep
+                edge i→j iff j ∈ topK(i) AND i ∈ topK(j)) so cluster-centroid
+                "hub" tracks don't dominate every walk. The same affinity
+                graph is the substrate for Louvain community detection
+                (cluster_id), so walk and clustering share one geometry.
   • metadata  — same-artist and same-album co-occurrence (edge_kind 'artist'
                 / 'album'). Weight is fixed at 1.0; ordering inside a tier
                 falls back to library order.
@@ -17,9 +18,8 @@ Two tiers of edges:
 The graph is the navigation backbone for the assistant: it routes 'play
 something similar' to a personalised-PageRank-flavoured random walk over
 acoustic + artist edges (see `walk`), 'more by this artist' to artist
-neighbours, and 'play X mood' to `tracks_by_mood`. Replaces the MCL
-clustering pipeline, which produced discrete buckets instead of the
-continuous proximity the assistant needs.
+neighbours, and 'play X mood' to `tracks_by_mood`. Provides the continuous
+proximity the assistant needs instead of discrete buckets.
 
 Walk improvements (versus a textbook random walk):
   • multi-tier pooling per step so the walker doesn't dead-end on
@@ -40,8 +40,8 @@ edit them directly. The assistant's intent regex imports `MOOD_KEYWORDS`
 lazily so adding a new mood word here automatically extends the parser.
 
 All builders are async (DB-bound) but the numpy work runs synchronously —
-no off-thread call is necessary for libraries up to ~20K tracks; cosine over
-56-dim vectors is bandwidth-limited and finishes in well under a second.
+no off-thread call is necessary for libraries up to ~20K tracks; Euclidean kNN
+over the PCA-reduced vectors is bandwidth-limited and finishes in under a second.
 For very large libraries the caller should wrap build_acoustic_edges in
 asyncio.to_thread.
 """
@@ -62,18 +62,25 @@ from utils.dsp import (
     analyze_track,
     unpack_timbre,
 )
+from utils.harmonic import key_index_to_camelot
 from utils.config import APP_DIR
 
 logger = logging.getLogger(__name__)
 
 CUSTOM_MOODS_PATH = os.path.join(APP_DIR, "custom_moods.json")
 
-# Islet membership defaults. Cosine similarity on raw timbre vectors against
-# the islet's centroid: tracks at or above the threshold are members, ranked
-# by similarity descending, capped at ISLET_MAX. ISLET_MIN guards against
-# islets too sparse to feel meaningful (an outlier exemplar with no neighbours
-# returns an empty result rather than a one-track "group").
-ISLET_THRESHOLD = 0.93
+# Islet membership defaults. Membership is a self-tuning Gaussian affinity to
+# the exemplar in the unified graph Zr space (1.0 = the exemplar itself):
+# tracks at or above the threshold are members, ranked by affinity descending,
+# capped at ISLET_MAX. ISLET_MIN guards against islets too sparse to feel
+# meaningful (an outlier exemplar with no neighbours returns an empty result
+# rather than a one-track "group"). NOTE: the threshold is now an affinity in
+# [0,1], not a raw-timbre cosine — legacy islets saved at ~0.93 may need
+# re-tuning. Because σ is the exemplar's 7th-NN distance, affinity(7th-NN) ≈
+# e⁻¹ ≈ 0.37 for every exemplar, so the threshold acts as a density-independent
+# rank cutoff: ~0.37 ≈ the 7 nearest, lower ⇒ a wider neighbourhood. The 0.25
+# default targets a ~10–15-track islet.
+ISLET_THRESHOLD = 0.25
 ISLET_MAX = 50
 ISLET_MIN = 3
 
@@ -218,17 +225,300 @@ KIND_ALBUM = "album"
 # ── Builders ─────────────────────────────────────────────────────────────────
 
 
+def _kmeans(
+    X: np.ndarray,
+    k: int,
+    max_iter: int = 50,
+    n_restarts: int = 5,
+) -> np.ndarray:
+    """k-means clustering with k-means++ init. Returns labels (N,)."""
+    N, D = X.shape
+    best_labels = np.zeros(N, dtype=np.int32)
+    best_inertia = np.inf
+    rng = np.random.RandomState(42)
+
+    # Pre-calculate squared norms of X for BLAS-accelerated Lloyd iterations
+    X_sq = np.sum(X ** 2, axis=1, keepdims=True)
+
+    for _ in range(n_restarts):
+        # Optimized k-means++ initialisation
+        centres = np.empty((k, D), dtype=np.float64)
+        centres[0] = X[rng.choice(N)]
+        min_dists = np.sum((X - centres[0]) ** 2, axis=1)
+        for c in range(1, k):
+            probs = min_dists / (min_dists.sum() + 1e-12)
+            centres[c] = X[rng.choice(N, p=probs)]
+            new_dists = np.sum((X - centres[c]) ** 2, axis=1)
+            min_dists = np.minimum(min_dists, new_dists)
+
+        # Lloyd iterations
+        labels = np.zeros(N, dtype=np.int32)
+        for _ in range(max_iter):
+            # Assignment using BLAS dot-product distance calculation:
+            # ||X - centres||^2 = X_sq - 2*X*centres^T + centres_sq
+            centres_sq = np.sum(centres ** 2, axis=1, keepdims=True).T
+            dists = X_sq - 2.0 * np.dot(X, centres.T) + centres_sq
+            new_labels = np.argmin(dists, axis=1).astype(np.int32)
+            if np.array_equal(new_labels, labels):
+                labels = new_labels
+                break
+            labels = new_labels
+            # Update
+            for c in range(k):
+                members = X[labels == c]
+                if len(members) > 0:
+                    centres[c] = members.mean(axis=0)
+
+        inertia = 0.0
+        for c in range(k):
+            members = X[labels == c]
+            if len(members) > 0:
+                inertia += float(np.sum((members - centres[c]) ** 2))
+        if inertia < best_inertia:
+            best_inertia = inertia
+            best_labels = labels.copy()
+
+    return best_labels
+
+
+def _louvain_local_move(
+    n: int,
+    edges: list[tuple[int, int, float]],
+    self_w: np.ndarray,
+    resolution: float,
+    rng: random.Random,
+    max_passes: int,
+) -> tuple[np.ndarray, int]:
+    """One Louvain level: greedily move nodes to maximise modularity.
+
+    Returns (community-per-node, total moves made). `self_w[i]` is i's
+    self-loop weight (intra-community weight folded in from a prior
+    aggregation level; zero at the first level).
+    """
+    adj: list[dict[int, float]] = [dict() for _ in range(n)]
+    for (u, v, w) in edges:
+        adj[u][v] = adj[u].get(v, 0.0) + w
+        adj[v][u] = adj[v].get(u, 0.0) + w
+
+    # degree k_i = incident edge weight + 2× self-loop weight
+    k = np.array(
+        [sum(adj[i].values()) + 2.0 * float(self_w[i]) for i in range(n)],
+        dtype=np.float64,
+    )
+    m2 = float(k.sum())  # = 2m
+    if m2 <= 0.0:
+        return np.arange(n, dtype=np.int64), 0
+
+    comm = np.arange(n, dtype=np.int64)
+    comm_tot = k.copy()  # Σ_tot: total degree per community
+    order = list(range(n))
+    total_moves = 0
+
+    for _pass in range(max_passes):
+        rng.shuffle(order)
+        moved_this_pass = 0
+        for i in order:
+            ci = int(comm[i])
+            ki = k[i]
+            # tentatively remove i from its community
+            comm_tot[ci] -= ki
+            # summed weight from i into each neighbouring community
+            nbr_w: dict[int, float] = {}
+            for j, w in adj[i].items():
+                cj = int(comm[j])
+                nbr_w[cj] = nbr_w.get(cj, 0.0) + w
+            # gain of joining C ≈ w(i,C) - γ·Σ_tot[C]·k_i/2m. Constant terms are
+            # identical across C, so this comparison is exact for ranking.
+            best_c = ci
+            best_gain = nbr_w.get(ci, 0.0) - resolution * comm_tot[ci] * ki / m2
+            for cj, wic in nbr_w.items():
+                if cj == ci:
+                    continue
+                gain = wic - resolution * comm_tot[cj] * ki / m2
+                if gain > best_gain:
+                    best_gain = gain
+                    best_c = cj
+            comm_tot[best_c] += ki
+            comm[i] = best_c
+            if best_c != ci:
+                moved_this_pass += 1
+        total_moves += moved_this_pass
+        if moved_this_pass == 0:
+            break
+
+    return comm, total_moves
+
+
+def _louvain(
+    n: int,
+    edges: list[tuple[int, int, float]],
+    resolution: float = 1.0,
+    seed: int = 42,
+    max_levels: int = 20,
+    max_passes: int = 100,
+) -> np.ndarray:
+    """Louvain modularity community detection on a weighted undirected graph.
+
+    Parameters
+    ----------
+    n : number of nodes (0..n-1).
+    edges : undirected weighted edges (u, v, w) with u != v; duplicate /
+        reversed pairs are summed. The graph need not be connected.
+    resolution : γ in the modularity. >1 → more, smaller communities; <1 →
+        fewer, larger. 1.0 is standard modularity.
+
+    Returns
+    -------
+    np.ndarray (n,) int32 : contiguous community label (0..C-1) per node.
+        Isolated nodes (no edges) come back as their own singleton community.
+
+    Pure NumPy/Python (no SciPy/sklearn/igraph) so it runs on-device. Blondel
+    et al. (2008): (1) greedily move nodes to the neighbouring community that
+    most increases modularity until no move helps; (2) contract each community
+    into a super-node (intra-community weight becomes a self-loop) and recurse
+    on the smaller graph. Converges in a handful of levels at kNN scale.
+    """
+    rng = random.Random(seed)
+
+    cur_n = n
+    cur_self = np.zeros(cur_n, dtype=np.float64)
+    cur_edges = [(int(u), int(v), float(w)) for (u, v, w) in edges if u != v]
+    labels = np.arange(n, dtype=np.int64)  # original node -> current super-node
+
+    for _level in range(max_levels):
+        comm, moved = _louvain_local_move(
+            cur_n, cur_edges, cur_self, resolution, rng, max_passes,
+        )
+        # Relabel communities to contiguous 0..c-1.
+        uniq = sorted(set(int(c) for c in comm))
+        remap = {c: i for i, c in enumerate(uniq)}
+        comm = np.array([remap[int(c)] for c in comm], dtype=np.int64)
+        c = len(uniq)
+
+        labels = comm[labels]  # map original nodes through this partition
+
+        if c == cur_n or moved == 0:
+            break  # no contraction possible / nothing moved → converged
+
+        # Contract communities into super-nodes for the next level.
+        new_self = np.zeros(c, dtype=np.float64)
+        for i in range(cur_n):
+            new_self[comm[i]] += cur_self[i]
+        edge_acc: dict[tuple[int, int], float] = {}
+        for (u, v, w) in cur_edges:
+            cu, cv = int(comm[u]), int(comm[v])
+            if cu == cv:
+                new_self[cu] += w
+            else:
+                key = (cu, cv) if cu < cv else (cv, cu)
+                edge_acc[key] = edge_acc.get(key, 0.0) + w
+        cur_edges = [(a, b, w) for (a, b), w in edge_acc.items()]
+        cur_self = new_self
+        cur_n = c
+
+    uniq = sorted(set(int(x) for x in labels))
+    remap = {c: i for i, c in enumerate(uniq)}
+    return np.array([remap[int(x)] for x in labels], dtype=np.int32)
+
+
+# ── Builders ─────────────────────────────────────────────────────────────────
+
+
+# Canonical order of the scalar descriptors appended to the 52-D timbre block.
+# `bpm` denotes the log2(bpm) column; cos_h/sin_h are the Camelot unit-circle
+# coords (structural — never cleaved by the covariance analysis).
+_SCALAR_ORDER = (
+    "bpm", "brightness", "energy", "rolloff", "beat_strength",
+    "spectral_flatness", "spectral_contrast", "cos_h", "sin_h", "key_mode",
+)
+_STRUCTURAL_SCALARS = frozenset({"cos_h", "sin_h"})
+
+
+def _all_scalars(row: dict) -> dict[str, float]:
+    """Every scalar descriptor for one track row, keyed by `_SCALAR_ORDER`.
+    `bpm` is returned as log2(bpm); the Camelot key is encoded as
+    (cos_h, sin_h, key_mode)."""
+    bpm_raw = float(row.get("bpm", 0) or 0)
+    log_bpm = float(np.log2(max(bpm_raw, 1.0)))
+    ki = row.get("key_index", 0) or 0
+    cam = key_index_to_camelot(ki)
+    if cam is None:
+        cos_h, sin_h, key_mode = 0.0, 0.0, 0.0
+    else:
+        hour, ring = cam
+        theta = 2.0 * np.pi * (hour - 1) / 12.0
+        cos_h = float(np.cos(theta))
+        sin_h = float(np.sin(theta))
+        key_mode = 1.0 if ring == "B" else 0.0
+    return {
+        "bpm": log_bpm,
+        "brightness": float(row.get("brightness", 0) or 0),
+        "energy": float(row.get("energy", 0) or 0),
+        "rolloff": float(row.get("rolloff", 0) or 0),
+        "beat_strength": float(row.get("beat_strength", 0) or 0),
+        "spectral_flatness": float(row.get("spectral_flatness", 0) or 0),
+        "spectral_contrast": float(row.get("spectral_contrast", 0) or 0),
+        "cos_h": cos_h,
+        "sin_h": sin_h,
+        "key_mode": key_mode,
+    }
+
+
+def _surviving_scalars(redundant: set[str]) -> list[str]:
+    """Scalar names that survive covariance cleaving, in canonical order.
+    Structural coords (cos_h/sin_h) are always kept."""
+    return [
+        s for s in _SCALAR_ORDER
+        if s in _STRUCTURAL_SCALARS or s not in redundant
+    ]
+
+
+def _feature_vector(row: dict, timbre: np.ndarray, surviving: list[str]) -> np.ndarray:
+    """Full graph feature vector for one track: the 52-D timbre block followed
+    by the surviving scalar descriptors in `surviving` order."""
+    sc = _all_scalars(row)
+    scalars = np.array([sc[s] for s in surviving], dtype=np.float32)
+    return np.concatenate([timbre.astype(np.float32), scalars])
+
+
+def project_to_zr(row: dict, proj: dict) -> Optional[np.ndarray]:
+    """Project one track row into the persisted graph Zr space.
+
+    `proj` is the dict from `db_manager.load_pca_space()`: means/stds (D,),
+    projection (D, k), and the feature spec (surviving scalars, scalar_weight,
+    embed_dims). Returns None when the track lacks a usable timbre BLOB or the
+    projection is absent/mismatched. This is the single entry point for placing
+    an arbitrary track (new import, islet exemplar) into the unified geometry.
+    """
+    if not proj or proj.get("projection") is None or proj.get("surviving") is None:
+        return None
+    v = unpack_timbre(row.get("timbre"))
+    if v is None or v.shape[0] != EMBED_DIMS:
+        return None
+    x = _feature_vector(row, v, proj["surviving"])
+    means = np.asarray(proj["means"], dtype=np.float32)
+    stds = np.asarray(proj["stds"], dtype=np.float32)
+    if x.shape[0] != means.shape[0]:
+        return None
+    z = (x - means) / stds
+    z[int(proj.get("embed_dims", EMBED_DIMS)):] *= float(proj.get("scalar_weight", 1.0))
+    return (z @ np.asarray(proj["projection"], dtype=np.float32)).astype(np.float32)
+
+
 async def build_acoustic_edges(
     db_manager,
     k: int = DEFAULT_K_ACOUSTIC,
     features_version: int = FEATURES_VERSION,
+    z_score: bool = True,
+    scalar_weight: float = 1.5,
+    cluster_resolution: float = 1.0,
 ) -> int:
     """Recompute the acoustic tier of the graph from scratch.
 
-    Loads every track that has a current-version feature BLOB, z-scores the
-    vectors so cosine on the normalised matrix is equivalent to scaled
-    Euclidean, and writes the top-K neighbours per track back to
-    `track_neighbors`. Returns the edge count written.
+    Loads every track that has a current-version feature BLOB, optionally
+    z-scores the vectors (or centers them if z_score=False), and writes the
+    top-K neighbours per track back to `track_neighbors`. Returns the edge
+    count written.
 
     Coverage degrades gracefully: tracks without features are simply absent
     from the acoustic graph. The assistant falls back to metadata edges for
@@ -240,111 +530,257 @@ async def build_acoustic_edges(
         logger.info("track_graph: acoustic edges skipped (only %d tracks with features)", len(rows))
         return 0
 
+    # ── Feature selection: drop covariance-redundant scalars ──────────────
+    # The graph — and the Louvain communities + similarity walk built on it —
+    # uses every feature that survives the unsupervised PCA / Pearson-covariance
+    # analysis. Collinear scalars (e.g. rolloff ↔ brightness) are cleaved so
+    # they don't double-count toward distance. The 52-D timbre block and the
+    # harmonic unit-circle coords (cos_h/sin_h) are structural and always kept;
+    # only the raw scalar descriptors are subject to cleaving.
+    from utils.pca_engine import redundant_raw_features
+    redundant = redundant_raw_features(rows)
+    if redundant:
+        logger.info(
+            "track_graph: covariance analysis cleaved redundant scalars %s "
+            "from the graph feature space", sorted(redundant),
+        )
+
+    surviving = _surviving_scalars(redundant)
     paths: list[str] = []
     vectors: list[np.ndarray] = []
     for r in rows:
         v = unpack_timbre(r.get("timbre"))
         if v is None or v.shape[0] != EMBED_DIMS:
             continue
-        # Append all 8 scalar descriptors so BPM / brightness / energy / rolloff
-        # / beat_strength / flatness / contrast / key_mode contribute to the
-        # similarity ranking. Without them, two tracks with matching MFCC
-        # profile but very different tempos or dynamic texture/harmonic profiles
-        # would be neighbours, which is rarely what a listener means by 'similar'.
-        ki = r.get("key_index", 0) or 0
-        key_mode = 1.0 if ki < 12 else 0.0
-        scalars = np.array([
-            r.get("bpm", 0) or 0,
-            r.get("brightness", 0) or 0,
-            r.get("energy", 0) or 0,
-            r.get("rolloff", 0) or 0,
-            r.get("beat_strength", 0) or 0,
-            r.get("spectral_flatness", 0) or 0,
-            r.get("spectral_contrast", 0) or 0,
-            key_mode,
-        ], dtype=np.float32)
+        # 52-D timbre block + the surviving scalar descriptors (tempo as
+        # log2(bpm), key as cos_h/sin_h/mode) so dynamics and harmony shape
+        # similarity alongside timbre. See `_all_scalars` / `_feature_vector`.
         paths.append(r["path"])
-        vectors.append(np.concatenate([v.astype(np.float32), scalars]))
+        vectors.append(_feature_vector(r, v, surviving))
 
     if len(vectors) < 2:
         await db_manager.replace_neighbors_bulk([], KIND_ACOUSTIC)
         return 0
 
-    X = np.stack(vectors, axis=0)  # (N, EMBED_DIMS + 8) -> (N, 60)
-    # z-score per dimension so the disparate scales (MFCC vs BPM) don't let
-    # one axis dominate the cosine. Replace zero-variance columns with 1 to
-    # avoid NaNs.
-    mu = X.mean(axis=0, keepdims=True)
-    sd = X.std(axis=0, keepdims=True)
-    sd = np.where(sd < 1e-8, 1.0, sd)
+    X = np.stack(vectors, axis=0)  # (N, EMBED_DIMS + len(surviving))
+    # z-score per column so the disparate scales (MFCC vs BPM) don't let one
+    # axis dominate the Euclidean metric. `mu`/`sd` are persisted with the
+    # projection so new/exemplar tracks project identically (project_to_zr);
+    # with z_score off we store unit stds so the same (x-mean)/std path holds.
+    mu = X.mean(axis=0)
+    if z_score:
+        sd = X.std(axis=0)
+        sd = np.where(sd < 1e-8, 1.0, sd)
+    else:
+        sd = np.ones(X.shape[1], dtype=X.dtype)
     Z = (X - mu) / sd
-    # Cosine over z-scored vectors. L2-normalise so the dot product gives
-    # cosine directly.
-    norms = np.linalg.norm(Z, axis=1, keepdims=True)
-    norms = np.where(norms < 1e-8, 1.0, norms)
-    Zn = Z / norms
 
-    N = Zn.shape[0]
+    # Boost the scalar block AFTER scaling so tempo/key/dynamics carry weight
+    # comparable to the 52 individual timbre axes.
+    if scalar_weight != 1.0:
+        Z[:, EMBED_DIMS:] *= scalar_weight
+
+    # ── PCA reduction (Kaiser-truncated SVD on the z-scored matrix) ────────
+    # Project onto the components with eigenvalue > 1 (Kaiser) to denoise the
+    # low-variance axes. We keep the *un-normalised* reduced coords Zr: unlike
+    # cosine, Euclidean distance in this variance-scaled space preserves
+    # magnitude — how far a track sits from the library's "average" — which is
+    # real perceptual signal (an energy/brightness extreme is part of what
+    # makes a track (dis)similar). Dropping the old L2 step also removes the
+    # cosine pathology where near-average tracks get noise-dominated directions
+    # and pollute the kNN, the same noise ball that made the old clusters poor.
+    Zr = Z.astype(np.float32)
+    N = Z.shape[0]
+    # Projection matrix V_keep maps a (z-scored, scalar-boosted) row → Zr coords
+    # (Zr = Z @ V_keep). Identity fallback keeps tiny libraries projectable.
+    V_keep = np.eye(Z.shape[1], dtype=np.float32)
+    eigenvalues = np.zeros(Z.shape[1], dtype=np.float32)
+    if Z.shape[1] >= 4 and N > 1:
+        # full_matrices=False gives the thin SVD; memory-cheap for our sizes.
+        _U, _S, _Vt = np.linalg.svd(Z, full_matrices=False)
+        eigenvalues = (_S ** 2) / float(N - 1)
+        kaiser_k = int((eigenvalues > 1.0).sum())
+        # Floor at 3 so we never collapse to near-scalar; cap at rank.
+        kaiser_k = max(3, min(kaiser_k, _Vt.shape[0]))
+        V_keep = _Vt[:kaiser_k].T.astype(np.float32)     # (D, kaiser_k)
+        Zr = (Z @ V_keep).astype(np.float32)             # (N, kaiser_k)
+        cum_var = float(eigenvalues[:kaiser_k].sum() / eigenvalues.sum()) if eigenvalues.sum() > 0 else 0.0
+        logger.info(
+            "track_graph: PCA-reduced build matrix from %d to %d dims "
+            "(Kaiser λ>1; %.1f%% variance retained)",
+            int(_Vt.shape[1]), V_keep.shape[1], cum_var * 100.0,
+        )
+
+    # ── Persist the unified geometry (projection + per-track Zr coords) ────
+    # Single source of the graph's Zr space: moods, islets and any on-demand
+    # projection of new/exemplar tracks read it back via load_pca_space() /
+    # project_to_zr(). Replaces the old separate 3-D mood PCA.
+    if hasattr(db_manager, "save_pca_space"):
+        try:
+            feature_spec = {
+                "surviving": surviving,
+                "scalar_weight": float(scalar_weight),
+                "embed_dims": int(EMBED_DIMS),
+                "z_score": bool(z_score),
+            }
+            await db_manager.save_pca_space(
+                mu.astype(np.float32), sd.astype(np.float32),
+                V_keep, eigenvalues.astype(np.float32), feature_spec,
+            )
+            await db_manager.update_tracks_pca_coords_batch(
+                [(paths[i], Zr[i]) for i in range(Zr.shape[0])]
+            )
+            _PERCENTILE_CACHE.clear()
+            logger.info(
+                "track_graph: persisted Zr geometry (%d tracks × %d dims)",
+                Zr.shape[0], Zr.shape[1],
+            )
+        except Exception as exc:
+            logger.warning("track_graph: persisting Zr geometry failed: %s", exc)
+
+    N = Zr.shape[0]
     k_eff = min(k, N - 1)
+    Zr_sq = np.sum(Zr ** 2, axis=1)  # row squared-norms for distance expansion
 
-    # First pass: collect each track's top-K candidates with their cosine
-    # weight, keyed by source-index. Stored as parallel arrays per source so
-    # the mutual-kNN intersection below can rebuild edges without recomputing.
+    # First pass: each track's top-K nearest neighbours by Euclidean distance in
+    # Zr, retaining the squared distance (the self-tuning kernel and the
+    # mutual-kNN intersection both reuse it). ||a-b||² = ||a||² - 2a·b + ||b||².
     candidates: list[list[tuple[int, float]]] = [[] for _ in range(N)]
     chunk = 256
     for i in range(0, N, chunk):
-        block = Zn[i:i + chunk]              # (C, D)
-        sims = block @ Zn.T                  # (C, N)
-        # Mask self-similarity.
+        block = Zr[i:i + chunk]              # (C, D)
+        # squared Euclidean distances from this block to all rows: (C, N)
+        d2 = (
+            Zr_sq[i:i + block.shape[0], None]
+            - 2.0 * (block @ Zr.T)
+            + Zr_sq[None, :]
+        )
+        # Mask self.
         for j, row_idx in enumerate(range(i, i + block.shape[0])):
-            sims[j, row_idx] = -np.inf
-        # Top-K indices per row, unordered. argpartition is O(N); the final
-        # ordering is recovered with argsort over the K slice.
-        topk_unsorted = np.argpartition(-sims, k_eff, axis=1)[:, :k_eff]
+            d2[j, row_idx] = np.inf
+        # Smallest-K distances per row. argpartition is O(N); order the K-slice.
+        topk_unsorted = np.argpartition(d2, k_eff, axis=1)[:, :k_eff]
         for j, row_idx in enumerate(range(i, i + block.shape[0])):
             idx = topk_unsorted[j]
-            order = np.argsort(-sims[j, idx])
+            order = np.argsort(d2[j, idx])
             ordered = idx[order]
             candidates[row_idx] = [
-                (int(nb), max(-1.0, min(1.0, float(sims[j, nb]))))
-                for nb in ordered
+                (int(nb), max(0.0, float(d2[j, nb]))) for nb in ordered
             ]
 
-    # Mutual-kNN pruning: keep edge (i → j) iff j is in i's top-K AND i is in
-    # j's top-K. This fights popularity / hub bias — a cluster centroid is
-    # everybody's neighbour but its outgoing top-K all point into the cluster,
-    # so the walker piles up there. Mutual-kNN flattens the over-representation
-    # without disconnecting the graph.
-    neighbour_set = [
-        {nb for nb, _ in cands} for cands in candidates
-    ]
-    # Tracks with too few mutual edges fall back to their original top-K so
-    # the walk still has somewhere to go. Threshold is small (5) — the goal
-    # is connectivity, not strict mutuality.
-    MUTUAL_FALLBACK = 5
+    # ── Local scaling (Zelnik-Manor self-tuning bandwidth) ────────────────
+    # σ_i = distance to i's LOCAL_K-th nearest neighbour; affinity(i,j) =
+    # exp(-d(i,j)² / (σ_i·σ_j)). The local σ adapts the kernel to each track's
+    # neighbourhood density so a sparse outlier and a dense-cluster member get
+    # comparable affinities. (Candidates store squared distance → σ = sqrt of
+    # the LOCAL_K-th entry.)
+    LOCAL_K = 7
+    sigmas = np.ones(N, dtype=np.float32)
+    for i in range(N):
+        if not candidates[i]:
+            continue
+        pivot_d2 = candidates[i][min(LOCAL_K - 1, len(candidates[i]) - 1)][1]
+        sigmas[i] = float(np.sqrt(max(0.0, pivot_d2)))
+    # Floor σ so a near-duplicate pivot (d ≈ 0) doesn't blow up the kernel.
+    sigmas = np.maximum(sigmas, 1e-3)
+
+    rescaled: list[list[tuple[int, float]]] = [[] for _ in range(N)]
+    for i, cands in enumerate(candidates):
+        sigma_i = float(sigmas[i])
+        for nb, d2_val in cands:
+            affinity = float(np.exp(-d2_val / (sigma_i * float(sigmas[nb]))))
+            rescaled[i].append((nb, affinity))
+    candidates = rescaled
+
+    # Mutual-kNN pruning: keep edge (i → j) iff j ∈ topK(i) AND i ∈ topK(j).
+    # Strict mutual-kNN flattens hub over-representation. The surviving edges
+    # are symmetric (the self-tuning affinity is symmetric in i,j), so we also
+    # collect them as undirected (i<j) pairs to feed Louvain below.
+    neighbour_set = [{nb for nb, _ in cands} for cands in candidates]
     edges: list[tuple[str, str, float]] = []
+    mutual_pairs: list[tuple[int, int, float]] = []
     mutual_total = 0
-    fallback_total = 0
     for src_idx, cands in enumerate(candidates):
-        mutual = [
-            (nb, w) for nb, w in cands if src_idx in neighbour_set[nb]
-        ]
-        if len(mutual) >= MUTUAL_FALLBACK:
-            mutual_total += len(mutual)
-            chosen = mutual
-        else:
-            fallback_total += 1
-            chosen = cands
         src = paths[src_idx]
-        for nb_idx, weight in chosen:
+        for nb_idx, weight in cands:
+            if src_idx not in neighbour_set[nb_idx]:
+                continue
+            mutual_total += 1
             edges.append((src, paths[nb_idx], weight))
+            if src_idx < nb_idx:
+                mutual_pairs.append((src_idx, nb_idx, weight))
 
     await db_manager.replace_neighbors_bulk(edges, KIND_ACOUSTIC)
     logger.info(
-        "track_graph: wrote %d acoustic edges across %d tracks (k=%d, "
-        "mutual=%d, fallback=%d)",
-        len(edges), N, k_eff, mutual_total, fallback_total,
+        "track_graph: wrote %d acoustic edges across %d tracks (k=%d, mutual=%d)",
+        len(edges), N, k_eff, mutual_total,
     )
+
+    # ── Community detection (Louvain) on the affinity graph ───────────────
+    # Replaces K-Means: the mutual-kNN affinity graph is the natural substrate
+    # for clustering, and modularity optimisation discovers the number of
+    # communities from the topology instead of guessing k. Labels persist in
+    # play_counts.cluster_id and are consumed by walk() as a soft cross-cluster
+    # penalty and by the PCA cluster report.
+    if N >= 6:
+        try:
+            cluster_labels = _louvain(N, mutual_pairs, resolution=cluster_resolution)
+            n_comm = int(len(np.unique(cluster_labels)))
+
+            pairs = [(paths[i], int(cluster_labels[i])) for i in range(N)]
+            await db_manager.save_track_clusters(pairs)
+
+            # Log the largest communities for diagnostics (singletons elided).
+            unique, counts = np.unique(cluster_labels, return_counts=True)
+            order = np.argsort(-counts)
+            size_str = ", ".join(
+                f"C{int(unique[o])}={int(counts[o])}" for o in order[:15]
+            )
+            logger.info(
+                "track_graph: Louvain (resolution=%.2f) found %d communities "
+                "across %d tracks; top sizes: %s",
+                cluster_resolution, n_comm, N, size_str,
+            )
+
+            # ── Generate/update on-device mathematical truth report ──────────
+            try:
+                from utils.pca_engine import plot_pca_report
+                from utils.streamrip_api import load_config
+
+                cfg = load_config()
+                library_folder = (cfg.get("downloads") or {}).get("folder") or ""
+                library_folder = str(library_folder).strip()
+
+                if library_folder and os.path.isdir(library_folder):
+                    report_dir = os.path.join(library_folder, "pca_report")
+                else:
+                    report_dir = os.path.join(APP_DIR, "pca_report")
+
+                saved = plot_pca_report(
+                    rows, report_dir, cluster_labels=cluster_labels,
+                )
+                if saved:
+                    logger.info(
+                        "track_graph: PCA cluster report updated in %s  (%d figures)",
+                        report_dir, len(saved),
+                    )
+            except Exception as plot_err:
+                logger.warning(
+                    "track_graph: PCA visual report after edge build skipped: %s",
+                    plot_err,
+                )
+
+        except Exception as exc:
+            logger.warning(
+                "track_graph: Louvain clustering failed (%s); "
+                "walk will proceed without cluster constraint.",
+                exc,
+            )
+    else:
+        logger.info(
+            "track_graph: skipping community detection (N=%d < 6)", N,
+        )
+
     return len(edges)
 
 
@@ -443,12 +879,19 @@ async def neighbors(
 
 
 # Default per-tier weights applied on top of the raw edge weight before the
-# softmax. Acoustic edges are already cosine ∈ [-1, 1]; metadata edges are
-# fixed at 1.0 so the multipliers double as their effective preference.
+# softmax. Acoustic affinity is the self-tuning kernel value ∈ (0, 1];
+# artist/album edges store a flat 1.0 indicator. With acoustic at 10× the
+# metadata tiers (post-batch-D z-scoring, the ratio is what matters, not the
+# absolute scale), even a low-affinity acoustic neighbour (≈ 0.18) outranks
+# any artist/album candidate. That demotes metadata to a tiebreaker used
+# when acoustic neighbours are exhausted, instead of letting prolific
+# artists trap the walker on a same-artist orbit. Album is lower still
+# because its edges fan out O(N²) within an album and would otherwise
+# saturate the candidate pool.
 _DEFAULT_EDGE_KIND_WEIGHTS: dict[str, float] = {
-    KIND_ACOUSTIC: 5.0,
-    KIND_ARTIST:   2.0,
-    KIND_ALBUM:    1.5,
+    KIND_ACOUSTIC: 10.0,
+    KIND_ARTIST:   0.4,
+    KIND_ALBUM:    0.2,
 }
 
 
@@ -474,7 +917,7 @@ async def walk(
     edge_kind_weights: Optional[dict[str, float]] = None,
     avoid: Optional[set[str]] = None,
     restart_prob: float = 0.15,
-    diversity_lambda: float = 0.3,
+    diversity_lambda: float = 0.15,
     temperature: float = 0.04,
     taste_weight: float = 0.0,
     taste_explore: float = 0.05,
@@ -483,6 +926,7 @@ async def walk(
     seed_rng: Optional[random.Random] = None,
     teleport_path: Optional[str] = None,
     prefetch_k: int = 40,
+    cluster_lambda: float = 0.5,
 ) -> list[str]:
     """Personalised-PageRank-flavoured random walk over the track graph.
 
@@ -537,6 +981,11 @@ async def walk(
     prefetch_k : number of neighbours to fetch per node in the 2-hop horizon
         prefetch. Default 40 (full quality). Pass 20 for the cheap Play
         Similar path; the graph is still well-connected at that depth.
+    cluster_lambda : penalty for cross-cluster transitions. At each step,
+        candidates in a different K-Means cluster from the current node
+        have their effective weight multiplied by (1 - cluster_lambda).
+        0 disables the constraint; 0.5 (default) halves the logit;
+        1.0 would hard-block (not recommended).
 
     Returns
     -------
@@ -575,6 +1024,24 @@ async def walk(
     second_hop_paths = list(dict.fromkeys(second_hop_paths))
     for p in second_hop_paths:
         horizon[p] = await db_manager.get_neighbors_multi(p, kinds, k=prefetch_k)
+
+    # ── Cluster map (for cross-cluster penalty) ───────────────────────────
+    # Build a path→cluster_id lookup from the prefetched neighbour rows.
+    # The get_neighbors_multi query now JOINs play_counts and includes
+    # cluster_id, so this is zero extra cost.
+    cluster_active = cluster_lambda > 0.0
+    cluster_map: dict[str, int | None] = {}
+    if cluster_active:
+        # Seed cluster: look up from the first-hop results or DB fallback.
+        if hasattr(db_manager, "get_track_cluster"):
+            seed_cluster = await db_manager.get_track_cluster(seed_path)
+        else:
+            seed_cluster = None
+        cluster_map[seed_path] = seed_cluster
+        for nbrs in horizon.values():
+            for n in nbrs:
+                cid = n.get("cluster_id")
+                cluster_map[n["path"]] = int(cid) if cid is not None else None
 
     # ── MMR setup ─────────────────────────────────────────────────────────
     # Pull embeddings for the seed + any node we might reach in two hops.
@@ -658,7 +1125,14 @@ async def walk(
 
     current = seed_path
     teleport_target = teleport_path or seed_path
-    for _ in range(length):
+    for step in range(length):
+        # MMR penalty decays by step index so the diversity term doesn't
+        # snowball into a flat -diversity_lambda on every reasonable
+        # candidate by step ~5 (visited_embs grows monotonically and the
+        # max-cos converges to ~1). 1/(1+step) keeps step 0 at full
+        # weight, halves it by step 1, and is ~λ/6 by step 5 — enough
+        # to keep the walk anchored to the seed cluster late in a chain.
+        diversity_lambda_eff = float(diversity_lambda) / (1.0 + step)
         # Restart roll. We always step from `current` afterwards, so toggling
         # current back to the teleport target implements the personalised-PageRank
         # teleport without special-casing the selection.
@@ -673,6 +1147,24 @@ async def walk(
             # single round-trip and cache the result.
             raw = await db_manager.get_neighbors_multi(current, kinds, k=40)
             horizon[current] = raw
+            if cluster_active:
+                if current not in cluster_map:
+                    if hasattr(db_manager, "get_track_cluster"):
+                        current_cid = await db_manager.get_track_cluster(current)
+                    else:
+                        current_cid = None
+                    cluster_map[current] = current_cid
+                for n in raw:
+                    cid = n.get("cluster_id")
+                    cluster_map[n["path"]] = int(cid) if cid is not None else None
+            if need_candidate_embs:
+                new_paths = [n["path"] for n in raw if n["path"] not in candidate_embs]
+                if new_paths:
+                    blobs = await db_manager.get_embeddings_for_paths(new_paths)
+                    for p, blob in blobs.items():
+                        v = _unpack_embedding(blob)
+                        if v is not None:
+                            candidate_embs[p] = v
 
         cands = _merge_candidates(raw)
         if not cands:
@@ -708,7 +1200,7 @@ async def walk(
                     [float(np.dot(cand_emb, v)) for v in visited_embs],
                     dtype=np.float32,
                 )
-                eff -= float(diversity_lambda) * float(sims.max())
+                eff -= diversity_lambda_eff * float(sims.max())
             if neg_active and neg_emb_arr is not None and cand_emb is not None:
                 # Max cosine to any session-rejected track. The candidate
                 # embedding is already L2-normalised by `_unpack_embedding`,
@@ -722,18 +1214,43 @@ async def walk(
                     z = max(-30.0, min(30.0, z))
                     p_like = 1.0 / (1.0 + float(np.exp(-z)))
                     eff += float(taste_weight) * (p_like - 0.5)
+            # Cluster constraint: penalise cross-cluster transitions.
+            if cluster_active:
+                cur_cid = cluster_map.get(current)
+                cand_cid = cluster_map.get(c["path"])
+                if (
+                    cur_cid is not None
+                    and cand_cid is not None
+                    and cur_cid != cand_cid
+                ):
+                    eff *= (1.0 - cluster_lambda)
             logits[i] = eff
 
         # Softmax with temperature. Subtract max for numerical stability.
         if temperature <= 0:
             chosen_idx = int(np.argmax(logits))
         else:
+            # Per-node logit standardisation. Raw effective weights are not
+            # calibrated across source nodes — a hub track has neighbours
+            # crowded near the top of its (0, 1] affinity range, an outlier
+            # spreads thinly. Without rescaling, `temperature = 0.05` reads
+            # as near-greedy at the hub but near-uniform at the outlier.
+            # Z-scoring before the softmax normalises the spread so the
+            # temperature has consistent semantics everywhere in the graph.
+            sd = float(logits.std())
+            if sd > 1e-9:
+                z_logits = (logits - float(logits.mean())) / sd
+            else:
+                # Degenerate: all candidates have equal effective weight
+                # (rare; happens when avoid set strips everything but
+                # near-duplicates). Keep raw logits so argmax is well-defined.
+                z_logits = logits - float(logits.mean())
             # Flat temperature: every step has the same low transition cost
             # so the walk stays acoustically close to the seed throughout.
             # The previous "Long-Flow Gentle-Reset" modulation (0.75× normal,
             # 1.5× every 6th step) introduced deliberate hot jumps that broke
             # similarity chains — removed per user intent.
-            scaled = (logits - logits.max()) / float(temperature)
+            scaled = (z_logits - z_logits.max()) / float(temperature)
             probs = np.exp(scaled)
             total = float(probs.sum())
             if not np.isfinite(total) or total <= 0:
@@ -883,6 +1400,45 @@ MOODS: dict[str, MoodSpec] = {
 }
 
 
+# ── Built-in mood targets (community → mood mapping) ──────────────────────────
+# Per-mood target profile in *percentile* space over the 8 raw scalar features.
+# Used once at graph-build time to label each Louvain community with the mood(s)
+# whose acoustic profile it best matches (many-to-many). NOT used per query —
+# `tracks_by_mood` ranks members in the unified Zr geometry. Values lifted from
+# the validated tests/test_cluster_mood_mapping.py prototype.
+_MAP_FEATURES = (
+    "bpm", "brightness", "energy", "rolloff",
+    "beat_strength", "spectral_flatness", "spectral_contrast", "key_mode",
+)
+
+MOOD_TARGETS: dict[str, dict[str, float]] = {
+    "chill":   {"bpm":0.25,"energy":0.20,"beat_strength":0.30,"brightness":0.30,"spectral_flatness":0.50,"spectral_contrast":0.30,"rolloff":0.30,"key_mode":0.20},
+    "dark":    {"bpm":0.35,"energy":0.25,"beat_strength":0.40,"brightness":0.20,"spectral_flatness":0.40,"spectral_contrast":0.50,"rolloff":0.25,"key_mode":0.10},
+    "upbeat":  {"bpm":0.75,"energy":0.80,"beat_strength":0.75,"brightness":0.80,"spectral_flatness":0.60,"spectral_contrast":0.60,"rolloff":0.75,"key_mode":0.85},
+    "beats":   {"bpm":0.40,"energy":0.60,"beat_strength":0.85,"brightness":0.50,"spectral_flatness":0.50,"spectral_contrast":0.70,"rolloff":0.55,"key_mode":0.30},
+    "intense": {"bpm":0.85,"energy":0.90,"beat_strength":0.80,"brightness":0.70,"spectral_flatness":0.40,"spectral_contrast":0.80,"rolloff":0.80,"key_mode":0.20},
+    "rock":    {"bpm":0.60,"energy":0.70,"beat_strength":0.65,"brightness":0.60,"spectral_flatness":0.50,"spectral_contrast":0.60,"rolloff":0.60,"key_mode":0.50},
+}
+
+def _mood_percentile_ranks(rows: list[dict]) -> dict[str, dict[str, float]]:
+    """Percentile rank (0..1) of every track per `_MAP_FEATURES`. key_mode is
+    ranked on the binary major/minor flag derived from the Camelot ring."""
+    N = len(rows)
+    out: dict[str, dict[str, float]] = {}
+    for f in _MAP_FEATURES:
+        if f == "key_mode":
+            vals_list = []
+            for r in rows:
+                cam = key_index_to_camelot(r.get("key_index", 0) or 0)
+                vals_list.append(1.0 if (cam is not None and cam[1] == "B") else 0.0)
+            vals = np.array(vals_list, dtype=np.float32)
+        else:
+            vals = np.array([float(r.get(f) or 0.0) for r in rows], dtype=np.float32)
+        ranks = np.argsort(np.argsort(vals)) / max(1, N - 1)
+        out[f] = {rows[i]["path"]: float(ranks[i]) for i in range(N)}
+    return out
+
+
 def mood_canonical(name: str) -> str | None:
     """Resolve any alias to its canonical mood name, or None if unknown.
     Custom moods (loaded from custom_moods.json) are also resolved here so
@@ -947,202 +1503,71 @@ del _spec
 MOOD_KEYWORDS: tuple[str, ...] = tuple(MOOD_PROFILES.keys())
 
 
-# Feature columns participating in mood scoring. Order matters: weights and
-# the z-scored matrix are aligned to this list. Adding a column here means
-# every profile may optionally include it. NOTE: key_mode is a projected
-# continuous binary mode (1.0 for major, 0.0 for minor) from key_index.
-_MOOD_FEATURES = ("PC1", "PC2", "PC3")
-
-# Module-level dynamically populated set of redundant features.
-# Populated automatically by correlation coefficient analysis on-the-fly.
-REDUNDANT_FEATURES: set[str] = set()
-
-def get_redundant_features(rows, projection, eigenvalues, threshold=0.85) -> set[str]:
-    if len(rows) < 50 or projection is None or eigenvalues is None:
-        return set()
-        
-    raw_features = ["bpm", "brightness", "energy", "rolloff", "beat_strength", "spectral_flatness", "spectral_contrast", "key_mode"]
-    N = len(rows)
-    D = len(raw_features)
-    
-    # 1. Build the data matrix X
-    X = np.zeros((N, D), dtype=np.float32)
-    for idx, r in enumerate(rows):
-        feat_vec = []
-        for f in raw_features:
-            if f == "key_mode":
-                ki = r.get("key_index", 0) or 0
-                val = 1.0 if ki < 12 else 0.0
-            else:
-                val = float(r.get(f, 0) or 0)
-            feat_vec.append(val)
-        X[idx, :] = feat_vec
-        
-    # 2. Compute Pearson correlation coefficient matrix
-    stds = np.std(X, axis=0)
-    stds[stds == 0] = 1.0
-    X_norm = (X - np.mean(X, axis=0)) / stds
-    corr_matrix = np.dot(X_norm.T, X_norm) / (N - 1)
-    
-    # 3. Calculate explained variance weights
-    overall_weights = []
-    for feat_idx, feat in enumerate(raw_features):
-        weight = float(
-            (projection[feat_idx, 0] ** 2) * eigenvalues[0] +
-            (projection[feat_idx, 1] ** 2) * eigenvalues[1] +
-            (projection[feat_idx, 2] ** 2) * eigenvalues[2]
-        )
-        overall_weights.append((feat, feat_idx, weight))
-        
-    # Sort descending by explained variance weight
-    sorted_features = sorted(overall_weights, key=lambda x: x[2], reverse=True)
-    
-    redundant = set()
-    # 4. Check correlations sequentially
-    for i in range(len(sorted_features)):
-        feat_i, idx_i, weight_i = sorted_features[i]
-        # Check if it correlates with any feature that has higher explained variance and is not redundant
-        for j in range(i):
-            feat_j, idx_j, weight_j = sorted_features[j]
-            if feat_j in redundant:
-                continue
-            r = abs(corr_matrix[idx_i, idx_j])
-            if r >= threshold:
-                redundant.add(feat_i)
-                logger.warning(
-                    "Dynamic Redundancy: Feature '%s' is highly correlated with '%s' (r=%.2f). Pruning '%s' (variance weight=%.4f < %.4f).",
-                    feat_i, feat_j, r, feat_i, weight_i, weight_j
-                )
-                break
-                
-    return redundant
-
-# Cache for the projected PCA matrix to avoid database calls and SVD projections on every query.
+# Cache for the projected Zr coordinate matrix (avoids re-reading/projecting on
+# every mood/islet query). Invalidated by build_acoustic_edges / invalidate_mood_cache.
 _PERCENTILE_CACHE: dict[tuple, tuple] = {}
-
-
-async def optimize_pca_spacing(db_manager, features_version: int):
-    """Mutation: Retrieves all analyzed tracks, computes PCA (Z-score standardized),
-    saves the loadings/eigenvectors to the DB, projects all tracks into the 3D space,
-    and caches their coordinates in the play_counts table."""
-    rows = await db_manager.get_tracks_with_features(features_version)
-    if len(rows) < 2:
-        logger.warning("Fewer than 2 tracks analyzed. Cannot optimize PCA spacing.")
-        return
-        
-    from utils.pca_engine import calculate_pca_projection, project_track
-    means, stds, V_keep, eigenvalues, kaiser_k = calculate_pca_projection(rows)
-    await db_manager.save_pca_space(means, stds, V_keep, eigenvalues)
-    
-    # Dynamically discover redundant features and cache them
-    global REDUNDANT_FEATURES
-    REDUNDANT_FEATURES = get_redundant_features(rows, V_keep, eigenvalues)
-    
-    batch_data = []
-    for r in rows:
-        z = project_track(r, means, stds, V_keep)
-        batch_data.append((r["path"], z))
-        
-    await db_manager.update_tracks_pca_coords_batch(batch_data)
-    _PERCENTILE_CACHE.clear()
-    logger.info(f"PCA library spacing optimized successfully (Kaiser count={kaiser_k}).")
-
-    # ── Generate on-device mathematical truth report ──────────────────────────
-    try:
-        from utils.pca_engine import plot_pca_report
-        from utils.streamrip_api import load_config
-
-        cfg = load_config()
-        library_folder = (cfg.get("downloads") or {}).get("folder") or ""
-        library_folder = str(library_folder).strip()
-
-        if library_folder and os.path.isdir(library_folder):
-            report_dir = os.path.join(library_folder, "pca_report")
-        else:
-            # User hasn't set a library path yet — shouldn't normally happen
-            # since PCA requires scanned tracks, but guard gracefully.
-            logger.warning(
-                "optimize_pca_spacing: downloads.folder not set or missing; "
-                "writing PCA report to APP_DIR fallback."
-            )
-            report_dir = os.path.join(APP_DIR, "pca_report")
-
-        saved = plot_pca_report(rows, report_dir)
-        if saved:
-            logger.info(
-                "PCA visual report written to: %s  (%d figures: %s)",
-                report_dir,
-                len(saved),
-                ", ".join(os.path.basename(p) for p in saved),
-            )
-    except Exception as _plot_err:
-        logger.warning("PCA visual report skipped: %s", _plot_err)
 
 
 async def _load_percentile_matrix(
     db_manager,
     features_version: int,
 ) -> tuple[list[dict], np.ndarray]:
-    """Returns (rows, pca_coordinate_matrix). Recovers/computes PCA projection
-    on-the-fly and handles cached DB values transparently. Replaces legacy percentile matrix."""
+    """Returns (rows, Zr_matrix) in the unified graph geometry.
+
+    Reads the per-track Zr coords persisted by `build_acoustic_edges`; any track
+    missing cached coords is projected on demand via the stored projection
+    (`project_to_zr`). Returns an empty-width matrix when no projection exists
+    yet (e.g. before the first build). Cached on a cheap library-change key.
+    """
     rows = await db_manager.get_tracks_with_features(features_version)
     if not rows:
-        return [], np.zeros((0, len(_MOOD_FEATURES)), dtype=np.float32)
-        
+        return [], np.zeros((0, 0), dtype=np.float32)
+
     sentinel = max(r["path"] for r in rows)
     key = (features_version, len(rows), sentinel)
     cached = _PERCENTILE_CACHE.get(key)
     if cached is not None:
         return cached
-        
-    pca_space = await db_manager.load_pca_space()
-    if pca_space is None:
-        logger.info("PCA projection space not found. Running auto-initialization...")
-        await optimize_pca_spacing(db_manager, features_version)
-        pca_space = await db_manager.load_pca_space()
-        
-    eigenvalues = None
-    if pca_space is not None:
-        if len(pca_space) == 4:
-            means, stds, V_keep, eigenvalues = pca_space
-        else:
-            means, stds, V_keep = pca_space
-    else:
-        means = np.zeros(8, dtype=np.float32)
-        stds = np.ones(8, dtype=np.float32)
-        V_keep = np.eye(8, 3, dtype=np.float32)
-        
-    # Dynamically discover redundant features and cache them
-    global REDUNDANT_FEATURES
-    if eigenvalues is not None:
-        REDUNDANT_FEATURES = get_redundant_features(rows, V_keep, eigenvalues)
-    else:
-        # Fallback if eigenvalues aren't saved yet: retrieve them by running projection calculation on the fly
-        from utils.pca_engine import calculate_pca_projection
-        _, _, _, calc_eigenvalues, _ = calculate_pca_projection(rows)
-        REDUNDANT_FEATURES = get_redundant_features(rows, V_keep, calc_eigenvalues)
-        
-    matrix = np.zeros((len(rows), 3), dtype=np.float32)
+
+    proj = await db_manager.load_pca_space()
     coords_rows = await db_manager.get_tracks_pca_coords()
-    coords_map = {r["path"]: r["pca_coords"] for r in coords_rows}
-    
-    tracks_to_cache = []
-    from utils.pca_engine import project_track
+    coords_map = {
+        r["path"]: r["pca_coords"]
+        for r in coords_rows if r.get("pca_coords")
+    }
+
+    dim = None
+    if proj and proj.get("projection") is not None:
+        dim = int(proj["projection"].shape[1])
+    elif coords_map:
+        dim = len(next(iter(coords_map.values())))
+    if not dim:
+        # No projection yet (pre-first-build / feature-less rows). Cache the
+        # empty result too so repeated queries are cheap; build_acoustic_edges
+        # clears this cache once the geometry exists.
+        result = (rows, np.zeros((len(rows), 0), dtype=np.float32))
+        _PERCENTILE_CACHE.clear()
+        _PERCENTILE_CACHE[key] = result
+        return result
+
+    matrix = np.zeros((len(rows), dim), dtype=np.float32)
+    to_cache: list[tuple[str, np.ndarray]] = []
     for idx, r in enumerate(rows):
-        path = r["path"]
-        if path in coords_map:
-            matrix[idx, :] = coords_map[path]
-        else:
-            z = project_track(r, means, stds, V_keep)
+        c = coords_map.get(r["path"])
+        if c is not None and len(c) == dim:
+            matrix[idx, :] = np.asarray(c, dtype=np.float32)
+            continue
+        z = project_to_zr(r, proj) if proj else None
+        if z is not None and z.shape[0] == dim:
             matrix[idx, :] = z
-            tracks_to_cache.append((path, z))
-            
-    if tracks_to_cache:
-        await db_manager.update_tracks_pca_coords_batch(tracks_to_cache)
-        
+            to_cache.append((r["path"], z))
+
+    if to_cache and hasattr(db_manager, "update_tracks_pca_coords_batch"):
+        await db_manager.update_tracks_pca_coords_batch(to_cache)
+
     _PERCENTILE_CACHE.clear()
     _PERCENTILE_CACHE[key] = (rows, matrix)
-    logger.info(f"track_graph: PCA 3D matrix cache rebuilt (N={len(rows)})")
+    logger.info("track_graph: Zr coord matrix cache rebuilt (N=%d, dim=%d)", len(rows), dim)
     return rows, matrix
 
 
@@ -1161,20 +1586,21 @@ async def _load_percentile_matrix(
 
 
 async def assign_track_to_mood(db_manager, track_path: str, mood: str) -> None:
-    """Assign one track to a mood, overwriting any prior assignment. Invalidates
-    the centroid for the destination mood (and the source mood if it changed)
-    so the next `tracks_by_mood` call recomputes."""
+    """Pin a track to a mood. Many-to-many: a track may be pinned to several
+    moods, and a pin adds the track to that mood's subset on top of the
+    community-derived members."""
     canonical = mood_canonical(mood) or mood.lower().strip()
     await db_manager.assign_track_to_mood(track_path, canonical)
-    # Recompute lazily on next read — calling `recompute_mood_centroid` here
-    # would double the cost of bulk-assign flows. The mood_profiles row stays
-    # stale until something reads it, at which point the partition count
-    # signals "recompute me".
 
 
-async def unassign_track_from_mood(db_manager, track_path: str) -> None:
-    """Remove a track from its current mood partition."""
-    await db_manager.unassign_track(track_path)
+async def unassign_track_from_mood(db_manager, track_path: str, mood: str | None = None) -> None:
+    """Remove a track's pin. With `mood` given, drop only that mood's pin
+    (leaving any other moods); without it, drop the track from all moods."""
+    if mood:
+        canonical = mood_canonical(mood) or mood.lower().strip()
+        await db_manager.unassign_track_from_mood(track_path, canonical)
+    else:
+        await db_manager.unassign_track(track_path)
 
 
 async def tracks_in_partition(db_manager, mood: str) -> list[str]:
@@ -1219,46 +1645,18 @@ def _get_default_quartiles(mood: str) -> dict[str, tuple[float, float]]:
     return res
 
 
-async def recompute_mood_centroid(
-    db_manager,
-    mood: str,
-) -> dict[str, tuple[float, float]] | None:
-    """Re-derive the target quartiles for `mood` from its current partition.
-    Pulls the assigned tracks' percentiles and maps their column-wise mean to quartiles.
-    """
-    canonical = mood_canonical(mood) or mood.lower().strip()
-    assigned_paths = await db_manager.get_tracks_in_mood(canonical)
-    if not assigned_paths:
-        return None
-        
-    rows = await db_manager.get_tracks_with_features(FEATURES_VERSION)
-    if not rows:
-        return None
-        
-    N = len(rows)
-    raw_features = ["bpm", "brightness", "energy", "rolloff", "beat_strength", "spectral_flatness", "spectral_contrast", "key_mode"]
-    
-    track_ranks = {}
-    for f in raw_features:
-        vals = np.array([float(r.get(f) or 0.0) for r in rows], dtype=np.float32)
-        ranks = np.argsort(np.argsort(vals)) / max(1, N - 1)
-        track_ranks[f] = {rows[idx]["path"]: float(ranks[idx]) for idx in range(N)}
-        
-    new_profile = {}
-    for f in raw_features:
-        if f in REDUNDANT_FEATURES:
-            new_profile[f] = (0.0, 0.0)
-            continue
-        active_pcts = [track_ranks[f].get(p, 0.5) for p in assigned_paths if p in track_ranks[f]]
-        if active_pcts:
-            avg_pct = np.mean(active_pcts)
-            quartile = int(np.clip(np.floor(avg_pct * 4) + 1, 1, 4))
-            new_profile[f] = (float(quartile), 1.0)
-        else:
-            new_profile[f] = (0.0, 0.0)
-            
-    await db_manager.save_adjusted_mood_profile(canonical, new_profile)
-    return new_profile
+# EQ <-> percentile conversion. The EQ exposes a 1–4 "band" per feature
+# (1=Very Low … 4=Very High; 0=Any/Neutral → feature ignored). MOOD_TARGETS is
+# in continuous percentile space, so the two map back and forth here.
+def _quartile_to_pct(q: float) -> float:
+    """1–4 EQ band → its centre percentile in [0,1] (0.125/0.375/0.625/0.875)."""
+    return (float(q) - 0.5) / 4.0
+
+
+def _pct_to_quartile(p: float) -> int:
+    """[0,1] percentile target → nearest 1–4 EQ band for the slider's initial
+    position (so an un-tuned mood shows its out-of-box MOOD_TARGETS profile)."""
+    return int(min(4, max(1, int(float(p) * 4) + 1)))
 
 
 async def set_mood_eq(
@@ -1266,7 +1664,9 @@ async def set_mood_eq(
     mood: str,
     eq_weights: dict[str, float],
 ) -> None:
-    """Update target quartiles for `mood`."""
+    """Persist a user EQ adjustment for `mood`. Each feature carries a 1–4 band
+    (0 ⇒ ignore that feature). Stored as (band, weight); `tracks_by_mood` then
+    uses this adjusted profile in place of the out-of-box MOOD_TARGETS."""
     canonical = mood_canonical(mood) or mood.lower().strip()
     new_profile: dict[str, tuple[float, float]] = {}
     for f, val in eq_weights.items():
@@ -1280,12 +1680,12 @@ async def get_mood_definition(
     db_manager,
     mood: str,
 ) -> dict[str, tuple[float, float]] | None:
-    """Resolve the target quartiles actually used to score `mood`.
+    """The EQ profile to render for `mood`, as {feature: (band 1–4, weight)}.
 
     Precedence:
-      1. If `mood_profiles` has rows → use them (user has partitioned or
-         tuned the mood at least once).
-      2. Else → Raise ValueError to force crash and remove default fallback.
+      1. A saved adjusted profile (the user has tuned this mood) → return it.
+      2. Otherwise the out-of-box MOOD_TARGETS, converted to 1–4 bands, so the
+         dialog opens on the optimised defaults the user can then nudge.
     """
     canonical = mood_canonical(mood)
     if canonical is None:
@@ -1293,15 +1693,22 @@ async def get_mood_definition(
     stored = await db_manager.get_adjusted_mood_profile(canonical)
     if stored is not None:
         return stored
-    raise ValueError(f"No adjusted mood profile found in database for '{canonical}'. Built-in factory-default profiles are disabled.")
+    base = MOOD_TARGETS.get(canonical)
+    if not base:
+        return {}
+    return {f: (float(_pct_to_quartile(p)), 1.0) for f, p in base.items()}
 
 
 # ── User-taste model wiring ─────────────────────────────────────────────────
 #
-# Global model loaded once per process and re-cached after each update.
-# Reads are hot (every walk step, every mood query); writes are rare
-# (per playback event). Module-level cache keeps the steady-state cost at
-# zero DB hits per scoring call.
+# DEPRECATED / DISCONNECTED. The taste model lived in a 3-D PCA basis that no
+# longer matches the unified 20-D graph Zr geometry, so its live training and
+# re-rank hooks are inert. `taste_model.py` and this wiring are retained for
+# revival — flip `_TASTE_ENABLED` to True (and re-fit the model in the current
+# geometry) to re-enable. While disabled, the feedback hooks no-op and
+# `taste_scores_for_matrix` reports "no signal" so callers fall back cleanly.
+
+_TASTE_ENABLED = False
 
 _TASTE_CACHE: tuple[np.ndarray, float, int, int] | None = None
 
@@ -1352,6 +1759,8 @@ async def record_explicit_feedback(
     """Train the taste model on one like (`True`) or dislike (`False`) event.
     Looks up the track's cached PC coords; no-op if the track hasn't been
     analysed yet (a label we can't ground in features is signal we can't use)."""
+    if not _TASTE_ENABLED:
+        return  # taste model deprecated/disconnected — see _TASTE_ENABLED
     from utils import taste_model as _tm
     pcs = await _get_track_pcs(db_manager, track_path, features_version)
     if pcs is None:
@@ -1382,6 +1791,8 @@ async def record_play_event(
     """Classify a playback event via `taste_model.classify_play_event` and
     feed it into the taste model with implicit-sample weight. Returns silently
     when the event is too short to be informative."""
+    if not _TASTE_ENABLED:
+        return  # taste model deprecated/disconnected — see _TASTE_ENABLED
     from utils import taste_model as _tm
     y = _tm.classify_play_event(float(played_seconds), float(duration_seconds))
     if y is None:
@@ -1432,6 +1843,9 @@ async def taste_scores_for_matrix(
     Returns (scores, has_signal): `has_signal=False` means the model is
     cold (zero events seen) and callers should ignore the scores entirely
     rather than re-ranking by σ ≈ 0.5 noise."""
+    if not _TASTE_ENABLED:
+        # Deprecated/disconnected — report no signal so callers skip the re-rank.
+        return np.full(percentiles.shape[0], 0.5, dtype=np.float32), False
     from utils import taste_model as _tm
     w, b, ne, ni = await _load_taste_model(db_manager, features_version)
     if ne + ni == 0:
@@ -1466,8 +1880,6 @@ def score_tracks_for_repartition(
             dist_sq_sum = 0.0
             active_count = 0
             for f in raw_features:
-                if f in REDUNDANT_FEATURES:
-                    continue
                 target, weight = profile.get(f, (0.0, 0.0))
                 if weight > 0.0 and target > 0.0:
                     pct = track_ranks[f].get(path, 0.5)
@@ -1489,138 +1901,98 @@ def score_tracks_for_repartition(
     return out
 
 
-def _score_against_centroid(
-    centroid: np.ndarray,
-    timbres: np.ndarray,
-) -> np.ndarray:
-    """Cosine similarity between each row's timbre BLOB and the centroid.
-    Higher is better. Returns shape (N,). Used for custom-mood centroids."""
-    if timbres.size == 0 or centroid.size == 0:
-        return np.zeros(timbres.shape[0], dtype=np.float32)
-    norm_c = float(np.linalg.norm(centroid)) + 1e-8
-    norm_t = np.linalg.norm(timbres, axis=1) + 1e-8
-    return (timbres @ centroid) / (norm_t * norm_c)
-
-
-# Re-rank weight for the taste model on top of the mood score. Small enough
-# that taste shapes ordering at the margin but doesn't let a global
-# preference drag an off-mood track into the result.
-_MOOD_TASTE_BETA = 0.20
-
-
 async def tracks_by_mood(
     db_manager,
     mood: str,
     limit: int = 12,
     features_version: int = FEATURES_VERSION,
 ) -> list[dict]:
-    """Rank tracks by how well their physical feature percentiles match the target quartiles
-    of the mood, re-ranked at the top by the global user-taste model.
+    """Tracks for a built-in mood, scored by how well each track's scalar-feature
+    percentiles match the mood's target profile.
 
-    Returns [] for unknown moods or empty libraries.
+    Energy/tempo-defined moods (chill/dark/intense/…) live in the *scalar*
+    percentile space, not the timbre-dominated graph Zr — ranking moods in Zr
+    collapses unlike moods together (chill≡dark). Targets come from the out-of-box
+    `MOOD_TARGETS` (restricted to the features that survived the graph's
+    covariance cleaving, one shared feature set), unless the user has tuned the
+    mood via the EQ — a saved adjusted profile then overrides per feature (see
+    `set_mood_eq`/`get_mood_definition`). Custom moods (islets) are acoustic
+    neighbourhoods and stay in Zr via `tracks_in_islet`.
+
+    Many-to-many: a track can rank into several moods (no exclusivity). User
+    pins (`assign_track_to_mood`) are floated to the top; tracks disliked in the
+    mood (`mood_feedback < 0`) are excluded. Returns the top-`limit` rows.
     """
     canonical = mood_canonical(mood)
     if canonical is None:
         return []
-
-    # Built-in moods follow the partition + EQ path. Custom moods (islets)
-    # keep the legacy cosine/regressor pipeline — see `tracks_in_islet`.
     if canonical not in MOODS:
         return await tracks_in_islet(db_manager, canonical, features_version)
 
-    rows, percentiles = await _load_percentile_matrix(db_manager, features_version)
+    rows = await db_manager.get_tracks_with_features(features_version)
     if not rows:
         return []
-
-    raw_features = ["bpm", "brightness", "energy", "rolloff", "beat_strength", "spectral_flatness", "spectral_contrast", "key_mode"]
-    N = len(rows)
-
-    # Compute raw feature percentile ranks in memory
-    track_ranks = {}
-    for f in raw_features:
-        vals = np.array([float(r.get(f) or 0.0) for r in rows], dtype=np.float32)
-        ranks = np.argsort(np.argsort(vals)) / max(1, N - 1)
-        track_ranks[f] = {rows[idx]["path"]: float(ranks[idx]) for idx in range(N)}
-
-    # Prefer a partition-derived target profile when the user has assigned tracks;
-    # otherwise load from SQLite adjusted_mood_profiles or throw.
-    assigned_paths = await db_manager.get_tracks_in_mood(canonical)
-    if assigned_paths:
-        stored = {}
-        for f in raw_features:
-            active_pcts = [track_ranks[f].get(p, 0.5) for p in assigned_paths if p in track_ranks[f]]
-            if active_pcts:
-                avg_pct = np.mean(active_pcts)
-                quartile = int(np.clip(np.floor(avg_pct * 4) + 1, 1, 4))
-                stored[f] = (float(quartile), 1.0)
-            else:
-                stored[f] = (0.0, 0.0)
-    else:
-        stored = await db_manager.get_adjusted_mood_profile(canonical)
-        if stored is None:
-            raise ValueError(f"No adjusted mood profile found in database for '{canonical}' and partition is empty.")
-
-    # Calculate distance to target quartiles for each track
-    scores = np.zeros(N, dtype=np.float32)
-    for idx, r in enumerate(rows):
-        path = r["path"]
-        dist_sq_sum = 0.0
-        active_count = 0
-        for f in raw_features:
-            if f in REDUNDANT_FEATURES:
-                continue
-            target, weight = stored.get(f, (0.0, 0.0))
-            if weight > 0.0 and target > 0.0:
-                pct = track_ranks[f].get(path, 0.5)
-                # target represents the quartile:
-                # 1: [0.0, 0.25]
-                # 2: [0.25, 0.50]
-                # 3: [0.50, 0.75]
-                # 4: [0.75, 1.0]
-                low_bound = (target - 1) * 0.25
-                high_bound = target * 0.25
-                if pct < low_bound:
-                    d = low_bound - pct
-                elif pct > high_bound:
-                    d = pct - high_bound
-                else:
-                    d = 0.0
-                dist_sq_sum += d * d
-                active_count += 1
-        if active_count > 0:
-            scores[idx] = -np.sqrt(dist_sq_sum / active_count)
-        else:
-            scores[idx] = 0.0
-
-    if scores.size == 0:
+    base = MOOD_TARGETS.get(canonical)
+    if not base:
         return []
 
-    # Taste-model re-rank over the top 3×limit window. Cold model
-    # (no events yet) skips the blend entirely so first-day behaviour is
-    # purely mood-driven.
-    rerank_window = max(limit * 3, 12)
-    if scores.size > rerank_window:
-        cand_idx = np.argpartition(-scores, rerank_window - 1)[:rerank_window]
-    else:
-        cand_idx = np.arange(scores.size)
-        
-    taste_scores, has_signal = await taste_scores_for_matrix(
-        db_manager, percentiles[cand_idx], features_version,
-    )
-    if has_signal:
-        beta = _MOOD_TASTE_BETA
-        # Mood scores are non-positive (negative distance); taste in (0, 1).
-        # Subtract 0.5 to centre taste so a neutral track doesn't reward the
-        # blend just by existing.
-        scores[cand_idx] = (
-            (1.0 - beta) * scores[cand_idx]
-            + beta * (taste_scores - 0.5)
-        )
+    # Effective per-feature percentile targets:
+    #   • a saved EQ adjustment (the user tuned this mood) overrides per feature
+    #     — a 1–4 band → band-centre percentile; band/weight 0 drops the feature;
+    #   • otherwise the out-of-box MOOD_TARGETS, restricted to the features that
+    #     survived the graph's covariance cleaving (one shared feature set).
+    adjusted = None
+    if hasattr(db_manager, "get_adjusted_mood_profile"):
+        try:
+            adjusted = await db_manager.get_adjusted_mood_profile(canonical)
+        except Exception:
+            adjusted = None
 
-    k = min(limit, scores.size)
-    top_unsorted = np.argpartition(-scores, k - 1)[:k]
-    top_ordered = top_unsorted[np.argsort(-scores[top_unsorted])]
-    return [rows[int(i)] for i in top_ordered]
+    eff: dict[str, float] = {}
+    if adjusted:
+        for f, tw in adjusted.items():
+            if f not in _MAP_FEATURES:
+                continue  # only rankable scalar features (skip stale PC* rows)
+            try:
+                qval, weight = tw
+            except (TypeError, ValueError):
+                continue
+            if weight > 0 and qval > 0:
+                eff[f] = _quartile_to_pct(qval)
+    if not eff:
+        proj = await db_manager.load_pca_space() if hasattr(db_manager, "load_pca_space") else None
+        surviving = set(proj.get("surviving") or []) if proj else None
+        eff = {f: base[f] for f in base if (surviving is None or f in surviving)}
+        if not eff:
+            eff = dict(base)
+
+    ranks = _mood_percentile_ranks(rows)  # {feat: {path: percentile}}
+
+    try:
+        fb = await db_manager.get_mood_feedback()
+    except Exception:
+        fb = {}
+    excluded = {p for p, mds in (fb or {}).items() if mds.get(canonical, 0) < 0}
+    pins = set(await db_manager.get_tracks_in_mood(canonical))
+
+    feats = list(eff.keys())
+    scored: list[tuple[float, dict]] = []
+    inv_n = 1.0 / len(feats)
+    for r in rows:
+        p = r["path"]
+        if p in excluded:
+            continue
+        d2 = 0.0
+        for f in feats:
+            diff = ranks[f][p] - eff[f]
+            d2 += diff * diff
+        score = -float(np.sqrt(d2 * inv_n))
+        if p in pins:
+            score += 10.0  # a pin always belongs, regardless of profile
+        scored.append((score, r))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [r for _, r in scored[:limit]]
 
 
 async def adjust_mood_profile(
@@ -1629,20 +2001,16 @@ async def adjust_mood_profile(
     track_path: str,
     feedback: int,
 ):
-    """Compatibility shim for legacy callers.
+    """Like/dislike a track within a built-in mood (many-to-many).
 
-    Old semantics nudged the mood's (target, weight) via gradient on a
-    single like/dislike event. The new model decouples those:
-
-      * `feedback == +1` (like in mood X) → assign the track to X's
-        partition AND record an explicit positive event for the global
-        taste model.
-      * `feedback == -1` (dislike in mood X) → unassign the track from any
-        partition AND record an explicit negative taste event.
+      * `feedback == +1` (like in mood X) → pin the track to X and clear any
+        prior dislike exclusion for X.
+      * `feedback == -1` (dislike in mood X) → remove X's pin and record a
+        per-mood exclusion so the track is dropped from X's subset.
       * any other value → no-op.
 
-    The centroid for X is re-derived from the partition lazily on the next
-    `tracks_by_mood` call; no per-call cost here beyond the two writes.
+    The taste model is deprecated/disconnected, so no taste event is recorded.
+    `tracks_by_mood` reflects the change on its next call.
     """
     canonical = mood_canonical(mood)
     if canonical is None:
@@ -1650,10 +2018,12 @@ async def adjust_mood_profile(
         return
     if feedback == 1:
         await assign_track_to_mood(db_manager, track_path, canonical)
-        await record_explicit_feedback(db_manager, track_path, True)
+        if hasattr(db_manager, "save_mood_feedback"):
+            await db_manager.save_mood_feedback(track_path, canonical, 1)
     elif feedback == -1:
-        await unassign_track_from_mood(db_manager, track_path)
-        await record_explicit_feedback(db_manager, track_path, False)
+        await unassign_track_from_mood(db_manager, track_path, canonical)
+        if hasattr(db_manager, "save_mood_feedback"):
+            await db_manager.save_mood_feedback(track_path, canonical, -1)
     else:
         return
     logger.info(
@@ -1674,22 +2044,24 @@ async def tracks_in_islet(
     features_version: int = FEATURES_VERSION,
     min_count: int = ISLET_MIN,
 ) -> list[dict]:
-    """Members of a named islet, ranked by cosine similarity to the centroid.
+    """Members of a named islet, ranked by similarity to its exemplar in the
+    unified graph Zr space.
 
-    Loads the islet's `custom_moods.json` entry → reads `threshold` and
-    `blacklist` → fetches every track with current-version features →
-    computes `cosine(track.timbre, islet.centroid)` over non-blacklisted
-    tracks → returns rows with sim ≥ threshold, ordered by descending sim.
+    Loads the islet's `custom_moods.json` entry → reads `exemplar_path`,
+    `threshold`, `blacklist` → projects every analysed track into Zr (the same
+    geometry as the walk and Louvain communities) → scores each by a
+    self-tuning Gaussian affinity to the exemplar's Zr position → returns rows
+    with affinity ≥ threshold, ranked descending, capped at ISLET_MAX, minus
+    the blacklist.
 
-    This is the only scoring path. Users prune unwanted tracks by adding
-    them to the per-islet blacklist (see `blacklist_track_from_islet`); no
-    per-islet learning model is involved.
+    Replaces the legacy raw-timbre cosine path so "play similar" and an islet
+    seeded on the same track now agree (one geometry). The threshold is an
+    affinity in [0,1] (1 = the exemplar itself), not a raw-timbre cosine.
 
-    By default returns [] if fewer than `ISLET_MIN` tracks pass — a centroid
-    that doesn't generalise produces no playable queue. Pass `min_count=0`
-    when the caller wants honest below-floor membership (e.g. the Library
-    view, which still needs to render the accordion so the user can loosen
-    a too-tight threshold instead of thinking the islet was deleted).
+    Returns [] if fewer than `min_count` tracks pass — a non-generalising
+    exemplar produces no playable queue. Pass `min_count=0` when the caller
+    wants honest below-floor membership (e.g. the Library view, which still
+    needs to render the accordion so the user can loosen the threshold).
     """
     cleaned = name.lower().strip()
     cm = load_custom_moods().get(cleaned)
@@ -1697,37 +2069,50 @@ async def tracks_in_islet(
         return []
     threshold = float(cm.get("threshold", ISLET_THRESHOLD))
     blacklist = set(cm.get("blacklist") or [])
-
-    centroid_list = cm.get("centroid") or []
-    if not centroid_list:
-        return []
-    centroid = np.array(centroid_list, dtype=np.float32)
-
-    rows = await db_manager.get_tracks_with_features(features_version)
-    if not rows:
+    exemplar_path = cm.get("exemplar_path")
+    if not exemplar_path:
         return []
 
-    timbres_list: list[np.ndarray] = []
-    keep_idx: list[int] = []
+    rows, Zr = await _load_percentile_matrix(db_manager, features_version)
+    if not rows or Zr.shape[1] == 0:
+        return []
+
+    # The islet centroid is the exemplar's position in the unified Zr space.
+    centroid = None
     for i, r in enumerate(rows):
-        if r.get("path") in blacklist:
-            continue
-        v = unpack_timbre(r.get("timbre"))
-        if v is not None and v.shape == centroid.shape:
-            timbres_list.append(v)
-            keep_idx.append(i)
-    if not timbres_list:
+        if r.get("path") == exemplar_path:
+            centroid = Zr[i]
+            break
+    if centroid is None:
+        logger.info(
+            "tracks_in_islet: exemplar '%s' for islet '%s' has no analysed "
+            "features; cannot score.", exemplar_path, cleaned,
+        )
         return []
 
-    timbres = np.stack(timbres_list, axis=0).astype(np.float32)
-    sims = _score_against_centroid(centroid, timbres)
+    # Squared Euclidean distance from every track to the exemplar in Zr.
+    diff = Zr - centroid[None, :]
+    d2 = np.einsum("ij,ij->i", diff, diff)
+    # Self-tuning bandwidth σ² = exemplar's distance² to its LOCAL_K-th nearest
+    # track (index 0 is the exemplar itself), so the threshold adapts to the
+    # exemplar's local density — the same principle as the graph affinity.
+    ISLET_LOCAL_K = 7
+    order_d = np.sort(d2)
+    pivot = order_d[min(ISLET_LOCAL_K, len(order_d) - 1)] if len(order_d) > 1 else 0.0
+    sigma2 = max(float(pivot), 1e-6)
+    affinity = np.exp(-d2 / sigma2)
 
-    member_mask = sims >= threshold
-    if int(member_mask.sum()) < min_count:
+    # Prune blacklisted tracks from membership (kept in the σ density estimate).
+    if blacklist:
+        for i, r in enumerate(rows):
+            if r.get("path") in blacklist:
+                affinity[i] = -1.0
+
+    member_idx = np.where(affinity >= threshold)[0]
+    if len(member_idx) < min_count:
         return []
-    member_indices = np.where(member_mask)[0]
-    ordered = member_indices[np.argsort(-sims[member_indices])][:ISLET_MAX]
-    return [rows[keep_idx[int(i)]] for i in ordered]
+    ordered = member_idx[np.argsort(-affinity[member_idx])][:ISLET_MAX]
+    return [rows[int(i)] for i in ordered]
 
 
 async def record_islet_negative(

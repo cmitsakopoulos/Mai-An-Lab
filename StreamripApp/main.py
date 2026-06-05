@@ -201,6 +201,7 @@ class StreamripFletApp:
         self._explicit_feedback_cache: dict[str, bool] = {}
         self.play_similar_mode: bool = False
         self._play_similar_gen: int = 0
+        self._play_similar_recommendation_in_progress: bool = False
 
         # ── Session-scoped negative centroid ─────────────────────────────
         # Transient signal that powers the "this chain went bad" guardrail
@@ -344,8 +345,51 @@ class StreamripFletApp:
         await asyncio.to_thread(repair_config)
         self.download_history_list = []
         from utils.db_manager import DatabaseManager
-        self.db_manager = DatabaseManager(os.path.join(DATA_DIR, "library.db"))
-        await self.db_manager.initialize()
+        db_path = os.path.join(DATA_DIR, "library.db")
+
+        # Check for auto-import state ZIP on startup (e.g. from auto_offload.sh)
+        try:
+            import_zip = "/sdcard/Download/mai_an_lab_state_import.zip"
+            if not os.path.exists(import_zip):
+                import_zip = "/storage/emulated/0/Download/mai_an_lab_state_import.zip"
+
+            if os.path.exists(import_zip) and os.path.getsize(import_zip) > 0:
+                logger.info(f"Auto-import state zip found at {import_zip}. Ingesting...")
+                from utils import state_export
+                from utils import track_graph as tg
+                from utils.streamrip_api import get_config_path
+                from utils.search_history import get_search_history_path
+
+                # Perform the import (replaces library.db on disk)
+                await asyncio.to_thread(
+                    state_export.import_state,
+                    import_zip,
+                    db_path,
+                    get_config_path(),
+                    get_search_history_path(),
+                    tg.CUSTOM_MOODS_PATH
+                )
+
+                # Delete the import ZIP
+                os.remove(import_zip)
+                logger.info("Auto-import state ZIP processed and deleted.")
+
+                # Re-initialize DB manager and rebuild graph and PCA space immediately
+                self.db_manager = DatabaseManager(db_path)
+                await self.db_manager.initialize()
+
+                logger.info("Auto-import: Rebuilding similarity graph (edges + Zr geometry + communities)...")
+                await tg.build_metadata_edges(self.db_manager)
+                await tg.build_acoustic_edges(self.db_manager)
+                logger.info("Auto-import: Rebuild completed successfully.")
+            else:
+                self.db_manager = DatabaseManager(db_path)
+                await self.db_manager.initialize()
+        except Exception as auto_imp_err:
+            logger.error(f"Auto-import startup hook failed: {auto_imp_err}", exc_info=True)
+            self.db_manager = DatabaseManager(db_path)
+            await self.db_manager.initialize()
+
         self.queue = QueueController(self)
         self._view_cache: dict[int, ft.Control] = {}
         await asyncio.to_thread(self._load_prefs)
@@ -379,7 +423,7 @@ class StreamripFletApp:
         self.assistant_view      = AssistantView(self)
 
         # wire ft.Audio into the page
-        audio_engine.setup(self.page)
+        audio_engine.setup(self.page, self.db_manager)
 
         # Restore saved shuffle, repeat and similar playback preferences
         audio_engine.is_shuffle = bool(self._prefs.get("is_shuffle", False))
@@ -399,6 +443,7 @@ class StreamripFletApp:
             position=self._on_position,
             is_playing=self._on_is_playing,
             duration=self._on_duration,
+            loudness_boost_db=self._on_loudness_boost_change,
         )
         def _on_queue_mutated(_inst, _val):
             self.safe_update(self.queue_sheet.refresh)
@@ -406,6 +451,7 @@ class StreamripFletApp:
             # memory reaping or process death) leaves a recoverable snapshot
             # on disk instead of the stale state from the previous launch.
             self._schedule_queue_save()
+            self._replenish_similar_queue_if_needed()
 
         audio_engine.bind(
             on_playback_error=lambda _, d: self.show_snackbar(f"Playback error: {d}", icon=ft.Icons.ERROR_OUTLINE, color="#FF4444"),
@@ -426,11 +472,61 @@ class StreamripFletApp:
         await self._restore_queue_state_async()
         await self.check_onboarding()
         self._is_restarting = False
+        # Prime availability checks so the UI reflects DSP readiness immediately,
+        # before the user opens Now Playing or Settings for the first time.
+        self.page.run_task(self.now_playing._check_play_similar_availability)
+
         # Long-running task that snapshots playback position to disk every
         # ~10 s so a hard kill leaves the resume offset close to where the
         # user actually was (queue/index get saved on mutation events
         # already, but position drifts continuously while playing).
         self._position_save_task = asyncio.create_task(self._position_save_loop())
+
+        # Auto-export a state snapshot to the user's library folder on every
+        # boot. The offload script can always find a fresh bundle at
+        # <library>/mai_an_lab_state_latest.zip without the user manually
+        # exporting first. Fire-and-forget: failures are logged but never
+        # block startup.
+        asyncio.create_task(self._auto_export_state_snapshot())
+
+    async def _auto_export_state_snapshot(self):
+        """Background task: write a deterministic state bundle to the standard
+        Downloads folder (and library folder if configured) so the desktop offload
+        pipeline always has a fresh starting point. Fire-and-forget."""
+        try:
+            from utils import state_export
+            from utils import track_graph as tg
+            from utils.streamrip_api import get_config_path
+            from utils.search_history import get_search_history_path
+            from utils.state_export import _default_bundle_dir
+
+            # Write to default Downloads folder first (always accessible and standard)
+            target_dir = _default_bundle_dir()
+            if not os.path.isdir(target_dir):
+                target_dir = DATA_DIR
+
+            out = await asyncio.to_thread(
+                state_export.export_state_snapshot,
+                self.db_manager.db_path,
+                get_config_path(),
+                target_dir,
+                get_search_history_path(),
+                tg.CUSTOM_MOODS_PATH,
+            )
+            logger.info("Auto-export state snapshot: %s", out)
+
+            # Optionally also copy to user's library folder if configured
+            lib_dir = getattr(self, "library_folder", "") or ""
+            if lib_dir and os.path.isdir(lib_dir) and os.path.abspath(lib_dir) != os.path.abspath(target_dir):
+                lib_out = os.path.join(lib_dir, "mai_an_lab_state_latest.zip")
+                try:
+                    import shutil
+                    await asyncio.to_thread(shutil.copy2, out, lib_out)
+                    logger.info("Auto-export state snapshot copied to library: %s", lib_out)
+                except Exception as cp_err:
+                    logger.warning("Failed to copy state snapshot to library: %s", cp_err)
+        except Exception as exc:
+            logger.warning("Auto-export state snapshot failed (non-fatal): %s", exc)
 
 
     def open_wipe_confirmation(self):
@@ -618,6 +714,59 @@ class StreamripFletApp:
         except Exception as exc:
             self.show_snackbar(f"Wipe failed: {exc}")
 
+    def trigger_haptic(self, action: str):
+        """Fire-and-forget sync wrapper — schedules the async haptic call on the page event loop.
+        All HapticFeedback methods are async coroutines in Flet; calling them without await
+        silently creates coroutines that are never executed. This wrapper ensures they actually run.
+        """
+        if sys.platform == "darwin":
+            return
+        self.page.run_task(self._trigger_haptic_async, action)
+
+    async def _trigger_haptic_async(self, action: str):
+        """Async implementation of haptic feedback triggering."""
+        try:
+            from utils.streamrip_api import load_config
+            cfg = load_config()
+            haptics_cfg = cfg.get("haptics", {})
+            enabled = bool(haptics_cfg.get("haptic_feedback_enabled", True))
+            if not enabled:
+                return
+
+            # If a direct intensity name was passed (light, medium, heavy, selection, vibrate), use it as fallback.
+            defaults = {
+                "eq_drag": "light",
+                "swipe_queue": "medium",
+                "swipe_dismiss": "medium",
+                "long_press": "heavy"
+            }
+            intensity = haptics_cfg.get(f"{action}_intensity", action if action in ["light", "medium", "heavy", "selection", "vibrate", "none"] else defaults.get(action, "light"))
+
+            if intensity == "none" or not intensity:
+                return
+        except Exception:
+            intensity = "light"
+
+        if not hasattr(self, "haptic") or self.haptic is None:
+            logger.debug("Haptic: service not initialized, skipping.")
+            return
+
+        try:
+            logger.debug("Haptic: triggering '%s' (resolved intensity=%s)", action, intensity)
+            if intensity == "light":
+                await self.haptic.light_impact()
+            elif intensity == "medium":
+                await self.haptic.medium_impact()
+            elif intensity == "heavy":
+                await self.haptic.heavy_impact()
+            elif intensity == "selection":
+                await self.haptic.selection_click()
+            elif intensity == "vibrate":
+                await self.haptic.vibrate()
+            logger.debug("Haptic: '%s' dispatched successfully.", intensity)
+        except Exception as e:
+            logger.debug("Haptic trigger failed: %s", e)
+
     def safe_update(self, fn):
         """Queue a UI mutation and schedule a single coalesced page.update().
         Thread-safe entry point: may be called from any background thread.
@@ -673,6 +822,13 @@ class StreamripFletApp:
 
     # ── UI construction ──────────────────────────────────────────────────────
     def _build_ui(self):
+        # Load show_jarvis from config
+        try:
+            cfg = load_config()
+            self._show_jarvis = bool(cfg.get("appearance", {}).get("show_jarvis", True))
+        except:
+            self._show_jarvis = True
+
         # Resolve startup page from config
         if hasattr(self, "_forced_tab") and self._forced_tab is not None:
             self._current_tab = self._forced_tab
@@ -686,6 +842,8 @@ class StreamripFletApp:
             
             mapping = {"Jarvis": 0, "Search": 1, "Library": 2, "Settings": 3}
             self._current_tab = mapping.get(startup_name, 2) # Default to Library (index 2)
+            if not self._show_jarvis and self._current_tab == 0:
+                self._current_tab = 2 # Fallback to Library if Jarvis is disabled
 
         # Build views (Jarvis, Search, Library, Settings)
         view_builders = [
@@ -715,30 +873,36 @@ class StreamripFletApp:
         # Content area (removed swipe detector GestureDetector to prevent accidental tab switching)
         self._swipe_content = self._tab_content
 
-        # Navigation bar
-        self._nav = ft.NavigationBar(
-            selected_index=self._current_tab if self._current_tab < 3 else 0,
-            bgcolor=SURFACE,
-            indicator_color=CYAN + "55",
-            label_behavior=ft.NavigationBarLabelBehavior.ALWAYS_SHOW,
-            destinations=[
+        destinations = []
+        if self._show_jarvis:
+            destinations.append(
                 ft.NavigationBarDestination(
                     icon=ft.Icons.AUTO_AWESOME_ROUNDED,
                     selected_icon=ft.Icons.AUTO_AWESOME_ROUNDED,
                     label="Jarvis",
-                ),
-                ft.NavigationBarDestination(
-                    icon=ft.Icons.SEARCH_OUTLINED,
-                    selected_icon=ft.Icons.SEARCH,
-                    label="Search",
-                ),
-                ft.NavigationBarDestination(
-                    icon=ft.Icons.LIBRARY_MUSIC_OUTLINED,
-                    selected_icon=ft.Icons.LIBRARY_MUSIC,
-                    label="Library",
-                ),
-            ],
-            on_change=lambda e: self._switch_tab(e.control.selected_index),
+                )
+            )
+        destinations.extend([
+            ft.NavigationBarDestination(
+                icon=ft.Icons.SEARCH_OUTLINED,
+                selected_icon=ft.Icons.SEARCH,
+                label="Search",
+            ),
+            ft.NavigationBarDestination(
+                icon=ft.Icons.LIBRARY_MUSIC_OUTLINED,
+                selected_icon=ft.Icons.LIBRARY_MUSIC,
+                label="Library",
+            ),
+        ])
+
+        # Navigation bar
+        self._nav = ft.NavigationBar(
+            selected_index=self._get_nav_index(self._current_tab),
+            bgcolor=SURFACE,
+            indicator_color=CYAN + "55",
+            label_behavior=ft.NavigationBarLabelBehavior.ALWAYS_SHOW,
+            destinations=destinations,
+            on_change=self._on_nav_change,
         )
 
         # Main layout; NO Stack, NO overlay for primary UI
@@ -789,6 +953,17 @@ class StreamripFletApp:
         self.page.overlay.append(self.now_playing.build())
         self.page.overlay.append(self.queue_sheet.build())
         
+        # Initialize haptic feedback overlay (Android only)
+        if sys.platform != "darwin":
+            try:
+                self.haptic = ft.HapticFeedback()
+                self.page.services.append(self.haptic)
+            except Exception as e:
+                self.haptic = None
+                logger.warning("Failed to initialize haptic feedback: %s", e)
+        else:
+            self.haptic = None
+            
         # Initial render
         self.page.update()
 
@@ -802,24 +977,50 @@ class StreamripFletApp:
             return
             
         new_tab = self._current_tab
-        if vx < 0 and self._current_tab < 1:
-            new_tab += 1
-        elif vx > 0 and self._current_tab > 0:
-            new_tab -= 1
+        if self._show_jarvis:
+            if vx < 0 and self._current_tab < 1:
+                new_tab += 1
+            elif vx > 0 and self._current_tab > 0:
+                new_tab -= 1
+        else:
+            if vx < 0 and self._current_tab == 1:
+                new_tab = 2
+            elif vx > 0 and self._current_tab == 2:
+                new_tab = 1
         
         if new_tab != self._current_tab:
             self._switch_tab(new_tab)
             # Let safe_update handle the page.update()
-            self.safe_update(lambda: setattr(self._nav, 'selected_index', new_tab))
+            self.safe_update(lambda: setattr(self._nav, 'selected_index', self._get_nav_index(new_tab)))
+
+    def _get_nav_index(self, tab_index: int) -> int:
+        if self._show_jarvis:
+            return tab_index if tab_index < 3 else 0
+        else:
+            if tab_index == 1:
+                return 0
+            elif tab_index == 2:
+                return 1
+            else:
+                return 0
+
+    def _get_absolute_tab_index(self, nav_index: int) -> int:
+        if self._show_jarvis:
+            return nav_index
+        else:
+            if nav_index == 0:
+                return 1
+            elif nav_index == 1:
+                return 2
+            else:
+                return 2
+
+    def _on_nav_change(self, e):
+        abs_index = self._get_absolute_tab_index(e.control.selected_index)
+        self._switch_tab(abs_index)
 
     def _switch_tab(self, index: int):
         self._current_tab = index
-        
-        # Reset labels to standard text
-        labels = ["Jarvis", "Search", "Library"]
-        for i, dest in enumerate(self._nav.destinations):
-            if i < len(labels):
-                dest.label = labels[i]
 
         if index == 0:
             # Jarvis / Assistant View
@@ -846,14 +1047,20 @@ class StreamripFletApp:
             
         def _mutate():
             self._tab_content.content = content
-            # If in Settings (index 3), deselect the bar or default to index 0 visually
-            is_nav_tab = index < len(self._nav.destinations)
-            self._nav.selected_index = index if is_nav_tab else 0
+            nav_idx = self._get_nav_index(index)
+            is_nav_tab = index < 3
+            if is_nav_tab:
+                self._nav.selected_index = nav_idx
             self._nav.indicator_color = (CYAN + "55" if is_nav_tab else "transparent")
 
         self.safe_update(_mutate)
 
     # ── audio engine callbacks ───────────────────────────────────────────────
+    def _on_loudness_boost_change(self, _instance, value: float):
+        self.now_playing.update_loudness_boost(value)
+        if hasattr(self, "settings_view") and self.settings_view:
+            self.settings_view.update_loudness_boost(value)
+
     def _on_current_path(self, _instance, path: str):
         if path and not getattr(self, "is_restoring_session", False):
             # Increment play count in background
@@ -894,8 +1101,7 @@ class StreamripFletApp:
 
         # Play Similar dynamic queue replenishment hook
         if self.play_similar_mode and path and not getattr(self, "is_restoring_session", False):
-            if audio_engine.current_index >= len(audio_engine.queue) - 1:
-                self.page.run_task(self._recommend_similar_async, path, self._play_similar_gen)
+            self._replenish_similar_queue_if_needed()
 
         def _atomic_update():
             track  = audio_engine.current_track  or ""
@@ -1121,11 +1327,11 @@ class StreamripFletApp:
             # Session-rejected paths go straight into the avoid set — no
             # embedding fetch needed; the graph won't visit them at all.
             avoid.update(self._session_bad_paths)
-            try:
-                recent = await self.db_manager.recent_played_paths(window_seconds=7 * 86400)
-                avoid.update(recent)
-            except Exception:
-                pass
+            # Play Similar leans purely on graph topology + DSP similarity +
+            # metadata. The 7-day recent-played window is deliberately kept
+            # out of the avoid set so a large library's natural listening
+            # history doesn't strip the seed's top-K neighbours mid-walk.
+            # `recent_played_paths` stays in db_manager for future features.
 
             from utils.streamrip_api import load_config
             cfg = load_config()
@@ -1134,11 +1340,15 @@ class StreamripFletApp:
             walk_paths = await tg.walk(
                 self.db_manager,
                 path,
-                length=12,
+                length=4,
                 edge_kinds=(tg.KIND_ACOUSTIC, tg.KIND_ARTIST),
                 teleport_path=path,
                 avoid=avoid,
-                restart_prob=0.15,
+                # Stronger seed anchoring (was 0.15). Cuts the two-hop
+                # drift that lets low-energy bridges (sustained synth/pad
+                # passages) walk into adjacent-but-genre-foreign clusters
+                # like modern classical or ambient.
+                restart_prob=0.30,
                 diversity_lambda=0.15,   # lighter MMR — no embedding fetch
                 temperature=temp,
                 taste_weight=0.0,        # acoustic-only, regressor reserved for DJ
@@ -1214,25 +1424,27 @@ class StreamripFletApp:
             avoid = {t["path"] for t in audio_engine.queue if t.get("path")}
             avoid.add(path)
             avoid.update(self._session_bad_paths)
-            try:
-                recent = await self.db_manager.recent_played_paths(window_seconds=7 * 86400)
-                avoid.update(recent)
-            except Exception:
-                pass
+            # Play Similar leans purely on graph topology + DSP similarity +
+            # metadata. The 7-day recent-played window is deliberately kept
+            # out of the avoid set so a large library's natural listening
+            # history doesn't strip the seed's top-K neighbours mid-walk.
+            # `recent_played_paths` stays in db_manager for future features.
 
             from utils.streamrip_api import load_config
             cfg = load_config()
             temp = float(cfg.get("general", {}).get("play_similar_temperature", 0.05))
 
+            teleport = getattr(audio_engine, "play_similar_seed_path", "") or path
             walk_tracks = await tg.walk(
                 self.db_manager,
                 path,
-                length=3,
+                length=6,
                 edge_kinds=(tg.KIND_ACOUSTIC, tg.KIND_ARTIST),
                 teleport_path=teleport,
                 avoid=avoid,
-                restart_prob=0.15,
-                diversity_lambda=0.0,   # single-track pick — diversity unused
+                # Matches _initiate_play_similar_queue_async — see comment there.
+                restart_prob=0.30,
+                diversity_lambda=0.2,   # single-track pick — diversity unused
                 temperature=temp,
                 taste_weight=0.0,
                 negative_embs=None,
@@ -1265,6 +1477,25 @@ class StreamripFletApp:
                     logger.info("Play Similar: Appended recommended track '%s' to queue.", next_track_path)
         except Exception as exc:
             logger.exception("Play Similar: Failed to generate dynamic recommendation: %s", exc)
+        finally:
+            self._play_similar_recommendation_in_progress = False
+
+    def _replenish_similar_queue_if_needed(self):
+        """Proactively replenish the Play Similar queue to maintain a 4-song buffer ahead of the currently playing track."""
+        if not self.play_similar_mode or getattr(self, "is_restoring_session", False):
+            return
+        if getattr(self, "_play_similar_recommendation_in_progress", False):
+            return
+        upcoming_count = len(audio_engine.queue) - 1 - audio_engine.current_index
+        if upcoming_count < 4:
+            path = None
+            if audio_engine.queue:
+                path = audio_engine.queue[-1].get("path")
+            if not path:
+                path = audio_engine.current_path
+            if path:
+                self._play_similar_recommendation_in_progress = True
+                self.page.run_task(self._recommend_similar_async, path, self._play_similar_gen)
 
     def _on_similar_continue(self, _inst, _val=None):
         """Sync callback dispatched by AudioEngine when the manually-initiated
@@ -1301,11 +1532,8 @@ class StreamripFletApp:
             if t.get("path"):
                 avoid.add(t["path"])
         avoid.update(self._session_bad_paths)
-        try:
-            recent = await self.db_manager.recent_played_paths(window_seconds=7 * 86400)
-            avoid.update(recent)
-        except Exception:
-            pass
+        # Play Similar continuation also skips the recent-played avoid window
+        # (see _initiate_play_similar_queue_async for rationale).
 
         from utils.streamrip_api import load_config
         cfg = load_config()
@@ -1319,7 +1547,8 @@ class StreamripFletApp:
                 length=5,
                 edge_kinds=(tg.KIND_ACOUSTIC, tg.KIND_ARTIST),
                 avoid=avoid,
-                restart_prob=0.15,
+                # Matches _initiate_play_similar_queue_async — see comment there.
+                restart_prob=0.30,
                 diversity_lambda=0.15,
                 temperature=temp,
                 taste_weight=0.0,
@@ -1464,7 +1693,7 @@ class StreamripFletApp:
                 edge_kinds=(tg.KIND_ACOUSTIC, tg.KIND_ARTIST),
                 avoid=avoid,
                 restart_prob=0.15,
-                diversity_lambda=0.3,
+                diversity_lambda=0.15,
                 temperature=temp,
                 taste_explore=0.0 if tripwire else 0.05,
                 negative_embs=negative_embs or None,
@@ -2154,6 +2383,7 @@ class StreamripFletApp:
         # from the previous session see a stale gen and bail out before
         # they mutate the queue.
         self._play_similar_gen += 1
+        self._play_similar_recommendation_in_progress = False
         gen = self._play_similar_gen
 
         self.play_similar_mode = enabled

@@ -489,9 +489,12 @@ class AssistantView:
             # reflects the latest analyser output.
             self._set_banner(visible=True, message="Linking similar tracks…", determinate=None)
             try:
+                # build_acoustic_edges persists the unified Zr geometry
+                # (projection + per-track coords + Louvain communities) too, so
+                # every downstream surface (moods, EQ dialog, islets) loads ready.
                 await tg.build_metadata_edges(self.app.db_manager)
                 await tg.build_acoustic_edges(self.app.db_manager)
-                
+
                 # Fetch new status and missing count to save the correct graph state
                 new_status = await tg.graph_status(self.app.db_manager)
                 new_missing = await self.app.db_manager.get_tracks_missing_features(tg.FEATURES_VERSION)

@@ -295,6 +295,58 @@ class FletAudioService extends FletService with WidgetsBindingObserver {
       case 'stt_stop':
         _runSttStop();
 
+      case 'set_loudness_boost':
+        final gain = (a['gain'] as num?)?.toDouble() ?? 0.0;
+        if (Platform.isAndroid) {
+          _handler?._loudnessEnhancer.setTargetGain(gain);
+        }
+
+      case 'set_eq_band_gain':
+        final index = (a['index'] as num?)?.toInt() ?? 0;
+        final gain = (a['gain'] as num?)?.toDouble() ?? 0.0;
+        if (Platform.isAndroid && _handler?._equalizerBands != null) {
+          if (index >= 0 && index < _handler!._equalizerBands!.length) {
+            _handler!._equalizerBands![index].setGain(gain);
+          }
+        }
+
+      case 'get_equalizer_bands':
+        final reqId = (a['request_id'] as String?) ?? '';
+        if (Platform.isAndroid && _handler?._equalizerBands != null) {
+          final bandsJson = _handler!._equalizerBands!.map((b) => {
+            'index': b.index,
+            'center_frequency': b.centerFrequency,
+            'gain': b.gain,
+          }).toList();
+          
+          double minDb = -15.0;
+          double maxDb = 15.0;
+          _handler!._equalizer.parameters.then((params) {
+            control.triggerEvent('equalizer_bands_result', jsonEncode({
+              'request_id': reqId,
+              'ok': true,
+              'min_db': params.minDecibels,
+              'max_db': params.maxDecibels,
+              'bands': bandsJson,
+            }));
+          }).catchError((e) {
+            control.triggerEvent('equalizer_bands_result', jsonEncode({
+              'request_id': reqId,
+              'ok': true,
+              'min_db': minDb,
+              'max_db': maxDb,
+              'bands': bandsJson,
+            }));
+          });
+        } else {
+          control.triggerEvent('equalizer_bands_result', jsonEncode({
+            'request_id': reqId,
+            'ok': false,
+            'error': 'Equalizer not supported or not ready',
+            'bands': [],
+          }));
+        }
+
       default:
         throw Exception("Unknown FletAudioService method: $name");
     }
@@ -746,7 +798,10 @@ class FletAudioService extends FletService with WidgetsBindingObserver {
 // ─────────────────────────────────────────────────────────────────────────────
 
 class AudioPlayerHandler extends BaseAudioHandler with QueueHandler, SeekHandler {
-  final _player = AudioPlayer();
+  final _equalizer = AndroidEqualizer();
+  final _loudnessEnhancer = AndroidLoudnessEnhancer();
+  late final AudioPlayer _player;
+  List<AndroidEqualizerBand>? _equalizerBands;
 
   ConcatenatingAudioSource _playlist = ConcatenatingAudioSource(
     children: [],
@@ -754,6 +809,23 @@ class AudioPlayerHandler extends BaseAudioHandler with QueueHandler, SeekHandler
   );
 
   AudioPlayerHandler() {
+    final effects = <AndroidAudioEffect>[];
+    if (Platform.isAndroid) {
+      effects.add(_equalizer);
+      effects.add(_loudnessEnhancer);
+      _equalizer.setEnabled(true);
+      _loudnessEnhancer.setEnabled(true);
+      _equalizer.parameters.then((p) {
+        _equalizerBands = p.bands;
+      }).catchError((e) {
+        debugPrint("FletAudioService: Failed to get equalizer parameters: $e");
+      });
+    }
+
+    _player = AudioPlayer(
+      audioPipeline: AudioPipeline(androidAudioEffects: effects),
+    );
+
     _player.playbackEventStream.map(_transformEvent).pipe(playbackState);
 
     _player.sequenceStateStream.listen((state) {
