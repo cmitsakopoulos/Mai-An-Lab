@@ -284,6 +284,16 @@ class AudioServiceControl(Service):
             payload["index"] = index
         await self._invoke_method("add_queue_item", payload)
 
+    async def add_queue_items(self, items: list):
+        """Insert several tracks into the live queue in a single method call.
+        Each item is a dict with keys src/title/artist/album_art and an 'index'
+        giving its insertion point (computed in append order by the caller, so
+        shuffle's scattered positions are preserved). Collapses N add_queue_item
+        IPC round-trips into one; the active source is not reloaded. Used by
+        Play Similar block-replenishment."""
+        await self._wait_ready()
+        await self._invoke_method("add_queue_items", {"items": items})
+
     async def remove_queue_item(self, index: int):
         """Removes the queue item at the given index."""
         await self._wait_ready()

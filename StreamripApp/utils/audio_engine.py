@@ -48,6 +48,11 @@ class AudioEngine:
         self.position       = 0.0
         self.duration       = 0.0
         self.is_playing     = False
+        # Mirror of the Dart player's just_audio processing state
+        # ("idle"/"loading"/"buffering"/"ready"/"completed"). Lets Python-side
+        # callers (e.g. the search preview wait loop) query load/buffer
+        # progress directly instead of inferring it from is_playing+position.
+        self.processing_state = "idle"
         self._is_shuffle    = False
         self._shuffle_order: list[int] = []
         self._repeat_mode   = "none"
@@ -240,10 +245,10 @@ class AudioEngine:
             return p
 
     def _get_artwork_path(self, track: dict) -> str:
-        art = track.get("artwork_path") or track.get("_resolved_artwork_path") or ""
+        art = track.get("artwork_path") or track.get("image_url") or track.get("_resolved_artwork_path") or ""
         if not art:
             path = track.get("path") or ""
-            if path:
+            if path and not path.startswith(("http://", "https://")):
                 folder = os.path.dirname(path)
                 if not hasattr(self, "_folder_artwork_cache"):
                     self._folder_artwork_cache = {}
@@ -344,6 +349,10 @@ class AudioEngine:
         except Exception:
             status = str(e.data) if e.data else "paused"
             processing_state = "idle"
+
+        # Surface the player's processing state so Python-side waiters can read
+        # it directly (dirty-checked _set → no dispatch churn when unchanged).
+        self._set("processing_state", processing_state)
 
         # Mirror the native queue index (changed by skip_to_next, notification
         # next/previous, or auto-advance at end-of-track) so Python-side UI
@@ -762,6 +771,75 @@ class AudioEngine:
             except Exception as exc:
                 logger.warning("ADB_AUDIO: add_queue_item failed; falling back to "
                                "set_playlist (will reset position): %s", exc)
+                await self._push_queue_native_unlocked(
+                    start_index=self.current_index, autoplay=False
+                )
+
+    def queue_extend(self, tracks: list[dict]):
+        """Append several tracks in one batch. Mirrors calling queue_last for
+        each track, but dispatches on_queue_mutated only ONCE (one queue-sheet
+        rebuild, one coalesced queue-save) and pushes every insert to Dart
+        under a single native task. Used by Play Similar block-replenishment,
+        which appends up to 8 tracks at a time — per-track queue_last would
+        otherwise rebuild the queue sheet eight times per replenish."""
+        if not tracks:
+            return
+        if not self.queue:
+            # Extending an empty queue is just setting it (and starts playback,
+            # matching queue_last's empty-queue behaviour).
+            self.set_queue(tracks)
+            return
+        native_items: list[tuple[dict, int]] = []
+        for track in tracks:
+            insert_at = len(self.queue)
+            self.queue.append(track)
+            native_idx = insert_at
+            if self._is_shuffle:
+                self._on_track_added_to_shuffle(insert_at, play_next=False)
+                try:
+                    native_idx = self._shuffle_order.index(insert_at)
+                except ValueError:
+                    native_idx = insert_at
+            native_items.append((track, native_idx))
+        self.dispatch("on_queue_mutated")
+        if self._page:
+            self._arm_queue_gate()
+            self._page.run_task(self._native_add_queue_items, native_items)
+
+    async def _native_add_queue_items(self, items: list[tuple[dict, int]]):
+        """Batch sibling of _native_add_queue_item: insert the whole block into
+        the live ConcatenatingAudioSource in ONE Dart call (add_queue_items)
+        under a single lock acquisition. The per-item indices are computed in
+        append order by queue_extend, so Dart replaying them in order is
+        equivalent to N sequential add_queue_item calls. Falls back to one full
+        set_playlist rebuild if the native call fails (including against an
+        older Dart bundle that predates add_queue_items)."""
+        import asyncio
+        if self._native_lock is None:
+            self._native_lock = asyncio.Lock()
+        async with self._native_lock:
+            self._ensure_audio()
+            if not self._audio:
+                return
+            payload = []
+            for track, index in items:
+                item = self._track_to_playlist_item(track)
+                if item is None:
+                    continue
+                payload.append({
+                    "src": item["src"],
+                    "title": item["title"],
+                    "artist": item["artist"],
+                    "album_art": item.get("album_art"),
+                    "index": index,
+                })
+            if not payload:
+                return
+            try:
+                await self._audio.add_queue_items(payload)
+            except Exception as exc:
+                logger.warning("ADB_AUDIO: batch add_queue_items failed; falling "
+                               "back to set_playlist (will reset position): %s", exc)
                 await self._push_queue_native_unlocked(
                     start_index=self.current_index, autoplay=False
                 )

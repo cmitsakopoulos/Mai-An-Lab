@@ -1,3 +1,4 @@
+from __future__ import annotations
 # pyrefly: ignore [missing-import]
 import aiosqlite
 import os
@@ -5,7 +6,10 @@ import asyncio
 import json
 import logging
 import re
-import numpy as np
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -1794,6 +1798,7 @@ class DatabaseManager:
         recovered on load from `len(means)`. `feature_spec` carries the surviving
         scalar list + scalar_weight + embed_dims needed to project new tracks
         identically (see track_graph.project_to_zr)."""
+        import numpy as np
         means_bytes = means.astype(np.float32).tobytes()
         stds_bytes = stds.astype(np.float32).tobytes()
         V_bytes = V_keep.astype(np.float32).tobytes()
@@ -1814,6 +1819,7 @@ class DatabaseManager:
         {means(D,), stds(D,), projection(D,k), eigenvalues, surviving,
         scalar_weight, embed_dims, z_score}, or None if unset. Projection shape
         is inferred as (D, len/D) so the dimensionality is not hardcoded."""
+        import numpy as np
         conn = await self.get_connection()
         async with conn.execute("SELECT means, stds, projection, eigenvalues, feature_spec FROM pca_space WHERE id = 1") as cursor:
             row = await cursor.fetchone()
@@ -1847,6 +1853,7 @@ class DatabaseManager:
 
     async def update_track_pca_coords(self, track_path: str, coords: np.ndarray):
         """Mutation: Caches the 3D PC coordinates for a track in play_counts."""
+        import numpy as np
         coords_bytes = coords.astype(np.float32).tobytes()
         async with self._write_lock:
             conn = await self.get_connection()
@@ -1859,6 +1866,7 @@ class DatabaseManager:
 
     async def update_tracks_pca_coords_batch(self, batch_data: list[tuple[str, np.ndarray]]):
         """Mutation: Efficiently updates PCA coordinates for a batch of tracks."""
+        import numpy as np
         formatted_data = [
             (coords.astype(np.float32).tobytes(), path)
             for path, coords in batch_data
@@ -1875,6 +1883,7 @@ class DatabaseManager:
 
     async def get_tracks_pca_coords(self) -> list[dict]:
         """Lock-free read. Returns tracks joined with metadata and their projected 3D coordinates."""
+        import numpy as np
         conn = await self.get_connection()
         sql = '''
             SELECT pc.track_path AS path, pc.pca_coords,
@@ -2111,6 +2120,7 @@ class DatabaseManager:
         """Return the PCA coordinates of every track assigned to `mood`.
         Used by the centroid recompute path so it can mean-pool without
         materialising the full track rows."""
+        import numpy as np
         conn = await self.get_connection()
         sql = '''
             SELECT pc.pca_coords

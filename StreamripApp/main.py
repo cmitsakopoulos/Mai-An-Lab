@@ -296,7 +296,7 @@ class StreamripFletApp:
 
     async def _pulse_splash(self):
         """Triggers a smooth opacity pulse on the splash logo."""
-        while hasattr(self, '_splash_logo') and self._splash_logo.page:
+        while getattr(self, '_splash_logo', None) is not None and self._splash_logo.page:
             try:
                 self._splash_logo.opacity = 0.3 if self._splash_logo.opacity == 1.0 else 1.0
                 self._splash_logo.update()
@@ -964,6 +964,9 @@ class StreamripFletApp:
         else:
             self.haptic = None
             
+        # Clean up splash logo reference so the background pulsing task exits immediately
+        self._splash_logo = None
+        
         # Initial render
         self.page.update()
 
@@ -1340,7 +1343,7 @@ class StreamripFletApp:
             walk_paths = await tg.walk(
                 self.db_manager,
                 path,
-                length=4,
+                length=8,
                 edge_kinds=(tg.KIND_ACOUSTIC, tg.KIND_ARTIST),
                 teleport_path=path,
                 avoid=avoid,
@@ -1407,11 +1410,11 @@ class StreamripFletApp:
         except Exception as exc:
             logger.exception("Play Similar: Failed to initiate similar queue: %s", exc)
 
-    async def _recommend_similar_async(self, path: str, gen: int = 0):
-        """Lightweight per-track recommendation for Play Similar.
+    async def _recommend_similar_async(self, path: str, count: int = 1, gen: int = 0):
+        """Lightweight block recommendation for Play Similar.
 
-        Runs a minimal acoustic walk (length=3, k=20 prefetch) with no taste
-        model and no embedding fetch — just graph topology + avoid set.
+        Runs a minimal acoustic walk with no taste model and no embedding fetch.
+        Appends up to `count` new unique similar tracks.
         """
         import os
         from utils import track_graph as tg
@@ -1435,16 +1438,17 @@ class StreamripFletApp:
             temp = float(cfg.get("general", {}).get("play_similar_temperature", 0.05))
 
             teleport = getattr(audio_engine, "play_similar_seed_path", "") or path
+            walk_len = max(count + 4, count * 2)
             walk_tracks = await tg.walk(
                 self.db_manager,
                 path,
-                length=6,
+                length=walk_len,
                 edge_kinds=(tg.KIND_ACOUSTIC, tg.KIND_ARTIST),
                 teleport_path=teleport,
                 avoid=avoid,
                 # Matches _initiate_play_similar_queue_async — see comment there.
                 restart_prob=0.30,
-                diversity_lambda=0.2,   # single-track pick — diversity unused
+                diversity_lambda=0.15,   # lighter MMR — no embedding fetch
                 temperature=temp,
                 taste_weight=0.0,
                 negative_embs=None,
@@ -1456,38 +1460,46 @@ class StreamripFletApp:
                 return
 
             if walk_tracks:
-                queue_paths = {t["path"] for t in audio_engine.queue}
-                next_track_path = next(
-                    (wt for wt in walk_tracks if wt not in queue_paths),
-                    walk_tracks[0],
-                )
-                row = await self.db_manager.get_track_full(next_track_path)
-                if row:
-                    if gen != self._play_similar_gen or not self.play_similar_mode:
-                        return
-                    track_dict = {
-                        "path":        row.get("path"),
-                        "track_title": row.get("title") or row.get("track_title") or os.path.basename(next_track_path),
-                        "artist_name": row.get("artist") or row.get("artist_name") or "Unknown Artist",
-                        "album_title": row.get("album")  or row.get("album_title")  or "Unknown Album",
-                        "duration":    row.get("duration", 0.0) or 0.0,
-                        "image_url":   row.get("image_url", "") or "",
-                    }
-                    audio_engine.queue_last(track_dict)
-                    logger.info("Play Similar: Appended recommended track '%s' to queue.", next_track_path)
+                queue_paths = {t["path"] for t in audio_engine.queue if t.get("path")}
+                batch: list[dict] = []
+                for wt in walk_tracks:
+                    if wt not in queue_paths:
+                        row = await self.db_manager.get_track_full(wt)
+                        if row:
+                            if gen != self._play_similar_gen or not self.play_similar_mode:
+                                return
+                            track_dict = {
+                                "path":        row.get("path"),
+                                "track_title": row.get("title") or row.get("track_title") or os.path.basename(wt),
+                                "artist_name": row.get("artist") or row.get("artist_name") or "Unknown Artist",
+                                "album_title": row.get("album")  or row.get("album_title")  or "Unknown Album",
+                                "duration":    row.get("duration", 0.0) or 0.0,
+                                "image_url":   row.get("image_url", "") or "",
+                            }
+                            batch.append(track_dict)
+                            queue_paths.add(wt)
+                            if len(batch) >= count:
+                                break
+                # Single batched append: one on_queue_mutated dispatch (one
+                # queue-sheet rebuild + one coalesced save) and one native task,
+                # instead of `count` of each per replenish.
+                if batch and gen == self._play_similar_gen and self.play_similar_mode:
+                    audio_engine.queue_extend(batch)
+                    logger.info("Play Similar: Appended %d recommended tracks to queue.", len(batch))
         except Exception as exc:
-            logger.exception("Play Similar: Failed to generate dynamic recommendation: %s", exc)
+            logger.exception("Play Similar: Failed to generate dynamic recommendations: %s", exc)
         finally:
             self._play_similar_recommendation_in_progress = False
 
     def _replenish_similar_queue_if_needed(self):
-        """Proactively replenish the Play Similar queue to maintain a 4-song buffer ahead of the currently playing track."""
+        """Proactively replenish the Play Similar queue to maintain an 8-song buffer ahead of the currently playing track."""
         if not self.play_similar_mode or getattr(self, "is_restoring_session", False):
             return
         if getattr(self, "_play_similar_recommendation_in_progress", False):
             return
         upcoming_count = len(audio_engine.queue) - 1 - audio_engine.current_index
         if upcoming_count < 4:
+            needed = 8 - upcoming_count
             path = None
             if audio_engine.queue:
                 path = audio_engine.queue[-1].get("path")
@@ -1495,7 +1507,7 @@ class StreamripFletApp:
                 path = audio_engine.current_path
             if path:
                 self._play_similar_recommendation_in_progress = True
-                self.page.run_task(self._recommend_similar_async, path, self._play_similar_gen)
+                self.page.run_task(self._recommend_similar_async, path, needed, self._play_similar_gen)
 
     def _on_similar_continue(self, _inst, _val=None):
         """Sync callback dispatched by AudioEngine when the manually-initiated
@@ -1544,7 +1556,7 @@ class StreamripFletApp:
             walk_paths = await tg.walk(
                 self.db_manager,
                 seed_path,
-                length=5,
+                length=8,
                 edge_kinds=(tg.KIND_ACOUSTIC, tg.KIND_ARTIST),
                 avoid=avoid,
                 # Matches _initiate_play_similar_queue_async — see comment there.
@@ -1582,13 +1594,15 @@ class StreamripFletApp:
                 "duration":    row.get("duration", 0.0) or 0.0,
                 "image_url":   row.get("image_url", "") or "",
             }
-            audio_engine.queue_last(track_dict)
             appended_tracks.append(track_dict)
 
         if len(appended_tracks) == 0:
             logger.info("Play Similar continuation: metadata lookup failed for all neighbours.")
             audio_engine.stop()
             return
+
+        # Single batched append (one queue-sheet rebuild) before resuming.
+        audio_engine.queue_extend(appended_tracks)
 
         # Resume playback at the first newly appended slot
         audio_engine.play_track_at(first_new_index)
@@ -3283,6 +3297,11 @@ class StreamripFletApp:
             # Flush DB to disk on disconnect
             if hasattr(self, "db_manager"):
                 self.db_manager.checkpoint()
+            # Shut down the audio engine (stops playback and background pollers)
+            try:
+                audio_engine.shutdown()
+            except Exception as ae_exc:
+                logger.error("Failed to shutdown audio engine: %s", ae_exc)
         except Exception as exc:
             logger.error("Failed to save queue state or checkpoint: %s", exc)
         # cleanup preview cache

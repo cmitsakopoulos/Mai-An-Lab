@@ -475,7 +475,7 @@ class TestQueueModes(unittest.TestCase):
         
         self.app._play_similar_recommendation_in_progress = False
         self.app._replenish_similar_queue_if_needed()
-        self.app._recommend_similar_async.assert_called_once_with("/music/song4.mp3", 0)
+        self.app._recommend_similar_async.assert_called_once_with("/music/song4.mp3", 5, 0)
 
         # Scenario 3: Recommendation in progress flag is True -> no new recommendation is scheduled
         self.app._recommend_similar_async.reset_mock()
@@ -485,7 +485,7 @@ class TestQueueModes(unittest.TestCase):
         # Scenario 4: Reset the flag -> replenishment is scheduled again
         self.app._play_similar_recommendation_in_progress = False
         self.app._replenish_similar_queue_if_needed()
-        self.app._recommend_similar_async.assert_called_once_with("/music/song4.mp3", 0)
+        self.app._recommend_similar_async.assert_called_once_with("/music/song4.mp3", 5, 0)
 
     def test_auto_dj_mode(self):
         # 1. Start sequential playback in normal mode
