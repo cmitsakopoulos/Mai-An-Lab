@@ -10,30 +10,43 @@ from tinytag import TinyTag
 
 if sys.platform == "darwin":
     try:
-        from Foundation import NSURL
+        from Foundation import NSURL, NSOperationQueue, NSThread
         from AVFoundation import (
             AVAudioPlayer,
             AVAudioEngine,
             AVAudioPlayerNode,
             AVAudioUnitEQ,
+            AVPlayer,
         )
+        try:
+            from CoreMedia import CMTimeMakeWithSeconds
+        except ImportError:
+            CMTimeMakeWithSeconds = None
         # AVAudioUnitEQFilterType constants
         AVAudioUnitEQFilterTypeParametric = 0
         _AVF_AVAILABLE = True
     except ImportError:
         NSURL = None
+        NSOperationQueue = None
+        NSThread = None
         AVAudioPlayer = None
         AVAudioEngine = None
         AVAudioPlayerNode = None
         AVAudioUnitEQ = None
+        AVPlayer = None
+        CMTimeMakeWithSeconds = None
         AVAudioUnitEQFilterTypeParametric = 0
         _AVF_AVAILABLE = False
 else:
     NSURL = None
+    NSOperationQueue = None
+    NSThread = None
     AVAudioPlayer = None
     AVAudioEngine = None
     AVAudioPlayerNode = None
     AVAudioUnitEQ = None
+    AVPlayer = None
+    CMTimeMakeWithSeconds = None
     AVAudioUnitEQFilterTypeParametric = 0
     _AVF_AVAILABLE = False
 
@@ -57,6 +70,10 @@ class AudioEngine:
         self.position       = 0.0
         self.duration       = 0.0
         self.is_playing     = False
+        # Parity with the Android engine. macOS uses AVFoundation (no just_audio
+        # processing-state concept), so this stays a coarse "idle"/"ready"
+        # mirror driven by playback start/stop rather than buffer events.
+        self.processing_state = "idle"
         self._is_shuffle    = False
         self._shuffle_order: list[int] = []
         self.repeat_mode    = "none"
@@ -234,8 +251,9 @@ class AudioEngine:
         title = (track.get("track_title") or os.path.basename(path)) if path else "Unknown"
         self._set("position", 0.0)
         self._set("duration", 0.0)
-        art = track.get("artwork_path") or ""
-        if not art and path:
+        art = track.get("artwork_path") or track.get("image_url") or ""
+        is_remote = path.startswith(("http://", "https://"))
+        if not art and path and not is_remote:
             folder = os.path.dirname(path)
             for name in ("cover.jpg", "folder.jpg", "cover.png", "front.jpg"):
                 p = os.path.join(folder, name)
@@ -248,7 +266,7 @@ class AudioEngine:
         self._set("current_track",  title)
         self._set("current_path",   path)
 
-        if path and os.path.exists(path):
+        if path and not is_remote and os.path.exists(path):
             try:
                 tag = TinyTag.get(path)
                 if tag.duration:
@@ -350,6 +368,37 @@ class AudioEngine:
         except Exception:
             return 1.0
 
+    def _run_on_main(self, fn, timeout: float = 5.0):
+        """Run fn() on the Cocoa main thread and block (briefly) for its result.
+
+        AVPlayer remote-stream loading is bound to the main run loop; creating
+        or driving it from the Python/asyncio worker thread leaves it stuck.
+        The Flet app's main thread runs the Flutter run loop, which services
+        NSOperationQueue.mainQueue(), so dispatching there lets the player load
+        and play. If already on the main thread, runs inline. Returns fn()'s
+        result, or None on timeout.
+        """
+        if NSThread is None or NSOperationQueue is None:
+            return fn()
+        if NSThread.isMainThread():
+            return fn()
+        done = threading.Event()
+        box: dict = {}
+        def _wrapped():
+            try:
+                box["value"] = fn()
+            except Exception as exc:  # noqa: BLE001 - surfaced to caller below
+                box["error"] = exc
+            finally:
+                done.set()
+        NSOperationQueue.mainQueue().addOperationWithBlock_(_wrapped)
+        if not done.wait(timeout):
+            logger.error("ADB_AUDIO: main-thread operation timed out after %.1fs", timeout)
+            return None
+        if "error" in box:
+            raise box["error"]
+        return box.get("value")
+
     def _start_playback(self, path: str, start_time: float = 0.0):
         with self._lock:
             self._stop_playback()
@@ -360,7 +409,8 @@ class AudioEngine:
                 self._set("is_playing", False)
                 self.dispatch("on_playback_error", err_msg)
                 return
-            if not path or not os.path.exists(path):
+            is_remote = path.startswith(("http://", "https://"))
+            if not path or (not is_remote and not os.path.exists(path)):
                 err_msg = f"File not found: {path}"
                 logger.error(err_msg)
                 self._set("is_playing", False)
@@ -368,87 +418,115 @@ class AudioEngine:
                 return
 
             try:
-                url = NSURL.fileURLWithPath_(path)
+                if is_remote:
+                    url = NSURL.URLWithString_(path)
+                else:
+                    url = NSURL.fileURLWithPath_(path)
 
-                # ── Primary path: AVAudioEngine + DSP chain ───────────────────
-                try:
-                    # Open the audio file first to get its processing format
-                    from AVFoundation import AVAudioFile
-                    audio_file, av_err = AVAudioFile.alloc().initForReading_error_(url, None)
-                    if audio_file is None:
-                        raise RuntimeError(f"AVAudioFile open failed: {av_err}")
-                    file_format = audio_file.processingFormat()
+                # ── Primary path: AVAudioEngine + DSP chain (local files only) ───────────────────
+                if not is_remote:
+                    try:
+                        # Open the audio file first to get its processing format
+                        from AVFoundation import AVAudioFile
+                        audio_file, av_err = AVAudioFile.alloc().initForReading_error_(url, None)
+                        if audio_file is None:
+                            raise RuntimeError(f"AVAudioFile open failed: {av_err}")
+                        file_format = audio_file.processingFormat()
 
-                    engine, player_node, eq_node = self._build_dsp_engine(file_format)
+                        engine, player_node, eq_node = self._build_dsp_engine(file_format)
 
-                    # Schedule the audio file on the player node.
-                    # Completion handler is intentionally None — end-of-track
-                    # detection is handled by the polling thread watching
-                    # player_node.isPlaying(), which avoids the ObjC void-return
-                    # constraint on Python lambdas.
-                    if start_time > 0:
-                        # Seek to a frame offset by scheduling only the tail segment.
-                        sample_rate  = file_format.sampleRate()
-                        frame_offset = int(start_time * sample_rate)
-                        total_frames = int(audio_file.length())
-                        play_frames  = max(1, total_frames - frame_offset)
-                        player_node.scheduleSegment_startingFrame_frameCount_atTime_completionHandler_(
-                            audio_file, frame_offset, play_frames, None, None
-                        )
-                    else:
-                        player_node.scheduleFile_atTime_completionHandler_(
-                            audio_file, None, None
-                        )
+                        # Schedule the audio file on the player node.
+                        # Completion handler is intentionally None — end-of-track
+                        # detection is handled by the polling thread watching
+                        # player_node.isPlaying(), which avoids the ObjC void-return
+                        # constraint on Python lambdas.
+                        if start_time > 0:
+                            # Seek to a frame offset by scheduling only the tail segment.
+                            sample_rate  = file_format.sampleRate()
+                            frame_offset = int(start_time * sample_rate)
+                            total_frames = int(audio_file.length())
+                            play_frames  = max(1, total_frames - frame_offset)
+                            player_node.scheduleSegment_startingFrame_frameCount_atTime_completionHandler_(
+                                audio_file, frame_offset, play_frames, None, None
+                            )
+                        else:
+                            player_node.scheduleFile_atTime_completionHandler_(
+                                audio_file, None, None
+                            )
 
-                    player_node.play()
+                        player_node.play()
 
-                    # Read duration from the file
-                    sample_rate = file_format.sampleRate()
-                    length      = audio_file.length()
-                    dur = float(length) / float(sample_rate) if sample_rate > 0 else 0.0
+                        # Read duration from the file
+                        sample_rate = file_format.sampleRate()
+                        length      = audio_file.length()
+                        dur = float(length) / float(sample_rate) if sample_rate > 0 else 0.0
 
-                    self._dsp_engine  = engine
-                    self._dsp_player  = player_node
-                    self._dsp_eq      = eq_node
-                    self._player      = None   # not using bare AVAudioPlayer
+                        self._dsp_engine  = engine
+                        self._dsp_player  = player_node
+                        self._dsp_eq      = eq_node
+                        self._player      = None   # not using bare AVAudioPlayer
+                        self._dsp_start_time = float(start_time)
+                        self._update_player_volume()
+
+                        if dur > 0:
+                            self._set("duration", dur)
+                        self._set("position", float(start_time))
+                        self._set("is_playing", True)
+                        self._spawn_poller(player_node=player_node)
+                        return
+
+                    except Exception as dsp_err:
+                        logger.error("AVAudioEngine DSP chain failed (%s), falling back to AVAudioPlayer", dsp_err, exc_info=True)
+                        # Tear down partial engine
+                        try:
+                            if self._dsp_engine:
+                                self._dsp_engine.stop()
+                        except Exception:
+                            pass
+                        self._dsp_engine = self._dsp_player = self._dsp_eq = None
+
+                # ── Fallback/Remote path ───────────────────────────────────────
+                if is_remote and AVPlayer is not None:
+                    # Remote stream path: AVPlayer. Its asset-loading state
+                    # machine is driven by the *main* run loop (serviced by
+                    # Flutter in the Flet app), not by the Python/asyncio thread
+                    # this runs on. Creating the player off-main leaves the item
+                    # stuck at AVPlayerItemStatusUnknown forever — metadata shows
+                    # but nothing ever plays. Marshal creation + play() onto the
+                    # main thread so the run loop adopts and advances it.
+                    def _create_remote_player():
+                        p = AVPlayer.alloc().initWithURL_(url)
+                        if start_time > 0 and CMTimeMakeWithSeconds is not None:
+                            p.seekToTime_(CMTimeMakeWithSeconds(float(start_time), 1000))
+                        p.play()
+                        return p
+                    player = self._run_on_main(_create_remote_player)
+                    if player is None:
+                        raise RuntimeError("AVPlayer creation on main thread failed/timed out")
+                    self._player = player
                     self._dsp_start_time = float(start_time)
-                    self._update_player_volume()
-
-                    if dur > 0:
-                        self._set("duration", dur)
                     self._set("position", float(start_time))
                     self._set("is_playing", True)
-                    self._spawn_poller(player_node=player_node)
-                    return
+                    self._spawn_poller()
+                else:
+                    # Fallback path: bare AVAudioPlayer (no DSP)
+                    player, error = AVAudioPlayer.alloc().initWithContentsOfURL_error_(url, None)
+                    if player is None:
+                        raise RuntimeError(f"AVAudioPlayer init failed: {error}")
+                    player.prepareToPlay()
+                    if start_time > 0:
+                        player.setCurrentTime_(float(start_time))
+                    if not player.play():
+                        raise RuntimeError("AVAudioPlayer.play() returned False")
 
-                except Exception as dsp_err:
-                    logger.error("AVAudioEngine DSP chain failed (%s), falling back to AVAudioPlayer", dsp_err, exc_info=True)
-                    # Tear down partial engine
-                    try:
-                        if self._dsp_engine:
-                            self._dsp_engine.stop()
-                    except Exception:
-                        pass
-                    self._dsp_engine = self._dsp_player = self._dsp_eq = None
-
-                # ── Fallback path: bare AVAudioPlayer (no DSP) ───────────────
-                player, error = AVAudioPlayer.alloc().initWithContentsOfURL_error_(url, None)
-                if player is None:
-                    raise RuntimeError(f"AVAudioPlayer init failed: {error}")
-                player.prepareToPlay()
-                if start_time > 0:
-                    player.setCurrentTime_(float(start_time))
-                if not player.play():
-                    raise RuntimeError("AVAudioPlayer.play() returned False")
-
-                self._player = player
-                dur = float(player.duration() or 0.0)
-                if dur > 0:
-                    self._set("duration", dur)
-                self._dsp_start_time = float(start_time)
-                self._set("position", float(start_time))
-                self._set("is_playing", True)
-                self._spawn_poller()
+                    self._player = player
+                    dur = float(player.duration() or 0.0)
+                    if dur > 0:
+                        self._set("duration", dur)
+                    self._dsp_start_time = float(start_time)
+                    self._set("position", float(start_time))
+                    self._set("is_playing", True)
+                    self._spawn_poller()
             except Exception as e:
                 logger.error(f"_start_playback error: {e}")
                 self._player = None
@@ -494,9 +572,61 @@ class AudioEngine:
                             pos = self.position
                         playing = bool(player_node.isPlaying())
                     else:
-                        # Bare AVAudioPlayer fallback
-                        pos     = float(av_player.currentTime())
-                        playing = bool(av_player.isPlaying())
+                        # Fallback players: bare AVAudioPlayer or AVPlayer
+                        if AVPlayer is not None and isinstance(av_player, AVPlayer):
+                            # AVPlayer (remote URL)
+                            current_time = av_player.currentTime()
+                            if current_time and current_time.timescale > 0:
+                                pos = float(current_time.value) / float(current_time.timescale)
+                            else:
+                                pos = self.position
+
+                            player_status = av_player.status()
+                            current_item = av_player.currentItem()
+                            item_status = current_item.status() if current_item else 0
+
+                            # If failed, treat as not playing and dispatch error
+                            if player_status == 2 or item_status == 2:
+                                err_msg = "Unknown AVPlayer error"
+                                try:
+                                    if player_status == 2 and av_player.error():
+                                        err_msg = str(av_player.error().localizedDescription() or av_player.error())
+                                    elif item_status == 2 and current_item and current_item.error():
+                                        err_msg = str(current_item.error().localizedDescription() or current_item.error())
+                                except Exception as err_exc:
+                                    err_msg = f"Failed to retrieve details: {err_exc}"
+                                logger.error("AVPlayer remote playback failed: %s", err_msg)
+                                self.dispatch("on_playback_error", err_msg)
+                                playing = False
+                            else:
+                                # AVPlayerStatusUnknown = 0, AVPlayerItemStatusUnknown = 0
+                                is_loading = (player_status == 0 or item_status == 0)
+                                if is_loading:
+                                    playing = True
+                                else:
+                                    rate = av_player.rate()
+                                    if rate > 0.0:
+                                        playing = True
+                                    else:
+                                        # If rate is 0.0, the player might be buffering or has ended.
+                                        # It has only ended if we have a valid duration and pos is close to it.
+                                        if self.duration and self.duration > 0.0 and pos >= self.duration - 1.0:
+                                            playing = False
+                                        else:
+                                            playing = True
+
+                            # Try to get duration if not already set
+                            if not self.duration or self.duration == 0.0:
+                                if current_item:
+                                    dur_cm = current_item.duration()
+                                    if dur_cm and dur_cm.timescale > 0:
+                                        dur_sec = float(dur_cm.value) / float(dur_cm.timescale)
+                                        if dur_sec > 0:
+                                            self._set("duration", dur_sec)
+                        else:
+                            # Bare AVAudioPlayer
+                            pos     = float(av_player.currentTime())
+                            playing = bool(av_player.isPlaying())
                 except Exception:
                     break
 
@@ -541,7 +671,10 @@ class AudioEngine:
             self._dsp_eq = None
             if self._player:
                 try:
-                    self._player.stop()
+                    if AVPlayer is not None and isinstance(self._player, AVPlayer):
+                        self._player.pause()
+                    else:
+                        self._player.stop()
                 except Exception:
                     pass
                 self._player = None
@@ -566,10 +699,16 @@ class AudioEngine:
             # Legacy fallback path
             if self._player is not None:
                 try:
-                    if self._player.play():
+                    if AVPlayer is not None and isinstance(self._player, AVPlayer):
+                        self._player.play()
                         self._set("is_playing", True)
                         self._spawn_poller()
                         return
+                    else:
+                        if self._player.play():
+                            self._set("is_playing", True)
+                            self._spawn_poller()
+                            return
                 except Exception as e:
                     logger.error(f"Resume failed, restarting: {e}")
             path = self.queue[self.current_index].get("path")
@@ -620,7 +759,11 @@ class AudioEngine:
                         self.pause()
             elif self._player is not None:
                 try:
-                    self._player.setCurrentTime_(bounded)
+                    if AVPlayer is not None and isinstance(self._player, AVPlayer):
+                        if CMTimeMakeWithSeconds is not None:
+                            self._player.seekToTime_(CMTimeMakeWithSeconds(bounded, 1000))
+                    else:
+                        self._player.setCurrentTime_(bounded)
                 except Exception as e:
                     logger.error(f"seek error: {e}")
 
@@ -717,6 +860,24 @@ class AudioEngine:
             self.queue.append(track)
             if self._is_shuffle:
                 self._on_track_added_to_shuffle(len(self.queue) - 1, play_next=False)
+            self.dispatch("on_queue_mutated")
+
+    def queue_extend(self, tracks: list[dict]):
+        """Append several tracks with a single on_queue_mutated dispatch (one
+        queue-sheet rebuild) instead of one per track. macOS has no native
+        playlist to mirror, so this only touches Python-side state. Parity
+        with the Android engine so main.py's block-replenishment is engine-
+        agnostic."""
+        with self._lock:
+            if not tracks:
+                return
+            if not self.queue:
+                self.set_queue(tracks)
+                return
+            for track in tracks:
+                self.queue.append(track)
+                if self._is_shuffle:
+                    self._on_track_added_to_shuffle(len(self.queue) - 1, play_next=False)
             self.dispatch("on_queue_mutated")
 
     def play_track_at(self, index: int):

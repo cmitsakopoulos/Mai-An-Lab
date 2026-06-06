@@ -109,6 +109,20 @@ class StreamripSearcher:
                 await StreamripSearcher._client.login()
             return StreamripSearcher._client
 
+    async def get_track_stream_url(self, track_id: str, quality: int = 1) -> str:
+        loop = self._get_loop()
+        future = asyncio.run_coroutine_threadsafe(
+            self._get_track_stream_url_async(track_id, quality),
+            loop
+        )
+        return await asyncio.wrap_future(future)
+
+    async def _get_track_stream_url_async(self, track_id: str, quality: int) -> str:
+        client = await self._get_client()
+        downloadable = await client.get_downloadable(track_id, quality)
+        return downloadable.url
+
+
     def get_artist_albums(self, artist_id: str, callback, limit: int = 30, offset: int = 0) -> None:
         loop = self._get_loop()
         asyncio.run_coroutine_threadsafe(

@@ -152,21 +152,21 @@ class FletAudioService extends FletService with WidgetsBindingObserver {
             : Map<String, dynamic>.from(args as Map);
     switch (name) {
       case 'play':
-        _handler?.play();
+        _fireAndReport(_handler?.play());
 
       case 'pause':
-        _handler?.pause();
+        _fireAndReport(_handler?.pause());
 
       case 'stop':
-        _handler?.stop();
+        _fireAndReport(_handler?.stop());
 
       case 'seek':
         final ms = (a['position'] as num?)?.toInt() ?? 0;
-        _handler?.seek(Duration(milliseconds: ms));
+        _fireAndReport(_handler?.seek(Duration(milliseconds: ms)));
 
       case 'set_media_item':
         final item = _mediaItemFromMap(a);
-        _handler?.setMediaItem(item, a['src'] as String?);
+        _fireAndReport(_handler?.setMediaItem(item, a['src'] as String?));
 
       case 'set_playlist':
         final rawItems = (a['items'] as List<dynamic>?) ?? [];
@@ -180,32 +180,50 @@ class FletAudioService extends FletService with WidgetsBindingObserver {
               : Map<String, dynamic>.from(raw as Map);
           return _mediaItemFromMap(m);
         }).toList();
-        _handler?.setPlaylist(items, startIndex);
+        _fireAndReport(_handler?.setPlaylist(items, startIndex));
 
       case 'add_queue_item':
         final item = _mediaItemFromMap(a);
         final index = (a['index'] as num?)?.toInt() ??
             (_handler?.queue.value.length ?? 0);
-        _handler?.addQueueItemAt(item, index);
+        _fireAndReport(_handler?.addQueueItemAt(item, index));
+
+      case 'add_queue_items':
+        // Batch insert: Python sends the whole block in one call, each item
+        // carrying its own insertion index (computed in append order, which
+        // also reproduces shuffle's scattered positions). Dart performs the N
+        // inserts locally so the IPC cost is one round-trip, not N.
+        final rawItems = (a['items'] as List<dynamic>?) ?? [];
+        final batchItems = <MediaItem>[];
+        final batchIndices = <int>[];
+        for (final raw in rawItems) {
+          final m = raw is Map<String, dynamic>
+              ? raw
+              : Map<String, dynamic>.from(raw as Map);
+          batchItems.add(_mediaItemFromMap(m));
+          batchIndices.add((m['index'] as num?)?.toInt() ??
+              (_handler?.queue.value.length ?? 0));
+        }
+        _fireAndReport(_handler?.addQueueItemsAt(batchItems, batchIndices));
 
       case 'remove_queue_item':
         final index = (a['index'] as num?)?.toInt() ?? 0;
-        _handler?.removeQueueItemAt(index);
+        _fireAndReport(_handler?.removeQueueItemAt(index));
 
       case 'move_queue_item':
         final from = (a['from_index'] as num?)?.toInt() ?? 0;
         final to = (a['to_index'] as num?)?.toInt() ?? 0;
-        _handler?.moveQueueItem(from, to);
+        _fireAndReport(_handler?.moveQueueItem(from, to));
 
       case 'skip_to_next':
-        _handler?.skipToNext();
+        _fireAndReport(_handler?.skipToNext());
 
       case 'skip_to_previous':
-        _handler?.skipToPrevious();
+        _fireAndReport(_handler?.skipToPrevious());
 
       case 'skip_to_index':
         final index = (a['index'] as num?)?.toInt() ?? 0;
-        _handler?.skipToQueueItem(index);
+        _fireAndReport(_handler?.skipToQueueItem(index));
 
       case 'set_repeat_mode':
         final mode = a['mode'] as String? ?? 'none';
@@ -214,7 +232,7 @@ class FletAudioService extends FletService with WidgetsBindingObserver {
           'all': AudioServiceRepeatMode.all,
           'none': AudioServiceRepeatMode.none,
         }[mode] ?? AudioServiceRepeatMode.none;
-        _handler?.setRepeatMode(repeatMode);
+        _fireAndReport(_handler?.setRepeatMode(repeatMode));
 
       case 'show_progress_notification':
         final title = (a['title'] as String?) ?? '';
@@ -351,6 +369,19 @@ class FletAudioService extends FletService with WidgetsBindingObserver {
         throw Exception("Unknown FletAudioService method: $name");
     }
     return null;
+  }
+
+  /// Fire a handler Future without awaiting it (so _invokeMethod returns
+  /// immediately and never trips the Flet method-channel's 10s timeout on a
+  /// slow cold-start operation), but surface any rejection to Python as an
+  /// instant "error" event. Before this, a thrown setPlaylist/setAudioSource
+  /// (e.g. an unplayable stream URL) was swallowed, and the Python side only
+  /// discovered the failure by timing out its own wait loop.
+  void _fireAndReport(Future<dynamic>? future) {
+    future?.catchError((Object e, StackTrace st) {
+      debugPrint("FletAudioService: handler error → $e");
+      control.triggerEvent("error", e.toString());
+    });
   }
 
   Future<FlutterTts> _ensureTts() async {
@@ -830,12 +861,17 @@ class AudioPlayerHandler extends BaseAudioHandler with QueueHandler, SeekHandler
 
     _player.sequenceStateStream.listen((state) {
       if (state == null) return;
+      // Defensive: a source with a null/non-MediaItem tag (can happen during
+      // a mid-load sequence swap) would throw on a forced `as MediaItem` cast
+      // and kill this listener, freezing all future queue/mediaItem updates.
+      // whereType filters those out instead.
       final items = state.effectiveSequence
-          .map((source) => source.tag as MediaItem)
+          .map((source) => source.tag)
+          .whereType<MediaItem>()
           .toList();
       queue.add(items);
-      final current = state.currentSource?.tag as MediaItem?;
-      if (current != null) mediaItem.add(current);
+      final current = state.currentSource?.tag;
+      if (current is MediaItem) mediaItem.add(current);
     });
 
     _initAudioSession();
@@ -952,9 +988,19 @@ class AudioPlayerHandler extends BaseAudioHandler with QueueHandler, SeekHandler
 
   AudioSource _buildAudioSource(String src, MediaItem item) {
     try {
+      // A bare filesystem path (leading '/') is a local file. Routing it
+      // through AudioSource.uri makes ExoPlayer treat it as a schemeless
+      // network URI and fail to load, so handle it explicitly first.
+      if (src.startsWith('/')) {
+        return AudioSource.file(src, tag: item);
+      }
       final uri = Uri.parse(src);
       if (uri.isScheme('file')) {
         return AudioSource.file(uri.toFilePath(), tag: item);
+      }
+      // Any source that parsed without a scheme is also a local path.
+      if (!uri.hasScheme) {
+        return AudioSource.file(src, tag: item);
       }
       return AudioSource.uri(uri, tag: item);
     } catch (_) {
@@ -1008,6 +1054,25 @@ class AudioPlayerHandler extends BaseAudioHandler with QueueHandler, SeekHandler
     );
     final updated = List<MediaItem>.from(queue.value);
     updated.insert(index.clamp(0, updated.length), item);
+    queue.add(updated);
+  }
+
+  /// Batch sibling of addQueueItemAt: insert several items in one pass with a
+  /// single queue.add() at the end. Indices are applied in order (each against
+  /// the growing playlist), matching N sequential addQueueItemAt calls, so the
+  /// active source is never torn down and playback continues uninterrupted.
+  Future<void> addQueueItemsAt(List<MediaItem> items, List<int> indices) async {
+    if (items.isEmpty) return;
+    final updated = List<MediaItem>.from(queue.value);
+    for (var i = 0; i < items.length; i++) {
+      final item = items[i];
+      final idx = i < indices.length ? indices[i] : _playlist.children.length;
+      await _playlist.insert(
+        idx.clamp(0, _playlist.children.length),
+        _buildAudioSource(item.id, item),
+      );
+      updated.insert(idx.clamp(0, updated.length), item);
+    }
     queue.add(updated);
   }
 

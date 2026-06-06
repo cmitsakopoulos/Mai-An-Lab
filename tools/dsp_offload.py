@@ -156,31 +156,123 @@ def _adb_pull_chunk(
     return out
 
 
-def _ffmpeg_decode(ffmpeg: str, src_path: str, out_pcm: str) -> bool:
-    """Decode MAX_SECONDS from the middle to mono 16-bit LE PCM at
-    TARGET_SAMPLE_RATE. Mirrors `_decode_pcm_ffmpeg` in
-    StreamripApp/utils/dsp.py, but sync. MAX_SECONDS is imported from the
-    app's dsp module so this script tracks the canonical window length
-    without manual coordination."""
+def _run_ffmpeg_to_pcm(ffmpeg: str, in_path: str, out_pcm: str, seek: bool) -> tuple[bool, str]:
+    """Run one ffmpeg decode of `in_path` to mono 16-bit LE PCM at
+    TARGET_SAMPLE_RATE. `seek` skips the first 15 s (the canonical middle
+    window); disable it for very short tracks. Returns (ok, stderr)."""
     from utils.dsp import MAX_SECONDS  # imported lazily to keep top tidy
-    cmd = [
-        ffmpeg, "-hide_banner", "-loglevel", "error",
-        "-ss", "15", "-t", str(MAX_SECONDS),
-        "-i", src_path,
+    cmd = [ffmpeg, "-hide_banner", "-loglevel", "error"]
+    if seek:
+        cmd += ["-ss", "15"]
+    cmd += [
+        "-t", str(MAX_SECONDS),
+        "-i", in_path,
         "-f", "s16le", "-acodec", "pcm_s16le",
         "-ac", "1",
         "-ar", str(TARGET_SAMPLE_RATE),
         "-y", out_pcm,
     ]
     proc = subprocess.run(cmd, capture_output=True, text=True)
-    if proc.returncode == 0 and os.path.exists(out_pcm) and os.path.getsize(out_pcm) > 0:
+    ok = proc.returncode == 0 and os.path.exists(out_pcm) and os.path.getsize(out_pcm) > 0
+    return ok, proc.stderr
+
+
+def _relocate_moov_to_front(src_path: str) -> str | None:
+    """Rewrite a fragmented MP4 whose `moov` init box sits at the END (after the
+    moof/mdat fragments) into faststart order (ftyp, moov, ...).
+
+    ffmpeg's mov demuxer reads sequentially and aborts on the first `moof`
+    before it ever reaches a trailing `moov` ("trun track id unknown, no tfhd
+    was found" / "error reading header"). Android's MediaExtractor locates the
+    moov regardless of position, which is why such files (e.g. FLAC-in-fMP4)
+    play on-device and decode in the app's on-device analyser but fail here.
+
+    Moving moov to the front is a pure byte copy (no re-encode) and is safe for
+    fragmented MP4 because `trun` data offsets are moof-relative, not absolute.
+    Returns a temp file path the caller must delete, or None if the file isn't a
+    fragmented MP4 with a trailing moov (i.e. relocation wouldn't help)."""
+    import struct
+    try:
+        with open(src_path, "rb") as f:
+            blob = f.read()
+    except OSError:
+        return None
+    boxes: list[tuple[bytes, int, int]] = []
+    off, n = 0, len(blob)
+    while off + 8 <= n:
+        size = struct.unpack(">I", blob[off:off + 4])[0]
+        typ = blob[off + 4:off + 8]
+        if size == 1:                      # 64-bit extended size
+            if off + 16 > n:
+                break
+            size = struct.unpack(">Q", blob[off + 8:off + 16])[0]
+        elif size == 0:                    # box runs to EOF
+            size = n - off
+        if size < 8 or off + size > n:
+            break
+        boxes.append((typ, off, size))
+        off += size
+
+    types = [b[0] for b in boxes]
+    if b"moov" not in types or b"moof" not in types:
+        return None  # not fragmented, or no moov to move
+    first_moof = next(i for i, b in enumerate(boxes) if b[0] == b"moof")
+    moov_idx = next(i for i, b in enumerate(boxes) if b[0] == b"moov")
+    if moov_idx < first_moof:
+        return None  # already faststart-ordered; relocation won't change anything
+
+    ordered = ([b for b in boxes if b[0] == b"ftyp"]
+               + [b for b in boxes if b[0] == b"moov"]
+               + [b for b in boxes if b[0] not in (b"ftyp", b"moov")])
+    fd, tmp = tempfile.mkstemp(suffix=".m4a", prefix="moovfix_")
+    try:
+        with os.fdopen(fd, "wb") as o:
+            for _typ, o0, sz in ordered:
+                o.write(blob[o0:o0 + sz])
+    except OSError:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        return None
+    return tmp
+
+
+def _ffmpeg_decode(ffmpeg: str, src_path: str, out_pcm: str) -> bool:
+    """Decode MAX_SECONDS from the middle to mono 16-bit LE PCM at
+    TARGET_SAMPLE_RATE. Mirrors `_decode_pcm_ffmpeg` in
+    StreamripApp/utils/dsp.py, but sync. MAX_SECONDS is imported from the
+    app's dsp module so this script tracks the canonical window length
+    without manual coordination."""
+    ok, _ = _run_ffmpeg_to_pcm(ffmpeg, src_path, out_pcm, seek=True)
+    if ok:
         return True
     # Retry without the seek for very short tracks.
-    cmd_retry = [c for c in cmd if c not in ("-ss", "15")]
-    proc = subprocess.run(cmd_retry, capture_output=True, text=True)
-    if proc.returncode == 0 and os.path.exists(out_pcm) and os.path.getsize(out_pcm) > 0:
+    ok, err = _run_ffmpeg_to_pcm(ffmpeg, src_path, out_pcm, seek=False)
+    if ok:
         return True
-    log.warning("ffmpeg decode failed for %s: %s", src_path, proc.stderr.strip())
+
+    # Last resort: fragmented MP4 with the moov init box at the END. ffmpeg
+    # aborts on the first moof before reaching it; relocate moov to the front
+    # and retry once. (These files play fine on-device because Android's
+    # extractor finds the moov wherever it is.)
+    fixed = _relocate_moov_to_front(src_path)
+    if fixed:
+        try:
+            ok, retry_err = _run_ffmpeg_to_pcm(ffmpeg, fixed, out_pcm, seek=True)
+            if not ok:
+                ok, retry_err = _run_ffmpeg_to_pcm(ffmpeg, fixed, out_pcm, seek=False)
+            if ok:
+                log.info("decoded %s via moov-relocation (fragmented MP4, moov-at-end)", src_path)
+                return True
+            err = retry_err
+        finally:
+            try:
+                os.remove(fixed)
+            except OSError:
+                pass
+
+    log.warning("ffmpeg decode failed for %s: %s", src_path, err.strip())
     return False
 
 

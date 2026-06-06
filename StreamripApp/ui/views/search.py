@@ -42,6 +42,8 @@ class SearchView:
         # Keyed by media_type singular ("track", "album", "artist").
         self.cached_results: dict[str, list[dict]] = {"track": [], "album": [], "artist": []}
         self._active_preview_data: dict | None = None
+        self._active_preview_task: asyncio.Task | None = None
+        self._active_preview_stop_event: asyncio.Event | None = None
         self.expanded_nodes: set[str] = set() # Track IDs/Artist IDs of expanded items
         self.node_cache: dict[str, list[dict]] = {} # Cache for expanded node children
         self.view_mode = "tracks" # artist, album, track (plural, matches tab labels)
@@ -326,6 +328,47 @@ class SearchView:
             animate_opacity=ft.Animation(250, ft.AnimationCurve.EASE_OUT),
         )
 
+        # Preview progress card
+        self._preview_progress_status = ft.Text("Loading Preview...", color=TEXT, size=13, weight=ft.FontWeight.W_700)
+        self._preview_progress_detail = ft.Text("Initializing...", color=DIM, size=11, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS)
+        self._preview_progress_spinner = ft.ProgressRing(width=18, height=18, stroke_width=2, color=CYAN)
+        self._preview_cancel_btn = ft.IconButton(
+            icon=ft.Icons.CLOSE,
+            icon_color=DIM,
+            icon_size=16,
+            tooltip="Cancel Preview",
+            on_click=self._cancel_preview_click,
+        )
+
+        self._preview_progress_card = ft.Container(
+            content=ft.Row(
+                [
+                    self._preview_progress_spinner,
+                    ft.Column(
+                        [
+                            self._preview_progress_status,
+                            self._preview_progress_detail,
+                        ],
+                        spacing=2,
+                        expand=True,
+                    ),
+                    self._preview_cancel_btn,
+                ],
+                spacing=12,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            bgcolor=SURFACE,
+            border=ft.Border.all(1, CYAN + "55"),
+            border_radius=12,
+            padding=14,
+            margin=ft.Margin.symmetric(horizontal=12),
+            visible=False,
+            offset=ft.Offset(0, 0.4),
+            animate_offset=ft.Animation(300, ft.AnimationCurve.EASE_OUT_BACK),
+            opacity=0,
+            animate_opacity=ft.Animation(250, ft.AnimationCurve.EASE_OUT),
+        )
+
         # pending queue list
         self._pending_list = ft.ListView(spacing=6, padding=ft.Padding.symmetric(horizontal=12))
 
@@ -416,6 +459,7 @@ class SearchView:
                 ),
 
                 self._progress_card,
+                self._preview_progress_card,
                 self._search_progress_card,
                 
                 # Main Results Area
@@ -1314,47 +1358,156 @@ class SearchView:
         self.app.safe_update(_mutate)
 
     def _start_preview(self, index: int, data: dict, icon_ctrl: ft.Icon, container_ctrl: ft.Container):
+        if self._active_preview_task and not self._active_preview_task.done():
+            self._active_preview_task.cancel()
+        if hasattr(self, "_active_preview_stop_event") and self._active_preview_stop_event:
+            self._active_preview_stop_event.set()
+
+        self._active_preview_stop_event = asyncio.Event()
+
         async def _worker():
             try:
+                track_id = data.get("id")
+                title = re.sub(r"\[.*?\]", "", data.get("ui_title", data.get("name", ""))).strip()
+                artist = data.get("ui_subtitle", data.get("artist", ""))
+                
+                self.show_preview_progress("Connecting...", f"Resolving stream URL for '{title}'...")
+                
+                stream_url = None
+                if track_id:
+                    try:
+                        # Attempt to resolve direct stream URL
+                        stream_url = await self.searcher.get_track_stream_url(str(track_id), quality=1)
+                        logger.info("Direct preview stream URL resolved: %s", stream_url)
+                    except Exception as stream_exc:
+                        logger.warning("Streaming URL resolution failed, falling back to download: %s", stream_exc)
+                        self.update_preview_progress(
+                            "Streaming Unavailable", 
+                            "Falling back to preview download..."
+                        )
+                        await asyncio.sleep(1.2) # Let the user read the status message
+                
+                # If we successfully resolved the stream URL, play it
+                if stream_url:
+                    meta = {
+                        "path":         stream_url,
+                        "track_title":  f"(Preview) {title}",
+                        "artist_name":  artist,
+                        "album_title":  "Streamrip Search",
+                        "image_url":    data.get("image_url", data.get("image", "")),
+                    }
+                    
+                    # Play the stream via audio engine
+                    audio_engine.jarvis_controlled = False
+                    audio_engine.set_queue([meta], start_index=0)
+                    
+                    # Monitor streaming playback for start success or error failure
+                    playback_failed = False
+                    error_signal = asyncio.Event()
+                    
+                    def on_err(_inst, _msg):
+                        error_signal.set()
+                        
+                    audio_engine.bind(on_playback_error=on_err)
+                    try:
+                        # Wait up to 6.0 seconds (60 * 0.1s) to see if it starts playing or fails
+                        for _ in range(60):
+                            if error_signal.is_set():
+                                playback_failed = True
+                                break
+                            if audio_engine.is_playing and (audio_engine.duration > 0.0 or audio_engine.position > 0.0):
+                                break
+                            await asyncio.sleep(0.1)
+                    finally:
+                        audio_engine.unbind(on_playback_error=on_err)
+                        
+                    if not playback_failed:
+                        def _play_success():
+                            data["preview_state"] = "playing"
+                            icon_ctrl.content = ft.Icon(ft.Icons.STOP_CIRCLE_OUTLINED, color=CYAN, size=20)
+                            container_ctrl.shadow = ft.BoxShadow(blur_radius=8, color=apply_opacity(0.15, CYAN))
+                            self.app.show_snackbar(f"Streaming preview: {title}")
+                            icon_ctrl.update()
+                            container_ctrl.update()
+                            self.hide_preview_progress()
+                        self.app.safe_update(_play_success)
+                        return
+                    else:
+                        logger.warning("Stream URL resolved but playback failed. Falling back to preview download...")
+                        self.update_preview_progress(
+                            "Stream Playback Failed", 
+                            "Falling back to preview download..."
+                        )
+                        await asyncio.sleep(1.2)
+                
+                # FALLBACK LOGIC: Download preview file
                 from utils.streamrip_api import download as _do_download
                 url       = data.get("url", "")
-                title     = re.sub(r"\[.*?\]", "", data.get("ui_title", data.get("name", ""))).strip()
                 safe_name = "".join(c if c.isalnum() else "_" for c in title[:20])
                 pdir      = os.path.join(get_app_dir(), "previews", f"{index}_{safe_name}")
                 await asyncio.to_thread(os.makedirs, pdir, exist_ok=True)
 
                 audio_file = await self._find_audio(pdir)
                 if not audio_file and url:
-                    if asyncio.iscoroutinefunction(_do_download):
-                        await _do_download(url, pdir, quality=1) 
-                    else:
-                        await asyncio.to_thread(_do_download, url, pdir, quality=1)
+                    self.update_preview_progress("Downloading...", f"Fetching preview for '{title}'...")
                     
+                    # Define progress callback for download
+                    def dl_progress(status_data):
+                        pct = status_data.get("percent", 0)
+                        msg = status_data.get("message", "")
+                        self.update_preview_progress(
+                            f"Downloading ({pct}%)...", 
+                            msg
+                        )
+
+                    if self._active_preview_stop_event.is_set():
+                        raise asyncio.CancelledError()
+
+                    if asyncio.iscoroutinefunction(_do_download):
+                        await _do_download(url, pdir, progress_callback=dl_progress, quality=1, stop_event=self._active_preview_stop_event) 
+                    else:
+                        await asyncio.to_thread(_do_download, url, pdir, progress_callback=dl_progress, quality=1, stop_event=self._active_preview_stop_event)
+                    
+                    if self._active_preview_stop_event.is_set():
+                        raise asyncio.CancelledError()
+                        
                     audio_file = await self._find_audio(pdir)
 
                 if audio_file:
                     meta = {
                         "path":         audio_file,
                         "track_title":  f"(Preview) {title}",
-                        "artist_name":  data.get("ui_subtitle", data.get("artist", "")),
+                        "artist_name":  artist,
                         "album_title":  "Streamrip Search",
                         "image_url":    data.get("image_url", data.get("image", "")),
                     }
-                    def _play_success():
+                    def _play_success_downloaded():
                         data["preview_state"] = "playing"
                         icon_ctrl.content = ft.Icon(ft.Icons.STOP_CIRCLE_OUTLINED, color=CYAN, size=20)
                         container_ctrl.shadow = ft.BoxShadow(blur_radius=8, color=apply_opacity(0.15, CYAN))
                         audio_engine.jarvis_controlled = False
                         audio_engine.set_queue([meta], start_index=0)
-                        self.app.show_snackbar(f"Playing preview: {title}")
+                        self.app.show_snackbar(f"Playing preview (downloaded): {title}")
                         icon_ctrl.update()
                         container_ctrl.update()
+                        self.hide_preview_progress()
                         
-                    self.app.safe_update(_play_success)
+                    self.app.safe_update(_play_success_downloaded)
                 else:
                     files_found = os.listdir(pdir) if os.path.exists(pdir) else "Directory Missing"
                     logger.error("Audio not found in %s. Found instead: %s", pdir, files_found)
                     raise Exception(f"Audio not found. Content: {files_found}")
+
+            except asyncio.CancelledError:
+                logger.info("Preview task cancelled.")
+                def _play_cancelled():
+                    data["preview_state"] = "idle"
+                    icon_ctrl.content = ft.Icon(ft.Icons.PLAY_CIRCLE_OUTLINE, color=DIM, size=20)
+                    container_ctrl.shadow = ft.BoxShadow(blur_radius=0, color=ft.Colors.TRANSPARENT, spread_radius=0)
+                    icon_ctrl.update()
+                    container_ctrl.update()
+                    self.hide_preview_progress()
+                self.app.safe_update(_play_cancelled)
 
             except Exception as exc:
                 logger.error("Preview failed: %s", exc)
@@ -1367,9 +1520,10 @@ class SearchView:
                     self.app._show_error(_exc)
                     icon_ctrl.update()
                     container_ctrl.update()
+                    self.hide_preview_progress()
                 self.app.safe_update(_play_fail)
 
-        asyncio.create_task(_worker())
+        self._active_preview_task = asyncio.create_task(_worker())
 
     async def _find_audio(self, directory: str, retries: int = 5) -> str | None:
         """Scan directory for audio files, with retries to handle filesystem sync latency."""
@@ -1452,6 +1606,49 @@ class SearchView:
         def _mutate():
             self._search_progress_card.visible = False
         self.app.safe_update(_mutate)
+
+    def _cancel_preview_click(self, e):
+        if hasattr(self, "_active_preview_stop_event") and self._active_preview_stop_event:
+            self._active_preview_stop_event.set()
+        if self._active_preview_task and not self._active_preview_task.done():
+            self._active_preview_task.cancel()
+        audio_engine.stop()
+        if self._active_preview_data:
+            self._active_preview_data["preview_state"] = "idle"
+            self._active_preview_data = None
+        self.hide_preview_progress()
+        self.refresh_results_only()
+
+    def show_preview_progress(self, status: str, detail: str = ""):
+        def _mutate():
+            self._preview_progress_status.value = status
+            self._preview_progress_detail.value = detail
+            self._preview_progress_card.visible = True
+            self._preview_progress_card.opacity = 1
+            self._preview_progress_card.offset = ft.Offset(0, 0)
+        self.app.safe_update(_mutate)
+
+    def update_preview_progress(self, status: str, detail: str = ""):
+        def _mutate():
+            self._preview_progress_status.value = status
+            self._preview_progress_detail.value = detail
+        self.app.safe_update(_mutate)
+
+    def hide_preview_progress(self):
+        def _mutate():
+            self._preview_progress_card.opacity = 0
+            self._preview_progress_card.offset = ft.Offset(0, 0.4)
+        self.app.safe_update(_mutate)
+        async def _delayed_hide():
+            await asyncio.sleep(0.3)
+            self._hide_preview_card_done()
+        asyncio.create_task(_delayed_hide())
+
+    def _hide_preview_card_done(self):
+        def _mutate():
+            self._preview_progress_card.visible = False
+        self.app.safe_update(_mutate)
+
 
     def update_progress(self, status: str, pct: float | None, detail: str = ""):
         self._progress_status.value = status
