@@ -29,6 +29,7 @@ Mai-An Lab uses a multi-layered bridge to interface a CPython backend with Andro
 To prevent the Android OS from killing the Python process during background playback, the Kotlin layer initializes an **Android Foreground Service** with a `MediaSession`. This ensures:
 - The app maintains a persistent notification.
 - Playback controls work from the lock screen and Bluetooth devices.
+- A custom refresh action button in the notification shade dispatches a `replenish_queue` command to trigger background queue replenishment on-demand.
 - The Python interpreter remains active in the background.
 
 ### Android-Specific Performance Optimizations
@@ -418,6 +419,9 @@ The catalog database (SQLite) manages records across the following tables:
 - **Pre-Computed Denormalization**: To avoid expensive nested `SELECT COUNT` joins at runtime, pre-computed aggregate columns (`artists.album_count`, `artists.track_count`, and `albums.track_count`) are maintained. These fields are synchronized via database triggers on insert, delete, or update, ensuring $O(1)$ read latency during scroll and navigation.
 - **Single-Query Junction Optimization**: Playlist track counts and metadata are fetched in a single pre-joined SQL query using a `LEFT JOIN` and `GROUP BY` clause. This eliminates sequential nested query lookups on the SQLite file, avoiding thread stalls and keeping CPU loading flat.
 - **FTS5 Search & Indexing**: Diacritic-folding prefix matching is achieved via a virtual table (`fts_search`) utilizing the FTS5 module and the `unicode61` tokenizer with `remove_diacritics=1`. Changes are automatically synchronized to the FTS index via triggers.
+- **Fuzzy Search Fallback**: If FTS5 and standard `LIKE %query%` queries return zero results, the engine falls back to a custom fuzzy string matching algorithm. It computes a 2-gram (k-mer) similarity score between the query and track/album/artist fields:
+  $$S = \frac{2 \cdot |Q_2 \cap T_2|}{|Q_2| + |T_2|}$$
+  where $Q_2$ and $T_2$ are the sets of 2-character substrings (k-mers) in the query and target respectively. Results with a similarity score $\ge 0.25$ are returned, sorted in descending order of similarity.
 
 ---
 

@@ -444,6 +444,7 @@ class StreamripFletApp:
             is_playing=self._on_is_playing,
             duration=self._on_duration,
             loudness_boost_db=self._on_loudness_boost_change,
+            on_custom_action=self._on_media_custom_action,
         )
         def _on_queue_mutated(_inst, _val):
             self.safe_update(self.queue_sheet.refresh)
@@ -454,7 +455,7 @@ class StreamripFletApp:
             self._replenish_similar_queue_if_needed()
 
         audio_engine.bind(
-            on_playback_error=lambda _, d: self.show_snackbar(f"Playback error: {d}", icon=ft.Icons.ERROR_OUTLINE, color="#FF4444"),
+            on_playback_error=lambda _, d: self._on_playback_error_toast(d),
             on_queue_mutated=_on_queue_mutated,
             on_jarvis_continue=self._on_jarvis_continue,
             on_similar_continue=self._on_similar_continue,
@@ -1138,6 +1139,12 @@ class StreamripFletApp:
 
         self.safe_update(_atomic_update)
 
+    def _on_media_custom_action(self, _instance, data: dict):
+        """Called when the user clicks a custom button in the media notification."""
+        name = data.get("name")
+        if name == "replenish_queue":
+            self.page.run_task(self._force_replenish_similar_queue)
+
     async def _record_play_event_safe(self, path: str, played: float, duration: float):
         """Background-safe wrapper around tg.record_play_event so the engine's
         sync dispatch doesn't get coupled to import-time / DB errors. Also
@@ -1508,6 +1515,40 @@ class StreamripFletApp:
             if path:
                 self._play_similar_recommendation_in_progress = True
                 self.page.run_task(self._recommend_similar_async, path, needed, self._play_similar_gen)
+
+    async def _force_replenish_similar_queue(self):
+        """Force replenish / extend the queue using the graph walk, waking up in the background."""
+        try:
+            self.show_snackbar("Replenishing queue...", icon=ft.Icons.AUTO_AWESOME)
+        except Exception:
+            pass
+
+        if self.play_similar_mode:
+            path = None
+            if audio_engine.queue:
+                path = audio_engine.queue[-1].get("path")
+            if not path:
+                path = audio_engine.current_path
+            if path:
+                self._play_similar_recommendation_in_progress = True
+                try:
+                    await self._recommend_similar_async(path, 8, self._play_similar_gen)
+                finally:
+                    self._play_similar_recommendation_in_progress = False
+        elif getattr(self, "auto_dj_mode", False):
+            await self._auto_dj_auto_continue_queue()
+        else:
+            path = audio_engine.current_path
+            if path:
+                self.play_similar_mode = True
+                audio_engine.play_similar_seed_path = path
+                self.now_playing.update_play_similar(True)
+                self.mini_player.update_play_similar(True)
+                self._play_similar_recommendation_in_progress = True
+                try:
+                    await self._recommend_similar_async(path, 8, self._play_similar_gen)
+                finally:
+                    self._play_similar_recommendation_in_progress = False
 
     def _on_similar_continue(self, _inst, _val=None):
         """Sync callback dispatched by AudioEngine when the manually-initiated
@@ -3282,6 +3323,18 @@ class StreamripFletApp:
         asyncio.create_task(asyncio.to_thread(_save_task))
 
     # ── snackbar ─────────────────────────────────────────────────────────────
+    def _on_playback_error_toast(self, detail: str):
+        # Swallow transient just_audio load/abort races that fire during rapid
+        # skip/mutation; they self-recover and shouldn't alarm the user. Only
+        # surface genuine, sticky failures.
+        benign = ("abort", "interrupted", "Source error", "Loading interrupted",
+                  "Connection", "setAudioSource")
+        if any(b.lower() in str(detail).lower() for b in benign):
+            logger.warning("Suppressed transient playback error: %s", detail)
+            return
+        self.show_snackbar(f"Playback error: {detail}",
+                           icon=ft.Icons.ERROR_OUTLINE, color="#FF4444")
+
     def show_snackbar(self, text: str, icon=ft.Icons.NOTIFICATIONS_ROUNDED, color=CYAN):
         self.notifications.show(text, icon=icon, color=color)
 

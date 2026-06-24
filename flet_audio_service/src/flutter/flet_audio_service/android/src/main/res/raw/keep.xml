@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  ic_refresh is loaded only by name at runtime (audio_service resolves the
+  replenish_queue MediaControl's androidIcon 'drawable/ic_refresh' via
+  Resources.getIdentifier). The release build's resource shrinker can't see
+  that reference and strips the drawable as unused, so getIdentifier returns 0
+  and audio_service throws "You must specify an icon resource id", which aborts
+  the whole media notification. tools:keep pins it so it ships in the APK.
+-->
+<resources xmlns:tools="http://schemas.android.com/tools"
+    tools:keep="@drawable/ic_refresh" />

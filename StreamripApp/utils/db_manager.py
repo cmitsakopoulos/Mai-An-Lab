@@ -13,6 +13,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
+class ClosestMatchList(list):
+    pass
+
+
 class DatabaseManager:
     """
     Manages the music catalogue SQLite database with zero resource leaks.
@@ -648,6 +653,26 @@ class DatabaseManager:
         q = re.sub(r'\s+', ' ', q)
         return q
 
+    @staticmethod
+    def _kmer_similarity(query: str, target: str) -> float:
+        if not query or not target:
+            return 0.0
+        q = query.lower().strip()
+        t = target.lower().strip()
+        if q == t:
+            return 1.0
+        if q in t:
+            return 0.8 + 0.2 * (len(q) / len(t))
+            
+        q_set = {q[i:i+2] for i in range(len(q) - 1)}
+        t_set = {t[i:i+2] for i in range(len(t) - 1)}
+        
+        if not q_set or not t_set:
+            return 0.0
+            
+        intersection = q_set.intersection(t_set)
+        return 2.0 * len(intersection) / (len(q_set) + len(t_set))
+
     async def get_all_tracks(self, search_query="", sort_mode="date"):
         """Lock-free read."""
         sort_map = {
@@ -679,7 +704,29 @@ class DatabaseManager:
         like_sql = f"{base} WHERE t.title LIKE ? OR al.title LIKE ? OR ar.name LIKE ? ORDER BY {order}"
         async with conn.execute(like_sql, [like_q, like_q, like_q]) as cursor:
             rows = await cursor.fetchall()
-            return [dict(r) for r in rows]
+            results = [dict(r) for r in rows]
+
+        if not results and search_query:
+            # Fallback to closest match
+            async with conn.execute(f"{base} ORDER BY {order}") as cursor:
+                all_rows = await cursor.fetchall()
+            scored_rows = []
+            for r in all_rows:
+                title = r["title"] or ""
+                album = r["album"] or ""
+                artist = r["artist"] or ""
+                score = max(
+                    self._kmer_similarity(search_query, title),
+                    self._kmer_similarity(search_query, album),
+                    self._kmer_similarity(search_query, artist)
+                )
+                if score >= 0.25:
+                    scored_rows.append((score, dict(r)))
+            scored_rows.sort(key=lambda x: x[0], reverse=True)
+            results = ClosestMatchList(item for _, item in scored_rows)
+            results.is_closest = True
+
+        return results
 
     async def get_all_albums(self, search_query="", sort_mode="date"):
         """Lock-free read."""
@@ -716,7 +763,27 @@ class DatabaseManager:
         sql = f"{base} WHERE al.title LIKE ? OR ar.name LIKE ? {fts_subq} ORDER BY {order}"
         async with conn.execute(sql, params) as cursor:
             rows = await cursor.fetchall()
-            return [dict(r) for r in rows]
+            results = [dict(r) for r in rows]
+
+        if not results and search_query:
+            # Fallback to closest match
+            async with conn.execute(f"{base} ORDER BY {order}") as cursor:
+                all_rows = await cursor.fetchall()
+            scored_rows = []
+            for r in all_rows:
+                album = r["album"] or ""
+                artist = r["artist"] or ""
+                score = max(
+                    self._kmer_similarity(search_query, album),
+                    self._kmer_similarity(search_query, artist)
+                )
+                if score >= 0.25:
+                    scored_rows.append((score, dict(r)))
+            scored_rows.sort(key=lambda x: x[0], reverse=True)
+            results = ClosestMatchList(item for _, item in scored_rows)
+            results.is_closest = True
+
+        return results
 
     async def get_all_artists(self, search_query="", sort_mode="name"):
         """Lock-free read."""
@@ -750,7 +817,23 @@ class DatabaseManager:
         sql = f"{base} WHERE name LIKE ? {fts_subq} ORDER BY {order}"
         async with conn.execute(sql, params) as cursor:
             rows = await cursor.fetchall()
-            return [dict(r) for r in rows]
+            results = [dict(r) for r in rows]
+
+        if not results and search_query:
+            # Fallback to closest match
+            async with conn.execute(f"{base} ORDER BY {order}") as cursor:
+                all_rows = await cursor.fetchall()
+            scored_rows = []
+            for r in all_rows:
+                name = r["name"] or ""
+                score = self._kmer_similarity(search_query, name)
+                if score >= 0.25:
+                    scored_rows.append((score, dict(r)))
+            scored_rows.sort(key=lambda x: x[0], reverse=True)
+            results = ClosestMatchList(item for _, item in scored_rows)
+            results.is_closest = True
+
+        return results
 
     async def get_tracks_by_album(self, album_title, artist_name):
         """Lock-free read."""
@@ -1085,7 +1168,29 @@ class DatabaseManager:
         params = (f"%{search_query}%",) if search_query else ()
         async with conn.execute(sql, params) as cursor:
             rows = await cursor.fetchall()
-            return [dict(r) for r in rows]
+            results = [dict(r) for r in rows]
+
+        if not results and search_query:
+            sql_all = f'''
+                SELECT p.id, p.name, p.created, p.color, COUNT(pt.track_path) AS track_count
+                FROM playlists p
+                LEFT JOIN playlist_tracks pt ON pt.playlist_id = p.id
+                GROUP BY p.id
+                ORDER BY {order_col}
+            '''
+            async with conn.execute(sql_all) as cursor:
+                all_rows = await cursor.fetchall()
+            scored_rows = []
+            for r in all_rows:
+                name = r["name"] or ""
+                score = self._kmer_similarity(search_query, name)
+                if score >= 0.25:
+                    scored_rows.append((score, dict(r)))
+            scored_rows.sort(key=lambda x: x[0], reverse=True)
+            results = ClosestMatchList(item for _, item in scored_rows)
+            results.is_closest = True
+
+        return results
 
     async def get_tracks_in_playlist(self, playlist_id: int) -> list[dict]:
         """
