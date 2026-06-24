@@ -56,6 +56,7 @@ class FletAudioService extends FletService with WidgetsBindingObserver {
   StreamSubscription? _positionSub;
   StreamSubscription? _durationSub;
   StreamSubscription? _errorSub;
+  StreamSubscription? _customActionSub;
 
   // Position throttling: just_audio emits ~5x/sec which is wasted battery on
   // mobile (each emit = IPC → Python → observer dispatch → Flet rebuild).
@@ -336,7 +337,7 @@ class FletAudioService extends FletService with WidgetsBindingObserver {
             'center_frequency': b.centerFrequency,
             'gain': b.gain,
           }).toList();
-          
+
           double minDb = -15.0;
           double maxDb = 15.0;
           _handler!._equalizer.parameters.then((params) {
@@ -661,6 +662,11 @@ class FletAudioService extends FletService with WidgetsBindingObserver {
     _positionSub?.cancel();
     _durationSub?.cancel();
     _errorSub?.cancel();
+    _customActionSub?.cancel();
+
+    _customActionSub = _handler!.customActionStream.listen((event) {
+      control.triggerEvent("custom_action", jsonEncode(event));
+    });
 
     _playerStateSub = _handler!._player.playerStateStream.listen((state) {
       // currentIndex can transiently be null during seek/buffer; emitting `?? 0`
@@ -765,14 +771,17 @@ class FletAudioService extends FletService with WidgetsBindingObserver {
     final src = control.getString('src');
     if (src != null) {
       debugPrint("FletAudioService: Initial src found: $src");
+      final durationStr = control.getString('duration_ms');
+      final durationMs = durationStr != null ? int.tryParse(durationStr) : null;
       final item = MediaItem(
         id: src,
-        album: 'Flet Music',
+        album: control.getString('album') ?? 'Flet Music',
         title: control.getString('title') ?? 'Unknown',
         artist: control.getString('artist') ?? 'Unknown',
         artUri: control.getString('album_art') != null
             ? Uri.parse(control.getString('album_art')!)
             : null,
+        duration: durationMs != null ? Duration(milliseconds: durationMs) : null,
       );
       await _handler?.setMediaItem(item, src);
     }
@@ -786,6 +795,7 @@ class FletAudioService extends FletService with WidgetsBindingObserver {
     _positionSub?.cancel();
     _durationSub?.cancel();
     _errorSub?.cancel();
+    _customActionSub?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
@@ -814,12 +824,14 @@ class FletAudioService extends FletService with WidgetsBindingObserver {
         // ignore: leave artUri null
       }
     }
+    final durationMs = map['duration_ms'] as int?;
     return MediaItem(
       id: src,
-      album: 'Flet Music',
+      album: (map['album'] as String?) ?? 'Flet Music',
       title: (map['title'] as String?) ?? '',
       artist: (map['artist'] as String?) ?? '',
       artUri: artUri,
+      duration: durationMs != null ? Duration(milliseconds: durationMs) : null,
     );
   }
 }
@@ -833,6 +845,17 @@ class AudioPlayerHandler extends BaseAudioHandler with QueueHandler, SeekHandler
   final _loudnessEnhancer = AndroidLoudnessEnhancer();
   late final AudioPlayer _player;
   List<AndroidEqualizerBand>? _equalizerBands;
+
+  final _customActionController = StreamController<Map<String, dynamic>>.broadcast();
+  Stream<Map<String, dynamic>> get customActionStream => _customActionController.stream;
+
+  @override
+  Future<dynamic> customAction(String name, [Map<String, dynamic>? extras]) async {
+    if (name == 'replenish_queue') {
+      _customActionController.add({'name': name, 'extras': extras});
+    }
+    return super.customAction(name, extras);
+  }
 
   ConcatenatingAudioSource _playlist = ConcatenatingAudioSource(
     children: [],
@@ -910,12 +933,19 @@ class AudioPlayerHandler extends BaseAudioHandler with QueueHandler, SeekHandler
       LoopMode.all: AudioServiceRepeatMode.all,
     }[_player.loopMode] ?? AudioServiceRepeatMode.none;
 
+    final replenishControl = MediaControl.custom(
+      androidIcon: 'drawable/ic_refresh',
+      label: 'Replenish Queue',
+      name: 'replenish_queue',
+    );
+
     return PlaybackState(
       controls: [
         MediaControl.skipToPrevious,
         if (_player.playing) MediaControl.pause else MediaControl.play,
         MediaControl.stop,
         MediaControl.skipToNext,
+        replenishControl,
       ],
       systemActions: const {
         MediaAction.seek,

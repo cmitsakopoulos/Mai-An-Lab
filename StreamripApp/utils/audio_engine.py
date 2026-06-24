@@ -83,6 +83,9 @@ class AudioEngine:
         self.loudness_boost_db: float = 0.0
         self._base_eq: list[float] = [0.0] * 5
         self._dyn_offsets: list[float] = [0.0] * 5
+        self._completed_terminal = False
+        self._skip_target: int | None = None   # native (post-shuffle) index
+        self._skip_task = None
 
     @property
     def is_shuffle(self) -> bool:
@@ -210,6 +213,7 @@ class AudioEngine:
                 on_position_change=self._on_position_change,
                 on_error=self._on_error,
                 on_ready=self._on_ready,
+                on_custom_action=self._on_custom_action,
             )
             # Service must live in page.services
             self._page.services.append(self._audio)
@@ -273,11 +277,24 @@ class AudioEngine:
         title = track.get("track_title") or os.path.basename(path) or "Unknown"
         artist = track.get("artist_name", "Unknown Artist")
         art = self._get_artwork_path(track)
+        album = track.get("album_title", "Unknown Album")
+
+        # Duration: convert seconds (float) to milliseconds (int)
+        duration_ms = None
+        duration = track.get("duration")
+        if duration is not None:
+            try:
+                duration_ms = int(float(duration) * 1000)
+            except Exception:
+                pass
+
         return {
             "src": self._to_uri(path),
             "title": title,
             "artist": artist,
+            "album": album,
             "album_art": self._to_uri(art),
+            "duration_ms": duration_ms,
         }
 
     def _build_playlist_payload(self) -> list[dict]:
@@ -401,6 +418,11 @@ class AudioEngine:
                     self.dispatch("on_jarvis_continue")
                 elif getattr(self, "play_similar_seed_path", ""):
                     self.dispatch("on_similar_continue")
+                else:
+                    # Terminal end of a finite queue: remember it so the next
+                    # play() restarts from the top instead of no-opping on a
+                    # 'completed' Dart player.
+                    self._completed_terminal = True
         elif processing_state == "ready":
             self._is_loaded = True
             # Apply any seek that was queued before the source finished
@@ -425,7 +447,17 @@ class AudioEngine:
         path = track.get("path") or ""
         title = (track.get("track_title") or os.path.basename(path)) if path else "Unknown"
         self._set("position", 0.0)
-        self._set("duration", 0.0)
+        # Seed duration from the track's own metadata so the slider shows the
+        # correct length immediately — before Dart's durationStream reports, and
+        # even when playback isn't (re)started (e.g. reloading a completed
+        # queue, where Dart never re-emits duration → stuck at 0:00). Dart's
+        # later duration_ms (exact, from the decoder) overwrites this via _set's
+        # dirty-check if it differs.
+        try:
+            seeded_dur = float(track.get("duration") or 0.0)
+        except (TypeError, ValueError):
+            seeded_dur = 0.0
+        self._set("duration", seeded_dur)
         art = self._get_artwork_path(track)
         self._set("current_art", art)
         self._set("current_artist", track.get("artist_name", "Unknown Artist"))
@@ -457,6 +489,14 @@ class AudioEngine:
     def _on_error(self, e):
         logger.error("ADB_AUDIO error: %s", e.data)
         self.dispatch("on_playback_error", str(e.data))
+
+    def _on_custom_action(self, e):
+        """Called when a custom notification action is triggered by the Dart side."""
+        try:
+            payload = json.loads(e.data)
+            self.dispatch("on_custom_action", payload)
+        except Exception as ex:
+            logger.error("ADB_AUDIO: _on_custom_action failed: %s", ex)
 
     def _on_loaded(self, e):
         # flet_audio compatibility - not used by service but kept to avoid errors if triggered
@@ -516,10 +556,41 @@ class AudioEngine:
         can't flip current_index to a wrong row before Dart catches up."""
         self._queue_change_until = time.time() + seconds
 
+    def _request_skip(self, native_index: int):
+        """Coalesce rapid skips: the UI index is already updated by the caller;
+        debounce the actual Dart skip so a burst of taps issues ONE
+        skip_to_index(final) under the native lock instead of N racing skips
+        (the source of the 'malformed queue' errors)."""
+        self._skip_target = native_index
+        self._arm_queue_gate(0.8)
+        if self._page and (self._skip_task is None or self._skip_task.done()):
+            self._skip_task = self._page.run_task(self._run_coalesced_skip)
+
+    async def _run_coalesced_skip(self):
+        import asyncio
+        # Settle: wait out the burst until the target stops moving.
+        last = object()
+        while last != self._skip_target:
+            last = self._skip_target
+            await asyncio.sleep(0.18)
+        target = self._skip_target
+        if target is None:
+            return
+        if self._native_lock is None:
+            self._native_lock = asyncio.Lock()
+        async with self._native_lock:        # serialize against mutations
+            if self._audio:
+                try:
+                    await self._audio.skip_to_index(target)
+                    await self._audio.play()
+                except Exception as exc:
+                    logger.warning("coalesced skip failed: %s", exc)
+
     def set_queue(self, tracks: list[dict], start_index: int = 0):
         """Set the playback queue and start from the given index. The full
         queue is pushed to Dart's ConcatenatingAudioSource so notification
         skip and background auto-advance work without Python in the loop."""
+        self._completed_terminal = False
         self.queue = tracks
         self.current_index = min(max(0, start_index), len(self.queue) - 1) if self.queue else 0
         if self._is_shuffle:
@@ -558,8 +629,18 @@ class AudioEngine:
     # ── Transport controls ────────────────────────────────────────────────────
 
     def play(self):
-        if self._audio and self._page:
-            self._page.run_task(self._audio.play)
+        if not (self._audio and self._page):
+            return
+        if getattr(self, "_completed_terminal", False) and self.queue:
+            # Replay a finished queue from the top; a 'completed' player won't
+            # resume on a bare play().
+            self._completed_terminal = False
+            self.current_index = 0
+            self._sync_metadata_for_current()
+            self._arm_queue_gate()
+            self._page.run_task(self._push_queue_native, 0, True)
+            return
+        self._page.run_task(self._audio.play)
 
     def pause(self):
         if self._audio and self._page:
@@ -619,6 +700,7 @@ class AudioEngine:
     def next(self):
         if not self._audio or not self._page:
             return
+        self._completed_terminal = False
         if self.repeat_mode == "one":
             self._page.run_task(self._audio.seek, 0)
             self._page.run_task(self._audio.play)
@@ -635,13 +717,13 @@ class AudioEngine:
                 target = self._shuffle_order[target_shuf_idx]
                 self.current_index = target
                 self._sync_metadata_for_current()
-                self._page.run_task(self._audio.skip_to_index, target_shuf_idx)
+                self._request_skip(target_shuf_idx)
                 return
             elif self.repeat_mode == "all":
                 target = self._shuffle_order[0]
                 self.current_index = target
                 self._sync_metadata_for_current()
-                self._page.run_task(self._audio.skip_to_index, 0)
+                self._request_skip(0)
                 return
             else:
                 if getattr(self, "jarvis_controlled", False):
@@ -655,11 +737,12 @@ class AudioEngine:
         if self.current_index < len(self.queue) - 1:
             self.current_index += 1
             self._sync_metadata_for_current()
-            self._page.run_task(self._audio.skip_to_next)
+            target = self.current_index
+            self._request_skip(target)
         elif self.repeat_mode == "all":
             self.current_index = 0
             self._sync_metadata_for_current()
-            self._page.run_task(self._audio.skip_to_index, 0)
+            self._request_skip(0)
         else:
             if getattr(self, "jarvis_controlled", False):
                 self.dispatch("on_jarvis_continue")
@@ -674,6 +757,7 @@ class AudioEngine:
             return
         if not self._audio or not self._page:
             return
+        self._completed_terminal = False
         if self._is_shuffle and len(self.queue) > 1 and getattr(self, "_shuffle_order", None):
             try:
                 curr_shuf_idx = self._shuffle_order.index(self.current_index)
@@ -686,14 +770,15 @@ class AudioEngine:
                 self._arm_queue_gate(0.8)
                 self.current_index = target
                 self._sync_metadata_for_current()
-                self._page.run_task(self._audio.skip_to_index, target_shuf_idx)
+                self._request_skip(target_shuf_idx)
                 return
 
         if self.current_index > 0:
             self._arm_queue_gate(0.8)
             self.current_index -= 1
             self._sync_metadata_for_current()
-            self._page.run_task(self._audio.skip_to_previous)
+            target = self.current_index
+            self._request_skip(target)
 
     # ── Queue mutation ────────────────────────────────────────────────────────
 
@@ -765,7 +850,9 @@ class AudioEngine:
                     src=item["src"],
                     title=item["title"],
                     artist=item["artist"],
+                    album=item.get("album"),
                     album_art=item.get("album_art"),
+                    duration_ms=item.get("duration_ms"),
                     index=index,
                 )
             except Exception as exc:
@@ -830,7 +917,9 @@ class AudioEngine:
                     "src": item["src"],
                     "title": item["title"],
                     "artist": item["artist"],
+                    "album": item.get("album"),
                     "album_art": item.get("album_art"),
+                    "duration_ms": item.get("duration_ms"),
                     "index": index,
                 })
             if not payload:
@@ -847,6 +936,7 @@ class AudioEngine:
     def play_track_at(self, index: int):
         if not (0 <= index < len(self.queue)) or not self._audio or not self._page:
             return
+        self._completed_terminal = False
         self._arm_queue_gate(0.8)
         self.current_index = index
         self._sync_metadata_for_current()
@@ -858,8 +948,7 @@ class AudioEngine:
             except ValueError:
                 target = index
                 
-        self._page.run_task(self._audio.skip_to_index, target)
-        self._page.run_task(self._audio.play)
+        self._request_skip(target)
 
     def remove_from_queue(self, index: int):
         if not 0 <= index < len(self.queue):
@@ -1143,7 +1232,7 @@ class AudioEngine:
 
         track = self.queue[self.current_index]
         path = track.get("path")
-        
+
         from utils.streamrip_api import load_config
         cfg = load_config()
         dsp = cfg.get("dsp", {})

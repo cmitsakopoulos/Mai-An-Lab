@@ -1650,7 +1650,8 @@ class LibraryView:
 
         if self.view_mode == "artists":
             artists = await db.get_all_artists(search_query=self.search_query, sort_mode=self.sort_mode)
-            stats_text = f"{len(artists)} {'ARTIST' if len(artists) == 1 else 'ARTISTS'}"
+            suffix = " (CLOSEST MATCH)" if getattr(artists, "is_closest", False) else ""
+            stats_text = f"{len(artists)} {'ARTIST' if len(artists) == 1 else 'ARTISTS'}{suffix}"
             
             async def _gen():
                 for a in artists:
@@ -1669,7 +1670,8 @@ class LibraryView:
 
         elif self.view_mode == "albums":
             albums = await db.get_all_albums(search_query=self.search_query, sort_mode=self.sort_mode)
-            stats_text = f"{len(albums)} {'ALBUM' if len(albums) == 1 else 'ALBUMS'}"
+            suffix = " (CLOSEST MATCH)" if getattr(albums, "is_closest", False) else ""
+            stats_text = f"{len(albums)} {'ALBUM' if len(albums) == 1 else 'ALBUMS'}{suffix}"
             
             async def _gen():
                 for a in albums:
@@ -1683,7 +1685,8 @@ class LibraryView:
 
         elif self.view_mode == "playlists":
             playlists = await db.get_all_playlists(search_query=self.search_query, sort_mode=self.sort_mode)
-            stats_text = f"{len(playlists)} {'PLAYLIST' if len(playlists) == 1 else 'PLAYLISTS'}"
+            suffix = " (CLOSEST MATCH)" if getattr(playlists, "is_closest", False) else ""
+            stats_text = f"{len(playlists)} {'PLAYLIST' if len(playlists) == 1 else 'PLAYLISTS'}{suffix}"
 
             async def _gen():
                 for pl in playlists:
@@ -1701,7 +1704,8 @@ class LibraryView:
 
         else:  # tracks
             tracks = await db.get_all_tracks(search_query=self.search_query, sort_mode=self.sort_mode)
-            stats_text = f"{len(tracks)} {'TRACK' if len(tracks) == 1 else 'TRACKS'}"
+            suffix = " (CLOSEST MATCH)" if getattr(tracks, "is_closest", False) else ""
+            stats_text = f"{len(tracks)} {'TRACK' if len(tracks) == 1 else 'TRACKS'}{suffix}"
             self._tracks_cache = tracks
             self._tracks_cache_key = (self.view_mode, self.search_query, self.sort_mode)
 
@@ -1958,15 +1962,18 @@ class LibraryView:
                     self._tracks_cache = tracks
                     self._tracks_cache_key = (self.view_mode, self.search_query, self.sort_mode)
                     self._flat_rows = [{"type": "track", "data": t, "depth": 0} for t in tracks]
-                    stats_text = f"{len(tracks)} {'TRACK' if len(tracks) == 1 else 'TRACKS'}"
+                    suffix = " (CLOSEST MATCH)" if getattr(tracks, "is_closest", False) else ""
+                    stats_text = f"{len(tracks)} {'TRACK' if len(tracks) == 1 else 'TRACKS'}{suffix}"
                 elif self.view_mode == "albums":
                     albums = await db.get_all_albums(search_query=self.search_query, sort_mode=self.sort_mode)
                     self._flat_rows = [{"type": "album", "data": a, "depth": 0} for a in albums]
-                    stats_text = f"{len(albums)} {'ALBUM' if len(albums) == 1 else 'ALBUMS'}"
+                    suffix = " (CLOSEST MATCH)" if getattr(albums, "is_closest", False) else ""
+                    stats_text = f"{len(albums)} {'ALBUM' if len(albums) == 1 else 'ALBUMS'}{suffix}"
                 else:
                     artists = await db.get_all_artists(search_query=self.search_query, sort_mode=self.sort_mode)
                     self._flat_rows = [{"type": "artist", "data": a, "depth": 0} for a in artists]
-                    stats_text = f"{len(artists)} {'ARTIST' if len(artists) == 1 else 'ARTISTS'}"
+                    suffix = " (CLOSEST MATCH)" if getattr(artists, "is_closest", False) else ""
+                    stats_text = f"{len(artists)} {'ARTIST' if len(artists) == 1 else 'ARTISTS'}{suffix}"
                 
                 self.total_pages = math.ceil(len(self._flat_rows) / self.items_per_page)
                 

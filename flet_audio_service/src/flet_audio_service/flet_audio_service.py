@@ -59,6 +59,7 @@ class AudioServiceControl(Service):
     # Internal-use event for STT transcription results.
     on_stt_result: Optional[EventHandler] = None
     on_equalizer_bands_result: Optional[EventHandler] = None
+    on_custom_action: Optional[EventHandler] = None
 
     # ── Internal readiness gate ───────────────────────────────────────────────
 
@@ -68,6 +69,7 @@ class AudioServiceControl(Service):
         on_state_change_cb = kwargs.pop("on_state_change", None)
         on_position_change_cb = kwargs.pop("on_position_change", None)
         on_error_cb = kwargs.pop("on_error", None)
+        on_custom_action_cb = kwargs.pop("on_custom_action", None)
 
         src_val = kwargs.pop("src", None)
         title_val = kwargs.pop("title", None)
@@ -80,6 +82,7 @@ class AudioServiceControl(Service):
         self.on_state_change = on_state_change_cb
         self.on_position_change = on_position_change_cb
         self.on_error = on_error_cb
+        self.on_custom_action = on_custom_action_cb
         self.src = src_val
         self.title = title_val
         self.artist = artist_val
@@ -274,12 +277,21 @@ class AudioServiceControl(Service):
         src: str,
         title: str,
         artist: str,
+        album: Optional[str] = None,
         album_art: Optional[str] = None,
+        duration_ms: Optional[int] = None,
         index: Optional[int] = None,
     ):
         """Inserts a track into the queue at the given index (appends if omitted)."""
         await self._wait_ready()
-        payload = {"src": src, "title": title, "artist": artist, "album_art": album_art}
+        payload = {
+            "src": src,
+            "title": title,
+            "artist": artist,
+            "album": album or "Unknown Album",
+            "album_art": album_art,
+            "duration_ms": duration_ms,
+        }
         if index is not None:
             payload["index"] = index
         await self._invoke_method("add_queue_item", payload)

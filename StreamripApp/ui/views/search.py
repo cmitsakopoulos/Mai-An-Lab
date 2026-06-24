@@ -30,12 +30,43 @@ def get_app_dir() -> str:
     return tempfile.gettempdir()
 
 
+class ConnectionSignal(ft.Row):
+    def __init__(self):
+        # 4 bars with heights: 4, 7, 10, 13
+        # No animation to conserve battery consumption
+        self.bars = [
+            ft.Container(width=3, height=4, bgcolor=DIM, border_radius=1),
+            ft.Container(width=3, height=7, bgcolor=DIM, border_radius=1),
+            ft.Container(width=3, height=10, bgcolor=DIM, border_radius=1),
+            ft.Container(width=3, height=13, bgcolor=DIM, border_radius=1),
+        ]
+        super().__init__(
+            controls=self.bars,
+            spacing=1.5,
+            alignment=ft.MainAxisAlignment.START,
+            vertical_alignment=ft.CrossAxisAlignment.END,
+            visible=False,
+        )
+
+    def set_level(self, level: int, connected: bool = False):
+        # level: 0 (all dimmed) to 4 (all lit)
+        # connected: turns bars green when connection is established
+        color = "#00E676" if connected else CYAN
+        inactive_color = apply_opacity(0.2, color)
+        for i, bar in enumerate(self.bars):
+            if i < level:
+                bar.bgcolor = color
+            else:
+                bar.bgcolor = inactive_color
+
+
 class SearchView:
     def __init__(self, app: "StreamripFletApp"):
         from utils.streamrip_search import StreamripSearcher
         self.app             = app
         self.page            = app.page
         self.searcher        = StreamripSearcher()
+        self._connection_signal = ConnectionSignal()
         self.current_search_id = 0
         self.selected_source = "qobuz"
         # Unified pre-fetch cache: all three types are fetched in one search call.
@@ -47,6 +78,9 @@ class SearchView:
         self.expanded_nodes: set[str] = set() # Track IDs/Artist IDs of expanded items
         self.node_cache: dict[str, list[dict]] = {} # Cache for expanded node children
         self.view_mode = "tracks" # artist, album, track (plural, matches tab labels)
+        self._hide_card_task: asyncio.Task | None = None
+        self._hide_search_card_task: asyncio.Task | None = None
+        self._hide_preview_card_task: asyncio.Task | None = None
 
         self.current_offset = 0
         self._is_loading_more = False
@@ -243,6 +277,7 @@ class SearchView:
         self._progress_bar     = ft.ProgressBar(value=0, color=CYAN, bgcolor=SURFACE2, expand=True)
         self._progress_spinner = ft.ProgressRing(width=18, height=18, stroke_width=2, color=CYAN, visible=False)
         self._queue_chips_row  = ft.Row(spacing=6, wrap=True)
+        self._progress_up_next = ft.Text("", color=DIM, size=11, weight=ft.FontWeight.W_500, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS, visible=False)
 
         self._cancel_btn = ft.TextButton(
             "Cancel",
@@ -280,6 +315,7 @@ class SearchView:
                     ),
                     self._progress_bar,
                     self._queue_chips_row,
+                    self._progress_up_next,
                 ],
                 spacing=8,
             ),
@@ -369,9 +405,6 @@ class SearchView:
             animate_opacity=ft.Animation(250, ft.AnimationCurve.EASE_OUT),
         )
 
-        # pending queue list
-        self._pending_list = ft.ListView(spacing=6, padding=ft.Padding.symmetric(horizontal=12))
-
         # history list
         self._history_list = ft.ListView(spacing=8, padding=ft.Padding.symmetric(horizontal=12))
 
@@ -400,15 +433,6 @@ class SearchView:
             visible=True,
         )
 
-        # ── Up Next Container ──
-        self._up_next_container = ft.Container(
-            content=ft.Column([
-                ft.Text("  Up Next", color=DIM, size=11, weight=ft.FontWeight.W_700),
-                self._pending_list,
-            ], spacing=4),
-            visible=False,
-        )
-
         # ── Root container ─────────────────────────────────────────────────
         self._root = ft.Column(
             [
@@ -421,7 +445,14 @@ class SearchView:
                                     ft.Column(
                                         [
                                             ft.Text("Streamrip", size=26, weight=ft.FontWeight.W_800, color=TEXT),
-                                            ft.Text("Qobuz", size=14, color=CYAN, weight=ft.FontWeight.W_500),
+                                            ft.Row(
+                                                [
+                                                    ft.Text("Qobuz", size=14, color=CYAN, weight=ft.FontWeight.W_500),
+                                                    self._connection_signal,
+                                                ],
+                                                spacing=8,
+                                                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                                            ),
                                         ],
                                         spacing=2,
                                         expand=True,
@@ -474,16 +505,6 @@ class SearchView:
                 ),
                 
                 self._pagination_bar,
-                
-                # History / Up Next Section
-                ft.Container(
-                    content=ft.Column(
-                        [
-                            self._up_next_container,
-                        ],
-                        spacing=0,
-                    ),
-                ),
             ],
             expand=True,
             spacing=0,
@@ -767,6 +788,8 @@ class SearchView:
             self._clear_btn.visible = has_val
             # Hide landing page when we have content
             self._landing_container.visible = not has_val
+            if not has_val:
+                self._connection_signal.visible = False
         self.app.safe_update(_mutate)
 
     def _on_search_focus(self, _e):
@@ -817,7 +840,7 @@ class SearchView:
         # Bump current_search_id so any in-flight searcher.search callback
         # fails its id-equality guard in _on_results and gets dropped.
         self.current_search_id += 1
-        self.hide_search_progress()
+        self.hide_search_progress(success=False)
 
         def _mutate():
             self._stop_skeleton_pulse()
@@ -891,7 +914,8 @@ class SearchView:
 
         def results_callback(results):
             if self.current_search_id == search_id:
-                self.hide_search_progress()
+                success = results is not None and not (isinstance(results, dict) and "error" in results)
+                self.hide_search_progress(success=success)
                 self._on_results(results)
 
         asyncio.create_task(asyncio.to_thread(
@@ -1549,6 +1573,9 @@ class SearchView:
         return None
 
     def show_progress_card(self):
+        if self._hide_card_task:
+            self._hide_card_task.cancel()
+            self._hide_card_task = None
         def _mutate():
             self._progress_status.value    = "Connecting…"
             self._progress_pct.value       = ""
@@ -1561,51 +1588,96 @@ class SearchView:
         self.app.safe_update(_mutate)
 
     def hide_progress_card(self):
+        if self._hide_card_task:
+            self._hide_card_task.cancel()
         def _mutate():
             self._progress_spinner.visible = False
             self._progress_card.opacity    = 0
             self._progress_card.offset     = ft.Offset(0, 0.4)
         self.app.safe_update(_mutate)
         async def _delayed_hide():
-            await asyncio.sleep(0.3)
-            self._hide_card_done()
-        asyncio.create_task(_delayed_hide())
+            try:
+                await asyncio.sleep(0.3)
+                self._hide_card_done()
+            except asyncio.CancelledError:
+                pass
+        self._hide_card_task = asyncio.create_task(_delayed_hide())
 
     def _hide_card_done(self):
         def _mutate():
             self._progress_card.visible = False
             self._progress_bar.value    = 0
         self.app.safe_update(_mutate)
+        self._hide_card_task = None
 
     def show_search_progress(self, status: str, detail: str = ""):
+        if self._hide_search_card_task:
+            self._hide_search_card_task.cancel()
+            self._hide_search_card_task = None
         def _mutate():
             self._search_progress_status.value = status
             self._search_progress_detail.value = detail
             self._search_progress_card.visible = True
             self._search_progress_card.opacity = 1
             self._search_progress_card.offset = ft.Offset(0, 0)
+            self._connection_signal.visible = True
+            self._connection_signal.set_level(1, connected=False)
         self.app.safe_update(_mutate)
 
     def update_search_progress(self, status: str, detail: str = ""):
+        if self._hide_search_card_task:
+            self._hide_search_card_task.cancel()
+            self._hide_search_card_task = None
+            def _mutate_show():
+                self._search_progress_card.visible = True
+                self._search_progress_card.opacity = 1
+                self._search_progress_card.offset = ft.Offset(0, 0)
+                self._connection_signal.visible = True
+            self.app.safe_update(_mutate_show)
+        
+        # Map statuses/details to cellular signal strength (1 to 4)
+        level = 1
+        if "DNS" in status:
+            level = 1
+        elif "TCP" in status:
+            level = 2
+        elif "TLS" in status or "SSL" in status or "Handshake" in status:
+            level = 3
+        elif "HTTP" in status or "Request" in status or "Data" in status or "Streaming" in status:
+            level = 4
+
         def _mutate():
             self._search_progress_status.value = status
             self._search_progress_detail.value = detail
+            self._connection_signal.set_level(level, connected=False)
         self.app.safe_update(_mutate)
 
-    def hide_search_progress(self):
-        def _mutate():
+    def hide_search_progress(self, success: bool = True):
+        if self._hide_search_card_task:
+            self._hide_search_card_task.cancel()
+            self._hide_search_card_task = None
+        def _mutate_signal():
+            if success:
+                self._connection_signal.visible = True
+                self._connection_signal.set_level(4, connected=True)
+            else:
+                self._connection_signal.visible = False
+        self.app.safe_update(_mutate_signal)
+
+        def _mutate_card():
             self._search_progress_card.opacity = 0
             self._search_progress_card.offset = ft.Offset(0, 0.4)
-        self.app.safe_update(_mutate)
-        async def _delayed_hide():
-            await asyncio.sleep(0.3)
-            self._hide_search_card_done()
-        asyncio.create_task(_delayed_hide())
+        self.app.safe_update(_mutate_card)
 
-    def _hide_search_card_done(self):
-        def _mutate():
-            self._search_progress_card.visible = False
-        self.app.safe_update(_mutate)
+        async def _delayed_hide_card():
+            try:
+                await asyncio.sleep(0.3)
+                def _mutate_done():
+                    self._search_progress_card.visible = False
+                self.app.safe_update(_mutate_done)
+            except asyncio.CancelledError:
+                pass
+        self._hide_search_card_task = asyncio.create_task(_delayed_hide_card())
 
     def _cancel_preview_click(self, e):
         if hasattr(self, "_active_preview_stop_event") and self._active_preview_stop_event:
@@ -1620,6 +1692,9 @@ class SearchView:
         self.refresh_results_only()
 
     def show_preview_progress(self, status: str, detail: str = ""):
+        if self._hide_preview_card_task:
+            self._hide_preview_card_task.cancel()
+            self._hide_preview_card_task = None
         def _mutate():
             self._preview_progress_status.value = status
             self._preview_progress_detail.value = detail
@@ -1629,28 +1704,51 @@ class SearchView:
         self.app.safe_update(_mutate)
 
     def update_preview_progress(self, status: str, detail: str = ""):
+        if self._hide_preview_card_task:
+            self._hide_preview_card_task.cancel()
+            self._hide_preview_card_task = None
+            def _mutate_show():
+                self._preview_progress_card.visible = True
+                self._preview_progress_card.opacity = 1
+                self._preview_progress_card.offset = ft.Offset(0, 0)
+            self.app.safe_update(_mutate_show)
         def _mutate():
             self._preview_progress_status.value = status
             self._preview_progress_detail.value = detail
         self.app.safe_update(_mutate)
 
     def hide_preview_progress(self):
+        if self._hide_preview_card_task:
+            self._hide_preview_card_task.cancel()
         def _mutate():
             self._preview_progress_card.opacity = 0
             self._preview_progress_card.offset = ft.Offset(0, 0.4)
         self.app.safe_update(_mutate)
         async def _delayed_hide():
-            await asyncio.sleep(0.3)
-            self._hide_preview_card_done()
-        asyncio.create_task(_delayed_hide())
+            try:
+                await asyncio.sleep(0.3)
+                self._hide_preview_card_done()
+            except asyncio.CancelledError:
+                pass
+        self._hide_preview_card_task = asyncio.create_task(_delayed_hide())
 
     def _hide_preview_card_done(self):
         def _mutate():
             self._preview_progress_card.visible = False
         self.app.safe_update(_mutate)
+        self._hide_preview_card_task = None
 
 
     def update_progress(self, status: str, pct: float | None, detail: str = ""):
+        if self._hide_card_task:
+            self._hide_card_task.cancel()
+            self._hide_card_task = None
+            def _mutate_show():
+                self._progress_card.visible = True
+                self._progress_card.opacity = 1
+                self._progress_card.offset  = ft.Offset(0, 0)
+            self.app.safe_update(_mutate_show)
+
         self._progress_status.value = status
         self._progress_status.color = CYAN if status not in ("Finished", "Error") else TEXT
         
@@ -1677,65 +1775,17 @@ class SearchView:
 
     def refresh_queue_ui(self, queue: list[dict]):
         def _mutate():
-            active_job = self.app.queue.current_job
-            self._pending_list.controls = [
-                self._pending_card(item, is_active=(item == active_job))
-                for item in queue
-            ]
-            self._up_next_container.visible = bool(queue)
+            if queue:
+                next_item = queue[0]
+                meta = next_item.get("metadata", {})
+                title = meta.get("name", "Unknown")
+                artist = meta.get("artist", "Unknown Artist")
+                self._progress_up_next.value = f"Up Next: {title} — {artist}"
+                self._progress_up_next.visible = True
+            else:
+                self._progress_up_next.value = ""
+                self._progress_up_next.visible = False
         self.app.safe_update(_mutate)
-
-    def _pending_card(self, item: dict, is_active: bool = False) -> ft.Control:
-        meta   = item.get("metadata", {})
-        source = meta.get("source", "qobuz")
-        title  = meta.get("name", "Unknown")
-        artist = meta.get("artist", "Unknown Artist")
-        qlabel = meta.get("quality_label", "MP3")
-        scolor = src_color(source)
-
-        card = ft.Container(
-            content=ft.Row(
-                [
-                    ft.Container(
-                        content=ft.Icon(ft.Icons.MUSIC_NOTE, color=scolor, size=24),
-                        width=56, height=56,
-                        bgcolor=apply_opacity(0.15, scolor),
-                        shape=ft.BoxShape.CIRCLE,
-                        alignment=ft.Alignment(0, 0),
-                    ),
-                    ft.Column(
-                        [
-                            ft.Text(title, color=TEXT, size=15, weight=ft.FontWeight.W_700,
-                                    overflow=ft.TextOverflow.ELLIPSIS, max_lines=1),
-                            ft.Text(artist, color=DIM, size=13,
-                                    overflow=ft.TextOverflow.ELLIPSIS, max_lines=1),
-                            ft.Text("PENDING", color=CYAN, size=10, weight=ft.FontWeight.W_700,
-                                    opacity=0.7),
-                        ],
-                        spacing=1,
-                        expand=True,
-                        alignment=ft.MainAxisAlignment.CENTER,
-                    ),
-                    ft.Container(
-                        content=ft.Text(qlabel, color=BG, size=9, weight=ft.FontWeight.W_700),
-                        bgcolor=CYAN,
-                        padding=ft.Padding.symmetric(horizontal=6, vertical=2),
-                        border_radius=4,
-                    ),
-                ],
-                spacing=16,
-            ),
-            height=72,
-            bgcolor=apply_opacity(0.04, "#FFFFFF") if is_active else SURFACE,
-            border=ft.Border.all(1, apply_opacity(0.3, CYAN) if is_active else BORDER),
-            border_radius=12,
-            padding=ft.Padding.symmetric(horizontal=12, vertical=8),
-            shadow=ft.BoxShadow(
-                spread_radius=1, blur_radius=8,
-                color=apply_opacity(0.15, CYAN),
-            ) if is_active else None,
-        )
-        return AnimatedEntry(card, target_height=72)
 
     def refresh_now_playing(self):
         """Update shadows on all visible cards to reflect the currently playing track."""

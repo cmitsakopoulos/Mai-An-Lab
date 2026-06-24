@@ -22,6 +22,7 @@ The Library supports five views, toggled via settings:
 
 ### 1.3 Searching & Filtering
 - **Real-Time Filter**: The top search bar filters the current view instantly, debounced by **300ms** to ensure responsiveness. Tap the 'X' button to clear.
+- **Fuzzy Search Fallback**: If FTS5 and prefix-based `LIKE` queries return no direct results, the library search falls back to a 2-gram (k-mer) similarity matching algorithm to surface the closest matching tracks, albums, or artists (score threshold $\ge 0.25$).
 
 ### 1.4 Sorting
 Context-aware sort options:
@@ -82,7 +83,8 @@ The **Search** tab (implemented in [search.py](file:///Users/chrismitsacopoulos/
 ### 3.2 Previews & Downloads
 - **Previews**: Stream short previews. Displays buffering progress rings and play/stop indicators.
 - **Downloads**: Download tracks/albums directly. Shows a cyan check icon if the item is already present in the local library.
-- **Connection Progress Tracking**: On search submission, a progress card displays connection handshake steps (DNS Lookup, TCP Connect, TLS Handshake, HTTP Request, Data Streaming, Processing).
+- **HTTPS Connection Signal**: On search submission, a cellular-style connection signal next to the Qobuz subtitle progressively lights up as the connection goes through handshake phases (DNS $\rightarrow$ TCP $\rightarrow$ TLS $\rightarrow$ HTTP). Once successfully established, it turns green with full bars and remains visible to indicate an active online status. To conserve battery, this uses state changes only without continuous frame animations.
+- **Connection Progress Card**: Concurrently, a temporary bottom-anchored card displays connection handshake steps (DNS Lookup, TCP Connect, TLS Handshake, HTTP Request, Data Streaming, Processing) and slides away once the connection is established.
 
 ---
 
@@ -109,6 +111,9 @@ The **Search** tab (implemented in [search.py](file:///Users/chrismitsacopoulos/
   - *Release*: Halts capturing, performs STT, submits text, and resets color.
   - *Greetings & Status*: Session introductions change dynamically by system time. Jarvis appends library metrics (track count, active edges) beneath greetings.
   - *Expiration*: Thread history persists across tabs but clears after 15 minutes of inactivity. The trash bin icon manually purges history.
+- **Media Notification Controls**:
+  - *Standard Controls*: Previous, Play/Pause, Stop, and Next are available directly in the system notification shade and lock screen.
+  - *Replenish/Refresh Queue*: A custom refresh action button in the media notification triggers a background queue replenishment, automatically rebuilding/filling the similar tracks queue based on the current track's profile and user tastes.
 
 ---
 

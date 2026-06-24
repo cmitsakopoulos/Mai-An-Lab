@@ -39,6 +39,9 @@ class QueueController:
 
     # ── public API ──────────────────────────────────────────────────────────
     def enqueue(self, item_data: dict, quality_tier: str = "mp3"):
+        if not self.is_processing:
+            self._status_chips.clear()
+
         source     = item_data.get("source", "qobuz")
         media_type = item_data.get("media_type", "track")
         item_id    = item_data.get("id", "")
@@ -111,10 +114,15 @@ class QueueController:
             
             self._queue.task_done()
             
-            # Transition delay
-            delay = 1 if self._cancel_event.is_set() else 3
+            # Transition delay: 1s if cancelled or if there are more items; 3s if it was the last item.
+            is_last = self._queue.empty()
+            delay = 1 if (self._cancel_event.is_set() or not is_last) else 3
             await asyncio.sleep(delay)
-            self._ui(self.app.search_view.hide_progress_card)
+            
+            # ONLY hide if this was the last item in the queue.
+            if is_last:
+                self._ui(self.app.search_view.hide_progress_card)
+            
             self.current_job = None
             self.app.refresh_queue_ui()
 
