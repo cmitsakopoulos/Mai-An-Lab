@@ -32,10 +32,20 @@ audio file ──► MediaCodec (Android) ──► mono int16 PCM @ 22050 Hz (9
                                                                                                     (52-D Timbre)
                                                    │
                                                    ▼
-              52-D Timbre + covariance-surviving scalars  →  Z-score  →  ×1.5 scalar boost
-                                                   │
-                                                   ▼
-                              Kaiser-truncated PCA  →  Zr  (~18-D, un-normalised)
+               52-D Timbre + covariance-surviving scalars
+                                                    │
+                                          ┌─────────┴──────────┐
+                                          ▼                    ▼
+                            Continuous (timbre+dynamics)   Harmonic (cos_h/sin_h/key_mode)
+                            Z-score → ×1.5 scalar boost   Z-score (separate μ/σ)
+                                          │                    │
+                                          ▼                    │
+                            Kaiser-truncated PCA (~18-D)       │
+                                          │                    ▼
+                                          └──── concat ◄── ×1.5 harmonic weight
+                                                    │
+                                                    ▼
+                                            Zr  (~21-D, un-normalised)
                                                    │
                                                    ▼
                             Acoustic Euclidean Self-Tuning Affinity Graph
@@ -81,7 +91,7 @@ Acoustic vectors are extracted by a pure-NumPy DSP analyzer (no Librosa, no SciP
 | `mfcc_delta` | 20 floats | How fast timbre changes frame-to-frame | (vector; captures evolution, not just stasis) |
 | `chroma` | 12 floats | Proportion of each pitch class (C, C#, D, …) | (vector; basis for the K-S key estimate) |
 
-The raw scalars get their own DB columns (cheap WHERE filters and direct mood-profile scoring); the 52-D timbre triple (`mfcc_mean` + `mfcc_delta` + `chroma`) is packed into one `float32` LE BLOB on `play_counts.timbre`. Total: **62 dimensions per track** (52-D timbre + 10 scalars in the SVD/build space).
+The raw scalars get their own DB columns (cheap WHERE filters and direct mood-profile scoring); the 52-D timbre triple (`mfcc_mean` + `mfcc_delta` + `chroma`) is packed into one `float32` LE BLOB on `play_counts.timbre`. Total: **62 dimensions per track** (52-D timbre + 10 scalars in the build space; the 3 harmonic scalars are late-fused after PCA — see §2.A).
 
 #### Component details
 
@@ -119,15 +129,20 @@ The backend [DatabaseManager](file:///Users/chrismitsacopoulos/Desktop/Mai-An-La
 ### A. The Acoustic Similarity Tier (`edge_kind = 'acoustic'`)
 The engine loads every track with a current-version feature BLOB and assembles a feature row from the 52-D timbre vector plus the scalar descriptors that survive covariance cleaving.
 
-* **Covariance cleaving (centrality).** A Pearson-correlation pass over the 8 raw scalars (`bpm`, `brightness`, `energy`, `rolloff`, `beat_strength`, `spectral_flatness`, `spectral_contrast`, `key_mode`) removes redundant ones: within any group correlating at $|r| \ge 0.70$, the feature with the highest mean $|r|$ to the group — its best representative — is kept and the rest dropped. The harmonic coords `cos_h`/`sin_h` are structural and always kept. The surviving scalars are appended to the 52-D timbre block (≈60-D on a typical library).
+* **Covariance cleaving (centrality).** A Pearson-correlation pass over the continuous raw scalars (`bpm`, `brightness`, `energy`, `rolloff`, `beat_strength`, `spectral_flatness`, `spectral_contrast`) removes redundant ones: within any group correlating at $|r| \ge 0.70$, the feature with the highest mean $|r|$ to the group — its best representative — is kept and the rest dropped. The harmonic coords `cos_h`/`sin_h`/`key_mode` are structural and always kept (they are late-fused after PCA — see below). The surviving scalars are appended to the 52-D timbre block (≈60-D on a typical library).
 
 * **Standardisation (Z-Scoring)**; putting every feature on a common ruler. Each column is centred on mean 0 and scaled to unit standard deviation:
   $$Z_{ij} = \frac{X_{ij} - \mu_j}{\sigma_j}$$
   so every feature contributes proportionally to its *spread across the library*. The per-column $\mu$/$\sigma$ are persisted with the projection so any new or exemplar track projects identically.
 
-* **Scalar Boosting**: after scaling, the scalar columns are multiplied by `scalar_weight = 1.5` so tempo, key and dynamics carry weight comparable to the 52 individual timbre axes.
+* **Scalar Boosting**: after scaling, the non-harmonic scalar columns are multiplied by `scalar_weight = 1.5` so tempo and dynamics carry weight comparable to the 52 individual timbre axes. The harmonic columns (`cos_h`, `sin_h`, `key_mode`) are **not** boosted here — they are handled separately by the late-fusion step below.
 
-* **PCA reduction (Kaiser).** A thin SVD reduces the z-scored, boosted matrix to the components with eigenvalue $> 1$ (Kaiser; floored at 3), giving the unified coordinate space $Z_r$ (~18-D on a typical library). $Z_r$ is kept **un-normalised**: Euclidean distance here preserves magnitude — how far a track sits from the library's "average" — which is real perceptual signal. The projection ($\mu$, $\sigma$, surviving-feature list, $V_{\text{keep}}$) and every track's $Z_r$ coordinates are persisted in `pca_space` / `play_counts.pca_coords`; this single geometry drives the walk, clustering, islets and mood feature selection.
+* **Late Fusion PCA reduction (Kaiser).** The harmonic unit-circle coordinates (`cos_h`, `sin_h`, `key_mode`) encode the rigid Camelot wheel geometry. Because PCA is a global linear rotation, running SVD on these columns would destroy the geometric integrity of the 12-hour circle. The engine therefore uses a **Late Fusion** strategy:
+  1. The z-scored feature matrix is **split** into a continuous block (52-D timbre + surviving non-harmonic scalars, ~59-D) and a harmonic block (3-D: `cos_h`, `sin_h`, `key_mode`), each z-scored with its own $\mu$/$\sigma$.
+  2. A thin SVD reduces **only the continuous block** to the components with eigenvalue $> 1$ (Kaiser; floored at 3), giving $Z_{r,\text{cont}}$ (~18-D). $Z_{r,\text{cont}}$ is kept **un-normalised**: Euclidean distance here preserves magnitude — how far a track sits from the library's "average" — which is real perceptual signal.
+  3. The raw z-scored harmonic coordinates are multiplied by `harmonic_weight = 1.5` and **concatenated** back onto $Z_{r,\text{cont}}$, producing the final unified coordinate space $Z_r$ (~21-D).
+
+  This guarantees that Euclidean distance in $Z_r$ matches perfect-fifth compatibility on the Camelot clock with 100% fidelity, while PCA still denoises the high-dimensional timbre and dynamics axes. The projection ($\mu_{\text{cont}}$, $\sigma_{\text{cont}}$, $\mu_{\text{harm}}$, $\sigma_{\text{harm}}$, surviving-feature list, $V_{\text{keep}}$, `harmonic_weight`) and every track's $Z_r$ coordinates are persisted in `pca_space` / `play_counts.pca_coords`; this single geometry drives the walk, clustering, islets and mood feature selection.
 
 * **Euclidean k-NN ($K=20$)**: each track's 20 nearest neighbours in $Z_r$ are found by squared-Euclidean distance, computed in 256-row blocks (`argpartition` is $O(N)$ per row; the K-slice is then ordered with a $O(K \log K)$ sort).
 
@@ -553,11 +568,11 @@ If a track's `features_version` is current in the bundle DB, it's already filter
 
 ## 8. PCA Engine & Coordinate Projection
 
-The unified coordinate space $Z_r$ (§2.A) is the engine's single projection. `build_acoustic_edges` persists it: the projection ($\mu$, $\sigma$, surviving-feature list and the $V_{\text{keep}}$ loading matrix) in the `pca_space` table, and every track's $Z_r$ coordinates in `play_counts.pca_coords`.
+The unified coordinate space $Z_r$ (§2.A) is the engine's single projection. `build_acoustic_edges` persists it: the continuous projection ($\mu_{\text{cont}}$, $\sigma_{\text{cont}}$, surviving-feature list, $V_{\text{keep}}$ loading matrix) and the harmonic z-score stats ($\mu_{\text{harm}}$, $\sigma_{\text{harm}}$, `harmonic_weight`, `harmonic_names`) in the `pca_space` table (via the `feature_spec` JSON column), and every track's $Z_r$ coordinates in `play_counts.pca_coords`.
 
 ### 8.1 Projecting a new track
 
-`project_to_zr(row, projection)` places any track absent from the last build — a new import, or an islet exemplar — into that same space: assemble its 52-D timbre + surviving scalars, apply the stored $\mu$/$\sigma$ and the ×1.5 scalar boost, then $Z_r = z \cdot V_{\text{keep}}$. This is what lets moods, islets and the walk all reason in one geometry without recomputing the SVD.
+`project_to_zr(row, projection)` places any track absent from the last build — a new import, or an islet exemplar — into that same space. It replicates the Late Fusion split from §2.A: assemble the 52-D timbre + surviving scalars, split off the harmonic columns, z-score each part with its own persisted $\mu$/$\sigma$, apply the ×1.5 scalar boost to the continuous scalars, project the continuous part through $V_{\text{keep}}$, then concatenate the raw weighted harmonics: $Z_r = [z_{\text{cont}} \cdot V_{\text{keep}} \;|\; z_{\text{harm}} \times w_{\text{harm}}]$. A legacy fallback handles projections saved before the late-fusion change (no `harmonic_names` in `feature_spec`). This is what lets moods, islets and the walk all reason in one geometry without recomputing the SVD.
 
 ### 8.2 On-Device Mathematical Truth Report
 
@@ -596,8 +611,8 @@ stateDiagram-v2
     state On {
         [*] --> SaveQueue : Backup original queue & current index
         SaveQueue --> LaunchWalk : Trigger _initiate_play_similar_queue_async
-        LaunchWalk --> Replenish : Append 12-track walk after current track
-        Replenish --> Replenish : Append next track when user reaches last track
+        LaunchWalk --> Replenish : Append 8-track walk after current track
+        Replenish --> Replenish : Proactively maintain 8-song buffer when upcoming count < 4
     }
 
     state Off {
@@ -610,9 +625,9 @@ stateDiagram-v2
 #### A. Enable Path (Centralized State Transition)
 1. **Shuffle Deactivation & Mutual Exclusivity**: Play Similar mode is mutually exclusive with Shuffle mode. Activating Play Similar automatically toggles Shuffle off.
 2. **Queue Snapshot & Backup**: The active queue list and the current playback index are saved into `play_similar_saved_queue` and `play_similar_saved_index` respectively.
-3. **Walk Initialization**: An asynchronous coroutine `_initiate_play_similar_queue_async(path, gen)` executes a 12-step similarity walk starting from the seed track.
+3. **Walk Initialization**: An asynchronous coroutine `_initiate_play_similar_queue_async(path, gen)` executes an 8-step similarity walk starting from the seed track.
 4. **Splicing Execution**: The similarity walk results are spliced into the active queue immediately *after* the currently playing track. This ensures that the user's playback is completely uninterrupted while the upcoming queue is populated with recommendation-based tracks.
-5. **Continuous Replenish Hook**: When the player transitions to a new track, the system checks if the newly active track is the last track in the queue. If it is, `_recommend_similar_async` performs a single-step walk and appends the new candidate to the end of the queue, enabling an infinite playback stream.
+5. **Continuous Replenish Hook**: When the queue changes or the player transitions to a new track, if the number of upcoming tracks in the queue drops below 4, `_recommend_similar_async` performs a walk to append enough new candidates to maintain an 8-song buffer ahead of the current track, enabling an infinite playback stream.
 
 #### B. Disable Path (Non-Destructive Restoration)
 When deactivating Play Similar mode (or when Shuffle is enabled, which automatically deactivates it), the system restores the user's original queue context:

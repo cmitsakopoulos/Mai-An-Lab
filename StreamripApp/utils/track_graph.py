@@ -57,10 +57,10 @@ from typing import Optional
 import numpy as np
 
 from utils.dsp import (
-    EMBED_DIMS,
+    GRAPH_EMBED_DIMS,
     FEATURES_VERSION,
     analyze_track,
-    unpack_timbre,
+    unpack_graph_embedding,
 )
 from utils.harmonic import key_index_to_camelot
 from utils.config import APP_DIR
@@ -424,14 +424,18 @@ def _louvain(
 # ── Builders ─────────────────────────────────────────────────────────────────
 
 
-# Canonical order of the scalar descriptors appended to the 52-D timbre block.
+# Canonical order of the scalar descriptors appended to the timbre block
+# (EMBED_DIMS floats: mfcc mean/std/delta + chroma + rhythm, see dsp.py).
 # `bpm` denotes the log2(bpm) column; cos_h/sin_h are the Camelot unit-circle
 # coords (structural — never cleaved by the covariance analysis).
 _SCALAR_ORDER = (
     "bpm", "brightness", "energy", "rolloff", "beat_strength",
     "spectral_flatness", "spectral_contrast", "cos_h", "sin_h", "key_mode",
 )
-_STRUCTURAL_SCALARS = frozenset({"cos_h", "sin_h"})
+_STRUCTURAL_SCALARS = frozenset({"cos_h", "sin_h", "key_mode"})
+# Harmonic columns excluded from SVD and late-fused after PCA projection.
+# Their rigid Camelot-wheel geometry must not be rotated by PCA.
+_HARMONIC_SCALARS = frozenset({"cos_h", "sin_h", "key_mode"})
 
 
 def _all_scalars(row: dict) -> dict[str, float]:
@@ -466,7 +470,7 @@ def _all_scalars(row: dict) -> dict[str, float]:
 
 def _surviving_scalars(redundant: set[str]) -> list[str]:
     """Scalar names that survive covariance cleaving, in canonical order.
-    Structural coords (cos_h/sin_h) are always kept."""
+    Structural/harmonic coords (cos_h/sin_h/key_mode) are always kept."""
     return [
         s for s in _SCALAR_ORDER
         if s in _STRUCTURAL_SCALARS or s not in redundant
@@ -474,8 +478,8 @@ def _surviving_scalars(redundant: set[str]) -> list[str]:
 
 
 def _feature_vector(row: dict, timbre: np.ndarray, surviving: list[str]) -> np.ndarray:
-    """Full graph feature vector for one track: the 52-D timbre block followed
-    by the surviving scalar descriptors in `surviving` order."""
+    """Full graph feature vector for one track: the EMBED_DIMS timbre block
+    followed by the surviving scalar descriptors in `surviving` order."""
     sc = _all_scalars(row)
     scalars = np.array([sc[s] for s in surviving], dtype=np.float32)
     return np.concatenate([timbre.astype(np.float32), scalars])
@@ -484,25 +488,163 @@ def _feature_vector(row: dict, timbre: np.ndarray, surviving: list[str]) -> np.n
 def project_to_zr(row: dict, proj: dict) -> Optional[np.ndarray]:
     """Project one track row into the persisted graph Zr space.
 
-    `proj` is the dict from `db_manager.load_pca_space()`: means/stds (D,),
-    projection (D, k), and the feature spec (surviving scalars, scalar_weight,
-    embed_dims). Returns None when the track lacks a usable timbre BLOB or the
-    projection is absent/mismatched. This is the single entry point for placing
-    an arbitrary track (new import, islet exemplar) into the unified geometry.
+    `proj` is the dict from `db_manager.load_pca_space()`: means/stds (D_cont,),
+    projection (D_cont, k), and the feature spec (surviving scalars,
+    scalar_weight, embed_dims, harmonic metadata). Returns None when the track
+    lacks a usable timbre BLOB or the projection is absent/mismatched.
+
+    Late Fusion: the harmonic columns (cos_h, sin_h, key_mode) are excluded
+    from the PCA projection and concatenated back onto Zr using their own
+    persisted z-score stats + harmonic_weight. This preserves the rigid
+    Camelot wheel geometry that SVD would otherwise rotate.
     """
     if not proj or proj.get("projection") is None or proj.get("surviving") is None:
         return None
-    v = unpack_timbre(row.get("timbre"))
-    if v is None or v.shape[0] != EMBED_DIMS:
+    v = unpack_graph_embedding(row.get("timbre"))
+    if v is None or v.shape[0] != GRAPH_EMBED_DIMS:
         return None
-    x = _feature_vector(row, v, proj["surviving"])
-    means = np.asarray(proj["means"], dtype=np.float32)
-    stds = np.asarray(proj["stds"], dtype=np.float32)
-    if x.shape[0] != means.shape[0]:
-        return None
-    z = (x - means) / stds
-    z[int(proj.get("embed_dims", EMBED_DIMS)):] *= float(proj.get("scalar_weight", 1.0))
-    return (z @ np.asarray(proj["projection"], dtype=np.float32)).astype(np.float32)
+
+    surviving = proj["surviving"]
+    embed_dims = int(proj.get("embed_dims", GRAPH_EMBED_DIMS))
+    scalar_weight = float(proj.get("scalar_weight", 1.0))
+    harmonic_names = set(proj.get("harmonic_names") or [])
+    harmonic_weight = float(proj.get("harmonic_weight", 1.5))
+
+    x = _feature_vector(row, v, surviving)
+
+    # ── Late-fusion split ────────────────────────────────────────────────
+    if harmonic_names:
+        # Determine which columns in x are harmonic (offset by embed_dims).
+        harm_cols = []
+        cont_cols = []
+        for i, s in enumerate(surviving):
+            col = embed_dims + i
+            if s in harmonic_names:
+                harm_cols.append(col)
+            else:
+                cont_cols.append(col)
+        # Timbre columns are always continuous.
+        cont_cols = list(range(embed_dims)) + cont_cols
+
+        x_cont = x[cont_cols]
+        x_harm = x[harm_cols]
+
+        # z-score continuous part with persisted stats.
+        means = np.asarray(proj["means"], dtype=np.float32)
+        stds = np.asarray(proj["stds"], dtype=np.float32)
+        if x_cont.shape[0] != means.shape[0]:
+            return None
+        z_cont = (x_cont - means) / stds
+        # Boost non-timbre continuous scalars.
+        if scalar_weight != 1.0:
+            z_cont[embed_dims:] *= scalar_weight
+
+        # z-score harmonic part with its own persisted stats.
+        h_means = np.asarray(proj.get("harmonic_means", np.zeros(len(harm_cols))), dtype=np.float32)
+        h_stds = np.asarray(proj.get("harmonic_stds", np.ones(len(harm_cols))), dtype=np.float32)
+        z_harm = ((x_harm - h_means) / h_stds) * harmonic_weight
+
+        # Project continuous part, concatenate harmonics.
+        zr_cont = z_cont @ np.asarray(proj["projection"], dtype=np.float32)
+        return np.concatenate([zr_cont, z_harm]).astype(np.float32)
+    else:
+        # Legacy path (pre-late-fusion projection): project the full vector.
+        means = np.asarray(proj["means"], dtype=np.float32)
+        stds = np.asarray(proj["stds"], dtype=np.float32)
+        if x.shape[0] != means.shape[0]:
+            return None
+        z = (x - means) / stds
+        z[embed_dims:] *= scalar_weight
+        return (z @ np.asarray(proj["projection"], dtype=np.float32)).astype(np.float32)
+
+
+def _local_refine_edges(
+    paths: list[str],
+    Z_cont: np.ndarray,
+    Z_harm: np.ndarray,
+    cluster_labels: np.ndarray,
+    k: int,
+    harmonic_weight: float,
+    min_size: int = 12,
+) -> tuple[list[tuple[str, str, float]], int]:
+    """Re-embed each Louvain community in its OWN local PCA and recompute the
+    intra-community acoustic edges with locally-informative axes.
+
+    Why (suggestion 3): the global SVD's principal axes are owned by whatever
+    genre dominates the library, so a minority-genre community is embedded on
+    axes fit to a *different* genre's variance and its internal structure
+    collapses (the majority-class / batch effect the genre diagnostic
+    surfaced). Re-z-scoring and re-PCA'ing *within* the community gives that
+    neighbourhood a metric fit to its own variance — the bioinformatics
+    "subcluster with cluster-specific HVGs" move.
+
+    Returns (intra_edges, n_refined_communities). The caller keeps the global
+    cross-community edges and replaces only the intra-community ones. The
+    persisted global Zr geometry is left untouched, so moods / islets /
+    project_to_zr are unaffected.
+    """
+    intra_edges: list[tuple[str, str, float]] = []
+    refined = 0
+    for cid in np.unique(cluster_labels):
+        members = np.where(cluster_labels == cid)[0]
+        m = int(members.size)
+        if m < min_size:
+            continue  # too small for a meaningful local geometry
+
+        # Local z-score of the continuous block (re-centre/scale within community).
+        sub = Z_cont[members]
+        mu = sub.mean(axis=0)
+        sd = sub.std(axis=0)
+        sd = np.where(sd < 1e-8, 1.0, sd)
+        subz = (sub - mu) / sd
+
+        # Local PCA (Kaiser λ>1, ≥3 comps) — community-specific principal axes.
+        if subz.shape[1] >= 4 and m > 4:
+            _u, _s, _vt = np.linalg.svd(subz, full_matrices=False)
+            ev = (_s ** 2) / float(m - 1)
+            kk = max(3, min(int((ev > 1.0).sum()), _vt.shape[0]))
+            subr = (subz @ _vt[:kk].T).astype(np.float32)
+        else:
+            subr = subz.astype(np.float32)
+
+        # Local harmonic late-fusion (re-z-scored within the community).
+        h = Z_harm[members]
+        hmu = h.mean(axis=0)
+        hsd = h.std(axis=0)
+        hsd = np.where(hsd < 1e-8, 1.0, hsd)
+        subr = np.concatenate(
+            [subr, ((h - hmu) / hsd).astype(np.float32) * harmonic_weight], axis=1,
+        )
+
+        # Local kNN + self-tuning σ + strict mutual-kNN — same recipe as the
+        # global build, restricted to the community subgraph.
+        kk = min(k, m - 1)
+        if kk < 1:
+            continue
+        sq = np.sum(subr ** 2, axis=1)
+        d2 = sq[:, None] - 2.0 * (subr @ subr.T) + sq[None, :]
+        np.fill_diagonal(d2, np.inf)
+        cand: list[list[tuple[int, float]]] = []
+        for i in range(m):
+            idx = np.argpartition(d2[i], kk)[:kk]
+            idx = idx[np.argsort(d2[i, idx])]
+            cand.append([(int(j), max(0.0, float(d2[i, j]))) for j in idx])
+        LOCAL_K = 7
+        sig = np.ones(m, dtype=np.float32)
+        for i in range(m):
+            if cand[i]:
+                piv = cand[i][min(LOCAL_K - 1, len(cand[i]) - 1)][1]
+                sig[i] = float(np.sqrt(max(0.0, piv)))
+        sig = np.maximum(sig, 1e-3)
+        nbr = [{j for j, _ in cand[i]} for i in range(m)]
+        for i in range(m):
+            for j, d2v in cand[i]:
+                if i not in nbr[j]:
+                    continue
+                aff = float(np.exp(-d2v / (sig[i] * float(sig[j]))))
+                intra_edges.append((paths[int(members[i])], paths[int(members[j])], aff))
+        refined += 1
+    return intra_edges, refined
 
 
 async def build_acoustic_edges(
@@ -511,7 +653,11 @@ async def build_acoustic_edges(
     features_version: int = FEATURES_VERSION,
     z_score: bool = True,
     scalar_weight: float = 1.5,
+    harmonic_weight: float = 1.5,
     cluster_resolution: float = 1.0,
+    local_refine: bool = True,
+    csls_beta: float = 0.0,
+    refine_resolution: float | None = None,
 ) -> int:
     """Recompute the acoustic tier of the graph from scratch.
 
@@ -549,10 +695,13 @@ async def build_acoustic_edges(
     paths: list[str] = []
     vectors: list[np.ndarray] = []
     for r in rows:
-        v = unpack_timbre(r.get("timbre"))
-        if v is None or v.shape[0] != EMBED_DIMS:
+        # The graph embedding is the v4 BLOB with mfcc_delta removed
+        # (GRAPH_EMBED_DIMS): the ablation showed delta is dead weight for
+        # similarity. Old/short BLOBs unpack to None and are skipped.
+        v = unpack_graph_embedding(r.get("timbre"))
+        if v is None or v.shape[0] != GRAPH_EMBED_DIMS:
             continue
-        # 52-D timbre block + the surviving scalar descriptors (tempo as
+        # timbre block + the surviving scalar descriptors (tempo as
         # log2(bpm), key as cos_h/sin_h/mode) so dynamics and harmony shape
         # similarity alongside timbre. See `_all_scalars` / `_feature_vector`.
         paths.append(r["path"])
@@ -563,68 +712,101 @@ async def build_acoustic_edges(
         return 0
 
     X = np.stack(vectors, axis=0)  # (N, EMBED_DIMS + len(surviving))
-    # z-score per column so the disparate scales (MFCC vs BPM) don't let one
-    # axis dominate the Euclidean metric. `mu`/`sd` are persisted with the
-    # projection so new/exemplar tracks project identically (project_to_zr);
-    # with z_score off we store unit stds so the same (x-mean)/std path holds.
-    mu = X.mean(axis=0)
+
+    # ── Late Fusion split: separate harmonic columns from continuous ──────
+    # The harmonic unit-circle coords (cos_h, sin_h, key_mode) encode the
+    # rigid Camelot wheel geometry. SVD rotates *all* axes into mixed PCs,
+    # which destroys that geometric integrity. Late Fusion keeps them out of
+    # the PCA entirely: the SVD denoises only the ~58-D timbre+dynamics, and
+    # the raw harmonic coordinates are concatenated back after projection.
+    harmonic_names_in_surviving = [s for s in surviving if s in _HARMONIC_SCALARS]
+    harm_col_indices = []   # column indices in X that are harmonic
+    cont_col_indices = list(range(GRAPH_EMBED_DIMS))  # timbre block is always continuous
+    for i, s in enumerate(surviving):
+        col = GRAPH_EMBED_DIMS + i
+        if s in _HARMONIC_SCALARS:
+            harm_col_indices.append(col)
+        else:
+            cont_col_indices.append(col)
+
+    X_cont = X[:, cont_col_indices]   # (N, D_cont)
+    X_harm = X[:, harm_col_indices]   # (N, n_harm)  — typically 3
+
+    # z-score the continuous block.
+    mu_cont = X_cont.mean(axis=0)
     if z_score:
-        sd = X.std(axis=0)
-        sd = np.where(sd < 1e-8, 1.0, sd)
+        sd_cont = X_cont.std(axis=0)
+        sd_cont = np.where(sd_cont < 1e-8, 1.0, sd_cont)
     else:
-        sd = np.ones(X.shape[1], dtype=X.dtype)
-    Z = (X - mu) / sd
+        sd_cont = np.ones(X_cont.shape[1], dtype=X_cont.dtype)
+    Z_cont = (X_cont - mu_cont) / sd_cont
 
-    # Boost the scalar block AFTER scaling so tempo/key/dynamics carry weight
-    # comparable to the 52 individual timbre axes.
-    if scalar_weight != 1.0:
-        Z[:, EMBED_DIMS:] *= scalar_weight
+    # z-score the harmonic block separately (preserves circle geometry).
+    mu_harm = X_harm.mean(axis=0)
+    if z_score:
+        sd_harm = X_harm.std(axis=0)
+        sd_harm = np.where(sd_harm < 1e-8, 1.0, sd_harm)
+    else:
+        sd_harm = np.ones(X_harm.shape[1], dtype=X_harm.dtype)
+    Z_harm = (X_harm - mu_harm) / sd_harm
 
-    # ── PCA reduction (Kaiser-truncated SVD on the z-scored matrix) ────────
-    # Project onto the components with eigenvalue > 1 (Kaiser) to denoise the
-    # low-variance axes. We keep the *un-normalised* reduced coords Zr: unlike
-    # cosine, Euclidean distance in this variance-scaled space preserves
-    # magnitude — how far a track sits from the library's "average" — which is
-    # real perceptual signal (an energy/brightness extreme is part of what
-    # makes a track (dis)similar). Dropping the old L2 step also removes the
-    # cosine pathology where near-average tracks get noise-dominated directions
-    # and pollute the kNN, the same noise ball that made the old clusters poor.
-    Zr = Z.astype(np.float32)
-    N = Z.shape[0]
-    # Projection matrix V_keep maps a (z-scored, scalar-boosted) row → Zr coords
-    # (Zr = Z @ V_keep). Identity fallback keeps tiny libraries projectable.
-    V_keep = np.eye(Z.shape[1], dtype=np.float32)
-    eigenvalues = np.zeros(Z.shape[1], dtype=np.float32)
-    if Z.shape[1] >= 4 and N > 1:
-        # full_matrices=False gives the thin SVD; memory-cheap for our sizes.
-        _U, _S, _Vt = np.linalg.svd(Z, full_matrices=False)
+    # Boost the non-timbre continuous scalars AFTER z-scoring so tempo/dynamics
+    # carry weight comparable to the individual timbre axes.
+    n_cont_scalars = Z_cont.shape[1] - GRAPH_EMBED_DIMS
+    if scalar_weight != 1.0 and n_cont_scalars > 0:
+        Z_cont[:, GRAPH_EMBED_DIMS:] *= scalar_weight
+
+    # ── PCA reduction (Kaiser-truncated SVD on the *continuous* matrix) ─────
+    # Only the timbre + continuous dynamics enter the SVD; the harmonic columns
+    # are fused back afterwards. This ensures the Camelot wheel's cos/sin
+    # geometry is 100% preserved in the final affinity calculation.
+    Zr_cont = Z_cont.astype(np.float32)
+    N = Z_cont.shape[0]
+    V_keep = np.eye(Z_cont.shape[1], dtype=np.float32)
+    eigenvalues = np.zeros(Z_cont.shape[1], dtype=np.float32)
+    if Z_cont.shape[1] >= 4 and N > 1:
+        _U, _S, _Vt = np.linalg.svd(Z_cont, full_matrices=False)
         eigenvalues = (_S ** 2) / float(N - 1)
         kaiser_k = int((eigenvalues > 1.0).sum())
-        # Floor at 3 so we never collapse to near-scalar; cap at rank.
         kaiser_k = max(3, min(kaiser_k, _Vt.shape[0]))
-        V_keep = _Vt[:kaiser_k].T.astype(np.float32)     # (D, kaiser_k)
-        Zr = (Z @ V_keep).astype(np.float32)             # (N, kaiser_k)
+        V_keep = _Vt[:kaiser_k].T.astype(np.float32)     # (D_cont, kaiser_k)
+        Zr_cont = (Z_cont @ V_keep).astype(np.float32)   # (N, kaiser_k)
         cum_var = float(eigenvalues[:kaiser_k].sum() / eigenvalues.sum()) if eigenvalues.sum() > 0 else 0.0
         logger.info(
-            "track_graph: PCA-reduced build matrix from %d to %d dims "
+            "track_graph: PCA-reduced continuous dims from %d to %d "
             "(Kaiser λ>1; %.1f%% variance retained)",
             int(_Vt.shape[1]), V_keep.shape[1], cum_var * 100.0,
         )
 
+    # ── Late Fusion: concatenate the raw harmonic coords onto Zr ───────────
+    H_fused = (Z_harm * harmonic_weight).astype(np.float32)  # (N, n_harm)
+    Zr = np.concatenate([Zr_cont, H_fused], axis=1)          # (N, kaiser_k + n_harm)
+    logger.info(
+        "track_graph: late-fused %d harmonic dims (weight=%.2f) → "
+        "final Zr %d-D",
+        H_fused.shape[1], harmonic_weight, Zr.shape[1],
+    )
+
     # ── Persist the unified geometry (projection + per-track Zr coords) ────
     # Single source of the graph's Zr space: moods, islets and any on-demand
     # projection of new/exemplar tracks read it back via load_pca_space() /
-    # project_to_zr(). Replaces the old separate 3-D mood PCA.
+    # project_to_zr(). The stored means/stds correspond to the *continuous*
+    # columns only; harmonic stats are stored separately in feature_spec so
+    # project_to_zr can replicate the same late-fusion split.
     if hasattr(db_manager, "save_pca_space"):
         try:
             feature_spec = {
                 "surviving": surviving,
                 "scalar_weight": float(scalar_weight),
-                "embed_dims": int(EMBED_DIMS),
+                "embed_dims": int(GRAPH_EMBED_DIMS),
                 "z_score": bool(z_score),
+                "harmonic_names": harmonic_names_in_surviving,
+                "harmonic_weight": float(harmonic_weight),
+                "harmonic_means": mu_harm.astype(np.float32).tolist(),
+                "harmonic_stds": sd_harm.astype(np.float32).tolist(),
             }
             await db_manager.save_pca_space(
-                mu.astype(np.float32), sd.astype(np.float32),
+                mu_cont.astype(np.float32), sd_cont.astype(np.float32),
                 V_keep, eigenvalues.astype(np.float32), feature_spec,
             )
             await db_manager.update_tracks_pca_coords_batch(
@@ -642,55 +824,69 @@ async def build_acoustic_edges(
     k_eff = min(k, N - 1)
     Zr_sq = np.sum(Zr ** 2, axis=1)  # row squared-norms for distance expansion
 
-    # First pass: each track's top-K nearest neighbours by Euclidean distance in
-    # Zr, retaining the squared distance (the self-tuning kernel and the
-    # mutual-kNN intersection both reuse it). ||a-b||² = ||a||² - 2a·b + ||b||².
-    candidates: list[list[tuple[int, float]]] = [[] for _ in range(N)]
+    # ── Pass 1: self-tuning bandwidth σ_i (Zelnik-Manor) ──────────────────
+    # σ_i = distance to i's LOCAL_K-th nearest neighbour. σ is a *distance*
+    # scale, independent of how candidates are later ranked, so it's computed
+    # up front over full rows. Chunked so we never materialise the full N×N
+    # matrix. ||a-b||² = ||a||² - 2a·b + ||b||².
+    LOCAL_K = 7
     chunk = 256
+    sigmas = np.ones(N, dtype=np.float32)
     for i in range(0, N, chunk):
         block = Zr[i:i + chunk]              # (C, D)
-        # squared Euclidean distances from this block to all rows: (C, N)
-        d2 = (
-            Zr_sq[i:i + block.shape[0], None]
-            - 2.0 * (block @ Zr.T)
-            + Zr_sq[None, :]
-        )
-        # Mask self.
-        for j, row_idx in enumerate(range(i, i + block.shape[0])):
-            d2[j, row_idx] = np.inf
-        # Smallest-K distances per row. argpartition is O(N); order the K-slice.
-        topk_unsorted = np.argpartition(d2, k_eff, axis=1)[:, :k_eff]
-        for j, row_idx in enumerate(range(i, i + block.shape[0])):
-            idx = topk_unsorted[j]
-            order = np.argsort(d2[j, idx])
-            ordered = idx[order]
-            candidates[row_idx] = [
-                (int(nb), max(0.0, float(d2[j, nb]))) for nb in ordered
-            ]
-
-    # ── Local scaling (Zelnik-Manor self-tuning bandwidth) ────────────────
-    # σ_i = distance to i's LOCAL_K-th nearest neighbour; affinity(i,j) =
-    # exp(-d(i,j)² / (σ_i·σ_j)). The local σ adapts the kernel to each track's
-    # neighbourhood density so a sparse outlier and a dense-cluster member get
-    # comparable affinities. (Candidates store squared distance → σ = sqrt of
-    # the LOCAL_K-th entry.)
-    LOCAL_K = 7
-    sigmas = np.ones(N, dtype=np.float32)
-    for i in range(N):
-        if not candidates[i]:
-            continue
-        pivot_d2 = candidates[i][min(LOCAL_K - 1, len(candidates[i]) - 1)][1]
-        sigmas[i] = float(np.sqrt(max(0.0, pivot_d2)))
+        c = block.shape[0]
+        d2 = Zr_sq[i:i + c, None] - 2.0 * (block @ Zr.T) + Zr_sq[None, :]
+        for j in range(c):
+            d2[j, i + j] = np.inf            # mask self
+        # LOCAL_K-th smallest squared distance per row → σ = its sqrt.
+        piv = np.partition(d2, LOCAL_K - 1, axis=1)[:, LOCAL_K - 1]
+        sigmas[i:i + c] = np.sqrt(np.maximum(piv, 0.0))
     # Floor σ so a near-duplicate pivot (d ≈ 0) doesn't blow up the kernel.
     sigmas = np.maximum(sigmas, 1e-3)
 
-    rescaled: list[list[tuple[int, float]]] = [[] for _ in range(N)]
-    for i, cands in enumerate(candidates):
-        sigma_i = float(sigmas[i])
-        for nb, d2_val in cands:
-            affinity = float(np.exp(-d2_val / (sigma_i * float(sigmas[nb]))))
-            rescaled[i].append((nb, affinity))
-    candidates = rescaled
+    # After σ (Pass 1): per-node hubness r(x) = mean of x's top-LOCAL_K affinities.
+    r = np.zeros(N, dtype=np.float32)
+    if csls_beta > 0.0:
+        for i in range(0, N, chunk):
+            block = Zr[i:i + chunk]
+            c = block.shape[0]
+            d2 = Zr_sq[i:i + c, None] - 2.0 * (block @ Zr.T) + Zr_sq[None, :]
+            for j in range(c):
+                d2[j, i + j] = np.inf
+            A = np.exp(-d2 / (sigmas[i:i + c, None] * sigmas[None, :]))
+            r[i:i + c] = np.sort(A, axis=1)[:, -LOCAL_K:].mean(axis=1)
+
+    # ── Pass 2: candidate neighbourhoods by self-tuning AFFINITY ──────────
+    # affinity(i,j) = exp(-d(i,j)² / (σ_i·σ_j)). We select each track's top-K by
+    # *affinity*, not by raw Euclidean distance. Gating on distance and only
+    # then applying the kernel as an edge weight (the previous behaviour) threw
+    # the kernel's hub mitigation away at the membership stage: the σ_j term
+    # divides a candidate's distance by *its own* neighbourhood scale, so a
+    # sparse-region neighbour — typically a minority-genre track — outranks an
+    # equidistant majority "hub". A per-class retrieval audit
+    # (tools/projection_diagnostic.py) showed affinity selection recovers
+    # minority structure the distance gate discarded (e.g. Classical kNN purity
+    # 0.21 → 0.33; global purity 0.631 → 0.640) at no majority cost. The
+    # affinity computed here is reused directly as the edge weight, so there is
+    # no separate rescale pass.
+    candidates: list[list[tuple[int, float]]] = [[] for _ in range(N)]
+    for i in range(0, N, chunk):
+        block = Zr[i:i + chunk]              # (C, D)
+        c = block.shape[0]
+        d2 = Zr_sq[i:i + c, None] - 2.0 * (block @ Zr.T) + Zr_sq[None, :]
+        for j in range(c):
+            d2[j, i + j] = np.inf            # self → affinity 0, never selected
+        A = np.exp(-d2 / (sigmas[i:i + c, None] * sigmas[None, :]))
+        if csls_beta > 0.0:
+            sel = A - csls_beta * 0.5 * (r[i:i + c, None] + r[None, :])
+        else:
+            sel = A
+        # Largest-K affinities per row. argpartition on -sel is O(N); order slice.
+        topk_unsorted = np.argpartition(-sel, k_eff, axis=1)[:, :k_eff]
+        for j in range(c):
+            idx = topk_unsorted[j]
+            ordered = idx[np.argsort(-sel[j, idx])]
+            candidates[i + j] = [(int(nb), float(A[j, nb])) for nb in ordered]
 
     # Mutual-kNN pruning: keep edge (i → j) iff j ∈ topK(i) AND i ∈ topK(j).
     # Strict mutual-kNN flattens hub over-representation. The surviving edges
@@ -742,9 +938,40 @@ async def build_acoustic_edges(
                 cluster_resolution, n_comm, N, size_str,
             )
 
+            # ── Local per-community re-embedding (suggestion 3) ──────────────
+            # Replace intra-community acoustic edges with ones computed under a
+            # community-local PCA/metric; keep the global cross-community edges.
+            # cluster_id stays from the global Louvain above (no re-clustering)
+            # so the refinement basis is fixed and non-circular.
+            if local_refine:
+                try:
+                    if refine_resolution is not None:
+                        refine_labels = _louvain(N, mutual_pairs, resolution=refine_resolution)
+                        logger.info("track_graph: ran second Louvain (resolution=%.2f) to seed refine partition", refine_resolution)
+                    else:
+                        refine_labels = cluster_labels
+                    intra, n_ref = _local_refine_edges(
+                        paths, Z_cont, Z_harm, refine_labels, k_eff, harmonic_weight,
+                    )
+                    cl = {paths[i]: int(cluster_labels[i]) for i in range(N)}
+                    cross = [e for e in edges if cl.get(e[0]) != cl.get(e[1])]
+                    refined_edges = cross + intra
+                    await db_manager.replace_neighbors_bulk(refined_edges, KIND_ACOUSTIC)
+                    edges = refined_edges
+                    logger.info(
+                        "track_graph: local re-embedding refined %d communities → "
+                        "%d intra + %d cross = %d acoustic edges",
+                        n_ref, len(intra), len(cross), len(edges),
+                    )
+                except Exception as ref_err:
+                    logger.warning(
+                        "track_graph: local re-embedding failed (%s); "
+                        "keeping global acoustic edges", ref_err,
+                    )
+
             # ── Generate/update on-device mathematical truth report ──────────
             try:
-                from utils.pca_engine import plot_pca_report
+                from utils.pca_engine import plot_pca_report, plot_genre_report
                 from utils.streamrip_api import load_config
 
                 cfg = load_config()
@@ -758,6 +985,13 @@ async def build_acoustic_edges(
 
                 saved = plot_pca_report(
                     rows, report_dir, cluster_labels=cluster_labels,
+                )
+                # Genre-coloured view of the REAL Zr geometry (aligned to paths).
+                path_to_genre = {r["path"]: r.get("genre") for r in rows}
+                genres_aligned = [path_to_genre.get(p) for p in paths]
+                saved += plot_genre_report(
+                    paths, Zr, genres_aligned, report_dir,
+                    cluster_labels=cluster_labels,
                 )
                 if saved:
                     logger.info(
@@ -897,9 +1131,10 @@ _DEFAULT_EDGE_KIND_WEIGHTS: dict[str, float] = {
 
 def _unpack_embedding(blob: bytes | None) -> Optional[np.ndarray]:
     """Local helper: unpack a timbre BLOB to an L2-normalised float32 vector
-    suitable for cosine on the MFCC+delta+chroma sub-space. Returns None when
-    the blob is absent or malformed. Used by the MMR diversity term."""
-    v = unpack_timbre(blob)
+    suitable for cosine on the graph timbre sub-space (mfcc mean/std + chroma +
+    rhythm; delta excluded, matching the geometry). Returns None when the blob
+    is absent or malformed. Used by the MMR diversity term."""
+    v = unpack_graph_embedding(blob)
     if v is None:
         return None
     n = float(np.linalg.norm(v))

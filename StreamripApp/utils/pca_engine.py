@@ -604,3 +604,212 @@ def plot_pca_report(
         logger.info("plot_pca_report: saved %s", path_sc_cluster)
 
     return saved
+
+
+# ─── Genre diagnostic (real Zr geometry) ────────────────────────────────────
+#
+# Unlike plot_pca_report (which projects the 8 raw scalars), this colours the
+# *actual* graph geometry — the persisted Zr coords that the walk and Louvain
+# use — by a coarse genre bucket, and quantifies how well genre is encoded:
+#   • per-genre silhouette in full Zr (separation), and
+#   • genre × Louvain-cluster fragmentation.
+# It's the measuring stick for any feature/geometry change: if a genre that
+# used to fragment now forms a coherent region, its silhouette rises and its
+# community count falls.
+
+# Coarse buckets over the messy, multi-label, partly-French Qobuz genre tags.
+# Priority order: the rare / historically-failing genres are matched FIRST so
+# they surface with their own colour instead of being swallowed by the Rock/Pop
+# majority co-tags ("Pop, Rock, Metal" → Metal).
+_GENRE_RULES = [
+    ("Classical",  ("classical", "classique")),
+    ("Hip-Hop",    ("rap", "hip hop", "hip-hop", "hiphop", "trap", "хип", "рэп")),
+    ("Electronic", ("électron", "electron", "électro", "house", "techno",
+                    "dance", "edm", "trance", "drum & bass", "dnb")),
+    ("Folk/Cntry", ("folk", "country", "blues", "bluegrass", "americana")),
+    ("Soul/R&B",   ("soul", "r&b", "funk", "rnb", "motown")),
+    ("Metal",      ("metal", "métal", "hard rock", "grunge")),
+    ("Rock/Alt",   ("rock", "alternatif", "alternative", "indé", "indie",
+                    "punk", "new wave", "рок")),
+    ("Pop",        ("pop", "поп")),
+]
+
+_GENRE_PALETTE = {
+    "Rock/Alt": "#40C4FF", "Pop": "#FF80AB", "Metal": "#FF5252",
+    "Hip-Hop": "#FFD740", "Electronic": "#76FF03", "Folk/Cntry": "#B388FF",
+    "Classical": "#FFFFFF", "Soul/R&B": "#FF6E40", "Other": "#888888",
+    "Unknown": "#444444",
+}
+
+
+def genre_bucket(genre: str | None) -> str:
+    """Map a free-text (multi-label) genre tag to one coarse bucket."""
+    g = (genre or "").strip().lower()
+    if not g:
+        return "Unknown"
+    for label, keys in _GENRE_RULES:
+        if any(k in g for k in keys):
+            return label
+    return "Other"
+
+
+def genre_tokens(genre: str | None) -> set[str]:
+    """Multi-label canonical genre set (FR/RU aware). Unlike genre_bucket's
+    first-match single label, returns ALL matching buckets — 39% of library
+    tags carry ≥2 genres. {'Unknown'} for empty, {'Other'} for unmatched."""
+    g = (genre or "").strip().lower()
+    if not g:
+        return {"Unknown"}
+    toks = {label for label, keys in _GENRE_RULES if any(k in g for k in keys)}
+    return toks or {"Other"}
+
+
+def plot_genre_report(
+    paths: list[str],
+    zr: np.ndarray,
+    genres: list,
+    output_dir: str,
+    cluster_labels=None,
+) -> list[str]:
+    """Render a genre-coloured scatter of the REAL Zr graph geometry plus a
+    text report (per-genre silhouette + Louvain fragmentation).
+
+    `zr` is (N, D) aligned row-for-row to `paths`/`genres` (and `cluster_labels`
+    if given). Writes `genre_pca_scatter.png` and `genre_report.txt` into
+    `output_dir`; returns the saved paths (empty if matplotlib is missing or
+    N < 3). Pure diagnostic — reads nothing, mutates nothing.
+    """
+    import os
+    from collections import Counter
+    zr = np.asarray(zr, dtype=np.float64)
+    N = zr.shape[0]
+    if N < 3 or len(genres) != N:
+        logger.warning("plot_genre_report: need ≥3 aligned rows; skipping.")
+        return []
+    os.makedirs(output_dir, exist_ok=True)
+
+    # token_sets (multi-label) feed the noise-robust Jaccard metric. The
+    # single-label `labels` for per-class purity/AUC/silhouette/scatter use the
+    # priority-ordered genre_bucket (rare-genre-first) so minorities like Metal
+    # surface as their own class instead of being absorbed into the Rock/Pop
+    # majority — the whole point of the diagnostic. (A dominant-by-frequency
+    # collapse would invert that priority and undercount Metal 87 → 26.)
+    token_sets = [genre_tokens(g) for g in genres]
+    labels = np.array([genre_bucket(g) for g in genres])
+    valid = np.array([g != "Unknown" for g in labels])
+
+    order = [g for g, _ in sorted(
+        ((g, int((labels == g).sum())) for g in set(labels)),
+        key=lambda x: -x[1],
+    )]
+
+    sq = (zr ** 2).sum(1)
+    D = np.sqrt(np.maximum(sq[:, None] - 2 * zr @ zr.T + sq[None, :], 0.0))
+
+    from utils.genre_eval import (
+        knn_purity,
+        knn_purity_z,
+        token_jaccard_agreement,
+        compute_silhouette_scores,
+        per_class_auc
+    )
+
+    nbr_order = np.argsort(D, axis=1)
+
+    purity, purity_null, purity_std, purity_z = knn_purity_z(nbr_order, labels, valid, k=10)
+    _, class_purities = knn_purity(nbr_order, labels, valid, k=10)
+    jac_mean, jac_null, jac_std, jac_z = token_jaccard_agreement(nbr_order, token_sets, valid, k=10)
+    sil, global_sil, class_sils = compute_silhouette_scores(D, labels, valid)
+    auc_results = per_class_auc(D, labels, valid, min_n=8)
+
+    lines = [
+        "GENRE DIAGNOSTIC — real Zr graph geometry",
+        f"  tracks={N}  Zr_dim={zr.shape[1]}",
+        f"  kNN purity@10        = {purity:.2f}   (null {purity_null:.2f} ± {purity_std:.2f} → z={purity_z:+.1f})      [PRIMARY]",
+        f"  multi-label Jaccard  = {jac_mean:.2f}   (null {jac_null:.2f} ± {jac_std:.2f} → z={jac_z:+.1f})      [PRIMARY, noise-robust]",
+        f"  silhouette           = {global_sil:+.2f}  [SECONDARY — global-overlap; misleading on a continuum]",
+        "",
+        "per-genre retrieval AUC (base-rate-invariant; <0.6 = feature-weak, ≥0.75 = separable):",
+    ]
+
+    for g in order:
+        if g == "Unknown":
+            continue
+        count = int((labels == g).sum())
+        p_val = class_purities.get(g, (0.0, 0))[0]  # knn_purity returns (mean, n)
+        if g in auc_results:
+            auc, _ = auc_results[g]
+            if auc < 0.6:
+                note = "   (feature-weak)"
+            elif auc >= 0.75:
+                if p_val < 0.5:
+                    note = "   (separable but base-rate-swamped)"
+                else:
+                    note = "   (separable)"
+            else:
+                note = ""
+            lines.append(f"  {g:12s} n={count:4d}  AUC={auc:.2f}  purity={p_val:.2f}{note}")
+        else:
+            lines.append(f"  {g:12s} n={count:4d}  AUC=--    purity={p_val:.2f}")
+
+    if cluster_labels is not None and len(cluster_labels) == N:
+        cl = np.asarray(cluster_labels)
+        lines += ["", "fragmentation (communities spanned / biggest-community share):"]
+        for g in order:
+            m = labels == g
+            cc = Counter(cl[m].tolist())
+            ncl = len([k for k in cc if k != -1])
+            top = max((v for k, v in cc.items() if k != -1), default=0)
+            lines.append(
+                f"  {g:12s} n={int(m.sum()):4d}  in {ncl:3d} communities  "
+                f"biggest={top / max(int(m.sum()), 1):.0%}"
+            )
+
+    report = "\n".join(lines)
+    logger.info("plot_genre_report:\n%s", report)
+    saved: list[str] = []
+    txt_path = os.path.join(output_dir, "genre_report.txt")
+    with open(txt_path, "w", encoding="utf-8") as fh:
+        fh.write(report + "\n")
+    saved.append(txt_path)
+
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        logger.warning("plot_genre_report: matplotlib missing — wrote text only.")
+        return saved
+
+    # 2D PCA of the real Zr for display.
+    zc = zr - zr.mean(0)
+    _, S, Vt = np.linalg.svd(zc, full_matrices=False)
+    P = zc @ Vt[:2].T
+    evr = (S ** 2) / float((S ** 2).sum() or 1.0)
+
+    fig, ax = plt.subplots(figsize=(11, 9), facecolor="#121212")
+    ax.set_facecolor("#1E1E1E")
+    for g in order:
+        m = labels == g
+        s_val = class_sils[g][0] if g in class_sils else (sil[m].mean() if m.any() else 0.0)
+        ax.scatter(P[m, 0], P[m, 1], s=34, alpha=0.82,
+                   c=_GENRE_PALETTE.get(g, "#888888"),
+                   edgecolors="#121212", linewidths=0.4,
+                   label=f"{g} ({int(m.sum())}, s={s_val:+.2f})")
+    ax.axhline(0, color="#333", ls="--", lw=.8)
+    ax.axvline(0, color="#333", ls="--", lw=.8)
+    ax.set_xlabel(f"Zr PC1 ({evr[0] * 100:.1f}%)", color="#ccc")
+    ax.set_ylabel(f"Zr PC2 ({evr[1] * 100:.1f}%)", color="#ccc")
+    ax.tick_params(colors="#888")
+    ax.set_title("Real Zr graph geometry coloured by genre "
+                 f"(global silhouette {global_sil:+.3f})",
+                 color="white", weight="bold")
+    ax.legend(fontsize=8, framealpha=.7, facecolor="#1E1E1E",
+              edgecolor="#444", labelcolor="white", loc="best")
+    fig.tight_layout()
+    png_path = os.path.join(output_dir, "genre_pca_scatter.png")
+    fig.savefig(png_path, dpi=150, facecolor="#121212")
+    plt.close(fig)
+    saved.append(png_path)
+    logger.info("plot_genre_report: saved %s", png_path)
+    return saved

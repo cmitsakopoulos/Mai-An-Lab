@@ -1526,7 +1526,8 @@ class DatabaseManager:
                    COALESCE(pc.key_index, 0)         AS key_index,
                    t.title, t.duration,
                    ar.name  AS artist,
-                   al.title AS album
+                   al.title AS album,
+                   al.genre AS genre
             FROM play_counts pc
             LEFT JOIN tracks  t  ON t.path  = pc.track_path
             LEFT JOIN albums  al ON al.id   = t.album_id
@@ -1951,6 +1952,11 @@ class DatabaseManager:
                     "scalar_weight": float(spec.get("scalar_weight", 1.0)),
                     "embed_dims": int(spec.get("embed_dims", 52)),
                     "z_score": bool(spec.get("z_score", True)),
+                    # Late-fusion harmonic metadata (absent in pre-v2 projections).
+                    "harmonic_names": spec.get("harmonic_names"),
+                    "harmonic_weight": float(spec.get("harmonic_weight", 1.5)),
+                    "harmonic_means": spec.get("harmonic_means"),
+                    "harmonic_stds": spec.get("harmonic_stds"),
                 }
             except Exception as e:
                 logger.error(f"Error decoding PCA space from database: {e}")

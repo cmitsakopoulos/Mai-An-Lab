@@ -83,7 +83,18 @@ def _trace(msg: str) -> None:
 #     (spectral_flatness, spectral_contrast, key_index). 120 s decode window.
 #     Destructive change — every track requires a re-analyse via the offload
 #     script. No backwards-compat read path.
-FEATURES_VERSION = 3
+# v4: distributional timbre + rhythm block. The single global MFCC *mean* was
+#     a bulk-average that washed out within-track heterogeneity (drops, beat
+#     switches) — fatal for rhythm/arrangement-driven genres. We now keep MFCC
+#     mean *and* std (dispersion) *and* delta, and append a 16-D RHYTHM block
+#     (beat-relative tempogram + sub-band kick/hat pulse structure + onset
+#     density) computed on the HPSS-percussive residual. This is the
+#     discriminative content for Hip-Hop / Electronic / House that v3 discarded
+#     into the two scalars bpm + beat_strength. Everything new lives inside the
+#     `timbre` BLOB — NO play_counts schema change — but the BLOB length grows
+#     (52→88 floats) so v3 blobs are rejected by length and every track must be
+#     re-analysed. No backwards-compat read path.
+FEATURES_VERSION = 4
 
 # Frame parameters. n_fft=2048 / hop=512 at 22050 Hz → ~93 ms windows hopping
 # every ~23 ms (~43 frames/sec). These are the conventional defaults from
@@ -94,18 +105,37 @@ HOP = 512
 N_MELS = 64       # v3: was 40; finer mel resolution → cleaner MFCC
 N_MFCC = 20       # v3: was 13; more spectral envelope detail
 N_CHROMA = 12
+# v4 rhythm block — descriptors derived from the HPSS-percussive onset
+# envelope (full-band + low/high sub-bands), anchored to the detected beat
+# period so the texture is tempo-normalised. Layout inside RHYTHM_DIMS:
+#   [0:6]   full-band beat-relative tempogram at {0.5,1,1.5,2,3,4}×beat
+#   [6:9]   low-band  (<200 Hz, kick/bass) tempogram at {0.5,1,2}×beat
+#   [9:12]  high-band (>2 kHz, hats/cymbals) tempogram at {0.5,1,2}×beat
+#   [12]    full-band onset density (onsets/sec, scaled)
+#   [13]    high/low onset-density ratio (hat vs kick busyness)
+#   [14]    low-band pulse clarity  (max autocorr in the tempo range)
+#   [15]    high-band pulse clarity
+# This separates four-on-the-floor (strong low-band 1×beat) from breakbeat
+# (syncopated low) from trap (dense high-band rolls) — invisible to v3.
+_TEMPOGRAM_MULTS_FULL = (0.5, 1.0, 1.5, 2.0, 3.0, 4.0)
+_TEMPOGRAM_MULTS_BAND = (0.5, 1.0, 2.0)
+RHYTHM_DIMS = (len(_TEMPOGRAM_MULTS_FULL)
+               + 2 * len(_TEMPOGRAM_MULTS_BAND)
+               + 4)
 # Decode window in seconds. Pulled by the offload script's ffmpeg call. Now
 # that DSP runs on the laptop, the per-track wall-clock cost of a longer
 # window is negligible (extra ~700 ms/track on laptop CPU) and stabilises
 # every statistic noticeably.
 MAX_SECONDS = 120
-# Total length of the packed sound-profile BLOB. v3 layout:
-#   [0 : N_MFCC)              mfcc_mean       (20 floats)
-#   [N_MFCC : 2*N_MFCC)       mfcc_delta_mean (20 floats)
-#   [2*N_MFCC : ...)          chroma          (12 floats)
+# Total length of the packed sound-profile BLOB. v4 layout (88 floats):
+#   [ 0:20)  mfcc_mean
+#   [20:40)  mfcc_std    (NEW v4 — within-track timbral dispersion)
+#   [40:60)  mfcc_delta
+#   [60:72)  chroma
+#   [72:88)  rhythm      (NEW v4 — see RHYTHM_DIMS above)
 # Stored as float32 little-endian; one BLOB so adding a new descriptor only
 # requires touching FEATURES_VERSION + the embedding layout.
-EMBED_DIMS = N_MFCC + N_MFCC + N_CHROMA
+EMBED_DIMS = N_MFCC + N_MFCC + N_MFCC + N_CHROMA + RHYTHM_DIMS
 TARGET_SAMPLE_RATE = 22050  # must match the Kotlin decoder's TARGET_SAMPLE_RATE
 
 
@@ -127,19 +157,26 @@ class Features:
     spectral_contrast: float   # [0, 1] mean peak-to-valley across sub-bands
     key_index: int             # 0..11 = C..B major, 12..23 = C..B minor
     mfcc_mean: np.ndarray      # (N_MFCC,) mean MFCC over HPSS-harmonic content
+    mfcc_std: np.ndarray       # (N_MFCC,) per-coeff MFCC std (timbral spread)
     mfcc_delta: np.ndarray     # (N_MFCC,) mean MFCC first derivative (Δ)
     chroma: np.ndarray         # (N_CHROMA,) mean pitch-class profile (HPSS-harmonic)
+    rhythm: np.ndarray         # (RHYTHM_DIMS,) groove descriptors (see RHYTHM_DIMS)
 
     def timbre_blob(self) -> bytes:
-        """Pack mfcc_mean + mfcc_delta + chroma into a single float32 LE BLOB.
+        """Pack the v4 sound profile into a single float32 LE BLOB.
 
-        v3 layout (52 × 4 = 208 bytes):
+        v4 layout (88 × 4 = 352 bytes):
             [ 0:20)  mfcc_mean
-            [20:40)  mfcc_delta
-            [40:52)  chroma
+            [20:40)  mfcc_std
+            [40:60)  mfcc_delta
+            [60:72)  chroma
+            [72:88)  rhythm
         """
         return (
-            np.concatenate([self.mfcc_mean, self.mfcc_delta, self.chroma])
+            np.concatenate([
+                self.mfcc_mean, self.mfcc_std, self.mfcc_delta,
+                self.chroma, self.rhythm,
+            ])
             .astype("<f4")
             .tobytes()
         )
@@ -158,15 +195,41 @@ def unpack_timbre(blob: bytes | None) -> np.ndarray | None:
 
 
 def unpack_embedding_groups(blob: bytes | None):
-    """Returns (mfcc_mean, mfcc_delta, chroma) or None for missing/malformed."""
+    """Returns (mfcc_mean, mfcc_std, mfcc_delta, chroma, rhythm) or None for
+    missing/malformed, sliced from the v4 layout."""
     v = unpack_timbre(blob)
     if v is None:
         return None
+    o_std   = N_MFCC
+    o_delta = 2 * N_MFCC
+    o_chrom = 3 * N_MFCC
+    o_rhy   = 3 * N_MFCC + N_CHROMA
     return (
-        v[0:N_MFCC],
-        v[N_MFCC:2 * N_MFCC],
-        v[2 * N_MFCC:],
+        v[0:o_std],            # mfcc_mean
+        v[o_std:o_delta],      # mfcc_std
+        v[o_delta:o_chrom],    # mfcc_delta
+        v[o_chrom:o_rhy],      # chroma
+        v[o_rhy:],             # rhythm
     )
+
+
+# Dimensionality of the timbre vector the *similarity graph* consumes: the full
+# BLOB minus the mfcc_delta block. A feature-group ablation (kNN genre-purity vs
+# a label-permutation null) found mfcc_delta carries no genre signal on its own
+# (it sits at the null) and only dilutes the Euclidean metric, so the graph
+# excludes it. The BLOB still stores delta (no extra version bump) — only the
+# graph view drops it. mfcc_mean + mfcc_std + chroma + rhythm = 68.
+GRAPH_EMBED_DIMS = N_MFCC + N_MFCC + N_CHROMA + RHYTHM_DIMS
+
+
+def unpack_graph_embedding(blob: bytes | None) -> np.ndarray | None:
+    """The timbre vector the graph uses: the v4 BLOB with the mfcc_delta block
+    removed. Returns a GRAPH_EMBED_DIMS-length float32 vector, or None for a
+    missing/malformed/old-version BLOB (length-checked via `unpack_timbre`)."""
+    v = unpack_timbre(blob)
+    if v is None:
+        return None
+    return np.delete(v, np.s_[2 * N_MFCC:3 * N_MFCC])
 
 
 # ─── Decoder dispatch ──────────────────────────────────────────────────────
@@ -437,6 +500,108 @@ def _estimate_bpm(onset_env: np.ndarray, sr: int) -> tuple[float, float]:
     # rhythmic regularity, not how close to 120 BPM the track happens to be.
     strength = float(np.clip(ac[1:][best], 0.0, 1.0))
     return bpm, strength
+
+
+# ─── Rhythm block (v4) ──────────────────────────────────────────────────────
+
+
+def _autocorr(env: np.ndarray) -> np.ndarray:
+    """Normalised autocorrelation of an onset envelope (ac[0] = 1).
+
+    Same FFT trick as `_estimate_bpm`: autocorr = IFFT(|FFT(x)|²) on a
+    zero-padded signal. Factored out so the rhythm block can sample the whole
+    autocorrelation curve (the tempogram), not just its argmax."""
+    n = env.size
+    if n < 4:
+        return np.zeros(max(n, 1), dtype=np.float32)
+    pad = 1 << (int(np.ceil(np.log2(2 * n))))
+    spec = np.fft.rfft(env, n=pad)
+    ac = np.fft.irfft(spec * np.conj(spec), n=pad)[:n]
+    return (ac / (ac[0] + 1e-9)).astype(np.float32)
+
+
+def _sample_tempogram(ac: np.ndarray, beat_frames: float,
+                      mults: tuple[float, ...]) -> list[float]:
+    """Sample the autocorrelation curve at beat-relative lags.
+
+    `beat_frames` is the detected beat period in frames; sampling at
+    {0.5, 1, 2, …}×beat makes the descriptor tempo-invariant — a 124-BPM and a
+    128-BPM four-on-the-floor land at the same coordinates. A high 0.5×beat
+    value means strong off-beat/swing energy; a high 4×beat value means a
+    clear bar-level pulse."""
+    n = ac.size
+    out: list[float] = []
+    for m in mults:
+        lag = int(round(beat_frames * m))
+        out.append(float(np.clip(ac[lag], -1.0, 1.0)) if 1 <= lag < n else 0.0)
+    return out
+
+
+def _onset_rate(env: np.ndarray, fps: float) -> float:
+    """Onsets per second: local maxima of the (already high-passed, unit-std)
+    onset envelope above a mean+½σ gate. Separates busy (DnB, trap hats) from
+    sparse (folk, ambient) textures."""
+    if env.size < 3 or fps <= 0:
+        return 0.0
+    thr = float(env.mean() + 0.5 * env.std())
+    mid = env[1:-1]
+    peaks = (mid > env[:-2]) & (mid >= env[2:]) & (mid > thr)
+    dur = env.size / fps
+    return float(peaks.sum()) / dur if dur > 0 else 0.0
+
+
+def _pulse_clarity(ac: np.ndarray, fps: float) -> float:
+    """Peak autocorrelation height in the [60, 200] BPM lag range — how
+    unambiguously periodic this (sub-)band is. A kick on every beat → high
+    low-band clarity; a wash of sustained noise → near 0."""
+    n = ac.size
+    lo = max(1, int(60.0 * fps / 200.0))
+    hi = min(n - 1, int(60.0 * fps / 60.0))
+    if hi <= lo:
+        return 0.0
+    return float(np.clip(ac[lo:hi].max(), 0.0, 1.0))
+
+
+def _rhythm_features(P_mag: np.ndarray, freqs: np.ndarray, sr: int,
+                     bpm: float) -> np.ndarray:
+    """RHYTHM_DIMS-vector of groove descriptors from the percussive residual.
+
+    Full-band + low(<200 Hz)/high(>2 kHz) sub-band onset envelopes → their
+    autocorrelations → beat-relative tempograms + densities + pulse clarities.
+    The sub-band split is what makes kick patterns and hat patterns separable;
+    v3 collapsed all of this into the two scalars `bpm` and `beat_strength`."""
+    R = np.zeros(RHYTHM_DIMS, dtype=np.float32)
+    if P_mag.shape[0] < 16:
+        return R
+    fps = sr / HOP
+
+    full_env = _onset_envelope(P_mag)
+    low_mask = freqs < 200.0
+    high_mask = freqs > 2000.0
+    low_env = _onset_envelope(P_mag[:, low_mask]) if low_mask.any() else full_env
+    high_env = _onset_envelope(P_mag[:, high_mask]) if high_mask.any() else full_env
+
+    ac_full, ac_low, ac_high = (
+        _autocorr(full_env), _autocorr(low_env), _autocorr(high_env),
+    )
+
+    nf = len(_TEMPOGRAM_MULTS_FULL)
+    nb = len(_TEMPOGRAM_MULTS_BAND)
+    if bpm > 0:
+        beat_frames = 60.0 * fps / bpm
+        R[0:nf] = _sample_tempogram(ac_full, beat_frames, _TEMPOGRAM_MULTS_FULL)
+        R[nf:nf + nb] = _sample_tempogram(ac_low, beat_frames, _TEMPOGRAM_MULTS_BAND)
+        R[nf + nb:nf + 2 * nb] = _sample_tempogram(ac_high, beat_frames, _TEMPOGRAM_MULTS_BAND)
+
+    i = nf + 2 * nb
+    d_full = _onset_rate(full_env, fps)
+    d_low = _onset_rate(low_env, fps)
+    d_high = _onset_rate(high_env, fps)
+    R[i] = float(np.clip(d_full / 8.0, 0.0, 1.5))                 # onset density
+    R[i + 1] = float(np.clip(d_high / (d_low + 1e-6), 0.0, 4.0) / 4.0)  # hat/kick ratio
+    R[i + 2] = _pulse_clarity(ac_low, fps)
+    R[i + 3] = _pulse_clarity(ac_high, fps)
+    return R
 
 
 # ─── Mel filterbank + MFCC ─────────────────────────────────────────────────
@@ -717,10 +882,13 @@ def extract_features_from_pcm(pcm_path: str, sr: int) -> Features:
 
     onset_env = _onset_envelope(P_mag)
     bpm, beat_strength = _estimate_bpm(onset_env, sr)
+    # v4 rhythm block: reuses the percussive residual + detected tempo.
+    rhythm = _rhythm_features(P_mag, freqs, sr, bpm)
     t6 = time.perf_counter()
 
     mfcc = _mfcc_per_frame(H_mag, sr)
     mfcc_mean = mfcc.mean(axis=0).astype(np.float32)
+    mfcc_std = mfcc.std(axis=0).astype(np.float32)            # v4: timbral spread
     mfcc_delta_frames = _mfcc_delta(mfcc, width=9)
     mfcc_delta_mean = mfcc_delta_frames.mean(axis=0).astype(np.float32)
     t7 = time.perf_counter()
@@ -728,7 +896,7 @@ def extract_features_from_pcm(pcm_path: str, sr: int) -> Features:
     _trace(
         f"  EXTRACT STEPS: load={t1 - t0:.3f}s, stft={t2 - t1:.3f}s, "
         f"hpss={t3 - t2:.3f}s, scalars={t4 - t3:.3f}s, "
-        f"chroma+key={t5 - t4:.3f}s, bpm={t6 - t5:.3f}s, mfcc+delta={t7 - t6:.3f}s"
+        f"chroma+key={t5 - t4:.3f}s, bpm+rhythm={t6 - t5:.3f}s, mfcc={t7 - t6:.3f}s"
     )
 
     return Features(
@@ -741,8 +909,10 @@ def extract_features_from_pcm(pcm_path: str, sr: int) -> Features:
         spectral_contrast=contrast,
         key_index=key_idx,
         mfcc_mean=mfcc_mean,
+        mfcc_std=mfcc_std,
         mfcc_delta=mfcc_delta_mean,
         chroma=chroma,
+        rhythm=rhythm,
     )
 
 

@@ -1,0 +1,24 @@
+GENRE DIAGNOSTIC — real Zr graph geometry
+  tracks=501  Zr_dim=20  global_silhouette=-0.103
+
+per-genre silhouette (1=own island, 0=overlapping, <0=embedded elsewhere):
+  Rock/Alt     n= 246  silhouette=-0.112
+  Unknown      n= 121  silhouette=-0.162
+  Metal        n=  78  silhouette=-0.011
+  Hip-Hop      n=  22  silhouette=-0.077
+  Electronic   n=  13  silhouette=-0.210
+  Classical    n=  10  silhouette=-0.069
+  Other        n=   6  silhouette=-0.006
+  Folk/Cntry   n=   4  silhouette=+0.141
+  Soul/R&B     n=   1  silhouette=+1.000
+
+fragmentation (communities spanned / biggest-community share):
+  Rock/Alt     n= 246  in  14 communities  biggest=18%
+  Unknown      n= 121  in  12 communities  biggest=29%
+  Metal        n=  78  in  11 communities  biggest=41%
+  Hip-Hop      n=  22  in   8 communities  biggest=27%
+  Electronic   n=  13  in   8 communities  biggest=23%
+  Classical    n=  10  in   4 communities  biggest=50%
+  Other        n=   6  in   5 communities  biggest=33%
+  Folk/Cntry   n=   4  in   3 communities  biggest=50%
+  Soul/R&B     n=   1  in   1 communities  biggest=100%
