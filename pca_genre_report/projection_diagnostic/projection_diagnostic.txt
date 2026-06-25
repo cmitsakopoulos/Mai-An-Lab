@@ -1,0 +1,49 @@
+PROJECTION DISTORTION DIAGNOSTIC
+==============================================================================
+db=tools/offload_cache/bundle/library.db
+tracks=1142  timbre=v3(52f)  continuous_block_dim=37 (timbre + 5 scalars)  harmonic_dim=3
+surviving scalars (post covariance-cleave): ['bpm', 'brightness', 'energy', 'beat_strength', 'spectral_contrast']
+genre buckets: {'Classical': 10, 'Electronic': 21, 'Folk/Cntry': 5, 'Hip-Hop': 362, 'Metal': 87, 'Other': 21, 'Pop': 1, 'Rock/Alt': 303, 'Soul/R&B': 3}
+Kaiser k (the app's live PCA component count) = 13
+knn=10  label-permutation null purity = 0.350 ± 0.007  (chance baseline)
+
+Columns:
+  purity   mean genre-purity of the k nearest neighbours (↑ better)
+  z        (purity − null)/null_std — SDs above chance (↑ better)
+  sil      global genre silhouette (↑ better; >0 = own regions)
+  trust    trustworthiness@k vs full space (invented neighbours; 1=none)
+  cont     continuity@k vs full space (lost neighbours; 1=none)
+  shepard  Spearman of pairwise distances vs full space (1=undistorted)
+  var      variance retained (PCA family only)
+
+method        dim  purity      z     sil  trust   cont   shep    var
+--------------------------------------------------------------------
+pca_10         13   0.635  +40.8  -0.058  0.991  0.996 +0.954   0.72
+full           40   0.631  +40.2  -0.041  1.000  1.000 +1.000      -
+pca_kaiser     16   0.627  +39.7  -0.052  0.995  0.998 +0.974   0.80
+pca_20         23   0.627  +39.7  -0.043  0.999  0.999 +0.993   0.91
+pca_5           8   0.614  +37.9  -0.082  0.966  0.987 +0.891   0.53
+pca_3           6   0.601  +36.0  -0.086  0.949  0.978 +0.846   0.41
+kpca_rbf       16   0.565  +30.8  -0.280  0.965  0.943 +0.413      -
+pca_whiten     16   0.552  +28.9  -0.082  0.982  0.990 +0.791      -
+pca_2           5   0.549  +28.5  -0.110  0.925  0.968 +0.791   0.33
+rand_gauss     16   0.508  +22.7  -0.068  0.941  0.956 +0.685      -
+zca_whiten     40   0.483  +19.0  -0.048  0.957  0.971 +0.733      -
+
+per-genre kNN purity: full space → pca_kaiser (Δ = projection cost)
+  Hip-Hop      n= 362  0.700 → 0.738  (Δ=+0.038)
+  Rock/Alt     n= 303  0.705 → 0.666  (Δ=-0.039)
+  Metal        n=  87  0.462 → 0.415  (Δ=-0.047)
+  Other        n=  21  0.052 → 0.038  (Δ=-0.014)
+  Electronic   n=  21  0.071 → 0.090  (Δ=+0.019)
+  Classical    n=  10  0.260 → 0.210  (Δ=-0.050)
+  Folk/Cntry   n=   5  0.000 → 0.000  (Δ=+0.000)
+  Soul/R&B     n=   3  0.000 → 0.000  (Δ=+0.000)
+  Pop          n=   1  0.000 → 0.000  (Δ=+0.000)
+
+VERDICT
+------------------------------------------------------------------------------
+• Features DO carry genre signal (full z=+40.2).
+• pca_kaiser preserves nearly all of the full-space purity → truncation is not the problem.
+• Best method overall: pca_10 (purity=0.635, z=+40.8).
+• Random-projection control purity=0.508 (z=+22.7) — any method not clearly above this adds nothing over a structure-blind linear map.

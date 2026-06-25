@@ -2033,6 +2033,13 @@ class LibraryView:
                         self._empty_label.content.controls[0].color = apply_opacity(0.3, CYAN)
                         self._empty_label.content.controls[1].value = "It's empty in here."
                         self._empty_label.content.controls[2].value = "Index your folders to start listening."
+                        # reset action button to "ENTER PATHS"
+                        self._empty_label.content.controls[3].visible = True
+                        self._empty_label.content.controls[4].visible = True
+                        self._empty_label.content.controls[4].content.controls[0].name = ft.Icons.SETTINGS_ROUNDED
+                        self._empty_label.content.controls[4].content.controls[1].value = "ENTER PATHS"
+                        self._empty_label.content.controls[4].on_click = self._on_enter_paths_click
+                        self._empty_label.content.controls[4].style = ft.ButtonStyle(color=CYAN)
                     
                     old_content = self._animated_list_wrapper.content
                     self._animated_list_wrapper.content = self._library_list
@@ -2365,6 +2372,9 @@ class LibraryView:
                         self._empty_label.content.controls[0].color = apply_opacity(0.3, LIB_PARTITION_COLOR)
                         self._empty_label.content.controls[1].value = "No partition results found."
                         self._empty_label.content.controls[2].value = "Try checking your filters or search query."
+                        # Hide action button and its spacing container
+                        self._empty_label.content.controls[3].visible = False
+                        self._empty_label.content.controls[4].visible = False
                     
                     if self.partition_sub_mode == "moods" and getattr(self, "_has_partitions", False) and not is_empty:
                         is_row_already_set = (
@@ -2435,11 +2445,25 @@ class LibraryView:
                             self._empty_label.content.controls[0].color = apply_opacity(0.3, LIB_PLAYLIST_COLOR)
                             self._empty_label.content.controls[1].value = "No playlists yet."
                             self._empty_label.content.controls[2].value = "Create your first playlist below."
+                            # Show action button as "CREATE PLAYLIST"
+                            self._empty_label.content.controls[3].visible = True
+                            self._empty_label.content.controls[4].visible = True
+                            self._empty_label.content.controls[4].content.controls[0].name = ft.Icons.ADD_ROUNDED
+                            self._empty_label.content.controls[4].content.controls[1].value = "CREATE PLAYLIST"
+                            self._empty_label.content.controls[4].on_click = lambda e: self._create_playlist_dialog()
+                            self._empty_label.content.controls[4].style = ft.ButtonStyle(color=LIB_PLAYLIST_COLOR)
                         else:
                             self._empty_label.content.controls[0].name = ft.Icons.LIBRARY_MUSIC_OUTLINED
                             self._empty_label.content.controls[0].color = apply_opacity(0.3, CYAN)
                             self._empty_label.content.controls[1].value = "It's empty in here."
                             self._empty_label.content.controls[2].value = "Index your folders to start listening."
+                            # Reset action button to "ENTER PATHS"
+                            self._empty_label.content.controls[3].visible = True
+                            self._empty_label.content.controls[4].visible = True
+                            self._empty_label.content.controls[4].content.controls[0].name = ft.Icons.SETTINGS_ROUNDED
+                            self._empty_label.content.controls[4].content.controls[1].value = "ENTER PATHS"
+                            self._empty_label.content.controls[4].on_click = self._on_enter_paths_click
+                            self._empty_label.content.controls[4].style = ft.ButtonStyle(color=CYAN)
                     
                     old_content = self._animated_list_wrapper.content
                     self._animated_list_wrapper.content = self._library_list

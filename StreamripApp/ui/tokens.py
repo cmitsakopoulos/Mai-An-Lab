@@ -26,8 +26,8 @@ SOURCE_COLORS = {
 
 LIB_ARTIST_COLOR   = "#CC00FF"
 LIB_ALBUM_COLOR    = "#00E3FF"
-LIB_TRACK_COLOR    = "#D4B038"
-LIB_PLAYLIST_COLOR = "#9B59B6"
+LIB_TRACK_COLOR    = "#00BFFF"
+LIB_PLAYLIST_COLOR = "#FFBF00"
 LIB_PARTITION_COLOR = "#00FF88"
 
 def apply_opacity(opacity: float, hex_color: str) -> str:

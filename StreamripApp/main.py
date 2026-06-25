@@ -251,6 +251,8 @@ class StreamripFletApp:
                     self.search_view.refresh_now_playing()
                 # When returning to foreground, force a single update to sync state
                 self.safe_update(lambda: None)
+                # Prune caches asynchronously when returning to foreground
+                self.page.run_task(self._prune_caches_async)
 
     async def initialize(self):
         # PHASE 1: Immediate Splash Render (< 50ms)
@@ -489,6 +491,9 @@ class StreamripFletApp:
         # exporting first. Fire-and-forget: failures are logged but never
         # block startup.
         asyncio.create_task(self._auto_export_state_snapshot())
+
+        # Prune caches asynchronously to keep disk footprint bounded
+        self.page.run_task(self._prune_caches_async)
 
     async def _auto_export_state_snapshot(self):
         """Background task: write a deterministic state bundle to the standard
@@ -3148,6 +3153,60 @@ class StreamripFletApp:
     
 
     # ── cache helpers ────────────────────────────────────────────────────────
+    async def _prune_caches_async(self):
+        """Asynchronously prunes the artwork and search preview caches to prevent disk ballooning."""
+        now = time.time()
+        last_run = getattr(self, "_last_cache_prune_time", 0.0)
+        if now - last_run < 21600:  # 6 hours
+            return
+        self._last_cache_prune_time = now
+
+        def _do_prune():
+            try:
+                # 1. Prune Artwork Cache
+                temp_dir = get_temp_artwork_dir()
+                if os.path.exists(temp_dir):
+                    files = []
+                    for name in os.listdir(temp_dir):
+                        if name == ".nomedia":
+                            continue
+                        p = os.path.join(temp_dir, name)
+                        if os.path.isfile(p):
+                            try:
+                                files.append((p, os.path.getmtime(p)))
+                            except Exception:
+                                pass
+                    # Keep the 100 most recently modified artwork files, delete the rest
+                    if len(files) > 100:
+                        files.sort(key=lambda x: x[1])  # oldest first
+                        for p, _ in files[:-100]:
+                            try:
+                                os.remove(p)
+                            except Exception:
+                                pass
+
+                # 2. Prune Preview Cache
+                preview_dir = os.path.join(get_app_dir(), "previews")
+                if os.path.exists(preview_dir):
+                    cutoff = now - 86400  # 24 hours
+                    for name in os.listdir(preview_dir):
+                        p = os.path.join(preview_dir, name)
+                        try:
+                            if os.path.isdir(p):
+                                mtime = os.path.getmtime(p)
+                                if mtime < cutoff:
+                                    shutil.rmtree(p)
+                            elif os.path.isfile(p):
+                                mtime = os.path.getmtime(p)
+                                if mtime < cutoff:
+                                    os.remove(p)
+                        except Exception:
+                            pass
+            except Exception as exc:
+                logger.warning("Cache pruning failed: %s", exc)
+
+        await asyncio.to_thread(_do_prune)
+
     def clear_preview_cache(self):
         preview_dir = os.path.join(get_app_dir(), "previews")
         try:

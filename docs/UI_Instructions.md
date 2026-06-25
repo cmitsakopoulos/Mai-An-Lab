@@ -66,7 +66,7 @@ Pure acoustic walks over the $k$-NN graph, decoupled from the taste model regres
 - **Visual Indicators**: Album artwork displays a **vibrant Cyan border** (`#00FFFF`) in the Mini Player and Now Playing card.
 - **Shuffle Exclusivity**: Play Similar and Shuffle modes are mutually exclusive.
 - **Non-Destructive Queue Backup**: Stores the original active queue when Play Similar is enabled and restores it dynamically when disabled, preserving active playback.
-- **Continuous Replenishment**: Transitioning to the last track in the queue automatically walks and appends a new similar track.
+- **Continuous Replenishment**: Maintains an 8-song buffer ahead of the currently playing track. If the number of upcoming tracks in the queue drops below 4, the engine automatically walks and appends new similar tracks to replenish the buffer.
 - **Anti-Skip Avoidance**: Skipping a song early appends it to a session-level skip avoidance list (`_session_bad_paths`).
 
 ---

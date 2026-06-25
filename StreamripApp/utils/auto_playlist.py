@@ -66,7 +66,10 @@ def _encode(tracks: list[dict]) -> tuple[list[str], np.ndarray]:
         groups = unpack_embedding_groups(d.get("timbre"))
         if groups is None:
             continue
-        mfcc_mean, mfcc_delta, chroma = groups
+        # v4 returns 5 groups; this selector keeps the v3 weighting (mean /
+        # delta / chroma). mfcc_std and rhythm are carried in the BLOB for the
+        # graph build but intentionally not re-weighted here yet.
+        mfcc_mean, _mfcc_std, mfcc_delta, chroma, _rhythm = groups
         paths.append(d["path"])
         rows.append(
             [float(d.get("bpm", 0) or 0),

@@ -945,7 +945,7 @@ class SettingsView:
             ft.Container(
                 content=ft.Column([
                     ft.Text("Mai An Lab", size=28, weight=ft.FontWeight.W_900, color=CYAN),
-                    ft.Text("Version 1.1.0", color=DIM, size=14),
+                    ft.Text("Version 1.3.0", color=DIM, size=14),
                 ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=4),
                 alignment=ft.Alignment(0, 0),
                 padding=ft.Padding.only(bottom=20),
@@ -953,13 +953,13 @@ class SettingsView:
             ft.Text("Summary", weight=ft.FontWeight.BOLD, color=TEXT),
             ft.Text("A deployment friendly restructure of Streamrip (Qobuz only), packaged with Flet alongside custom Flutter (audio engine) extensions.", color=DIM, size=12),
             ft.Divider(color=BORDER, height=30),
-            ft.Text("What's New in 1.1.0", weight=ft.FontWeight.BOLD, color=TEXT),
+            ft.Text("What's New in 1.3.0", weight=ft.FontWeight.BOLD, color=TEXT),
             ft.Column([
-                ft.Text("• Unsupervised PCA engine with automatic double-pass SVD and Pearson correlation cleaving of redundant acoustic features", color=DIM, size=12),
-                ft.Text("• Mood EQ sliders dynamically hide zero-weight features detected as redundant by the PCA engine", color=DIM, size=12),
-                ft.Text("• On-device mathematical truth report: heatmap and biplot scatter PNGs written to your library folder after each PCA rebuild", color=DIM, size=12),
-                ft.Text("• Play Similar now replaces the current song (consistent behaviour between Jarvis and the playback pane)", color=DIM, size=12),
-                ft.Text("• PCA analysis script automatically locates the most recent analyzed state zip in tools/analyzed_states", color=DIM, size=12),
+                ft.Text("• EQ coupled with DSP optimisation", color=DIM, size=12),
+                ft.Text("• UI improvements / simplifications", color=DIM, size=12),
+                ft.Text("• Qobuz connection improvements + UI", color=DIM, size=12),
+                ft.Text("• Better search capabilities", color=DIM, size=12),
+                ft.Text("• Improvements to track similarity search", color=DIM, size=12),
             ], spacing=4),
             ft.Divider(color=BORDER, height=30),
             ft.Text("Developer", weight=ft.FontWeight.BOLD, color=TEXT),
