@@ -44,6 +44,26 @@ Browse your catalog by artist, album, or track through SQL joins. The playback p
 
 ---
 
+### Interactive Acoustic Network Graph *(v1.3.0)*
+
+Explore your music library mapped as an interactive 2D force-directed similarity graph. Includes two visualization modes: **Local** (plots the seed track and its 1-hop nearest neighbors) and **Walk** (visualizes the active similarity walk path), colored by Louvain genre communities. Double-clicking any node starts playback immediately.
+
+<p align="center">
+  <img src="assets/network_pane.gif" width="55%" alt="Interactive Acoustic Network Graph" style="border-radius: 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); border: 1px solid rgba(255, 255, 255, 0.1);">
+</p>
+
+---
+
+### Audio Equalizer & Real-time DSP *(v1.2.0)*
+
+Fine-tune your listening experience via a manual 5-band Equalizer and real-time DSP settings. Toggles between System and Custom presets, features precise keyboard-editable gains, and incorporates Dynamism Enhancement to automatically boost rhythmic track punchiness with a live decibel boost monitor.
+
+<p align="center">
+  <img src="assets/EQ.gif" width="55%" alt="Audio Equalizer & DSP Panel" style="border-radius: 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); border: 1px solid rgba(255, 255, 255, 0.1);">
+</p>
+
+---
+
 ### Jarvis Voice Assistant
 
 Use voice controls or chat to walk similarity graphs, search tracks, manage queues, make playlists, queue recommendations, and trigger downloads — all via local keyword parsing and audio focus ducking. Say "Hello" and see what happens.
