@@ -10,7 +10,6 @@ sys.path.insert(0, os.getcwd())
 from utils.db_manager import DatabaseManager
 from utils.dsp import FEATURES_VERSION, unpack_embedding_groups
 from utils import track_graph as tg
-from utils import taste_model as tm
 
 # 1. Main Async Simulation Task
 async def run_simulation():
@@ -145,34 +144,7 @@ async def run_simulation():
     artist_cnt, album_cnt = await tg.build_metadata_edges(db)
     print(f"    - Wrote {acoustic_cnt} acoustic edges and {artist_cnt} artist + {album_cnt} album metadata edges.")
 
-    # E. Train dynamic taste model
-    # Simulate a user who likes high-energy, heavy rock/metal tracks, and dislikes pop
-    # We load seed coordinate examples to train
-    w, b = tm.fresh()
-    
-    metal_paths = [p for p, m in track_metadata.items() if "Black Label Society" in m["artist"] or "Slipknot" in m["artist"]]
-    pop_paths = [p for p, m in track_metadata.items() if "Calvin Harris" in m["artist"]]
-
-    # Collect training samples
-    pos_samples = [track_metadata[p]["pca_coords"] for p in metal_paths[:3]]
-    neg_samples = [track_metadata[p]["pca_coords"] for p in pop_paths[:3]]
-
-    train_size = min(len(pos_samples), len(neg_samples), 3)
-    if train_size > 0:
-        for i in range(train_size):
-            w, b = tm.online_update(np.array(pos_samples[i], dtype=np.float32), 1, w, b, sample_weight=tm.WEIGHT_EXPLICIT, n_samples=2*i + 1)
-            w, b = tm.online_update(np.array(neg_samples[i], dtype=np.float32), 0, w, b, sample_weight=tm.WEIGHT_EXPLICIT, n_samples=2*i + 2)
-        print(f"[!] Trained Taste Model (Prefers Metal over Pop): w = {np.round(w, 4).tolist()}, b = {b:.4f}")
-    else:
-        # Fallback to cold start if artists aren't in this catalog
-        print("[!] Taste Model: Cold start (neutral weights).")
-
-    # Save to test database and invalidate cache
-    weights_bytes = tm.pack_weights(w)
-    await db.save_taste_model(weights_bytes, b, train_size, train_size, FEATURES_VERSION)
-    tg.invalidate_taste_cache()
-
-    # F. Run Walks across Multiple Seeds (Different Genres)
+    # E. Run Walks across Multiple Seeds (Different Genres)
     print("\n" + "=" * 90)
     print("   GENRE-COHERENCE VALIDATION SUITE: MULTI-SEED SIMILARITY PLAYS")
     print("=" * 90)
@@ -181,7 +153,7 @@ async def run_simulation():
     seeds = []
     
     # 1. Metal seed
-    metal_seed = next((p for p, m in track_metadata.items() if "Black Label Society" in m["artist"]), None)
+    metal_seed = next((p for p, m in track_metadata.items() if "Black Label Society" in m["artist"] or "Slipknot" in m["artist"]), None)
     if metal_seed:
         seeds.append(("CASE 1: HEAVY METAL SEED", metal_seed))
     
@@ -204,8 +176,8 @@ async def run_simulation():
         print(f"\n⚡ {title}")
         print(f"   Seed Track: '{seed_meta['title']}' by {seed_meta['artist']}")
         print("-" * 116)
-        print(f"{'Step':<5} | {'Track Title':<30} | {'Artist':<22} | {'P(like)':<9} | {'BPM':<6} | {'Energy':<7} | {'Transition Cost':<15}")
-        print("-" * 116)
+        print(f"{'Step':<5} | {'Track Title':<30} | {'Artist':<22} | {'BPM':<6} | {'Energy':<7} | {'Transition Cost':<15}")
+        print("-" * 104)
 
         # Run Personalized PageRank Walk (Long-Flow, Gentle-Reset in Action)
         walk_paths = await tg.walk(
@@ -214,7 +186,6 @@ async def run_simulation():
             length=10,
             edge_kinds=(tg.KIND_ACOUSTIC, tg.KIND_ARTIST),
             teleport_path=seed_path,
-            taste_weight=0.3, # Enable taste model nudge
         )
 
         prev_pc = seed_meta["pca_coords"]
@@ -224,10 +195,6 @@ async def run_simulation():
                 continue
             pc = meta["pca_coords"]
             
-            # Calculate P(like) prediction
-            z_like = float(np.dot(w, pc)) + b
-            p_like = 1.0 / (1.0 + np.exp(-max(-30.0, min(30.0, z_like))))
-
             # Calculate feature distance from previous track
             dist = float(np.linalg.norm(np.array(pc) - np.array(prev_pc)))
 
@@ -236,7 +203,7 @@ async def run_simulation():
             if (idx + 1) % 6 == 0:
                 step_label += " [RESET]"
 
-            print(f"{step_label:<5} | {meta['title'][:30]:<30} | {meta['artist'][:22]:<22} | {p_like*100:>7.1f}% | {meta['bpm']:>6.1f} | {meta['energy']:>7.3f} | {dist:>15.4f}")
+            print(f"{step_label:<5} | {meta['title'][:30]:<30} | {meta['artist'][:22]:<22} | {meta['bpm']:>6.1f} | {meta['energy']:>7.3f} | {dist:>15.4f}")
             prev_pc = pc
 
         print("-" * 116)

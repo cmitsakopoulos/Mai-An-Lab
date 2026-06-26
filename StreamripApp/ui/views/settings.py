@@ -17,15 +17,6 @@ else:
 
 logger = logging.getLogger(__name__)
 
-def get_app_dir() -> str:
-    """Returns the primary writable directory for the app, prioritizing 'files'."""
-    for env_var in ("APP_FILES_PATH", "FILES_DIR", "INTERNAL_STORAGE", "FLET_APP_STORAGE_DATA", "HOME"):
-        val = os.getenv(env_var)
-        if val and os.path.isdir(val):
-            return val
-    import tempfile
-    return tempfile.gettempdir()
-
 
 class EqualizerCurve(ft.Container):
     def __init__(self, bands, min_db=-15.0, max_db=15.0, on_band_change=None, eq_enabled_check=None):
@@ -374,8 +365,7 @@ class SettingsView:
 
         # Library Pane Customization & Jarvis
         self._show_jarvis_switch = ft.Switch(value=True, active_color=CYAN, on_change=self._on_appearance_change)
-        self._show_moods_switch = ft.Switch(value=False, active_color=CYAN, on_change=self._on_appearance_change)
-        self._show_islets_switch = ft.Switch(value=False, active_color=CYAN, on_change=self._on_appearance_change)
+        self._show_network_switch = ft.Switch(value=False, active_color=CYAN, on_change=self._on_appearance_change)
         self._show_playlists_switch = ft.Switch(value=True, active_color=CYAN, on_change=self._on_appearance_change)
         self._show_artists_switch = ft.Switch(value=True, active_color=CYAN, on_change=self._on_appearance_change)
         self._show_albums_switch = ft.Switch(value=True, active_color=CYAN, on_change=self._on_appearance_change)
@@ -669,18 +659,8 @@ class SettingsView:
             ft.Divider(color=BORDER, height=20),
             ft.Text("Library Tabs Visibility", color=CYAN, size=12, weight=ft.FontWeight.BOLD),
             ft.Row([
-                self._show_moods_switch, 
-                ft.Text("Default Moods", color=TEXT, size=12),
-                ft.Container(
-                    content=ft.Text("EXPERIMENTAL", color=BG, size=9, weight=ft.FontWeight.W_800),
-                    bgcolor=AMBER,
-                    padding=ft.Padding.symmetric(horizontal=6, vertical=2),
-                    border_radius=4,
-                )
-            ], spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER),
-            ft.Row([
-                self._show_islets_switch, 
-                ft.Text("Mood Islets (Custom)", color=TEXT, size=12),
+                self._show_network_switch, 
+                ft.Text("Acoustic Network", color=TEXT, size=12),
                 ft.Container(
                     content=ft.Text("EXPERIMENTAL", color=BG, size=9, weight=ft.FontWeight.W_800),
                     bgcolor=AMBER,
@@ -718,19 +698,12 @@ class SettingsView:
                      "Clear DSP", 
                      self.app.clear_dsp_features
                 )),
-                ft.TextButton("Taste Model", icon=ft.Icons.FAVORITE_ROUNDED, on_click=lambda _: self.app.open_maintenance_confirmation(
-                     "Reset Taste Model?", 
-                     "This will reset all user preference learning parameters and weights back to zero. The taste model will start cold.\n\nThis cannot be undone.", 
-                     "Reset Model", 
-                     self.app.clear_taste_model_weights
-                )),
                 ft.TextButton("Wipe DB", icon=ft.Icons.DELETE_FOREVER, icon_color="#FF4444", on_click=lambda _: self._on_wipe_db_click()),
             ], wrap=True, spacing=10),
             ft.Divider(color=BORDER, height=20),
             ft.Text("Compute Pipeline", weight=ft.FontWeight.BOLD, color=DIM),
             ft.Text(
-                "Run the DSP / graph / PCA pipeline manually instead of going through Jarvis. "
-                "Existing mood quartile customisations are preserved.",
+                "Run the DSP / graph / PCA pipeline manually instead of going through Jarvis.",
                 color=DIM, size=12,
             ),
             ft.Row([
@@ -1036,8 +1009,6 @@ class SettingsView:
             return
 
         if hasattr(self.app, "library_view") and self.app.library_view:
-            self.app.library_view._cached_moods = None
-            self.app.library_view._cached_islets = None
             self.app.library_view._cached_unanalysed = None
 
         self.app.show_snackbar(
@@ -1063,11 +1034,6 @@ class SettingsView:
             logger.exception("Advanced: PCA/geometry rebuild failed: %s", exc)
             self.app.show_snackbar(f"PCA recompute failed: {exc}", color="#FF4444")
             return
-
-        # User-stored mood EQ customisations live in the moods table and are not
-        # touched by the rebuild; un-tuned moods fall back to MOOD_TARGETS.
-        if hasattr(self.app, "library_view") and self.app.library_view:
-            self.app.library_view._cached_moods = None
 
         self.app.show_snackbar(
             "PCA space rebuilt.",
@@ -1096,7 +1062,6 @@ class SettingsView:
 
     async def _do_export_state(self, out_dir: str):
         from utils import state_export
-        from utils import track_graph as tg
         from utils.streamrip_api import get_config_path
         from utils.search_history import get_search_history_path
 
@@ -1108,7 +1073,6 @@ class SettingsView:
                 get_config_path(),
                 get_search_history_path(),
                 out_dir,
-                tg.CUSTOM_MOODS_PATH,
             )
         except Exception as ex:
             logger.exception("state export failed")
@@ -1120,7 +1084,6 @@ class SettingsView:
 
     async def _do_import_state(self, zip_path: str):
         from utils import state_export
-        from utils import track_graph as tg
         from utils.streamrip_api import get_config_path
         from utils.search_history import get_search_history_path
 
@@ -1140,7 +1103,6 @@ class SettingsView:
                 self.app.db_manager.db_path,
                 get_config_path(),
                 get_search_history_path(),
-                tg.CUSTOM_MOODS_PATH,
             )
         except Exception as ex:
             logger.exception("state import failed")
@@ -1351,8 +1313,7 @@ class SettingsView:
             appearance = cfg.get("appearance", {})
             self._selected_accent_color = appearance.get("accent_color", "#00BFFF")
             self._show_jarvis_switch.value = bool(appearance.get("show_jarvis", True))
-            self._show_moods_switch.value = bool(appearance.get("show_moods", False))
-            self._show_islets_switch.value = bool(appearance.get("show_islets", False))
+            self._show_network_switch.value = bool(appearance.get("show_network", False))
             self._show_playlists_switch.value = bool(appearance.get("show_playlists", True))
             self._show_artists_switch.value = bool(appearance.get("show_artists", True))
             self._show_albums_switch.value = bool(appearance.get("show_albums", True))
@@ -1450,8 +1411,7 @@ class SettingsView:
             "appearance": {
                 "accent_color": self._selected_accent_color,
                 "show_jarvis": self._show_jarvis_switch.value,
-                "show_moods": self._show_moods_switch.value,
-                "show_islets": self._show_islets_switch.value,
+                "show_network": self._show_network_switch.value,
                 "show_playlists": self._show_playlists_switch.value,
                 "show_artists": self._show_artists_switch.value,
                 "show_albums": self._show_albums_switch.value,

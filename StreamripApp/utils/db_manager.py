@@ -58,7 +58,6 @@ class DatabaseManager:
             await self._migrate_playlists(self._conn)
             await self._migrate_partitions(self._conn)
             await self._migrate_pca(self._conn)
-            await self._migrate_taste_model(self._conn)
             await self._migrate_clusters(self._conn)
         return self._conn
 
@@ -996,159 +995,6 @@ class DatabaseManager:
         ''')
         await conn.commit()
 
-    async def get_saved_partitions(self) -> dict[str, dict]:
-        """Lock-free read. Returns a dictionary mapping track_path -> {mood, islet_id}."""
-        conn = await self.get_connection()
-        async with conn.execute("SELECT track_path, mood, islet_id FROM track_partitions") as cursor:
-            rows = await cursor.fetchall()
-            return {r["track_path"]: {"mood": r["mood"], "islet_id": r["islet_id"]} for r in rows}
-
-    async def save_partitions(self, assignments: list[tuple[str, str, int]]):
-        """Mutation: Overwrites the partition assignments in the database."""
-        async with self._write_lock:
-            conn = await self.get_connection()
-            try:
-                await conn.execute("DELETE FROM track_partitions")
-                if assignments:
-                    await conn.executemany(
-                        "INSERT INTO track_partitions (track_path, mood, islet_id) VALUES (?, ?, ?)",
-                        assignments
-                    )
-                await conn.commit()
-            except Exception as e:
-                await conn.rollback()
-                logger.error(f"Failed to save partitions: {e}")
-                raise
-
-    async def save_mood_feedback(self, track_path: str, mood: str, feedback: int):
-        """Mutation: Save like/dislike feedback for a track in a specific mood."""
-        async with self._write_lock:
-            conn = await self.get_connection()
-            try:
-                await conn.execute(
-                    "INSERT OR REPLACE INTO mood_feedback (track_path, mood, feedback) VALUES (?, ?, ?)",
-                    (track_path, mood, feedback)
-                )
-                await conn.commit()
-            except Exception as e:
-                await conn.rollback()
-                logger.error(f"Failed to save mood feedback: {e}")
-                raise
-
-    async def get_mood_feedback(self) -> dict[str, dict[str, int]]:
-        """Lock-free read. Returns all mood feedback as a nested dict mapping track_path -> {mood: feedback}."""
-        conn = await self.get_connection()
-        async with conn.execute("SELECT track_path, mood, feedback FROM mood_feedback") as cursor:
-            rows = await cursor.fetchall()
-            out = {}
-            for r in rows:
-                path = r["track_path"]
-                mood = r["mood"]
-                val = r["feedback"]
-                if path not in out:
-                    out[path] = {}
-                out[path][mood] = val
-            return out
-
-    async def clear_all_mood_feedback(self):
-        """Mutation: Clears all mood feedback."""
-        async with self._write_lock:
-            conn = await self.get_connection()
-            try:
-                await conn.execute("DELETE FROM mood_feedback")
-                await conn.commit()
-            except Exception as e:
-                await conn.rollback()
-                logger.error(f"Failed to clear mood feedback: {e}")
-                raise
-
-    async def save_adjusted_mood_profile(
-        self,
-        mood: str,
-        profile: dict[str, float | tuple[float, float]],
-    ):
-        """Mutation: Saves customized (target, weight) per feature for a mood.
-
-        Accepts both v1 (float target) and v2 (target, weight) shapes — v1
-        values are promoted to weight=1.0 so callers can pass either shape
-        during the migration window."""
-        async with self._write_lock:
-            conn = await self.get_connection()
-            try:
-                await conn.execute("DELETE FROM mood_profiles WHERE mood = ?", (mood,))
-                if profile:
-                    rows = []
-                    for feat, val in profile.items():
-                        if isinstance(val, tuple) and len(val) == 2:
-                            target, weight = float(val[0]), float(val[1])
-                        else:
-                            target, weight = float(val), 1.0
-                        rows.append((mood, feat, target, weight))
-                    await conn.executemany(
-                        "INSERT INTO mood_profiles (mood, feature, target, weight) "
-                        "VALUES (?, ?, ?, ?)",
-                        rows,
-                    )
-                await conn.commit()
-            except Exception as e:
-                await conn.rollback()
-                logger.error(f"Failed to save adjusted mood profile: {e}")
-                raise
-
-    async def get_adjusted_mood_profile(
-        self, mood: str,
-    ) -> dict[str, tuple[float, float]] | None:
-        """Lock-free read. Returns customized features for a mood as a v2
-        {feature: (target, weight)} dict, or None if not customized. Legacy
-        rows with NULL weight (pre-migration writes) are coerced to 1.0."""
-        conn = await self.get_connection()
-        async with conn.execute(
-            "SELECT feature, target, weight FROM mood_profiles WHERE mood = ?",
-            (mood,),
-        ) as cursor:
-            rows = await cursor.fetchall()
-            if not rows:
-                return None
-            return {
-                r["feature"]: (
-                    float(r["target"]),
-                    float(r["weight"]) if r["weight"] is not None else 1.0,
-                )
-                for r in rows
-            }
-
-    async def get_all_adjusted_mood_profiles(
-        self,
-    ) -> dict[str, dict[str, tuple[float, float]]]:
-        """Lock-free read. Returns all customized mood profiles as v2 shapes."""
-        conn = await self.get_connection()
-        async with conn.execute(
-            "SELECT mood, feature, target, weight FROM mood_profiles"
-        ) as cursor:
-            rows = await cursor.fetchall()
-            out: dict[str, dict[str, tuple[float, float]]] = {}
-            for r in rows:
-                m = r["mood"]
-                f = r["feature"]
-                t = float(r["target"])
-                w = float(r["weight"]) if r["weight"] is not None else 1.0
-                if m not in out:
-                    out[m] = {}
-                out[m][f] = (t, w)
-            return out
-
-    async def clear_all_adjusted_mood_profiles(self):
-        """Mutation: Clears all customized mood profiles."""
-        async with self._write_lock:
-            conn = await self.get_connection()
-            try:
-                await conn.execute("DELETE FROM mood_profiles")
-                await conn.commit()
-            except Exception as e:
-                await conn.rollback()
-                logger.error(f"Failed to clear adjusted mood profiles: {e}")
-                raise
-
     # ─── Playlist CRUD ─────────────────────────────────────────────────────────
 
     async def get_all_playlists(self, search_query: str = "", sort_mode: str = "date") -> list[dict]:
@@ -1657,6 +1503,59 @@ class DatabaseManager:
         async with conn.execute(sql, params) as cursor:
             return [dict(r) for r in await cursor.fetchall()]
 
+    async def get_neighbors_multi_batch(
+        self,
+        track_paths: list[str],
+        edge_kinds: tuple[str, ...],
+        k: int = 30,
+    ) -> dict[str, list[dict]]:
+        """Top-k pooled neighbours for MANY source paths in a single query.
+
+        Replaces the walk's 2-hop prefetch loop (one round-trip per first-hop
+        node — O(40) sequential awaits) with one window-function query. Returns
+        {source_path: [neighbour rows]}; sources with no edges are simply
+        absent. Row shape matches `get_neighbors_multi`.
+        """
+        if not track_paths or not edge_kinds:
+            return {}
+        conn = await self.get_connection()
+        kind_ph = ",".join("?" * len(edge_kinds))
+        out: dict[str, list[dict]] = {}
+        # Chunk source paths to stay under SQLite's ~999 bound-parameter limit.
+        for i in range(0, len(track_paths), 400):
+            chunk = track_paths[i:i + 400]
+            src_ph = ",".join("?" * len(chunk))
+            # ROW_NUMBER() partitions by source so each source keeps only its
+            # own top-k by weight — the per-source LIMIT the loop did serially.
+            sql = f'''
+                WITH ranked AS (
+                    SELECT n.track_path AS src, n.neighbor_path AS path,
+                           n.weight, n.edge_kind,
+                           t.title, ar.name AS artist, al.title AS album,
+                           pc.cluster_id,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY n.track_path ORDER BY n.weight DESC
+                           ) AS rn
+                    FROM track_neighbors n
+                    LEFT JOIN tracks  t  ON t.path     = n.neighbor_path
+                    LEFT JOIN albums  al ON al.id      = t.album_id
+                    LEFT JOIN artists ar ON ar.id      = al.artist_id
+                    LEFT JOIN play_counts pc ON pc.track_path = n.neighbor_path
+                    WHERE n.track_path IN ({src_ph})
+                      AND n.edge_kind IN ({kind_ph})
+                )
+                SELECT src, path, weight, edge_kind, title, artist, album,
+                       cluster_id
+                FROM ranked
+                WHERE rn <= ?
+            '''
+            params = (*chunk, *edge_kinds, k)
+            async with conn.execute(sql, params) as cursor:
+                for r in await cursor.fetchall():
+                    d = dict(r)
+                    out.setdefault(d.pop("src"), []).append(d)
+        return out
+
     async def get_embeddings_for_paths(
         self, paths: list[str]
     ) -> dict[str, bytes]:
@@ -1997,7 +1896,7 @@ class DatabaseManager:
         import numpy as np
         conn = await self.get_connection()
         sql = '''
-            SELECT pc.track_path AS path, pc.pca_coords,
+            SELECT pc.track_path AS path, pc.pca_coords, pc.cluster_id, pc.bpm, pc.energy,
                    t.title, t.duration,
                    ar.name  AS artist,
                    al.title AS album
@@ -2018,79 +1917,46 @@ class DatabaseManager:
                 results.append(row_dict)
             return results
 
-    # ─── User Taste Model (global preference regressor) ───────────────────────
-    #
-    # Single-row table holding one logistic-regression model over PC features.
-    # Trained online from like/dislike events + implicit playback signals
-    # (≥45 s OR ≥30 % duration → positive; skip > 5 s → negative). The model
-    # is consumed by walk() as a re-rank term and by tracks_by_mood as the
-    # final shaping pass over the top-K candidates.
-
-    async def _migrate_taste_model(self, conn):
-        """Idempotent migration for the single-row user_taste_model table."""
-        await conn.execute('''
-            CREATE TABLE IF NOT EXISTS user_taste_model (
-                id          INTEGER PRIMARY KEY CHECK (id = 1),
-                weights     BLOB NOT NULL,
-                bias        REAL NOT NULL,
-                n_explicit  INTEGER NOT NULL DEFAULT 0,
-                n_implicit  INTEGER NOT NULL DEFAULT 0,
-                features_version INTEGER NOT NULL,
-                updated_at  REAL NOT NULL
-            )
-        ''')
-        await conn.commit()
-
-    async def get_taste_model(
-        self, features_version: int,
-    ) -> tuple[bytes, float, int, int] | None:
-        """Lock-free read. Returns (weights_blob, bias, n_explicit, n_implicit)
-        or None if absent or features_version mismatched (stale model under a
-        different PC layout is treated as missing — caller cold-starts)."""
+    async def get_tracks_pca_coords_for_paths(self, paths: list[str]) -> list[dict]:
+        """Fetch PCA coords + metadata for a specific set of track paths only.
+        Much faster than get_tracks_pca_coords() for small path sets (Local/Walk
+        network views need ~15 paths vs. potentially thousands in the full library)."""
+        if not paths:
+            return []
+        import numpy as np
         conn = await self.get_connection()
-        async with conn.execute(
-            "SELECT weights, bias, n_explicit, n_implicit, features_version "
-            "FROM user_taste_model WHERE id = 1"
-        ) as cursor:
-            row = await cursor.fetchone()
-        if row is None:
-            return None
-        if int(row["features_version"]) != features_version:
-            return None
-        return (
-            bytes(row["weights"]),
-            float(row["bias"]),
-            int(row["n_explicit"]),
-            int(row["n_implicit"]),
-        )
+        placeholders = ",".join("?" for _ in paths)
+        sql = f'''
+            SELECT pc.track_path AS path, pc.pca_coords, pc.cluster_id, pc.bpm, pc.energy,
+                   pc.count AS play_count,
+                   t.title, t.duration,
+                   ar.name  AS artist,
+                   al.title AS album,
+                   al.genre AS genre
+            FROM play_counts pc
+            LEFT JOIN tracks  t  ON t.path  = pc.track_path
+            LEFT JOIN albums  al ON al.id   = t.album_id
+            LEFT JOIN artists ar ON ar.id   = al.artist_id
+            WHERE pc.track_path IN ({placeholders})
+              AND pc.pca_coords IS NOT NULL
+        '''
+        async with conn.execute(sql, paths) as cursor:
+            results = []
+            for r in await cursor.fetchall():
+                row_dict = dict(r)
+                try:
+                    row_dict["pca_coords"] = np.frombuffer(row_dict["pca_coords"], dtype=np.float32).tolist()
+                except Exception:
+                    row_dict["pca_coords"] = None
+                results.append(row_dict)
+            return results
 
-    async def save_taste_model(
-        self,
-        weights_blob: bytes,
-        bias: float,
-        n_explicit: int,
-        n_implicit: int,
-        features_version: int,
-    ) -> None:
-        """Upsert the single-row taste model."""
-        async with self._write_lock:
-            conn = await self.get_connection()
-            try:
-                await conn.execute(
-                    """
-                    INSERT OR REPLACE INTO user_taste_model
-                        (id, weights, bias, n_explicit, n_implicit,
-                         features_version, updated_at)
-                    VALUES (1, ?, ?, ?, ?, ?, strftime('%s','now'))
-                    """,
-                    (weights_blob, float(bias), int(n_explicit),
-                     int(n_implicit), int(features_version)),
-                )
-                await conn.commit()
-            except Exception as e:
-                await conn.rollback()
-                logger.error(f"Failed to save taste model: {e}")
-                raise
+    async def has_pca_coords(self) -> bool:
+        """Fast existence check — no blob deserialization."""
+        conn = await self.get_connection()
+        sql = "SELECT 1 FROM play_counts WHERE pca_coords IS NOT NULL LIMIT 1"
+        async with conn.execute(sql) as cursor:
+            return (await cursor.fetchone()) is not None
 
     # ── Track Clustering ───────────────────────────────────────────────────────
 
@@ -2157,95 +2023,3 @@ class DatabaseManager:
                     out[r[0]] = int(cid) if cid is not None else None
         return out
 
-    async def clear_taste_model(self) -> None:
-        """Mutation: wipe the taste model. Called when FEATURES_VERSION moves
-        forward and the persisted weights no longer align with the PC layout."""
-        async with self._write_lock:
-            conn = await self.get_connection()
-            try:
-                await conn.execute("DELETE FROM user_taste_model")
-                await conn.commit()
-            except Exception as e:
-                await conn.rollback()
-                logger.error(f"Failed to clear taste model: {e}")
-                raise
-
-    # ─── Incremental partition helpers ────────────────────────────────────────
-    #
-    # `save_partitions` is a full-overwrite API suited to bulk recompute. UI
-    # flows (drag track into mood, remove track) need single-row mutations
-    # without trampling unrelated assignments. PRIMARY KEY on track_path
-    # enforces strict one-to-many: re-assigning a track moves it.
-
-    async def assign_track_to_mood(self, track_path: str, mood: str) -> None:
-        """Pin a track to a mood (many-to-many; a track may sit in several
-        moods). Idempotent on (track_path, mood)."""
-        async with self._write_lock:
-            conn = await self.get_connection()
-            await conn.execute(
-                "INSERT OR REPLACE INTO track_partitions (track_path, mood, islet_id) "
-                "VALUES (?, ?, NULL)",
-                (track_path, mood),
-            )
-            await conn.commit()
-
-    async def unassign_track(self, track_path: str) -> None:
-        """Remove a track from *all* its mood pins."""
-        async with self._write_lock:
-            conn = await self.get_connection()
-            await conn.execute(
-                "DELETE FROM track_partitions WHERE track_path = ?",
-                (track_path,),
-            )
-            await conn.commit()
-
-    async def unassign_track_from_mood(self, track_path: str, mood: str) -> None:
-        """Remove a track from one specific mood pin (leaves its other moods)."""
-        async with self._write_lock:
-            conn = await self.get_connection()
-            await conn.execute(
-                "DELETE FROM track_partitions WHERE track_path = ? AND mood = ?",
-                (track_path, mood),
-            )
-            await conn.commit()
-
-    async def get_tracks_in_mood(self, mood: str) -> list[str]:
-        """Return all track paths assigned to `mood`."""
-        conn = await self.get_connection()
-        async with conn.execute(
-            "SELECT track_path FROM track_partitions WHERE mood = ?",
-            (mood,),
-        ) as cursor:
-            return [r["track_path"] for r in await cursor.fetchall()]
-
-    async def get_mood_partition_counts(self) -> dict[str, int]:
-        """Return {mood: count} across all current partition assignments."""
-        conn = await self.get_connection()
-        async with conn.execute(
-            "SELECT mood, COUNT(*) AS n FROM track_partitions "
-            "WHERE mood IS NOT NULL GROUP BY mood"
-        ) as cursor:
-            return {r["mood"]: int(r["n"]) for r in await cursor.fetchall()}
-
-    async def get_mood_partition_pca(self, mood: str) -> list[list[float]]:
-        """Return the PCA coordinates of every track assigned to `mood`.
-        Used by the centroid recompute path so it can mean-pool without
-        materialising the full track rows."""
-        import numpy as np
-        conn = await self.get_connection()
-        sql = '''
-            SELECT pc.pca_coords
-            FROM track_partitions tp
-            JOIN play_counts pc ON pc.track_path = tp.track_path
-            WHERE tp.mood = ? AND pc.pca_coords IS NOT NULL
-        '''
-        coords: list[list[float]] = []
-        async with conn.execute(sql, (mood,)) as cursor:
-            for r in await cursor.fetchall():
-                try:
-                    coords.append(
-                        np.frombuffer(r["pca_coords"], dtype=np.float32).tolist()
-                    )
-                except Exception:
-                    continue
-        return coords

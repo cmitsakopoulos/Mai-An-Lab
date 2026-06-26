@@ -26,9 +26,8 @@ def get_platform_name():
     return 'linux'
 
 def get_config_path():
-    # Keep compatibility with main.py expectations
     try:
-        from main import get_app_dir
+        from utils.filepath_utils import get_app_dir
         base = get_app_dir()
     except ImportError:
         base = os.path.join(os.path.expanduser("~"), ".streamrip")

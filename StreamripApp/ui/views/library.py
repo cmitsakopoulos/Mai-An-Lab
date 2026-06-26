@@ -5,28 +5,57 @@ import logging
 import asyncio
 from collections import Counter
 import flet as ft
+import flet.canvas as cv
 from ui.tokens import (
     BG, SURFACE, SURFACE2, CYAN, AMBER, TEXT, DIM, BORDER, 
     SOURCE_COLORS, LIB_ARTIST_COLOR, LIB_ALBUM_COLOR, LIB_TRACK_COLOR, 
-    LIB_PLAYLIST_COLOR, LIB_PARTITION_COLOR, apply_opacity
+    LIB_PLAYLIST_COLOR, apply_opacity
 )
-from ui.widgets import AnimatedEntry, AccordionCard, src_color
+from ui.widgets import AnimatedEntry, AccordionCard, src_color, build_page_ghost_top, build_page_ghost_bottom
 
 if sys.platform == "darwin":
     from utils.audio_engine_macos import audio_engine
 else:
     from utils.audio_engine import audio_engine
 
+from utils.filepath_utils import get_app_dir
+
 logger = logging.getLogger(__name__)
 
-def get_app_dir() -> str:
-    """Returns the primary writable directory for the app, prioritizing 'files'."""
-    for env_var in ("APP_FILES_PATH", "FILES_DIR", "INTERNAL_STORAGE", "FLET_APP_STORAGE_DATA", "HOME"):
-        val = os.getenv(env_var)
-        if val and os.path.isdir(val):
-            return val
-    import tempfile
-    return tempfile.gettempdir()
+
+# Categorical palette for colouring network nodes by genre. Picked for
+# distinctness on the dark theme; cycles for libraries with more genres than
+# colours. Tracks with no genre fall back to grey.
+_CLUSTER_PALETTE = [
+    "#4C9BE8", "#E8794C", "#5AC8A8", "#C779E0", "#E8C34C", "#E85C8A",
+    "#7AD15A", "#5A6BE8", "#E0A04C", "#4CD0E8", "#B8E84C", "#EB5C5C",
+]
+_CLUSTER_NEUTRAL = "#8A93A0"
+
+
+def _genre_color(genre) -> str:
+    """Deterministic colour for a genre string (FNV-1a hash → palette), so the
+    same genre is always the same colour across sessions. Grey when missing."""
+    if not genre:
+        return _CLUSTER_NEUTRAL
+    g = str(genre).strip().lower()
+    if not g:
+        return _CLUSTER_NEUTRAL
+    h = 2166136261
+    for ch in g:
+        h = ((h ^ ord(ch)) * 16777619) & 0xFFFFFFFF
+    return _CLUSTER_PALETTE[h % len(_CLUSTER_PALETTE)]
+
+
+def _node_radius(base: float, play_count) -> float:
+    """Node radius grows with play count so favourites read as larger hubs.
+    sqrt keeps the growth gentle and capped so heavy-rotation tracks don't
+    swamp the canvas."""
+    try:
+        pc = max(0, int(play_count or 0))
+    except (TypeError, ValueError):
+        pc = 0
+    return base + min(7.0, 2.2 * math.sqrt(pc))
 
 
 class LibraryView:
@@ -52,13 +81,11 @@ class LibraryView:
             self.sort_mode = "date"
             appearance = {}
 
-        show_moods = bool(appearance.get("show_moods", False))
-        show_islets = bool(appearance.get("show_islets", False))
-        show_partitions = show_moods or show_islets
         show_playlists = bool(appearance.get("show_playlists", True))
         show_artists = bool(appearance.get("show_artists", True))
         show_albums = bool(appearance.get("show_albums", True))
         show_tracks = bool(appearance.get("show_tracks", True))
+        show_network = bool(appearance.get("show_network", False))
 
         if show_tracks:
             self.view_mode = "tracks"
@@ -68,8 +95,8 @@ class LibraryView:
             self.view_mode = "artists"
         elif show_playlists:
             self.view_mode = "playlists"
-        elif show_partitions:
-            self.view_mode = "partitions"
+        elif show_network:
+            self.view_mode = "network"
         else:
             self.view_mode = "tracks"
 
@@ -94,14 +121,7 @@ class LibraryView:
         self._tracks_cache: list[dict] | None = None
         self._tracks_cache_key: tuple | None = None
 
-        # Partition calculation caches to prevent stupid startup recomputations.
-        self._cached_moods: dict[str, list[dict]] | None = None
-        # islet_name -> list of member tracks. Populated lazily by computing
-        # membership against each saved islet's centroid via tg.tracks_in_islet.
-        self._cached_islets: dict[str, list[dict]] | None = None
         self._cached_unanalysed: list[dict] | None = None
-        self._mood_feedback_map: dict[str, dict[str, int]] = {}
-        self._mood_recalc_pending = False
 
         # ── Controls ───────────────────────────────────────────────────────
         # ── Library Search Bar (matches SearchView unified design) ───────────
@@ -154,18 +174,26 @@ class LibraryView:
 
         self._stats_label = ft.Text("", color=DIM, size=11, weight=ft.FontWeight.W_700)
 
-        self.partition_sub_mode = "moods"
-        self._partition_tabs = ft.Container(
-            content=ft.Row(
-                spacing=6,
-                alignment=ft.MainAxisAlignment.CENTER,
-            ),
-            visible=False,
-            padding=ft.Padding.symmetric(vertical=4),
-        )
+        self.selected_network_index = 0  # 0=Local, 1=Walk
+
+        # Interactive network canvas state
+        self._net_nodes: list[dict] = []
+        self._net_node_by_path: dict[str, dict] = {}
+        self._net_edges: list[dict] = []          # {src, dst, weight}
+        self._net_mode: int = 0
+        self._net_dims: tuple[int, int, int] = (0, 0, 0)  # (w, h, pad)
+        self._net_canvas_obj: ft.Control | None = None    # the cv.Canvas itself
+        self._net_pressed: dict | None = None     # node under last tap-down
+        self._net_drag: dict | None = None        # node grabbed for moving
+        self._net_panning: bool = False           # dragging the whole graph
+        self._net_pan_last: tuple[float, float] = (0.0, 0.0)
+        self._net_pulse_overlay: ft.Control | None = None
+        self._net_pulse_token: int = 0
+        self._net_tooltip_overlay: ft.Control | None = None
+        self._network_seed_path: str | None = None  # pinned seed for Local navigation
+        self._net_canvas: ft.Control | None = None
         self._view_tabs_row = ft.Row(spacing=6)
         self._update_view_tabs()
-        self._update_partition_tabs_ui()
 
         # Define the buttons as class variables first
         self._sort_icon_btn = ft.IconButton(icon=ft.Icons.SORT, icon_color=DIM, icon_size=22, on_click=self._open_sort_menu)
@@ -265,54 +293,6 @@ class LibraryView:
             visible=False,
         )
 
-        # Mood selection for partitions page
-        self.selected_mood_index = 0
-        self._prev_mood_btn = ft.IconButton(
-            icon=ft.Icons.CHEVRON_LEFT_ROUNDED,
-            icon_color=LIB_PARTITION_COLOR,
-            icon_size=20,
-            tooltip="Previous Mood",
-            on_click=lambda e: self.page.run_task(self._change_mood, -1)
-        )
-        self._next_mood_btn = ft.IconButton(
-            icon=ft.Icons.CHEVRON_RIGHT_ROUNDED,
-            icon_color=LIB_PARTITION_COLOR,
-            icon_size=20,
-            tooltip="Next Mood",
-            on_click=lambda e: self.page.run_task(self._change_mood, 1)
-        )
-        self._mood_label = ft.Text(
-            "",
-            color=TEXT,
-            size=14,
-            weight=ft.FontWeight.BOLD,
-        )
-        self._mood_eq_btn = ft.IconButton(
-            icon=ft.Icons.TUNE,
-            icon_color=LIB_PARTITION_COLOR,
-            icon_size=20,
-            tooltip="Adjust EQ for this mood",
-            on_click=lambda e: self.page.run_task(self._open_mood_eq_dialog),
-        )
-        self._mood_pagination_bar = ft.Container(
-            content=ft.Row(
-                [
-                    self._prev_mood_btn,
-                    self._mood_label,
-                    self._next_mood_btn,
-                    self._mood_eq_btn,
-                ],
-                alignment=ft.MainAxisAlignment.CENTER,
-                spacing=20,
-            ),
-            bgcolor=apply_opacity(0.05, LIB_PARTITION_COLOR),
-            border=ft.Border.all(1, apply_opacity(0.15, LIB_PARTITION_COLOR)),
-            border_radius=12,
-            padding=ft.Padding.symmetric(vertical=4, horizontal=16),
-            margin=ft.Margin.only(left=14, right=14, bottom=6),
-            visible=False,
-        )
-
         self._empty_label = ft.Container(
             content=ft.Column(
                 [
@@ -365,8 +345,6 @@ class LibraryView:
                             ),
                             ft.Row([self._search_bar_container], spacing=0),
                             self._view_tabs_row,
-                            self._partition_tabs,
-                            self._mood_pagination_bar,
                             self._scan_progress_container,
                         ],
                         spacing=10,
@@ -435,10 +413,9 @@ class LibraryView:
             self.sort_mode = "date"
         self.expanded_nodes.clear()
         
-        # Toggle sub-mode tabs and sort button visibility
-        self._partition_tabs.visible = (mode == "partitions")
-        self._sort_icon_btn.visible = (mode != "partitions")
-        self.try_update(self._partition_tabs, self._sort_icon_btn)
+        # Toggle sort button visibility
+        self._sort_icon_btn.visible = (mode != "network")
+        self.try_update(self._sort_icon_btn)
 
         self._update_view_tabs()
         self.page.run_task(self.load_library)
@@ -451,1057 +428,559 @@ class LibraryView:
         self._search_spinner.visible = False
         self.page.run_task(self.load_library)
 
-    def _set_partition_sub_mode(self, sub_mode: str):
-        self.partition_sub_mode = sub_mode
-        self._update_partition_tabs_ui()
-        self.page.run_task(self.load_library)
-
-    def _select_mood_index(self, index: int):
-        self.selected_mood_index = index
+    def _select_network_index(self, index: int):
+        self.selected_network_index = index
         self.current_page = 0
         self.page.run_task(self.load_library)
 
-    async def _change_mood(self, delta: int):
-        # Gather active sections matching the search query
-        active_moods = []
-        sq = self.search_query.lower() if self.search_query else ""
-        def matches_query(t):
-            if not sq: return True
-            return (
-                sq in (t.get("title") or "").lower() or
-                sq in (t.get("artist") or "").lower() or
-                sq in (t.get("album") or "").lower() or
-                sq in (t.get("path") or "").lower()
-            )
+    def _build_interactive_network_canvas(
+        self, rows, mode, current_path, neighbors_list, walk_paths,
+    ) -> ft.Control:
+        """
+        Build a fully interactive Flet Canvas graph that fits the mobile
+        viewport.  Supports tap-to-play, pan, pinch-zoom, active-track
+        glow and an info tooltip overlay.
+        """
+        # ── Resolve canvas dimensions from the page ────────────────────────
+        avail_w = max(260, (self.page.width or 360) - 24)
+        canvas_h = int(avail_w * (1.0 if mode == 0 else 0.72))
+        canvas_w = int(avail_w)
+        pad = 28                                   # edge padding in px
+        self._net_dims = (canvas_w, canvas_h, pad)
+        self._net_mode = mode
 
-        from utils import track_graph as tg
-        for mood in tg.MOODS.keys():
-            tracks = (self._cached_moods or {}).get(mood, [])
-            filtered = [t for t in tracks if matches_query(t)]
-            active_moods.append((mood, filtered))
+        now_playing = audio_engine.current_path or ""
+        path_to_row = {r["path"]: r for r in rows if r.get("pca_coords")}
 
-        active_moods.sort(key=lambda x: len(x[1]), reverse=True)
+        # ── Collect raw node / edge data ────────────────────────────────────
+        # Nodes carry cluster_id (community colour) and play_count (radius);
+        # edges reference endpoints by path so a live drag just moves a node and
+        # the connected edges follow.
+        raw_nodes: list[dict] = []
+        raw_edges: list[dict] = []     # {src, dst, weight}
 
-        unanalysed_searched = [t for t in (self._cached_unanalysed or []) if matches_query(t)]
+        def _trunc(s: str, n: int) -> str:
+            return s[:n] + "…" if len(s) > n else s
 
-        active_sections = []
-        for mood, tracks in active_moods:
-            active_sections.append(mood.capitalize())
-        if unanalysed_searched:
-            active_sections.append("Unanalysed Tracks")
+        def _mk_node(rx, ry, *, is_seed, base_radius, label, genre,
+                     play_count, path, title, artist):
+            return {
+                "rx": rx, "ry": ry, "path": path,
+                "title": title, "artist": artist,
+                "genre": genre,
+                "color": _genre_color(genre),
+                "radius": _node_radius(base_radius, play_count),
+                "is_seed": is_seed,
+                "is_now_playing": (path == now_playing),
+                "label": label,
+            }
 
-        if not active_sections:
-            return
-
-        # Cycle selected mood index with wrapping
-        self.selected_mood_index = (self.selected_mood_index + delta) % len(active_sections)
-        self.current_page = 0
-        await self.load_library()
-
-    def _refresh_partitions_click(self, e):
-        self.app.show_snackbar("Recalculating Default Moods...")
-        self.page.run_task(self.recalculate_partitions_worker)
-
-    async def _open_mood_eq_dialog(self):
-        """Open a popover with raw feature quartile dropdowns to optimize the active mood."""
-        from utils import track_graph as tg
-        label_value = (self._mood_label.value or "").strip()
-        canonical = tg.mood_canonical(label_value)
-        if not canonical:
-            self.app.show_snackbar("Select a mood partition first.", icon=ft.Icons.INFO_OUTLINE)
-            return
-
-        db = self.app.db_manager
-        try:
-            definition = await tg.get_mood_definition(db, canonical)
-        except Exception as exc:
-            logger.exception("EQ dialog: failed to fetch mood definition: %s", exc)
-            definition = None
-
-        # Raw scalar features the EQ exposes as 1–4 bands (these map to MOOD_TARGETS).
-        raw_features = ["bpm", "brightness", "energy", "rolloff", "beat_strength", "spectral_flatness", "spectral_contrast", "key_mode"]
-        
-        friendly_names = {
-            "bpm": "Tempo / BPM",
-            "brightness": "Brightness",
-            "energy": "Energy",
-            "rolloff": "Treble Rolloff",
-            "beat_strength": "Beat Strength",
-            "spectral_flatness": "Flatness / Acoustic",
-            "spectral_contrast": "Timbre Contrast",
-            "key_mode": "Key Mode (Major/Minor)"
-        }
-        
-        feature_explanations = {
-            "bpm": "Aligns the overall playback tempo and speed.",
-            "brightness": "Boosts high frequencies for crisp vocals and acoustics.",
-            "energy": "Loud, intense tracks vs. quiet, minimal soundscapes.",
-            "rolloff": "Warm, mellow tones vs. sharp, crisp treble.",
-            "beat_strength": "Pronounced rhythm and percussion vs. ambient washes.",
-            "spectral_flatness": "Noisy, complex textures vs. clean melodic tones.",
-            "spectral_contrast": "Rich orchestration vs. focused, narrow synth sounds.",
-            "key_mode": "Major keys (bright/optimistic) vs. minor keys (dark/somber).",
-        }
-        
-        # The legacy "Sonic Variance Profile" / PC-colour decoration was tied to
-        # the retired 3-D mood PCA and no longer applies under the unified graph
-        # geometry. Sliders render plain; the EQ band values drive tracks_by_mood.
-        feature_pc = {f: 0 for f in raw_features}
-        header_controls = []
-
-        def _weight_for(feature: str) -> float:
-            if not definition:
-                return 0.0
-            entry = definition.get(feature)
-            if not entry:
-                return 0.0
-            try:
-                target_val, weight_val = entry
-                if weight_val == 0.0:
-                    return 0.0
-                return float(target_val)
-            except (TypeError, ValueError, IndexError):
-                return 0.0
-
-        sliders: dict[str, ft.Slider] = {}
-        
-        pc_metadata = {
-            0: {"label": "Timbre (PC1)", "color": "#00E5FF"},   # cyan
-            1: {"label": "Tempo (PC2)", "color": "#CE93D8"},   # purple-200
-            2: {"label": "Harmonic (PC3)", "color": "#FFB300"},  # amber
-        }
-
-        labels = {
-            0: "Any / Neutral",
-            1: "Very Low",
-            2: "Low",
-            3: "High",
-            4: "Very High",
-        }
-
-        def _make_row(feature: str) -> ft.Container:
-            initial = int(_weight_for(feature))
-            
-            dom_pc = feature_pc.get(feature, 0)
-            meta = pc_metadata[dom_pc]
-            pc_color = meta["color"]
-            
-            value_text_control = ft.Text(
-                labels.get(initial, "Any / Neutral"),
-                color=pc_color,
-                size=11,
-                weight=ft.FontWeight.W_600
-            )
-
-            def _on_slider_change(e, val_text=value_text_control):
-                val = int(e.control.value)
-                val_text.value = labels.get(val, "Any / Neutral")
-                val_text.update()
-
-            slider = ft.Slider(
-                min=0,
-                max=4,
-                divisions=4,
-                value=initial,
-                active_color=pc_color,
-                inactive_color=apply_opacity(0.15, pc_color),
-                thumb_color=TEXT,
-                on_change=_on_slider_change,
-            )
-            sliders[feature] = slider
-            
-            label_text = friendly_names.get(feature, feature)
-            explanation = feature_explanations.get(feature, "")
-            
-            dot = ft.Container(
-                width=8,
-                height=8,
-                border_radius=4,
-                bgcolor=pc_color,
-                margin=ft.Margin.only(right=6),
-            )
-            
-            return ft.Container(
-                content=ft.Column(
-                    [
-                        ft.Row(
-                            [
-                                ft.Row(
-                                    [
-                                        dot,
-                                        ft.Text(label_text, color=TEXT, size=12, weight=ft.FontWeight.W_700, no_wrap=True),
-                                    ],
-                                    alignment=ft.MainAxisAlignment.START,
-                                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                                    spacing=0,
-                                ),
-                                value_text_control,
-                            ],
-                            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                        ),
-                        ft.Container(
-                            content=ft.Text(
-                                explanation,
-                                color=DIM,
-                                size=9.5,
-                                weight=ft.FontWeight.W_400,
-                                no_wrap=False,
-                            ),
-                            margin=ft.Margin.only(left=14, right=4),
-                            padding=ft.Padding.only(bottom=2),
-                        ),
-                        ft.Container(
-                            content=slider,
-                            margin=ft.Margin.only(top=-6, bottom=-4),
-                        ),
-                    ],
-                    spacing=2,
-                    tight=True,
-                ),
-                padding=ft.Padding.only(bottom=4),
-            )
-
-        redundant_features = getattr(tg, "REDUNDANT_FEATURES", set())
-        active_features = [f for f in raw_features if f not in redundant_features]
-
-        rows = []
-        if header_controls:
-            rows.extend(header_controls)
-        rows.extend([_make_row(f) for f in active_features])
-
-        dlg = ft.AlertDialog(
-            title=ft.Text(f"{label_value or canonical.capitalize()} Quartile Optimization", color=TEXT),
-            content=ft.Container(
-                content=ft.Column(rows, spacing=16, tight=True, scroll=ft.ScrollMode.ADAPTIVE),
-                padding=ft.Padding.only(top=8, right=8),
-                width=380,
-                height=460,
-            ),
-            actions_alignment=ft.MainAxisAlignment.END,
-            bgcolor=SURFACE,
-        )
-
-        def _close(_e=None):
-            dlg.open = False
-            self.page.update()
-
-        def _on_apply(_e):
-            weights_to_save = {}
-            for f in raw_features:
-                if f in redundant_features:
-                    weights_to_save[f] = 0.0
-                else:
-                    weights_to_save[f] = float(sliders[f].value)
-            
-            _close()
-            self.page.run_task(self._apply_mood_eq, canonical, weights_to_save)
-
-        dlg.actions = [
-            ft.TextButton("Cancel", on_click=_close),
-            ft.TextButton(
-                content=ft.Text("Apply", weight=ft.FontWeight.BOLD, color=CYAN),
-                on_click=_on_apply,
-            ),
-        ]
-        self.page.overlay.append(dlg)
-        dlg.open = True
-        self.page.update()
-
-    async def _apply_mood_eq(self, canonical_mood: str, weights: dict[str, float]):
-        from utils import track_graph as tg
-        db = self.app.db_manager
-        try:
-            await tg.set_mood_eq(db, canonical_mood, weights)
-        except Exception as exc:
-            logger.exception("Failed to set mood EQ: %s", exc)
-            self.app.show_snackbar(f"EQ update failed: {exc}", icon=ft.Icons.ERROR_OUTLINE)
-            return
-        self.app.show_snackbar(f"EQ updated for {canonical_mood.capitalize()}.", icon=ft.Icons.CHECK_CIRCLE_OUTLINE)
-        try:
-            current_label = (self._mood_label.value or "").strip()
-            if (
-                self.partition_sub_mode == "moods"
-                and tg.mood_canonical(current_label) == canonical_mood
-            ):
-                await self.load_library()
-        except Exception as exc:
-            logger.debug("EQ apply: post-save refresh failed: %s", exc)
-
-    async def _toggle_mood_like(self, track_path: str, mood: str, btn: ft.IconButton = None):
-        db = self.app.db_manager
-        from utils import track_graph as tg
-        try:
-            feedback_map = await db.get_mood_feedback()
-            is_liked = feedback_map.get(track_path, {}).get(mood, 0) == 1
-            
-            new_fb = 0 if is_liked else 1
-            await db.save_mood_feedback(track_path, mood, new_fb)
-            self._mood_feedback_map.setdefault(track_path, {})[mood] = new_fb
-            
-            feedback_str = "Like removed" if is_liked else "Track pinned to mood"
-            
-            if btn:
-                btn.icon = ft.Icons.THUMB_UP_OUTLINED if is_liked else ft.Icons.THUMB_UP_ROUNDED
-                btn.icon_color = DIM if is_liked else CYAN
-                self.try_update(btn)
-            
-            for ctrl in self._path_to_controls.get(track_path, []):
-                try:
-                    tile = self._get_tile(ctrl)
-                    if isinstance(tile.trailing, ft.Row) and len(tile.trailing.controls) >= 2:
-                        l_btn = tile.trailing.controls[0]
-                        l_btn.icon = ft.Icons.THUMB_UP_OUTLINED if is_liked else ft.Icons.THUMB_UP_ROUNDED
-                        l_btn.icon_color = DIM if is_liked else CYAN
-                        self.try_update(l_btn)
-                except:
-                    pass
-
-            if not is_liked:
-                async def run_learning_and_walk():
-                    try:
-                        walk_tracks = await tg.walk(db, track_path, length=5, edge_kinds=(tg.KIND_ACOUSTIC,))
-                        for wt in walk_tracks:
-                            await db.save_mood_feedback(wt, mood, 1)
-                            self._mood_feedback_map.setdefault(wt, {})[mood] = 1
-                            for ctrl in self._path_to_controls.get(wt, []):
-                                try:
-                                    tile = self._get_tile(ctrl)
-                                    if isinstance(tile.trailing, ft.Row) and len(tile.trailing.controls) >= 2:
-                                        l_btn = tile.trailing.controls[0]
-                                        l_btn.icon = ft.Icons.THUMB_UP_ROUNDED
-                                        l_btn.icon_color = CYAN
-                                        self.try_update(l_btn)
-                                except:
-                                    pass
-                    except Exception as walk_err:
-                        logger.exception("Random walk failed during like toggle: %s", walk_err)
-
-                    try:
-                        await tg.adjust_mood_profile(db, mood, track_path, 1)
-                    except Exception as shift_err:
-                        logger.exception("Online learning shift failed during like: %s", shift_err)
-
-                self.page.run_task(run_learning_and_walk)
-            else:
-                async def run_unlike_walk():
-                    try:
-                        walk_tracks = await tg.walk(db, track_path, length=5, edge_kinds=(tg.KIND_ACOUSTIC,))
-                        feedback_map_latest = await db.get_mood_feedback()
-                        for wt in walk_tracks:
-                            if feedback_map_latest.get(wt, {}).get(mood, 0) == 1:
-                                await db.save_mood_feedback(wt, mood, 0)
-                                self._mood_feedback_map.setdefault(wt, {})[mood] = 0
-                                for ctrl in self._path_to_controls.get(wt, []):
-                                    try:
-                                        tile = self._get_tile(ctrl)
-                                        if isinstance(tile.trailing, ft.Row) and len(tile.trailing.controls) >= 2:
-                                            l_btn = tile.trailing.controls[0]
-                                            l_btn.icon = ft.Icons.THUMB_UP_OUTLINED
-                                            l_btn.icon_color = DIM
-                                            self.try_update(l_btn)
-                                    except:
-                                        pass
-                    except Exception as walk_err:
-                        logger.exception("Random walk failed during unlike toggle: %s", walk_err)
-
-                self.page.run_task(run_unlike_walk)
-
-            self._mood_recalc_pending = True
-            self._update_partition_tabs_ui()
-            self.app.show_snackbar(f"{feedback_str}. Recalculation pending.")
-        except Exception as e:
-            logger.exception("Failed to toggle mood like: %s", e)
-            self.app.show_snackbar(f"Failed to like track: {e}")
-
-    async def _register_mood_dislike(self, track_path: str, mood: str, btn: ft.IconButton = None):
-        db = self.app.db_manager
-        from utils import track_graph as tg
-        import numpy as np
-        try:
-            feedback_map = await db.get_mood_feedback()
-            was_liked = feedback_map.get(track_path, {}).get(mood, 0) == 1
-
-            await db.save_mood_feedback(track_path, mood, -1)
-            self._mood_feedback_map.setdefault(track_path, {})[mood] = -1
-
-            try:
-                rows, percentile_matrix = await tg._load_percentile_matrix(db, tg.FEATURES_VERSION)
-                track_idx = None
-                for idx, r in enumerate(rows):
-                    if r["path"] == track_path:
-                        track_idx = idx
+        if mode == 0:  # Local — seed + neighbours (navigable)
+            seed_row = path_to_row.get(current_path) if current_path else None
+            if not seed_row:
+                for r in rows:
+                    if r.get("pca_coords"):
+                        seed_row = r
                         break
-
-                if track_idx is not None:
-                    adjusted_profiles = await db.get_all_adjusted_mood_profiles()
-                    raw_mood_scores = tg.score_tracks_for_repartition(rows, adjusted_profiles)
-                    mood_scores = {}
-                    for m in tg.MOODS.keys():
-                        if m in raw_mood_scores:
-                            mood_scores[m] = float(raw_mood_scores[m][track_idx])
-                        else:
-                            mood_scores[m] = -np.inf
-
-                    dislikes = {m for m, fb in self._mood_feedback_map.get(track_path, {}).items() if fb == -1}
-                    
-                    best_mood = None
-                    best_score = -np.inf
-                    for m in tg.MOODS.keys():
-                        if m in dislikes:
-                            continue
-                        score = mood_scores[m]
-                        if score > best_score:
-                            best_score = score
-                            best_mood = m
-
-                    if best_mood is not None and best_score >= -2.0:
-                        await db.save_partitions([(track_path, best_mood, None)])
-                        logger.info("register_mood_dislike: Re-routed track '%s' from '%s' to next-best mood '%s' (score: %.3f)",
-                                    track_path, mood, best_mood, best_score)
+            if seed_row:
+                sc = seed_row["pca_coords"][:2]
+                seed_title = seed_row.get("title") or "Active"
+                raw_nodes.append(_mk_node(
+                    sc[0], sc[1], is_seed=True, base_radius=13,
+                    label=_trunc(seed_title, 14),
+                    genre=seed_row.get("genre"),
+                    play_count=seed_row.get("play_count"),
+                    path=seed_row["path"], title=seed_title,
+                    artist=seed_row.get("artist") or "Unknown",
+                ))
+                for idx, n in enumerate(neighbors_list):
+                    n_path = n.get("path")
+                    n_weight = n.get("weight") or 0.5
+                    n_row = path_to_row.get(n_path)
+                    if n_row:
+                        nc = n_row["pca_coords"][:2]
+                        n_title = n_row.get("title") or n.get("title") or "Neighbor"
+                        n_artist = n_row.get("artist") or n.get("artist") or "Unknown"
+                        n_genre = n_row.get("genre")
+                        n_pc = n_row.get("play_count")
                     else:
-                        async with db._write_lock:
-                            conn = await db.get_connection()
-                            await conn.execute("DELETE FROM track_partitions WHERE track_path = ?", (track_path,))
-                            await conn.commit()
-                        best_mood = None
-                        logger.info("register_mood_dislike: Track '%s' has no compatible default partition, removed from partitions",
-                                    track_path)
+                        theta = 2 * math.pi * idx / max(1, len(neighbors_list))
+                        nc = [sc[0] + 0.8 * math.cos(theta), sc[1] + 0.8 * math.sin(theta)]
+                        n_title = n.get("title") or "Neighbor"
+                        n_artist = n.get("artist") or "Unknown"
+                        n_genre = None
+                        n_pc = 0
+                    raw_nodes.append(_mk_node(
+                        nc[0], nc[1], is_seed=False, base_radius=8,
+                        label="",  # neighbour titles via tooltip; keeps a denser graph readable
+                        genre=n_genre, play_count=n_pc,
+                        path=n_path, title=n_title, artist=n_artist,
+                    ))
+                    raw_edges.append({"src": seed_row["path"], "dst": n_path, "weight": float(n_weight)})
 
-                    if self._cached_moods is not None:
-                        track_obj = None
-                        if mood in self._cached_moods:
-                            for t in list(self._cached_moods[mood]):
-                                if t["path"] == track_path:
-                                    track_obj = t
-                                    self._cached_moods[mood].remove(t)
-                                    break
-                        if track_obj is not None and best_mood is not None and best_mood in self._cached_moods:
-                            self._cached_moods[best_mood].append(track_obj)
-            except Exception as routing_err:
-                logger.exception("Failed to calculate next-best matching mood partition during dislike: %s", routing_err)
+        elif mode == 1:  # Walk — sequential path
+            seed_row = path_to_row.get(current_path) if current_path else None
+            if not seed_row:
+                for r in rows:
+                    if r.get("pca_coords"):
+                        seed_row = r
+                        break
+            walk_rows_ordered = []
+            if seed_row:
+                walk_rows_ordered.append(seed_row)
+                for wp in walk_paths:
+                    wr = path_to_row.get(wp)
+                    if wr:
+                        walk_rows_ordered.append(wr)
+            for idx, wr in enumerate(walk_rows_ordered):
+                c = wr["pca_coords"][:2]
+                is_seed = (idx == 0)
+                raw_nodes.append(_mk_node(
+                    c[0], c[1], is_seed=is_seed,
+                    base_radius=12 if is_seed else 7,
+                    label=str(idx),
+                    genre=wr.get("genre"),
+                    play_count=wr.get("play_count"),
+                    path=wr["path"],
+                    title=wr.get("title") or f"Step {idx}",
+                    artist=wr.get("artist") or "Unknown",
+                ))
+            for i in range(len(walk_rows_ordered) - 1):
+                alpha_w = max(0.3, 0.8 - i / max(1, len(walk_rows_ordered)) * 0.5)
+                raw_edges.append({
+                    "src": walk_rows_ordered[i]["path"],
+                    "dst": walk_rows_ordered[i + 1]["path"],
+                    "weight": float(alpha_w),
+                })
 
-            controls = self._path_to_controls.get(track_path, [])
-            removed_any = False
-            for ctrl in controls:
-                if ctrl in self._library_list.controls:
-                    self._library_list.controls.remove(ctrl)
-                    removed_any = True
-            
-            if removed_any:
-                self.try_update(self._library_list)
-            
-            try:
-                if self._stats_label.text:
-                    parts = self._stats_label.text.split()
-                    if parts and parts[0].isdigit():
-                        cnt = max(0, int(parts[0]) - 1)
-                        self._stats_label.text = f"{cnt} {'TRACK' if cnt == 1 else 'TRACKS'}"
-                        self.try_update(self._stats_label)
-            except:
-                pass
-
-            async def run_learning_dislike():
-                if was_liked:
-                    try:
-                        walk_tracks = await tg.walk(db, track_path, length=5, edge_kinds=(tg.KIND_ACOUSTIC,))
-                        feedback_map_latest = await db.get_mood_feedback()
-                        for wt in walk_tracks:
-                            if feedback_map_latest.get(wt, {}).get(mood, 0) == 1:
-                                await db.save_mood_feedback(wt, mood, 0)
-                                self._mood_feedback_map.setdefault(wt, {})[mood] = 0
-                                for ctrl in self._path_to_controls.get(wt, []):
-                                    try:
-                                        tile = self._get_tile(ctrl)
-                                        if isinstance(tile.trailing, ft.Row) and len(tile.trailing.controls) >= 2:
-                                            l_btn = tile.trailing.controls[0]
-                                            l_btn.icon = ft.Icons.THUMB_UP_OUTLINED
-                                            l_btn.icon_color = DIM
-                                            self.try_update(l_btn)
-                                    except:
-                                        pass
-                    except Exception as walk_err:
-                        logger.exception("Random walk failed during dislike unlike propagation: %s", walk_err)
-
-                try:
-                    await tg.adjust_mood_profile(db, mood, track_path, -1)
-                except Exception as shift_err:
-                    logger.exception("Online learning shift failed during dislike: %s", shift_err)
-
-            self.page.run_task(run_learning_dislike)
-
-            self._mood_recalc_pending = True
-            self._update_partition_tabs_ui()
-            self.app.show_snackbar("Track excluded from mood subset and re-routed.", color=CYAN)
-        except Exception as e:
-            logger.exception("Failed to register mood dislike: %s", e)
-            self.app.show_snackbar(f"Failed to dislike track: {e}")
-
-    def _open_reset_feedback_confirmation(self):
-        """Open a confirmation dialog before resetting mood feedback and profiles."""
-        def _on_confirm(e):
-            dlg.open = False
-            self.page.update()
-            self.page.run_task(self._reset_mood_feedback)
-
-        def _on_cancel(e):
-            dlg.open = False
-            self.page.update()
-
-        dlg = ft.AlertDialog(
-            title=ft.Text("Reset Mood Configurations?", color=TEXT),
-            content=ft.Text("This will permanently delete all your custom mood EQ tunings, partition assignments, and feedback. Are you sure you want to begin calibration from scratch?", color=DIM),
-            actions_alignment=ft.MainAxisAlignment.END,
-            bgcolor=SURFACE,
-            actions=[
-                ft.TextButton("Cancel", on_click=_on_cancel),
-                ft.TextButton(
-                    content=ft.Text("Reset", weight=ft.FontWeight.BOLD, color=ft.Colors.RED_400),
-                    on_click=_on_confirm,
+        if not raw_nodes:
+            # Fallback: empty label
+            return ft.Container(
+                content=ft.Text(
+                    "Play a track to seed the network.",
+                    color=DIM, size=13, text_align=ft.TextAlign.CENTER,
                 ),
-            ],
+                alignment=ft.Alignment(0, 0),
+                padding=32,
+            )
+
+        # ── Normalise raw coords → canvas pixel coords ─────────────────────
+        xs = [n["rx"] for n in raw_nodes]
+        ys = [n["ry"] for n in raw_nodes]
+        min_x, max_x = min(xs), max(xs)
+        min_y, max_y = min(ys), max(ys)
+        range_x = max_x - min_x or 1.0
+        range_y = max_y - min_y or 1.0
+
+        def to_px(rx, ry):
+            px = pad + (rx - min_x) / range_x * (canvas_w - 2 * pad)
+            py = pad + (ry - min_y) / range_y * (canvas_h - 2 * pad)
+            return px, py
+
+        # Pixel-space node list (mutated in place by drag) + path index.
+        self._net_nodes = []
+        self._net_node_by_path = {}
+        for n in raw_nodes:
+            px, py = to_px(n["rx"], n["ry"])
+            nd = {
+                "px": px, "py": py,
+                "path": n["path"], "title": n["title"], "artist": n["artist"],
+                "color": n["color"], "radius": n["radius"],
+                "is_seed": n["is_seed"], "is_now_playing": n["is_now_playing"],
+                "genre": n["genre"], "label": n.get("label", ""),
+            }
+            self._net_nodes.append(nd)
+            self._net_node_by_path[nd["path"]] = nd
+        self._net_edges = raw_edges
+
+        # Canvas shapes are emitted by _emit_net_shapes() from self._net_nodes /
+        # self._net_edges, so a live drag can cheaply regenerate them. See that
+        # method for cluster colouring, weight-scaled edges and node rendering.
+
+        # ── Tooltip overlay (initially hidden) ─────────────────────────────
+        tooltip_title = ft.Text("", color=TEXT, size=11, weight=ft.FontWeight.W_700,
+                                max_lines=1, overflow=ft.TextOverflow.ELLIPSIS, no_wrap=True)
+        tooltip_artist = ft.Text("", color=DIM, size=9.5,
+                                  max_lines=1, overflow=ft.TextOverflow.ELLIPSIS, no_wrap=True)
+        tooltip_container = ft.Container(
+            content=ft.Column([tooltip_title, tooltip_artist], spacing=1, tight=True),
+            bgcolor=apply_opacity(0.92, SURFACE2),
+            border=ft.Border.all(1, apply_opacity(0.25, CYAN)),
+            border_radius=8,
+            padding=ft.Padding.symmetric(horizontal=10, vertical=6),
+            visible=False,
+            shadow=ft.BoxShadow(blur_radius=12, color=apply_opacity(0.3, "#000000")),
+            animate_opacity=ft.Animation(120, ft.AnimationCurve.EASE_OUT),
         )
-        self.page.overlay.append(dlg)
-        dlg.open = True
-        self.page.update()
+        self._net_tooltip_overlay = tooltip_container
+        self._net_tooltip_title = tooltip_title
+        self._net_tooltip_artist = tooltip_artist
 
-    async def _reset_mood_feedback(self):
-        db = self.app.db_manager
-        try:
-            self.app.show_snackbar("Resetting mood feedback & profiles...")
-            await db.clear_all_mood_feedback()
-            await db.clear_all_adjusted_mood_profiles()
-            await db.save_partitions([])  # Wipe all track partitions from SQLite
-            self._mood_feedback_map.clear()
-            self._mood_recalc_pending = False
-            
-            self._cached_moods = None
-            self._cached_islets = None
-            self._cached_unanalysed = None
-            
-            from utils import track_graph as tg
-            tg.invalidate_mood_cache()
-            
-            await self.load_library()
-            self.app.show_snackbar("Mood feedback & profiles reset successfully. Ready for clean calibration.", color=CYAN)
-        except Exception as e:
-            logger.exception("Failed to reset mood feedback: %s", e)
-            self.app.show_snackbar(f"Failed to reset mood feedback: {e}")
+        # ── Canvas ──────────────────────────────────────────────────────────
+        canvas = cv.Canvas(
+            shapes=self._emit_net_shapes(),
+            width=canvas_w,
+            height=canvas_h,
+        )
+        self._net_canvas_obj = canvas
 
+        # ── Hit-test helpers ────────────────────────────────────────────────
+        def _find_node_at(lx: float, ly: float) -> dict | None:
+            """Return the nearest node within tap radius, preferring seeds."""
+            best, best_dist = None, float("inf")
+            for nd in self._net_nodes:
+                dx = lx - nd["px"]
+                dy = ly - nd["py"]
+                dist = math.sqrt(dx * dx + dy * dy)
+                tap_radius = nd["radius"] + 14  # generous touch target
+                if dist <= tap_radius and dist < best_dist:
+                    best = nd
+                    best_dist = dist
+            return best
 
-    async def recalculate_partitions_worker(self):
-        self.app.safe_update(lambda: setattr(self._search_spinner, "visible", True))
-        try:
-            db = self.app.db_manager
-            
-            import numpy as np
-            from utils import track_graph as tg
+        def _evt_xy(e):
+            lp = getattr(e, "local_position", None)
+            if lp is not None:
+                return lp.x, lp.y
+            return getattr(e, "local_x", 0.0) or 0.0, getattr(e, "local_y", 0.0) or 0.0
 
-            rows, percentile_matrix = await tg._load_percentile_matrix(db, tg.FEATURES_VERSION)
-            
-            all_tracks = await db.get_all_tracks()
-            all_paths_to_track = {t["path"]: t for t in all_tracks}
-            
-            if not all_tracks:
-                self.app.show_snackbar("No tracks found in library. Scan your music folder first.")
+        def _show_tooltip(nd, lx, ly, subtitle=None):
+            self._net_tooltip_title.value = nd["title"]
+            self._net_tooltip_artist.value = subtitle if subtitle is not None else nd["artist"]
+            tooltip_container.visible = True
+            tooltip_container.left = min(lx + 10, canvas_w - 140)
+            tooltip_container.top = max(ly - 42, 4)
+            self.try_update(tooltip_container)
+
+        def _hide_tooltip_now():
+            if tooltip_container.visible:
+                tooltip_container.visible = False
+                self.try_update(tooltip_container)
+
+        def _on_tap_down(e):
+            # Record the pressed node + preview its tooltip. The play/reseed
+            # action fires on _on_tap (a clean tap), so a drag never triggers it.
+            # Clear any prior grab so a fresh touch always starts clean (a
+            # long-press that never produced a drag won't leave a node stuck).
+            self._net_drag = None
+            lx, ly = _evt_xy(e)
+            nd = _find_node_at(lx, ly)
+            self._net_pressed = nd
+            if nd:
+                _show_tooltip(nd, lx, ly)
+            else:
+                _hide_tooltip_now()
+
+        def _on_tap(e=None):
+            nd = self._net_pressed
+            if not nd:
                 return
-            
-            analysed_rows = []
-            analysed_indices = []
-            for idx, r in enumerate(rows):
-                if r["path"] in all_paths_to_track:
-                    analysed_rows.append(r)
-                    analysed_indices.append(idx)
-            
-            mood_assignments = {}
-            if analysed_rows and len(analysed_indices) > 0:
-                feedback_map = await db.get_mood_feedback()
-                self._mood_feedback_map = feedback_map
-                adjusted_profiles = await db.get_all_adjusted_mood_profiles()
-                
-                if not adjusted_profiles:
-                    for mood in tg.MOODS.keys():
-                        default_profile = tg._get_default_quartiles(mood)
-                        await db.save_adjusted_mood_profile(mood, default_profile)
-                    adjusted_profiles = await db.get_all_adjusted_mood_profiles()
-                
-                raw_mood_scores = tg.score_tracks_for_repartition(analysed_rows, adjusted_profiles)
-                mood_scores = {}
-                for mood in tg.MOODS.keys():
-                    if mood in raw_mood_scores:
-                        mood_scores[mood] = raw_mood_scores[mood]
-                    else:
-                        raise ValueError(f"No adjusted mood profile found in database for '{mood}'. Built-in default profiles are disabled.")
-                        
-                for i, track in enumerate(analysed_rows):
-                    path = track["path"]
-                    track_feedback = feedback_map.get(path, {})
-                    
-                    track_likes = [m for m, fb in track_feedback.items() if fb == 1]
-                    if track_likes:
-                        best_mood = None
-                        best_score = -np.inf
-                        for mood in track_likes:
-                            if mood in mood_scores:
-                                score = mood_scores[mood][i]
-                                if score > best_score:
-                                    best_score = score
-                                    best_mood = mood
-                        if best_mood is None:
-                            best_mood = track_likes[0]
-                    else:
-                        dislikes = {m for m, fb in track_feedback.items() if fb == -1}
-                        best_mood = None
-                        best_score = -np.inf
-                        for mood in tg.MOODS.keys():
-                            if mood in dislikes:
-                                continue
-                            score = mood_scores[mood][i]
-                            if score > best_score:
-                                best_score = score
-                                best_mood = mood
-                                
-                        if best_score is not None and best_score < -2.0:
-                            best_mood = None
-                                
-                    if best_mood is not None:
-                        mood_assignments[path] = best_mood
-            
-            assignments = [
-                (path, mood_assignments.get(path), None)
-                for path in all_paths_to_track.keys()
-                if mood_assignments.get(path) is not None
-            ]
-
-            await db.save_partitions(assignments)
-
-            self._cached_moods = None
-            self._cached_islets = None
-            self._cached_unanalysed = None
-
-            self._mood_recalc_pending = False
-            self._update_partition_tabs_ui()
-            self.app.show_snackbar("Default moods regenerated.")
-            await self.load_library()
-        except Exception as ex:
-            logger.exception("Failed to recalculate partitions: %s", ex)
-            self.app.show_snackbar(f"Failed to generate partitions: {ex}")
-        finally:
-            self.app.safe_update(lambda: setattr(self._search_spinner, "visible", False))
-
-    def _update_partition_tabs_ui(self):
-        from utils.streamrip_api import load_config
-        try:
-            cfg = load_config()
-            appearance = cfg.get("appearance", {})
-        except:
-            appearance = {}
-
-        show_moods = bool(appearance.get("show_moods", False))
-        show_islets = bool(appearance.get("show_islets", False))
-
-        visible_submodes = []
-        if show_moods: visible_submodes.append("moods")
-        if show_islets: visible_submodes.append("islets")
-
-        if not visible_submodes:
-            visible_submodes = ["moods"]
-            show_moods = True
-
-        if self.partition_sub_mode not in visible_submodes:
-            self.partition_sub_mode = visible_submodes[0]
-
-        tabs = []
-        all_submodes = [
-            ("moods", "Default", ft.Icons.EMOJI_EMOTIONS_ROUNDED, show_moods),
-            ("islets", "Custom", ft.Icons.DIVERSITY_3_ROUNDED, show_islets),
-        ]
-        
-        active_col = LIB_PARTITION_COLOR
-        for mode, label, icon, enabled in all_submodes:
-            if not enabled:
-                continue
-            is_active = (self.partition_sub_mode == mode)
-            
-            tabs.append(
-                ft.GestureDetector(
-                    content=ft.Container(
-                        content=ft.Row(
-                            [
-                                ft.Icon(icon, color=BG if is_active else active_col, size=16),
-                                ft.Text(label, size=12, weight=ft.FontWeight.W_700,
-                                        color=BG if is_active else TEXT, no_wrap=True),
-                            ],
-                            spacing=6,
-                            alignment=ft.MainAxisAlignment.CENTER,
-                        ),
-                        bgcolor=active_col if is_active else apply_opacity(0.08, active_col),
-                        border=ft.Border.all(1, active_col if is_active else apply_opacity(0.2, active_col)),
-                        border_radius=12,
-                        padding=ft.Padding.symmetric(horizontal=16, vertical=8),
-                        animate=ft.Animation(150, ft.AnimationCurve.EASE_OUT),
-                    ),
-                    on_tap=lambda e, m=mode: self._set_partition_sub_mode(m),
-                    expand=True,
-                )
-            )
-        if self.partition_sub_mode == "islets" and show_islets:
-            tabs.append(
-                ft.IconButton(
-                    icon=ft.Icons.ADD_CIRCLE_OUTLINE_ROUNDED,
-                    icon_color=active_col,
-                    icon_size=18,
-                    tooltip="New Islet",
-                    bgcolor=apply_opacity(0.08, active_col),
-                    on_click=lambda _: self._open_create_islet_dialog(),
-                )
-            )
-        if self.partition_sub_mode == "moods" and show_moods:
-            tabs.append(
-                ft.IconButton(
-                    icon=ft.Icons.DELETE_OUTLINE_ROUNDED,
-                    icon_color=ft.Colors.WHITE,
-                    icon_size=18,
-                    tooltip="Reset Mood Feedback",
-                    bgcolor=apply_opacity(0.08, active_col),
-                    on_click=lambda _: self._open_reset_feedback_confirmation(),
-                )
-            )
-        is_pending = getattr(self, "_mood_recalc_pending", False)
-        tabs.append(
-            ft.IconButton(
-                icon=ft.Icons.REFRESH_ROUNDED,
-                icon_color=ft.Colors.WHITE if is_pending else active_col,
-                icon_size=18,
-                tooltip="Recalculate Default Moods (Changes Pending)" if is_pending else "Recalculate Default Moods",
-                bgcolor=apply_opacity(0.08, active_col),
-                on_click=self._refresh_partitions_click
-            )
-        )
-        self._partition_tabs.content.controls = tabs
-        self.try_update(self._partition_tabs)
-
-    # ── Islet creation dialog ────────────────────────────────────────────────
-    def _open_create_islet_dialog(self):
-        """Open the New Islet modal. Seeds the islet from the currently-playing
-        track (its timbre vector becomes the centroid). Membership is computed
-        on demand against ISLET_THRESHOLD when the library reloads."""
-        current_path = audio_engine.current_path or ""
-        current_title = audio_engine.current_track or ""
-        current_artist = audio_engine.current_artist or ""
-
-        name_field = ft.TextField(
-            label="Islet name",
-            autofocus=True,
-            border_color=LIB_PARTITION_COLOR,
-            cursor_color=LIB_PARTITION_COLOR,
-        )
-
-        if current_path:
-            seed_line = ft.Text(
-                f"Seed: {current_title} — {current_artist}",
-                color=DIM, size=12, max_lines=2,
-            )
-            disabled_reason = ""
-        else:
-            seed_line = ft.Text(
-                "No track is currently playing. Play the exemplar track first, then reopen this dialog.",
-                color="#FF8866", size=12, max_lines=3,
-            )
-            disabled_reason = "Play a track first."
-
-        dlg = ft.AlertDialog(
-            title=ft.Text("New Islet"),
-            content=ft.Container(
-                content=ft.Column(
-                    [name_field, ft.Container(height=6), seed_line],
-                    spacing=4, tight=True,
-                ),
-                padding=ft.Padding.only(top=10),
-                width=360,
-            ),
-            actions_alignment=ft.MainAxisAlignment.END,
-        )
-
-        def _close(_e=None):
-            dlg.open = False
-            self.page.update()
-
-        def _on_save(_e):
-            raw_name = (name_field.value or "").strip().strip("\"'").strip()
-            if not raw_name:
-                name_field.error_text = "Name required"
-                self.page.update()
-                return
-            if disabled_reason:
-                self.app.show_snackbar(disabled_reason, icon=ft.Icons.WARNING_AMBER_ROUNDED)
-                return
-            from utils import track_graph as tg
-            if raw_name.lower() in tg.MOOD_PROFILES:
-                name_field.error_text = "Conflicts with a built-in mood"
-                self.page.update()
-                return
-            _close()
-            self.page.run_task(self._save_islet_from_dialog, raw_name, current_path)
-
-        dlg.actions = [
-            ft.TextButton("Cancel", on_click=_close),
-            ft.TextButton("Save", on_click=_on_save),
-        ]
-        self.page.overlay.append(dlg)
-        dlg.open = True
-        self.page.update()
-
-    async def _exclude_track_from_islet(self, islet_name: str, track_path: str, track_title: str):
-        from utils import track_graph as tg
-        ok = tg.blacklist_track_from_islet(islet_name, track_path)
-        if ok:
-            try:
-                await tg.record_islet_negative(self.app.db_manager, islet_name, track_path)
-            except Exception as exc:
-                logger.debug("islet regressor negative update failed: %s", exc)
-            self._cached_islets = None
-            self.app.show_snackbar(
-                f"'{track_title}' excluded from custom mood '{islet_name.title()}'.",
-                icon=ft.Icons.CHECK_CIRCLE_OUTLINE
-            )
-            await self.load_library()
-        else:
-            self.app.show_snackbar(
-                "Failed to exclude track from custom mood.",
-                icon=ft.Icons.ERROR_OUTLINE
-            )
-
-    async def _clear_islet_blacklist_action(self, islet_name: str, dialog: ft.AlertDialog):
-        from utils import track_graph as tg
-        dialog.open = False
-        self.page.update()
-        
-        ok = tg.clear_islet_blacklist(islet_name)
-        if ok:
-            self._cached_islets = None
-            self.app.show_snackbar(
-                f"Exclusion blacklist cleared for custom mood '{islet_name.title()}'.",
-                icon=ft.Icons.CHECK_CIRCLE_OUTLINE
-            )
-            await self.load_library()
-        else:
-            self.app.show_snackbar(
-                "Failed to clear exclusion blacklist.",
-                icon=ft.Icons.ERROR_OUTLINE
-            )
-
-    def _open_edit_islet_dialog(self, name: str):
-        """Rename + retune-threshold for an existing islet. Centroid and
-        exemplar stay locked — to re-seed, delete and create fresh."""
-        from utils import track_graph as tg
-        entry = tg.load_custom_moods().get(name)
-        if entry is None:
-            self.app.show_snackbar(f"Islet '{name}' no longer exists.", icon=ft.Icons.ERROR_OUTLINE)
-            return
-        current_threshold = float(entry.get("threshold", tg.ISLET_THRESHOLD))
-
-        name_field = ft.TextField(
-            label="Name",
-            value=name,
-            autofocus=True,
-            border_color=LIB_PARTITION_COLOR,
-            cursor_color=LIB_PARTITION_COLOR,
-        )
-        threshold_label = ft.Text(f"Threshold: {current_threshold:.2f}", color=DIM, size=12)
-        threshold_slider = ft.Slider(
-            min=0.70, max=0.99, divisions=29, value=current_threshold,
-            active_color=LIB_PARTITION_COLOR,
-            inactive_color=apply_opacity(0.2, LIB_PARTITION_COLOR),
-            on_change=lambda e: (
-                setattr(threshold_label, "value", f"Threshold: {float(e.control.value):.2f}"),
-                self.page.update(),
-            ),
-        )
-
-        blacklist = entry.get("blacklist", [])
-        blacklist_container = ft.Container(visible=bool(blacklist))
-        if blacklist:
-            blacklist_container.content = ft.Row(
-                [
-                    ft.Text(f"{len(blacklist)} track(s) excluded", size=11, color=DIM, weight=ft.FontWeight.W_600),
-                    ft.TextButton(
-                        "Clear Exclusions",
-                        icon=ft.Icons.RESTORE_ROUNDED,
-                        style=ft.ButtonStyle(color="#FF4444"),
-                        on_click=lambda _e: self.page.run_task(self._clear_islet_blacklist_action, name, dlg)
-                    )
-                ],
-                alignment=ft.MainAxisAlignment.SPACE_BETWEEN
-            )
-
-        dlg = ft.AlertDialog(
-            title=ft.Text("Edit Islet"),
-            content=ft.Container(
-                content=ft.Column(
-                    [
-                        name_field,
-                        ft.Container(height=6),
-                        threshold_label,
-                        threshold_slider,
-                        ft.Text(
-                            "Tighter values keep the islet closer to the seed track. "
-                            "Looser values pull in more distant neighbours.",
-                            color=DIM, size=11, max_lines=3,
-                        ),
-                        ft.Container(height=6, visible=bool(blacklist)),
-                        blacklist_container,
-                    ],
-                    spacing=4, tight=True,
-                ),
-                padding=ft.Padding.only(top=10),
-                width=380,
-            ),
-            actions_alignment=ft.MainAxisAlignment.END,
-        )
-
-        def _close(_e=None):
-            dlg.open = False
-            self.page.update()
-
-        def _on_save(_e):
-            raw_new = (name_field.value or "").strip().strip("\"'").strip()
-            if not raw_new:
-                name_field.error_text = "Name required"
-                self.page.update()
-                return
-            if raw_new.lower() != name and raw_new.lower() in tg.MOOD_PROFILES:
-                name_field.error_text = "Conflicts with a built-in mood"
-                self.page.update()
-                return
-            ok = tg.update_custom_mood(name, raw_new, float(threshold_slider.value))
-            if not ok:
-                name_field.error_text = "Name already in use"
-                self.page.update()
-                return
-            _close()
-            self._cached_islets = None
-            self.app.show_snackbar(f"Islet '{raw_new}' updated.", icon=ft.Icons.CHECK_CIRCLE_OUTLINE)
-            self.page.run_task(self.load_library)
-
-        dlg.actions = [
-            ft.TextButton("Cancel", on_click=_close),
-            ft.TextButton("Save", on_click=_on_save),
-        ]
-        self.page.overlay.append(dlg)
-        dlg.open = True
-        self.page.update()
-
-    def _confirm_delete_islet(self, name: str):
-        """Two-step delete with confirmation dialog. The centroid file gets
-        rewritten without this entry; library reloads to drop the accordion."""
-        from utils import track_graph as tg
-
-        dlg = ft.AlertDialog(
-            title=ft.Text("Delete Islet"),
-            content=ft.Text(
-                f"Remove '{name.title()}'? The exemplar track stays in your library; "
-                "only the islet definition is deleted.",
-                color=TEXT, size=13,
-            ),
-            actions_alignment=ft.MainAxisAlignment.END,
-        )
-
-        def _close(_e=None):
-            dlg.open = False
-            self.page.update()
-
-        def _on_delete(_e):
-            _close()
-            if tg.delete_custom_mood(name):
-                self._cached_islets = None
-                self.app.show_snackbar(f"Islet '{name}' deleted.", icon=ft.Icons.DELETE_OUTLINE)
+            self.page.run_task(self.app.play_track, nd["path"], ("library", None))
+            # Local mode: tapping a neighbour re-seeds the graph around it.
+            if mode == 0 and not nd["is_seed"]:
+                self._network_seed_path = nd["path"]
                 self.page.run_task(self.load_library)
             else:
-                self.app.show_snackbar(f"Islet '{name}' was already gone.", icon=ft.Icons.ERROR_OUTLINE)
+                async def _hide_later():
+                    await asyncio.sleep(1.8)
+                    _hide_tooltip_now()
+                self.page.run_task(_hide_later)
 
-        dlg.actions = [
-            ft.TextButton("Cancel", on_click=_close),
-            ft.TextButton("Delete", on_click=_on_delete),
-        ]
-        self.page.overlay.append(dlg)
-        dlg.open = True
-        self.page.update()
+        def _pan_all(dx, dy):
+            # Translate the whole graph (every node) + the pulse ring overlay.
+            for _nd in self._net_nodes:
+                _nd["px"] += dx
+                _nd["py"] += dy
+            ov = self._net_pulse_overlay
+            if ov is not None and ov.left is not None:
+                ov.left += dx
+                ov.top += dy
+                self.try_update(ov)
+            self._redraw_net_canvas()
 
-    async def _save_islet_from_dialog(self, name: str, exemplar_path: str):
-        from utils import track_graph as tg
-        from utils.dsp import unpack_timbre
-        try:
-            row = await self.app.db_manager.get_track_full(exemplar_path)
-            timbre = unpack_timbre(row.get("timbre")) if row else None
-            if timbre is None:
-                self.app.show_snackbar(
-                    "Exemplar has no DSP features. Run a rescan first.",
-                    icon=ft.Icons.ERROR_OUTLINE,
-                )
-                return
-            tg.save_custom_mood(
-                name,
-                centroid=[float(x) for x in timbre],
-                exemplar_path=exemplar_path,
+        def _on_long_press(e):
+            # Press-and-hold picks a node up so the following drag moves *it*
+            # (instead of panning the whole network).
+            lx, ly = _evt_xy(e)
+            nd = _find_node_at(lx, ly)
+            if nd:
+                self._net_drag = nd
+                self._net_pressed = None
+                _show_tooltip(nd, lx, ly, subtitle="moving — drag to reposition")
+
+        def _on_pan_start(e):
+            lx, ly = _evt_xy(e)
+            self._net_pressed = None
+            self._net_pan_last = (lx, ly)
+            # A node grabbed via long-press → drag moves it; otherwise pan.
+            self._net_panning = self._net_drag is None
+
+        def _on_pan_update(e):
+            lx, ly = _evt_xy(e)
+            plx, ply = self._net_pan_last
+            dx, dy = lx - plx, ly - ply
+            self._net_pan_last = (lx, ly)
+            nd = self._net_drag
+            if nd is not None:
+                nd["px"] = max(6.0, min(float(canvas_w - 6), lx))
+                nd["py"] = max(6.0, min(float(canvas_h - 6), ly))
+                self._redraw_net_canvas()
+                ov = self._net_pulse_overlay
+                if ov is not None and nd.get("is_now_playing"):
+                    d = (nd["radius"] + 9) * 2
+                    ov.left = nd["px"] - d / 2
+                    ov.top = nd["py"] - d / 2
+                    self.try_update(ov)
+            elif self._net_panning:
+                _pan_all(dx, dy)
+
+        def _on_pan_end(e):
+            self._net_drag = None       # release pins the moved node
+            self._net_panning = False
+
+        def _on_scroll(e):
+            # Scroll wheel / two-finger scroll pans the network too.
+            sd = getattr(e, "scroll_delta", None)
+            dx = getattr(sd, "x", 0.0) or 0.0 if sd is not None else 0.0
+            dy = getattr(sd, "y", 0.0) or 0.0 if sd is not None else 0.0
+            if dx or dy:
+                _pan_all(-dx, -dy)
+
+        # ── Gesture wrapper ─────────────────────────────────────────────────
+        gesture = ft.GestureDetector(
+            content=canvas,
+            on_tap_down=_on_tap_down,
+            on_tap=_on_tap,
+            on_pan_start=_on_pan_start,
+            on_pan_update=_on_pan_update,
+            on_pan_end=_on_pan_end,
+            on_scroll=_on_scroll,
+            on_long_press_start=_on_long_press,
+            drag_interval=16,
+        )
+
+        # ── Mode selector overlay (top-right: − | LAYER | +) ────────────────
+        _mode_labels = ["LOCAL", "WALK"]
+
+        def _on_mode_minus(_e):
+            self._select_network_index((mode - 1) % 2)
+
+        def _on_mode_plus(_e):
+            self._select_network_index((mode + 1) % 2)
+
+        def _mode_btn(symbol, on_tap):
+            return ft.GestureDetector(
+                content=ft.Container(
+                    content=ft.Text(symbol, color=CYAN, size=15, weight=ft.FontWeight.W_700),
+                    width=26, height=26, alignment=ft.Alignment(0, 0),
+                ),
+                on_tap=on_tap,
             )
-            self._cached_islets = None
-            self.app.show_snackbar(f"Islet '{name}' saved.", icon=ft.Icons.CHECK_CIRCLE_OUTLINE)
-            await self.load_library()
-        except Exception as ex:
-            logger.exception("Failed to save islet %s", name)
-            self.app.show_snackbar(f"Failed to save islet: {ex}", icon=ft.Icons.ERROR_OUTLINE)
 
-    def _build_islet_empty_state(self) -> ft.Control:
-        """Shown in the Islets sub-tab when no user islets exist yet."""
-        return ft.Container(
-            content=ft.Column(
+        mode_overlay = ft.Container(
+            content=ft.Row(
                 [
-                    ft.Container(
-                        content=ft.Icon(
-                            ft.Icons.DIVERSITY_3_ROUNDED,
-                            color=LIB_PARTITION_COLOR,
-                            size=40,
-                        ),
-                        bgcolor=apply_opacity(0.1, LIB_PARTITION_COLOR),
-                        border_radius=20,
-                        padding=16,
-                    ),
+                    _mode_btn("−", _on_mode_minus),
                     ft.Text(
-                        "No islets yet",
-                        color=TEXT, size=18, weight=ft.FontWeight.W_700,
-                        text_align=ft.TextAlign.CENTER,
+                        _mode_labels[mode], color=TEXT, size=9,
+                        weight=ft.FontWeight.W_700,
+                        text_align=ft.TextAlign.CENTER, no_wrap=True,
                     ),
-                    ft.Text(
-                        "Play a track you'd like to anchor a vibe around, then create an "
-                        "islet from it. Tracks acoustically close to that exemplar become "
-                        "members automatically.",
-                        color=DIM, size=13, text_align=ft.TextAlign.CENTER, max_lines=4,
-                    ),
-                    ft.Container(height=8),
-                    ft.Button(
-                        "New Islet",
-                        icon=ft.Icons.ADD_CIRCLE_OUTLINE_ROUNDED,
-                        color=BG,
-                        bgcolor=LIB_PARTITION_COLOR,
-                        on_click=lambda _: self._open_create_islet_dialog(),
-                        style=ft.ButtonStyle(
-                            shape=ft.RoundedRectangleBorder(radius=10),
-                            padding=ft.Padding.symmetric(horizontal=24, vertical=12),
-                        ),
-                    ),
+                    _mode_btn("+", _on_mode_plus),
                 ],
-                alignment=ft.MainAxisAlignment.CENTER,
-                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                spacing=12,
+                spacing=2,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                tight=True,
             ),
-            bgcolor="#0DFFFFFF",
-            border=ft.Border.all(1, apply_opacity(0.1, TEXT)),
-            border_radius=16,
-            padding=32,
-            margin=ft.Margin.symmetric(horizontal=16, vertical=24),
+            right=8, top=8,
+            bgcolor=apply_opacity(0.88, SURFACE2),
+            border=ft.Border.all(1, apply_opacity(0.22, CYAN)),
+            border_radius=10,
+            padding=ft.Padding.symmetric(horizontal=4, vertical=3),
+        )
+
+        # ── Genre legend (top-left), shown when >1 genre is on screen ───────
+        genres_present: dict[str, str] = {}
+        for nd in self._net_nodes:
+            g = nd.get("genre")
+            if g:
+                genres_present.setdefault(str(g), nd["color"])
+        legend_overlay = None
+        if len(genres_present) > 1:
+            legend_rows = []
+            for g in sorted(genres_present)[:8]:
+                legend_rows.append(ft.Row(
+                    [
+                        ft.Container(width=9, height=9, border_radius=5,
+                                     bgcolor=genres_present[g]),
+                        ft.Text(g[:16] + ("…" if len(g) > 16 else ""),
+                                size=8.5, color=TEXT, no_wrap=True),
+                    ],
+                    spacing=4, tight=True,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ))
+            legend_overlay = ft.Container(
+                content=ft.Column(legend_rows, spacing=2, tight=True),
+                left=8, top=8,
+                bgcolor=apply_opacity(0.82, SURFACE2),
+                border=ft.Border.all(1, apply_opacity(0.18, CYAN)),
+                border_radius=8,
+                padding=ft.Padding.symmetric(horizontal=6, vertical=5),
+            )
+
+        # ── Now-playing pulse overlay ───────────────────────────────────────
+        # A cyan ring over the currently-playing track whenever it's on screen,
+        # animated by a small repeating task — independent of which node is seed.
+        self._net_pulse_overlay = None
+        np_node = self._net_node_by_path.get(now_playing) if now_playing else None
+        pulse_overlay = None
+        if np_node is not None:
+            d = (np_node["radius"] + 9) * 2
+            pulse_overlay = ft.Container(
+                width=d, height=d, border_radius=d / 2,
+                border=ft.Border.all(2, CYAN),
+                left=np_node["px"] - d / 2, top=np_node["py"] - d / 2,
+                animate_scale=ft.Animation(700, ft.AnimationCurve.EASE_IN_OUT),
+                animate_opacity=ft.Animation(700, ft.AnimationCurve.EASE_IN_OUT),
+                scale=1.0, opacity=0.9,
+            )
+            self._net_pulse_overlay = pulse_overlay
+
+        # Stack: canvas, legend, mode selector, pulse ring, tooltip (top).
+        stack_controls: list = [gesture]
+        if legend_overlay is not None:
+            stack_controls.append(legend_overlay)
+        stack_controls.append(mode_overlay)
+        if pulse_overlay is not None:
+            stack_controls.append(pulse_overlay)
+        stack_controls.append(tooltip_container)
+
+        stack = ft.Stack(
+            controls=stack_controls,
+            width=canvas_w,
+            height=canvas_h,
+            clip_behavior=ft.ClipBehavior.HARD_EDGE,
+        )
+
+        # Outer container with rounded border matching the app aesthetic
+        container = ft.Container(
+            content=stack,
+            border=ft.Border.all(1, apply_opacity(0.12, TEXT)),
+            border_radius=14,
+            bgcolor=BG,
+            clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
+            margin=ft.Margin.only(bottom=12, left=4, right=4, top=4),
             alignment=ft.Alignment(0, 0),
         )
+
+        self._net_canvas = container
+        # Bump the token (supersedes any previous pulse loop) and start anew.
+        self._net_pulse_token += 1
+        if self._net_pulse_overlay is not None:
+            self.page.run_task(self._run_net_pulse, self._net_pulse_token)
+        return container
+
+    def _emit_net_shapes(self) -> list:
+        """Build the canvas shape list from the current node/edge state.
+
+        Called on the initial build and on every drag frame, so it stays cheap
+        (a few dozen shapes). Edges are weight-scaled (opacity + width) and
+        coloured by the source node's community; nodes are cluster-coloured and
+        play-count-sized; the seed gets a glow + white ring.
+        """
+        canvas_w, canvas_h, _pad = self._net_dims
+        mode = self._net_mode
+        nbp = self._net_node_by_path
+        shapes: list = [
+            cv.Rect(0, 0, canvas_w, canvas_h,
+                    paint=ft.Paint(color=BG, style=ft.PaintingStyle.FILL)),
+        ]
+
+        for e in self._net_edges:
+            a = nbp.get(e["src"])
+            b = nbp.get(e["dst"])
+            if a is None or b is None:
+                continue
+            w = max(0.0, min(1.0, float(e.get("weight", 0.5))))
+            paint = ft.Paint(
+                color=apply_opacity(0.15 + 0.75 * w, a["color"]),
+                stroke_width=0.8 + 2.4 * w,
+                style=ft.PaintingStyle.STROKE,
+                stroke_cap=ft.StrokeCap.ROUND,
+            )
+            elems = [cv.Path.MoveTo(a["px"], a["py"]), cv.Path.LineTo(b["px"], b["py"])]
+            if mode == 1:
+                # Arrow head at the destination for the directed walk.
+                dx, dy = b["px"] - a["px"], b["py"] - a["py"]
+                length = math.sqrt(dx * dx + dy * dy) or 1.0
+                ux, uy = dx / length, dy / length
+                al = 7
+                elems += [
+                    cv.Path.MoveTo(b["px"], b["py"]),
+                    cv.Path.LineTo(b["px"] - al * (ux * 0.866 + uy * 0.5),
+                                   b["py"] - al * (-ux * 0.5 + uy * 0.866)),
+                    cv.Path.MoveTo(b["px"], b["py"]),
+                    cv.Path.LineTo(b["px"] - al * (ux * 0.866 - uy * 0.5),
+                                   b["py"] - al * (ux * 0.5 + uy * 0.866)),
+                ]
+            shapes.append(cv.Path(elements=elems, paint=paint))
+
+        # Nodes — non-seed first so the seed (and its ring) draws on top.
+        for nd in sorted(self._net_nodes, key=lambda n: n["is_seed"]):
+            px, py, r = nd["px"], nd["py"], nd["radius"]
+            col = nd["color"]
+            if nd["is_seed"]:
+                shapes.append(cv.Circle(px, py, r + 8,
+                              paint=ft.Paint(color=apply_opacity(0.18, col),
+                                             style=ft.PaintingStyle.FILL)))
+                shapes.append(cv.Circle(px, py, r + 3,
+                              paint=ft.Paint(color=apply_opacity(0.6, "#FFFFFF"),
+                                             stroke_width=1.6,
+                                             style=ft.PaintingStyle.STROKE)))
+            shapes.append(cv.Circle(px, py, r,
+                          paint=ft.Paint(color=col, style=ft.PaintingStyle.FILL)))
+            if nd["label"]:
+                shapes.append(cv.Text(
+                    px - len(nd["label"]) * 3, py - r - 12, nd["label"],
+                    style=ft.TextStyle(size=8.5, weight=ft.FontWeight.W_700, color="#FFFFFF"),
+                    max_width=120,
+                ))
+        return shapes
+
+    def _redraw_net_canvas(self):
+        """Regenerate canvas shapes in place — used during a node drag."""
+        if self._net_canvas_obj is None:
+            return
+        self._net_canvas_obj.shapes = self._emit_net_shapes()
+        self.try_update(self._net_canvas_obj)
+
+    async def _run_net_pulse(self, token: int):
+        """Pulse the now-playing ring until a newer build supersedes this token.
+        The scale/opacity transitions are animated client-side; we just toggle
+        the targets each beat. Tokened so only one loop runs at a time.
+
+        Battery: while the app is backgrounded or the Network view isn't the
+        active library mode, we stop pushing updates (and idle at a slow tick),
+        so an off-screen pulse never drives the Flet→Flutter bridge. The loop
+        resumes pushing the moment the view is foregrounded again."""
+        await asyncio.sleep(1.0)  # let finalize mount the overlay first
+        big = True
+        while token == self._net_pulse_token:
+            ov = self._net_pulse_overlay
+            if ov is None:
+                return
+            # Pause work when not visibly on screen.
+            if getattr(self.app, "is_background", False) or self.view_mode != "network":
+                await asyncio.sleep(1.5)
+                continue
+            try:
+                ov.scale = 1.4 if big else 1.0
+                ov.opacity = 0.25 if big else 0.9
+                ov.update()
+            except Exception:
+                return
+            big = not big
+            await asyncio.sleep(0.7)
 
     def _update_view_tabs(self):
         from utils.streamrip_api import load_config
@@ -1511,17 +990,14 @@ class LibraryView:
         except:
             appearance = {}
 
-        show_moods = bool(appearance.get("show_moods", False))
-        show_islets = bool(appearance.get("show_islets", False))
-        show_partitions = show_moods or show_islets
-
         show_playlists = bool(appearance.get("show_playlists", True))
         show_artists = bool(appearance.get("show_artists", True))
         show_albums = bool(appearance.get("show_albums", True))
         show_tracks = bool(appearance.get("show_tracks", True))
+        show_network = bool(appearance.get("show_network", False))
 
         visible_modes = []
-        if show_partitions: visible_modes.append("partitions")
+        if show_network: visible_modes.append("network")
         if show_playlists: visible_modes.append("playlists")
         if show_artists: visible_modes.append("artists")
         if show_albums: visible_modes.append("albums")
@@ -1539,19 +1015,19 @@ class LibraryView:
             "artists":   ft.Icons.PERSON_ROUNDED,
             "albums":    ft.Icons.ALBUM_ROUNDED,
             "tracks":    ft.Icons.MUSIC_NOTE_ROUNDED,
-            "partitions": ft.Icons.DIVERSITY_3_ROUNDED,
+            "network":   ft.Icons.HUB_ROUNDED,
         }
         accents = {
             "playlists": LIB_PLAYLIST_COLOR,
             "artists":   LIB_ARTIST_COLOR,
             "albums":    LIB_ALBUM_COLOR,
             "tracks":    LIB_TRACK_COLOR,
-            "partitions": LIB_PARTITION_COLOR,
+            "network":   CYAN,
         }
         tabs = []
-        
+
         all_modes = [
-            ("partitions", "Moods", show_partitions),
+            ("network", "Network", show_network),
             ("playlists", "Playlists", show_playlists),
             ("artists", "Artists", show_artists),
             ("albums", "Albums", show_albums),
@@ -1763,59 +1239,27 @@ class LibraryView:
         asyncio.create_task(load_chunk())
 
     def _build_top_ghost(self) -> ft.Control:
-        return ft.Container(
-            content=ft.Row(
-                [
-                    ft.Icon(ft.Icons.KEYBOARD_DOUBLE_ARROW_UP_ROUNDED, color=CYAN, size=16),
-                    ft.Text("Tap here to load previous page", color=TEXT, size=11, weight=ft.FontWeight.W_500),
-                    ft.Icon(ft.Icons.KEYBOARD_DOUBLE_ARROW_UP_ROUNDED, color=CYAN, size=16),
-                ],
-                alignment=ft.MainAxisAlignment.CENTER,
-                spacing=10,
-            ),
-            height=48,
-            alignment=ft.Alignment(0, 0),
-            bgcolor=apply_opacity(0.03, CYAN),
-            border=ft.Border.all(1, apply_opacity(0.08, CYAN)),
-            border_radius=12,
-            margin=ft.Margin.only(bottom=12),
-            on_click=lambda e: self.page.run_task(self.change_page, self.current_page - 1, scroll_to_bottom=True),
+        return build_page_ghost_top(
+            lambda e: self.page.run_task(self.change_page, self.current_page - 1, scroll_to_bottom=True)
         )
 
     def _build_bottom_ghost(self) -> ft.Control:
-        return ft.Container(
-            content=ft.Row(
-                [
-                    ft.Icon(ft.Icons.KEYBOARD_DOUBLE_ARROW_DOWN_ROUNDED, color=CYAN, size=16),
-                    ft.Text("Tap here to load next page", color=TEXT, size=11, weight=ft.FontWeight.W_500),
-                    ft.Icon(ft.Icons.KEYBOARD_DOUBLE_ARROW_DOWN_ROUNDED, color=CYAN, size=16),
-                ],
-                alignment=ft.MainAxisAlignment.CENTER,
-                spacing=10,
-            ),
-            height=48,
-            alignment=ft.Alignment(0, 0),
-            bgcolor=apply_opacity(0.03, CYAN),
-            border=ft.Border.all(1, apply_opacity(0.08, CYAN)),
-            border_radius=12,
-            margin=ft.Margin.only(top=12),
-            on_click=lambda e: self.page.run_task(self.change_page, self.current_page + 1, scroll_to_bottom=False),
+        return build_page_ghost_bottom(
+            lambda e: self.page.run_task(self.change_page, self.current_page + 1, scroll_to_bottom=False)
         )
 
     def _update_pagination_ui(self):
         total = max(1, self.total_pages)
         self._page_label.value = f"Page {self.current_page + 1} of {total}"
         
-        color = LIB_PARTITION_COLOR if self.view_mode == "partitions" else CYAN
         self._prev_page_btn.disabled = self.current_page <= 0
-        self._prev_page_btn.icon_color = DIM if self.current_page <= 0 else color
-        
+        self._prev_page_btn.icon_color = DIM if self.current_page <= 0 else CYAN
+
         self._next_page_btn.disabled = self.current_page >= self.total_pages - 1
-        self._next_page_btn.icon_color = DIM if self.current_page >= self.total_pages - 1 else color
-        
-        is_partitions_moods = (self.view_mode == "partitions" and self.partition_sub_mode == "moods")
+        self._next_page_btn.icon_color = DIM if self.current_page >= self.total_pages - 1 else CYAN
+
         self._pagination_bar.visible = self.total_pages > 1 and (
-            self.view_mode in ("tracks", "albums", "artists") or is_partitions_moods
+            self.view_mode in ("tracks", "albums", "artists")
         )
         self.try_update(self._pagination_bar)
 
@@ -1878,10 +1322,10 @@ class LibraryView:
                                 sub_tracks = await db.get_tracks_by_album(al['album'], al['artist'])
                                 for t in sub_tracks:
                                     controls.append(self._track_row(t, depth=2, album_context=(al['artist'], al['album'])))
-            elif self.view_mode == "partitions" and self.partition_sub_mode == "moods":
+            elif self.view_mode == "network":
                 for item in page_items:
                     controls.append(self._build_partition_track_row(item["data"], item["tracks"], depth=0))
-                
+
             if self.current_page < self.total_pages - 1:
                 controls.append(self._build_bottom_ghost())
                     
@@ -1925,16 +1369,25 @@ class LibraryView:
         self._tracks_cache = None
         self._tracks_cache_key = None
 
-        if not (self.view_mode == "partitions" and self.partition_sub_mode == "moods"):
+        if self.search_query:
+            sq = self.search_query.lower()
+            def matches_query(t):
+                return (
+                    sq in (t.get("title") or "").lower() or
+                    sq in (t.get("artist") or "").lower() or
+                    sq in (t.get("album") or "").lower() or
+                    sq in (t.get("path") or "").lower()
+                )
+        else:
+            def matches_query(t):
+                return True
+
+        is_dual_pane = self.view_mode == "network"
+        if not is_dual_pane:
             old_content = self._animated_list_wrapper.content
             self._animated_list_wrapper.content = self._library_list
             if old_content != self._library_list:
                 self.try_update(self._animated_list_wrapper)
-
-        if self.view_mode == "partitions":
-            self._cached_islets = None
-            self._cached_moods = None
-            self._cached_unanalysed = None
 
         self._last_highlighted_path = audio_engine.current_path or None
 
@@ -1943,14 +1396,12 @@ class LibraryView:
         self._path_to_controls.clear()
         self._empty_label.visible = False
         self._pagination_bar.visible = False
-        self._mood_pagination_bar.visible = False
-        
+
         self.try_update(
             self._search_spinner,
             self._library_list,
             self._empty_label,
             self._pagination_bar,
-            self._mood_pagination_bar,
         )
 
         try:
@@ -2051,90 +1502,26 @@ class LibraryView:
 
                 self.app.safe_update(finalize_paginated)
 
-            elif self.view_mode == "partitions":
-                import numpy as np
-                from utils import track_graph as tg
-                db = self.app.db_manager
-                
-                saved_partitions = await db.get_saved_partitions()
-                self._has_partitions = bool(saved_partitions)
-                self._mood_feedback_map = await db.get_mood_feedback()
-                
-                if self._cached_moods is None or self._cached_islets is None:
-                    all_tracks = await db.get_all_tracks()
-                    all_paths_to_track = {t["path"]: t for t in all_tracks}
-
-                    cached_moods = {mood: [] for mood in tg.MOODS.keys()}
-                    cached_unanalysed = []
-
-                    if saved_partitions:
-                        for t in all_tracks:
-                            path = t["path"]
-                            if path in saved_partitions:
-                                mood = saved_partitions[path].get("mood")
-                                if mood in cached_moods:
-                                    cached_moods[mood].append(t)
-                            else:
-                                cached_unanalysed.append(t)
-                    else:
-                        cached_unanalysed = list(all_tracks)
-
-                    cached_islets = {}
-                    for islet_name in tg.list_islets():
-                        members = await tg.tracks_in_islet(db, islet_name, min_count=0)
-                        members = [m for m in members if m.get("path") in all_paths_to_track]
-                        cached_islets[islet_name] = members
-
-                    if self._load_token != token:
-                        return
-
-                    self._cached_moods = cached_moods
-                    self._cached_unanalysed = cached_unanalysed
-                    self._cached_islets = cached_islets
-
-                if self.search_query:
-                    sq = self.search_query.lower()
-                    def matches_query(t):
-                        return (
-                            sq in (t.get("title") or "").lower() or
-                            sq in (t.get("artist") or "").lower() or
-                            sq in (t.get("album") or "").lower() or
-                            sq in (t.get("path") or "").lower()
-                        )
-                else:
-                    def matches_query(t):
-                        return True
-
+            elif self.view_mode == "network":
                 first_chunk = []
-                total_searched_count = 0
-                
-                if not saved_partitions:
+
+                # Fast existence check — no blob deserialization
+                has_pca = await self.app.db_manager.has_pca_coords()
+
+                if not has_pca:
                     setup_card = ft.Container(
                         content=ft.Column(
                             [
                                 ft.Container(
-                                    content=ft.Icon(ft.Icons.DIVERSITY_3_ROUNDED, color=LIB_PARTITION_COLOR, size=40),
-                                    bgcolor=apply_opacity(0.1, LIB_PARTITION_COLOR),
+                                    content=ft.Icon(ft.Icons.HUB_ROUNDED, color=CYAN, size=40),
+                                    bgcolor=apply_opacity(0.1, CYAN),
                                     border_radius=20,
                                     padding=16,
                                 ),
-                                ft.Text("Sonic Library Moods", color=TEXT, size=18, weight=ft.FontWeight.W_700, text_align=ft.TextAlign.CENTER),
+                                ft.Text("Acoustic Network Graph", color=TEXT, size=18, weight=ft.FontWeight.W_700, text_align=ft.TextAlign.CENTER),
                                 ft.Text(
-                                    "Analyze your library's DSP features to segment your music "
-                                    "collection into cohesive Default and Custom moods.",
+                                    "No PCA coordinates found. Please analyze your library first to construct the network.",
                                     color=DIM, size=13, text_align=ft.TextAlign.CENTER, max_lines=3,
-                                ),
-                                ft.Container(height=8),
-                                ft.Button(
-                                    "Generate Moods",
-                                    icon=ft.Icons.AUTO_AWESOME_ROUNDED,
-                                    color=BG,
-                                    bgcolor=LIB_PARTITION_COLOR,
-                                    on_click=lambda _: self.page.run_task(self.recalculate_partitions_worker),
-                                    style=ft.ButtonStyle(
-                                        shape=ft.RoundedRectangleBorder(radius=10),
-                                        padding=ft.Padding.symmetric(horizontal=24, vertical=12),
-                                    )
                                 ),
                             ],
                             alignment=ft.MainAxisAlignment.CENTER,
@@ -2149,218 +1536,71 @@ class LibraryView:
                         alignment=ft.Alignment(0, 0),
                     )
                     first_chunk.append(setup_card)
+                    self._flat_rows = []
                     stats_text = "0 TRACKS"
                 else:
-                    if self.partition_sub_mode == "moods":
-                        active_moods = []
-                        mood_icons = {
-                            "chill": ft.Icons.SPA_ROUNDED,
-                            "dark": ft.Icons.NIGHTLIGHT_ROUNDED,
-                            "upbeat": ft.Icons.CELEBRATION_ROUNDED,
-                            "rock": ft.Icons.FESTIVAL_ROUNDED,
-                            "beats": ft.Icons.SPEAKER_ROUNDED,
-                            "intense": ft.Icons.WHATSHOT_ROUNDED,
-                        }
-                        
-                        for mood in tg.MOODS.keys():
-                            tracks = (self._cached_moods or {}).get(mood, [])
-                            filtered_tracks = [t for t in tracks if matches_query(t)]
-                            active_moods.append((mood, filtered_tracks))
-                            total_searched_count += len(filtered_tracks)
-                                
-                        active_moods.sort(key=lambda x: len(x[1]), reverse=True)
-                        
-                        unanalysed_searched = [t for t in (self._cached_unanalysed or []) if matches_query(t)]
-                        if unanalysed_searched:
-                            total_searched_count += len(unanalysed_searched)
-                            
-                        active_sections = []
-                        for mood, tracks in active_moods:
-                            icon = mood_icons.get(mood.lower(), ft.Icons.EMOJI_EMOTIONS_ROUNDED)
-                            active_sections.append((mood.capitalize(), tracks, icon))
-                        if unanalysed_searched:
-                            active_sections.append(("Unanalysed Tracks", unanalysed_searched, ft.Icons.HELP_OUTLINE_ROUNDED))
-                            
-                        if active_sections:
-                            if self.selected_mood_index >= len(active_sections):
-                                self.selected_mood_index = 0
-                            elif self.selected_mood_index < 0:
-                                self.selected_mood_index = max(0, len(active_sections) - 1)
-                                
-                            sec_title, sec_tracks, sec_icon = active_sections[self.selected_mood_index]
-                            self._mood_label.value = sec_title
-                            
-                            self._flat_rows = [{"type": "partition_track", "data": t, "tracks": sec_tracks, "depth": 0} for t in sec_tracks][:35]
-                            self.total_pages = 1
-                            self.current_page = 0
-                            self._mood_pagination_bar.visible = False
-                            
-                            if hasattr(self, "_mood_wheel_list") and self._mood_wheel_list is not None and len(self._mood_wheel_list.controls) == len(active_sections) + 1:
-                                for idx, (title, tracks, icon) in enumerate(active_sections):
-                                    is_selected = (idx == self.selected_mood_index)
-                                    accent = LIB_PARTITION_COLOR if is_selected else DIM
-                                    
-                                    chip = self._mood_wheel_list.controls[idx + 1]
-                                    container = chip.content
-                                    column = container.content
-                                    
-                                    column.controls[0].name = icon
-                                    column.controls[0].color = accent
-                                    
-                                    short_title = title.split()[0]
-                                    column.controls[1].value = short_title
-                                    column.controls[1].color = accent
-                                    
-                                    container.bgcolor = apply_opacity(0.12, LIB_PARTITION_COLOR) if is_selected else "transparent"
-                                    container.border = ft.Border.all(1.5, LIB_PARTITION_COLOR if is_selected else apply_opacity(0.15, TEXT))
-                                    chip.on_tap = lambda _e, index=idx: self._select_mood_index(index)
-                            else:
-                                wheel_controls = []
-                                
-                                eq_btn = ft.GestureDetector(
-                                    content=ft.Container(
-                                        content=ft.Column(
-                                            [
-                                                ft.Icon(ft.Icons.TUNE_ROUNDED, color=CYAN, size=18),
-                                                ft.Text("TUNE", size=8.5, weight=ft.FontWeight.W_700, color=CYAN, text_align=ft.TextAlign.CENTER, no_wrap=True),
-                                            ],
-                                            alignment=ft.MainAxisAlignment.CENTER,
-                                            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                                            spacing=2,
-                                        ),
-                                        width=58, height=58, border_radius=29,
-                                        bgcolor="transparent", border=ft.Border.all(1.5, apply_opacity(0.4, CYAN)),
-                                        padding=4, animate=ft.Animation(150, ft.AnimationCurve.EASE_OUT),
-                                    ),
-                                    on_tap=lambda _e: self.page.run_task(self._open_mood_eq_dialog),
-                                )
-                                wheel_controls.append(eq_btn)
-                                
-                                for idx, (title, tracks, icon) in enumerate(active_sections):
-                                    is_selected = (idx == self.selected_mood_index)
-                                    accent = LIB_PARTITION_COLOR if is_selected else DIM
-                                    short_title = title.split()[0]
-                                    
-                                    chip = ft.GestureDetector(
-                                        content=ft.Container(
-                                            content=ft.Column(
-                                                [
-                                                    ft.Icon(icon, color=accent, size=18),
-                                                    ft.Text(short_title, size=8.5, weight=ft.FontWeight.W_700, color=accent, text_align=ft.TextAlign.CENTER, no_wrap=True),
-                                                ],
-                                                alignment=ft.MainAxisAlignment.CENTER,
-                                                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                                                spacing=2,
-                                            ),
-                                            width=58, height=58, border_radius=29,
-                                            bgcolor=apply_opacity(0.12, LIB_PARTITION_COLOR) if is_selected else "transparent",
-                                            border=ft.Border.all(1.5, LIB_PARTITION_COLOR if is_selected else apply_opacity(0.15, TEXT)),
-                                            padding=4, animate=ft.Animation(150, ft.AnimationCurve.EASE_OUT),
-                                        ),
-                                        on_tap=lambda _e, index=idx: self._select_mood_index(index),
-                                    )
-                                    wheel_controls.append(chip)
-                                    
-                                if not hasattr(self, "_mood_wheel_list") or self._mood_wheel_list is None:
-                                    self._mood_wheel_list = ft.ListView(
-                                        spacing=12, width=68,
-                                        padding=ft.Padding.only(left=2, right=2, top=6, bottom=20),
-                                    )
-                                self._mood_wheel_list.controls = wheel_controls
-                            
-                            if self._flat_rows:
-                                for item in self._flat_rows:
-                                    first_chunk.append(self._build_partition_track_row(item["data"], item["tracks"], depth=0))
-                            else:
-                                first_chunk.append(
-                                    ft.Container(
-                                        content=ft.Column(
-                                            [
-                                                ft.Icon(ft.Icons.MUSIC_NOTE_ROUNDED, color=apply_opacity(0.3, LIB_PARTITION_COLOR), size=32),
-                                                ft.Text(f"No tracks assigned to {sec_title}", color=DIM, size=13, weight=ft.FontWeight.W_600),
-                                                ft.Text("Analyze more tracks or adjust liked feedback.", color=apply_opacity(0.5, TEXT), size=11),
-                                            ],
-                                            alignment=ft.MainAxisAlignment.CENTER,
-                                            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                                            spacing=6,
-                                        ),
-                                        padding=32, alignment=ft.Alignment(0, 0), expand=True,
-                                    )
-                                )
-                        else:
-                            self._flat_rows = []
-                            self.total_pages = 1
-                            self._mood_pagination_bar.visible = False
-                            
+                    neighbors_list = []
+                    walk_paths = []
+
+                    # Determine seed path and fetch graph data FIRST,
+                    # then only request PCA coords for the relevant paths.
+                    if self.selected_network_index == 0:  # Local
+                        current_path = self._network_seed_path or audio_engine.current_path or ""
+                        if not current_path:
+                            # Grab any single path that has PCA coords
+                            conn = await self.app.db_manager.get_connection()
+                            async with conn.execute(
+                                "SELECT track_path FROM play_counts WHERE pca_coords IS NOT NULL LIMIT 1"
+                            ) as cur:
+                                row = await cur.fetchone()
+                                current_path = row[0] if row else ""
+
+                        if current_path:
+                            from utils import track_graph as tg
+                            # Denser local neighbourhood now that the canvas is
+                            # pan/zoom-able and uncluttered (neighbour labels off).
+                            neighbors_list = await tg.neighbors(self.app.db_manager, current_path, k=24)
+
+                        # Collect only the paths we need PCA coords for
+                        needed_paths = [current_path] if current_path else []
+                        needed_paths.extend(n["path"] for n in neighbors_list)
+                        pca_rows = await self.app.db_manager.get_tracks_pca_coords_for_paths(needed_paths)
+
+                    elif self.selected_network_index == 1:  # Walk
+                        current_path = audio_engine.current_path or ""
+                        if not current_path:
+                            conn = await self.app.db_manager.get_connection()
+                            async with conn.execute(
+                                "SELECT track_path FROM play_counts WHERE pca_coords IS NOT NULL LIMIT 1"
+                            ) as cur:
+                                row = await cur.fetchone()
+                                current_path = row[0] if row else ""
+
+                        if current_path:
+                            from utils import track_graph as tg
+                            walk_paths = await tg.walk(self.app.db_manager, current_path, length=10)
+
+                        needed_paths = [current_path] if current_path else []
+                        needed_paths.extend(walk_paths)
+                        pca_rows = await self.app.db_manager.get_tracks_pca_coords_for_paths(needed_paths)
+
                     else:
-                        self._mood_pagination_bar.visible = False
-                        named_islets = []
-                        for name, member_tracks in (self._cached_islets or {}).items():
-                            filtered = [t for t in member_tracks if matches_query(t)]
-                            if filtered or (not self.search_query and not member_tracks):
-                                named_islets.append((name, filtered))
-                                total_searched_count += len(filtered)
+                        current_path = audio_engine.current_path or ""
+                        pca_rows = []
 
-                        named_islets.sort(key=lambda x: len(x[1]), reverse=True)
+                    stats_text = f"{len(pca_rows)} TRACKS"
 
-                        for name, member_tracks in named_islets:
-                            if member_tracks:
-                                artists = [t.get("artist") or "Unknown" for t in member_tracks]
-                                dominant_artist = Counter(artists).most_common(1)[0][0]
-                                subtitle = f"{len(member_tracks)} tracks · Featuring {dominant_artist}"
-                            else:
-                                subtitle = "0 tracks · threshold too tight — edit to loosen"
-                            
-                            rendered_tracks = member_tracks[:35]
-                            content_controls = [
-                                self._build_partition_track_row(t, member_tracks, depth=1, islet_name=name)
-                                for t in rendered_tracks
-                            ]
-                            if len(member_tracks) > 35:
-                                remaining = len(member_tracks) - 35
-                                content_controls.append(
-                                    ft.Container(
-                                        content=ft.Text(f"+ {remaining} more tracks in this custom islet", size=11, color=DIM, italic=True),
-                                        padding=ft.Padding.only(left=24, top=6, bottom=6),
-                                    )
-                                )
-                                
-                            edit_btn = ft.IconButton(
-                                icon=ft.Icons.EDIT_OUTLINED, icon_color=DIM, icon_size=18, tooltip="Edit islet",
-                                on_click=lambda _e, n=name: self._open_edit_islet_dialog(n),
-                            )
-                            del_btn = ft.IconButton(
-                                icon=ft.Icons.DELETE_OUTLINE, icon_color=DIM, icon_size=18, tooltip="Delete islet",
-                                on_click=lambda _e, n=name: self._confirm_delete_islet(n),
-                            )
-                            node_id = f"islet_{name.lower().strip()}"
-                            initially_open = node_id in self.expanded_nodes
-                            
-                            def make_toggle_cb(nid):
-                                return lambda open_state: (
-                                    self.expanded_nodes.add(nid) if open_state else self.expanded_nodes.discard(nid)
-                                )
-
-                            accordion = AccordionCard(
-                                icon=ft.Icons.DIVERSITY_3_ROUNDED,
-                                title=name.title(),
-                                subtitle=subtitle,
-                                content_controls=content_controls,
-                                header_actions=[edit_btn, del_btn],
-                                initially_open=initially_open,
-                                on_toggle=make_toggle_cb(node_id),
-                            )
-                            first_chunk.append(accordion)
-
-                        if not (self._cached_islets or {}):
-                            first_chunk.append(self._build_islet_empty_state())
-                            
-                    stats_text = f"{total_searched_count} TRACKS"
+                    interactive_canvas = self._build_interactive_network_canvas(
+                        pca_rows, self.selected_network_index,
+                        current_path, neighbors_list, walk_paths,
+                    )
+                    first_chunk.append(interactive_canvas)
+                    self._flat_rows = []
                 
                 if self._load_token != token:
                     return
                     
-                def finalize_partitions():
+                def finalize_network():
                     self._stats_label.text = stats_text
                     self._library_list.controls.extend(first_chunk)
                     self._search_spinner.visible = False
@@ -2368,53 +1608,24 @@ class LibraryView:
                     is_empty = not first_chunk
                     if is_empty:
                         self._empty_label.visible = True
-                        self._empty_label.content.controls[0].name = ft.Icons.LIBRARY_MUSIC_OUTLINED
-                        self._empty_label.content.controls[0].color = apply_opacity(0.3, LIB_PARTITION_COLOR)
-                        self._empty_label.content.controls[1].value = "No partition results found."
-                        self._empty_label.content.controls[2].value = "Try checking your filters or search query."
-                        # Hide action button and its spacing container
+                        self._empty_label.content.controls[0].name = ft.Icons.HUB_ROUNDED
+                        self._empty_label.content.controls[0].color = apply_opacity(0.3, CYAN)
+                        self._empty_label.content.controls[1].value = "No network coordinates found."
+                        self._empty_label.content.controls[2].value = "Make sure your tracks are analyzed."
                         self._empty_label.content.controls[3].visible = False
                         self._empty_label.content.controls[4].visible = False
                     
-                    if self.partition_sub_mode == "moods" and getattr(self, "_has_partitions", False) and not is_empty:
-                        is_row_already_set = (
-                            isinstance(self._animated_list_wrapper.content, ft.Row) and
-                            len(self._animated_list_wrapper.content.controls) == 2 and
-                            hasattr(self, "_mood_wheel_list") and
-                            self._mood_wheel_list is not None and
-                            self._animated_list_wrapper.content.controls[0].content == self._mood_wheel_list
-                        )
-                        if not is_row_already_set:
-                            self._animated_list_wrapper.content = ft.Row(
-                                [
-                                    ft.Container(
-                                        content=self._mood_wheel_list,
-                                        border=ft.Border(right=ft.BorderSide(1, apply_opacity(0.1, TEXT))),
-                                        padding=ft.Padding.only(right=6),
-                                    ),
-                                    self._library_list
-                                ],
-                                spacing=6, expand=True,
-                            )
-                            self._animated_list_wrapper.update()
-                        else:
-                            self._mood_wheel_list.update()
-                            self._library_list.update()
-                    else:
-                        old_content = self._animated_list_wrapper.content
-                        self._animated_list_wrapper.content = self._library_list
-                        if old_content != self._library_list:
-                            self._animated_list_wrapper.update()
-                        else:
-                            self._library_list.update()
-                    
-                    self._stats_label.update()
-                    self._search_spinner.update()
-                    if self._empty_label.visible:
-                        self._empty_label.update()
+                    self._animated_list_wrapper.content = self._library_list
                     self._update_pagination_ui()
-                    
-                finalize_partitions()
+                    # NB: no per-control .update() / page.update() here — dispatch
+                    # via safe_update so a single coalesced page.update() flushes
+                    # the canvas to the client. Calling finalize directly (the old
+                    # behaviour) left the freshly-built canvas unpainted until the
+                    # next unrelated safe_update fired, which read as a ~30s "draw"
+                    # delay even though the Python build is ~3 ms.
+
+                self.app.safe_update(finalize_network)
+
 
             else:
                 self.total_pages = 1
@@ -3071,46 +2282,17 @@ class LibraryView:
         self._path_to_controls.setdefault(path, []).append(res)
         return res
 
-    def _build_partition_track_row(self, t: dict, partition_tracks: list[dict], depth: int = 0, islet_name: str = None) -> ft.Control:
+    def _build_partition_track_row(self, t: dict, partition_tracks: list[dict], depth: int = 0) -> ft.Control:
         res = self._track_row(t, depth=depth)
         path = t.get("path", "")
         tile = res.content.content
-        title = t.get("title") or os.path.basename(path)
 
-        if islet_name:
-            exclude_btn = ft.IconButton(
-                icon=ft.Icons.REMOVE_CIRCLE_OUTLINE,
-                icon_size=18,
-                icon_color="#FF4444",
-                tooltip="Exclude track from this custom mood",
-                on_click=lambda e, p=path, n=islet_name, t=title: self.page.run_task(self._exclude_track_from_islet, n, p, t)
-            )
-            tile.trailing = ft.Row([exclude_btn], tight=True, spacing=0)
-        
         def play_partition_track(_e):
             self._tracks_cache = partition_tracks
-            self._tracks_cache_key = ("partitions", self.search_query, self.sort_mode)
+            self._tracks_cache_key = ("network", self.search_query, self.sort_mode)
             self.page.run_task(self.app.play_track, path, ("library", None))
-            
+
         tile.on_click = play_partition_track
-
-        from utils import track_graph as tg
-        mood = tg.mood_canonical(self._mood_label.value) if self.partition_sub_mode == "moods" and hasattr(self, "_mood_label") and self._mood_label else None
-
-        if mood:
-            artist = t.get("artist") or "Unknown"
-            tnum = t.get("track_num")
-            is_current = (path == audio_engine.current_path and bool(path))
-
-            tile.subtitle = ft.Text(
-                f"Track {tnum}  ·  {artist}" if tnum else artist,
-                color=CYAN if is_current else DIM,
-                size=11,
-                max_lines=1,
-                overflow=ft.TextOverflow.ELLIPSIS,
-            )
-            tile.trailing = None
-
         return res
 
     def _edit_btn(self, edit_type: str, meta: dict, color: str = DIM) -> ft.Control:
@@ -3362,8 +2544,6 @@ class LibraryView:
         self.app.safe_update(_apply)
 
     def _on_scan_complete(self, count: int, _skipped: int):
-        self._cached_moods = None
-        self._cached_islets = None
         self._cached_unanalysed = None
         self._scan_update_count = 0
         self._is_scanning = False
