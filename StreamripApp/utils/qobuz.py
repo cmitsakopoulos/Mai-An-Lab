@@ -465,7 +465,10 @@ class QobuzClient(Client):
         -------
             Generator that yields (status code, response) tuples
         """
+        app_id = getattr(self, "app_id", None) or self.config.session.qobuz.app_id
         params.update({"limit": limit, "offset": offset})
+        if app_id:
+            params.update({"app_id": str(app_id)})
         status, page = await self._api_request(epoint, params, progress_callback=progress_callback)
         assert status == 200, status
         logger.debug("paginate: initial request made with status %d", status)

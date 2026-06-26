@@ -239,7 +239,7 @@ class StreamripSearcher:
                             items_out.append(item)
                 return items_out
             except Exception as exc:
-                logger.warning("Qobuz search %s: %s", m_type, exc)
+                logger.warning("Qobuz search %s: %s", m_type, exc, exc_info=True)
                 return []
 
         results_per_type = []

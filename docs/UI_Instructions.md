@@ -18,6 +18,10 @@ The Library supports five views, toggled via settings:
 - **Artists**: Lists artists; expanding reveals albums.
 - **Albums**: Lists albums; expanding reveals tracks.
 - **Tracks**: A flat, paginated list of all indexed tracks.
+- **Network**: An interactive, 2D force-directed layout representation of the acoustic similarity graph. It has two modes:
+  * **Local**: Displays the seed/playing track and its immediate 1-hop nearest neighbors, colored by genre. Pinned nodes allow local navigation.
+  * **Walk**: Visualizes the actual path and nodes traversed during similarity walks.
+  * Double-clicking a node plays that track, while mouse wheels or pinch/swipe gestures pan and zoom the visualization. Requires having analyzed the library first to construct the PCA space.
 
 ### 1.3 Searching & Filtering
 - **Real-Time Filter**: The top search bar filters the current view instantly, debounced by **300ms** to ensure responsiveness. Tap the 'X' button to clear.
@@ -36,12 +40,15 @@ Context-aware sort options:
 
 ---
 
-## 2. Playback Taste Modeling & Play Similar
+## 2. Play Similar Recommendations & Graphs
 
 Controls that guide queue generation and recommendation behavior.
 
+> [!NOTE]
+> The legacy mood-based logic and the regression-based playback taste modeling have been completely removed from the engine due to being extremely difficult to optimize efficiently on the mobile client. Playback similarity is now guided purely by the $k$-NN acoustic similarity network.
+
 ### 2.2 Play Similar & Continuous Playback Walks
-Pure acoustic walks over the $k$-NN graph, decoupled from the taste model regressor for strict sonic consistency.
+Pure acoustic walks over the $k$-NN graph for strict sonic consistency.
 - **Centralized Manager**: Tapping *Play Similar* instantly toggles the mode, bypassing confirmations.
 - **Visual Indicators**: Album artwork displays a **vibrant Cyan border** (`#00FFFF`) in the Mini Player and Now Playing card.
 - **Shuffle Exclusivity**: Play Similar and Shuffle modes are mutually exclusive.
@@ -120,6 +127,9 @@ The settings screen features a categorized menu linking to sub-panels:
   - **Preset Filtering & UI Guarding**: Filter between `System Presets` (default profiles) and `Custom Presets` (user-saved configurations). Custom preset creation tools (naming text field and save button) and the list of custom preset cards are guarded and only visible when the custom mode is active.
   - **Keyboard-Editable Gains**: Slider values can be precisely adjusted using keyboard-editable decibel text fields, which automatically handle parsing (e.g. `+5.0 dB`), validate inputs, and clamp values to $[-15.0, 15.0]$ dB.
   - **Real-time Dynamism Monitor**: Displays the active decibel gain boost applied by the Dynamism feature dynamically (via a badge under the track title in Now Playing, and a status card in the Settings panel) when Dynamism is active.
+  - **Dynamism Availability Guards**: The Dynamism Enhancement switch in Settings is dynamically guarded to prevent enabling when acoustic features are unavailable:
+    - If the library is empty, the switch is disabled and dimmed (opacity `0.4`), and a warning is displayed: *"⚠ Library is empty — add tracks first."*
+    - If indexed tracks lack computed features, the switch is disabled and dimmed, displaying: *"⚠ {N} tracks lack DSP features — run Jarvis Analyser first."*
   - **Spectral Contrast Normalization:**
     $$\text{norm\_contrast} = \max\left(0.0, \min\left(1.0, \frac{\text{spectral\_contrast} - 0.2}{0.2}\right)\right)$$
   - **Dynamism Score:**

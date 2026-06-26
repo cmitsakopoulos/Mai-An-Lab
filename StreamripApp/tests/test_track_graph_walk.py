@@ -32,11 +32,11 @@ def _blob(vec: np.ndarray) -> bytes:
 
 
 class FakeDB:
-    """Minimal stand-in for DatabaseManager used by tg.walk + tracks_by_mood.
+    """Minimal stand-in for DatabaseManager used by tg.walk.
 
     Stores edges as {(src, kind): [{path, weight, edge_kind, title, artist,
-    album}]} and timbres as {path: bytes}. Only the methods the walker /
-    mood scorer call are implemented."""
+    album}]} and timbres as {path: bytes}. Only the methods the walker
+    calls are implemented."""
 
     def __init__(self):
         self.edges: dict = {}
