@@ -362,8 +362,6 @@ Jarvis is a zero-latency vocal command center that operates entirely on-device, 
 
 7. **Real-Time Dynamic Help System**:
     - Queries the database and filesystem on-the-fly when the user requests `help` or asks `"what can you do?"`.
-    - Automatically builds alphabetical lists of all canonical built-in moods (`track_graph.MOODS`) and any user-saved custom moods (`custom_moods.json`).
-    - If no custom moods are found, it gracefully renders an interactive walkthrough encouraging the user to save one via voice command.
 
 ### 5.2 Comprehensive Skillset & Commands
 
@@ -374,10 +372,8 @@ Jarvis supports an exhaustive range of hands-free vocal commands and functions:
 | **Play Song / Artist** | Immediately plays a matched track, artist catalog, or album from your library. | *"play Stairway to Heaven"*, *"play Radiohead"*, *"start playing Homework"* |
 | **Play Next** | Inserts the matched track, artist, or album directly after the currently playing song in the queue. | *"play Stairway next"*, *"put Radiohead next"* |
 | **Add to Queue** | Appends the matched track, artist, or album to the end of the global playback queue. | *"add Stairway to the queue"*, *"put Homework in the queue"*, *"enqueue Daft Punk"* |
-| **Acoustic Moods** | Triggers library-relative percentile-Euclidean scoring and high-dimensional similarity matching against the chosen mood profile. | *"play something chill"*, *"I want intense music"*, *"play some upbeat tunes"* |
 | **Acoustic Similarity Walk** | Traverses acoustic and metadata similarity edges from the current track to sequence a smooth related arc. | *"play something similar to this"*, *"more like this song"*, *"play tracks similar to Daft Punk"* |
 | **Artist Similarity Walk** | Traverses relationship links to play more tracks from the currently playing artist. | *"play more by this artist"*, *"more songs from them"* |
-| **Create Custom Mood** | Saves the currently playing track as a named custom mood. | *"save this as Chillout"*, *"name this mood Night Vibes"*, *"create a custom mood called Focus"* |
 | **Remote Download** | Invokes the background Streamrip thread to search Qobuz, download, and auto-index the target track or album. | *"download Stairway to Heaven"*, *"get Daft Punk Homework"*, *"fetch and save track X"* |
 | **Surprise Me (Random)** | Selects a random track from the local library, shuffles the playback pool, and begins playback. | *"surprise me"*, *"play something random"*, *"shuffle play"* |
 | **Playback Control** | Standard controls to manipulate active audio player states. | *"pause"*, *"resume"*, *"stop"*, *"skip"*, *"previous track"* |
@@ -385,7 +381,7 @@ Jarvis supports an exhaustive range of hands-free vocal commands and functions:
 | **Volume Control** | Adjusts or silences system audio player levels. | *"mute"*, *"unmute"*, *"be quiet"*, *"restore volume"* |
 | **Status Inquiry** | Prompts Jarvis to query player metadata and vocalize active media info. | *"what's playing?"*, *"what is this song?"*, *"now playing"* |
 | **DSP Library Sweep** | Requests a full filesystem and feature extraction sweep for missing acoustic metrics or link matrices. | *"rescan the library"*, *"reanalyse my music"*, *"reindex features"* |
-| **Help Commands** | Queries Jarvis's on-device documentation to dynamically list exact voice skills, canonical moods, and user-saved custom moods. | *"help"*, *"what can you do?"*, *"commands"* |
+| **Help Commands** | Queries Jarvis's on-device documentation to dynamically list exact voice skills. | *"help"*, *"what can you do?"*, *"commands"* |
 
 ### 5.3 Parallel Multi-Core Folder Scanner
 - **Concurrent Disk Crawl**: The library scanner walks large directories asynchronously. It dynamically scales to use multiple processing cores via `concurrent.futures`, preventing large directories from blocking the Flet main thread.

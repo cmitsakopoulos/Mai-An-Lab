@@ -57,7 +57,7 @@ audio file ──► MediaCodec (Android) ──► mono int16 PCM @ 22050 Hz (9
                           HYBRID k-NN ADJACENCY NETWORK  +  Louvain communities
                                                    │
                                                    ▼
-                Personalised-PageRank Walker  +  Library-Relative Mood Scorer
+                Personalised-PageRank Walker 
                   (restart · softmax τ · MMR ·    (scalar-percentile targets ·
                    multi-tier · persistent avoid)  EQ adjustment · Camelot)
                                                    │
@@ -91,7 +91,7 @@ Acoustic vectors are extracted by a pure-NumPy DSP analyzer (no Librosa, no SciP
 | `mfcc_delta` | 20 floats | How fast timbre changes frame-to-frame | (vector; captures evolution, not just stasis) |
 | `chroma` | 12 floats | Proportion of each pitch class (C, C#, D, …) | (vector; basis for the K-S key estimate) |
 
-The raw scalars get their own DB columns (cheap WHERE filters and direct mood-profile scoring); the 52-D timbre triple (`mfcc_mean` + `mfcc_delta` + `chroma`) is packed into one `float32` LE BLOB on `play_counts.timbre`. Total: **62 dimensions per track** (52-D timbre + 10 scalars in the build space; the 3 harmonic scalars are late-fused after PCA — see §2.A).
+The raw scalars get their own DB columns; the 52-D timbre triple (`mfcc_mean` + `mfcc_delta` + `chroma`) is packed into one `float32` LE BLOB on `play_counts.timbre`. Total: **62 dimensions per track** (52-D timbre + 10 scalars in the build space; the 3 harmonic scalars are late-fused after PCA — see §2.A).
 
 #### Component details
 
@@ -142,7 +142,7 @@ The engine loads every track with a current-version feature BLOB and assembles a
   2. A thin SVD reduces **only the continuous block** to the components with eigenvalue $> 1$ (Kaiser; floored at 3), giving $Z_{r,\text{cont}}$ (~18-D). $Z_{r,\text{cont}}$ is kept **un-normalised**: Euclidean distance here preserves magnitude — how far a track sits from the library's "average" — which is real perceptual signal.
   3. The raw z-scored harmonic coordinates are multiplied by `harmonic_weight = 1.5` and **concatenated** back onto $Z_{r,\text{cont}}$, producing the final unified coordinate space $Z_r$ (~21-D).
 
-  This guarantees that Euclidean distance in $Z_r$ matches perfect-fifth compatibility on the Camelot clock with 100% fidelity, while PCA still denoises the high-dimensional timbre and dynamics axes. The projection ($\mu_{\text{cont}}$, $\sigma_{\text{cont}}$, $\mu_{\text{harm}}$, $\sigma_{\text{harm}}$, surviving-feature list, $V_{\text{keep}}$, `harmonic_weight`) and every track's $Z_r$ coordinates are persisted in `pca_space` / `play_counts.pca_coords`; this single geometry drives the walk, clustering, islets and mood feature selection.
+  This guarantees that Euclidean distance in $Z_r$ matches perfect-fifth compatibility on the Camelot clock with 100% fidelity, while PCA still denoises the high-dimensional timbre and dynamics axes. The projection ($\mu_{\text{cont}}$, $\sigma_{\text{cont}}$, $\mu_{\text{harm}}$, $\sigma_{\text{harm}}$, surviving-feature list, $V_{\text{keep}}$, `harmonic_weight`) and every track's $Z_r$ coordinates are persisted in `pca_space` / `play_counts.pca_coords`; this single geometry drives the walk and clustering.
 
 * **Euclidean k-NN ($K=20$)**: each track's 20 nearest neighbours in $Z_r$ are found by squared-Euclidean distance, computed in 256-row blocks (`argpartition` is $O(N)$ per row; the K-slice is then ordered with a $O(K \log K)$ sort).
 
@@ -297,94 +297,6 @@ The reference implementation is in [track_graph.walk()](file:///Users/chrismitsa
 
 ---
 
-## 4. Automatic Preset Moods & Library-Relative Profiles
-
-Vocal commands like *"play something chill"* or *"play upbeat tracks"* resolve (via aliases) to one of the six built-in moods — **chill, dark, upbeat, rock, beats, intense** — and run a library-relative percentile scorer. `MOODS` holds the vocabulary and sequencer preferences; `MOOD_TARGETS` holds each mood's target profile in percentile space over the 8 raw scalar features. (`MOOD_PROFILES`/`MOOD_KEYWORDS` are derived views kept for the intent parser; do not edit them directly.)
-
-```python
-@dataclass(frozen=True)
-class MoodSpec:
-    canonical: str
-    aliases: tuple[str, ...] = ()
-    camelot_pref: str | None = None           # "major" / "minor" / None  (sequencer anchor)
-    bpm_smooth_weight: float = 1.0            # tempo-jump penalty multiplier
-
-# Target percentile per scalar feature (bpm, brightness, energy, rolloff,
-# beat_strength, spectral_flatness, spectral_contrast, key_mode):
-MOOD_TARGETS = {
-    "chill":   {"bpm": 0.25, "energy": 0.20, "beat_strength": 0.30, "brightness": 0.30, ...},
-    "intense": {"bpm": 0.85, "energy": 0.90, "beat_strength": 0.80, "brightness": 0.70, ...},
-    # dark · upbeat · rock · beats
-}
-```
-
-### 4.1 Percentile ranks; library-relative scoring math
-
-The naïve way to ask "find me energetic tracks" is to threshold on absolute energy. But "energetic" in an ambient library lives at a totally different absolute energy than "energetic" in a metal library. So the scorer doesn't use absolute values; it uses **percentile ranks**.
-
-For each scalar feature column, every track is ranked from slowest/quietest/darkest to fastest/loudest/brightest, and the rank is divided by $N-1$:
-
-$$p_{i,f} = \frac{\text{rank}(x_{i,f})}{N - 1} \in [0, 1]$$
-
-Track at rank 0 → percentile 0.0; track at rank $N-1$ → percentile 1.0. Implementation is the two-argsort trick: `np.argsort(np.argsort(col))` returns the inverse permutation, which *is* the rank of each element; no for-loop required.
-
-Each `MOOD_TARGETS` entry declares targets in this same percentile space:
-
-```python
-"chill":  {"bpm": 0.25, "energy": 0.20, "beat_strength": 0.30, "brightness": 0.30, ...}
-"intense":{"bpm": 0.85, "energy": 0.90, "beat_strength": 0.80, "brightness": 0.70, ...}
-```
-
-A chill profile literally says *"give me a track in the bottom quartile of BPM and energy of THIS library, and the bottom 30% of beat strength and brightness"*. Plug a metal library in and "chill" still picks its calmest; plug an ambient library in and it picks the calmest of *that*; exactly the right relativity.
-
-The **mood score** is the (negative) mean Euclidean distance from the track's percentile vector to the target, over the target features that survive the graph's covariance cleaving (§2.A) — one shared feature selection. A saved EQ adjustment (§4.2) overrides the target per feature; a 0/Any-Neutral band drops that feature from the masked distance:
-
-$$\text{score}_i = -\sqrt{\tfrac{1}{|F|}\sum_{f \in F} \big(p_{i,f} - t_f\big)^2}$$
-
-Higher (closer to 0) is better; the top-`limit` tracks are returned. The percentile-matrix cache key `(features_version, row_count, max_path)` is a cheap library-change proxy, so repeat queries pay only a dict lookup.
-
-### 4.2 User EQ adjustment
-
-`MOOD_TARGETS` is the out-of-box profile. The Mood EQ lets the listener nudge a mood per feature: each scalar gets a 1–4 band (1 = Very Low … 4 = Very High; 0 = Any/Neutral → the feature is ignored). A saved adjustment is stored in the `mood_profiles` table and, when present, **overrides** `MOOD_TARGETS` for that mood: band $q$ maps to the band-centre percentile $(q-0.5)/4$, and a 0 band drops the feature from the masked distance. Un-tuned moods score purely on `MOOD_TARGETS`. Opening the EQ on an un-tuned mood shows its `MOOD_TARGETS` defaults rendered as 1–4 bands, so the user starts from the optimised profile and nudges.
-
-### 4.3 Pins and dislikes (many-to-many)
-
-A mood subset is **many-to-many**: a track can rank into several moods, and two explicit user actions sit on top of the scalar score:
-
-* **Pin** (`assign_track_to_mood`): the track is added to the mood and floated to the top of its ranking regardless of profile. A track may be pinned to several moods at once — `track_partitions` has a composite `(track_path, mood)` key.
-* **Dislike** (`mood_feedback < 0`): the track is excluded from that mood's subset entirely.
-
-`adjust_mood_profile(mood, track, ±1)` is the single entry point (pin + clear-exclusion on +1, unpin + record-exclusion on −1). With no pins or dislikes a mood is purely its `MOOD_TARGETS`/EQ ranking; the reset hook clears all EQ adjustments and pins/dislikes, restoring the out-of-box state.
-
-### 4.4 The Playback-History Feedback Loop
-
-The SQLite table `playback_history(track_path, played_at, event, seed_path)` records every track the assistant queues, with `event ∈ {played, skipped_early, completed}`. It drives the walker's **persistent avoidance set** (§3.5): unioned with the in-memory recent list over a 7-day window, so a track heard yesterday isn't re-recommended today, even across restarts. `seed_path` records the seed when a track was reached via *play similar*. The table degrades gracefully when empty — `recent_played_paths()` returns an empty set and the walker behaves as the no-history baseline.
-
-* **Why moods are library-relative**: percentile ranks are computed against the active library distribution, so "fast" or "intense" always means relative to *this* collection — there is no global threshold to maintain.
-
-### 4.5 Custom Moods (Islets)
-
-A custom mood (islet) is a neighbourhood in the unified $Z_r$ graph space (§2.A) around a single user-chosen **exemplar** track. Each islet lives in `custom_moods.json` (exemplar path, threshold, blacklist).
-
-The exemplar is projected into $Z_r$ and every track is scored by a self-tuning Gaussian affinity to it:
-
-$$a_i = \exp\!\big(-\,d\big(Z_r^{(i)},\, Z_r^{(\text{exemplar})}\big)^2 / \sigma^2\big) \in (0, 1]$$
-
-where $\sigma$ is the exemplar's distance to its 7th-nearest neighbour. A track is a member iff $a_i \ge \theta$, ranked by affinity descending.
-
-* **Threshold ($\theta$)**: because $\sigma$ is the 7th-NN distance, $a \approx e^{-1} \approx 0.37$ at that neighbour for *every* exemplar, so $\theta$ behaves as a density-independent rank cutoff. Default `ISLET_THRESHOLD = 0.25` targets a ~10–15-track islet; lower ⇒ wider.
-* **`ISLET_MIN = 3`**: if fewer than three tracks pass, the islet returns empty — a non-generalising exemplar yields no playable queue.
-* **`ISLET_MAX = 50`**: membership is capped at the 50 highest-affinity tracks.
-* **Blacklist**: per-islet excluded paths never appear, even as $\theta$ loosens.
-
-Because islets use the same $Z_r$ geometry as the walk and the Louvain communities, "play similar" from a track and an islet seeded on it return consistent neighbourhoods.
-
----
-
-## 5. Harmonic-Aware Sequencing (the Camelot wheel)
-
-Mood scoring decides *what* tracks go into a playlist. **Sequencing** decides *which order they play in*. Two tracks that score equally well on a mood can still sit next to each other terribly; a 60 BPM piano piece followed by a 140 BPM techno track in a clashing key is a jarring transition even if both individually fit "happy". The sequencer layers two music-theory penalties on top of the raw timbre distance: tempo continuity and harmonic compatibility.
-
 ### 5.1 The Camelot wheel
 
 The **Camelot wheel** is the DJ industry's de-facto re-numbering of the 24 keys (12 major + 12 minor) so that musically compatible keys sit at adjacent positions on a clock. Two concentric rings:
@@ -419,34 +331,6 @@ The normalised penalty divides through by the max:
 
 $$\text{camelot\_penalty}(a, b) = \frac{\text{camelot\_distance}(a, b)}{6} \in [0, 1]$$
 
-### 5.3 The mood-sequencer transition cost
-
-For mood playlists, `auto_playlist._greedy_sequence` accepts an optional `transition_cost(a, b)` callable that's *added* to the raw timbre distance. The mood path supplies:
-
-$$\text{cost}(a \to b) = \underbrace{\|\mathbf{z}_a - \mathbf{z}_b\|_2}_{\text{timbre distance}} + \underbrace{\frac{|\text{bpm}_a - \text{bpm}_b|}{50} \cdot w_{\text{bpm}}}_{\text{BPM smoothness}} + \underbrace{\text{camelot\_penalty}(a, b)}_{\text{harmonic clash}}$$
-
-Each term lives on roughly the same scale (~[0, 1]) so none dominates:
-
-* **Timbre distance** (existing): Euclidean in the 57-D weighted feature space; keeps the playlist sonically coherent.
-* **BPM smoothness**: a 50 BPM jump scores 1.0 raw, multiplied by the mood's `bpm_smooth_weight` (1.5 for `chill`/`slow`/`ambient` because listeners notice tempo jumps more in calm music, 1.0 otherwise).
-* **Camelot penalty**: 0 for compatible moves (same key, ±1 hour, relative major/minor), up to 1 for a complete clash.
-
-The greedy step picks `next = argmin_b cost(current, b)`. A track that's a timbre-twin but 40 BPM away or in a clashing key now has to fight against the penalty terms; a slightly-less-similar but BPM-compatible and harmonically-adjacent track may win instead. The result is a smooth, harmonic, tempo-stable playlist without sacrificing the mood targeting.
-
-### 5.4 Anchor-track selection
-
-Specs with a `camelot_pref` ("major" / "minor" / `None`) also bias the **anchor track**; the first entry in the playlist; toward a track in the requested mode:
-
-```text
-seed_path = paths[0]                           # default: highest mood score
-if spec.camelot_pref:
-    for p in paths:
-        if matches_mode_preference(key_index(p), spec.camelot_pref):
-            seed_path = p; break               # first matching candidate wins
-```
-
-This means a `chill` playlist (camelot_pref="minor") opens on a minor-key track if any of the top mood candidates is in a minor key; setting the harmonic tone for the greedy walk that follows. If no candidate matches, we fall back to plain mood rank.
-
 ---
 
 ## 6. End-to-End Trace
@@ -467,20 +351,6 @@ Walking through a concrete request makes the moving parts visible. Suppose the u
 7. **Step 3; restart fires**. Roll 0.08 < $\alpha$ → teleport back to the seed. Score from the seed's neighbours again, but Marconi Union Track 1 and "Avril 14th" are in `visited` (filtered out) AND their embeddings still apply MMR pressure on whatever else surfaces.
 
 Repeat for 12 steps. The walk explores the seed's neighbourhood without drifting into unrelated genres (restart), without producing 12 Marconi Union tracks in a row (MMR), and without re-recommending anything the user heard yesterday (persistent avoid set).
-
-### 6.2 Later: the user says "play chill"
-
-1. **Resolve**: `mood_canonical("chill")` → `"chill"`. `MOOD_TARGETS["chill"]` gives the target percentiles (bpm 0.25, energy 0.20, beat_strength 0.30, brightness 0.30, …); `MOODS["chill"]` carries `camelot_pref = "minor"`, `bpm_smooth_weight = 1.5` for the sequencer.
-2. **Percentile cache hit** (no new tracks since last query) — instant.
-3. **Mood score** per track: negative mean Euclidean distance from each track's percentile vector to the chill target, over the covariance-surviving features. "Weightless" — one of the slowest, calmest tracks in the library — sits near percentile $0.05$ on BPM, $0.08$ on energy and $0.10$ on beat_strength: very close to the chill target → a strong (near-zero) score.
-4. **Pins / dislikes**: none here, so the ranking is purely the mood score. (A pinned track would jump to the top; a disliked one would be dropped; and a tuned EQ would replace the targets in step 3.)
-6. **Sequencer fires** with the top 20 candidates. `camelot_pref = "minor"` → the anchor is the highest-scoring minor-key track (likely "Weightless" itself if it's the top result and in D minor / 7A).
-7. **Greedy ordering** with the transition cost from §5.3:
-   - $w_\text{bpm} = 1.5$ (the chill spec).
-   - From "Weightless" (60 BPM, 7A), the next track scoring best on $\text{timbre} + 1.5 \cdot |\Delta\text{bpm}|/50 + \text{camelot\_penalty}$ might be another minor-key 65 BPM track (BPM penalty $\approx 1.5 \cdot 0.1 = 0.15$, harmonic penalty 0 if relative major / ±1 hour); a smooth transition.
-   - A 95 BPM track with very similar timbre would score $1.5 \cdot 35/50 = 1.05$ on the BPM penalty alone, enough to drop it behind a slower track with slightly worse timbre.
-
-The final playlist is short, calm, harmonically coherent, and personalised by past listening behaviour; without any single component doing more than a few dozen lines of arithmetic.
 
 ---
 
@@ -572,7 +442,7 @@ The unified coordinate space $Z_r$ (§2.A) is the engine's single projection. `b
 
 ### 8.1 Projecting a new track
 
-`project_to_zr(row, projection)` places any track absent from the last build — a new import, or an islet exemplar — into that same space. It replicates the Late Fusion split from §2.A: assemble the 52-D timbre + surviving scalars, split off the harmonic columns, z-score each part with its own persisted $\mu$/$\sigma$, apply the ×1.5 scalar boost to the continuous scalars, project the continuous part through $V_{\text{keep}}$, then concatenate the raw weighted harmonics: $Z_r = [z_{\text{cont}} \cdot V_{\text{keep}} \;|\; z_{\text{harm}} \times w_{\text{harm}}]$. A legacy fallback handles projections saved before the late-fusion change (no `harmonic_names` in `feature_spec`). This is what lets moods, islets and the walk all reason in one geometry without recomputing the SVD.
+`project_to_zr(row, projection)` places any track absent from the last build — a new import, or an islet exemplar — into that same space. It replicates the Late Fusion split from §2.A: assemble the 52-D timbre + surviving scalars, split off the harmonic columns, z-score each part with its own persisted $\mu$/$\sigma$, apply the ×1.5 scalar boost to the continuous scalars, project the continuous part through $V_{\text{keep}}$, then concatenate the raw weighted harmonics: $Z_r = [z_{\text{cont}} \cdot V_{\text{keep}} \;|\; z_{\text{harm}} \times w_{\text{harm}}]$. A legacy fallback handles projections saved before the late-fusion change (no `harmonic_names` in `feature_spec`).
 
 ### 8.2 On-Device Mathematical Truth Report
 

@@ -493,10 +493,8 @@ class TestQueueModes(unittest.TestCase):
         self.assertEqual(len(audio_engine.queue), 3)
         self.assertEqual(audio_engine.current_index, 0)
 
-        # Mock taste model and PCA projection space
+        # Mock PCA projection space
         import numpy as np
-        # Cold taste model mock
-        self.app.db_manager.get_taste_model.return_value = None
         self.app.db_manager.get_tracks_with_features.return_value = [
             {"path": "/music/song1.mp3", "title": "Song 1", "artist": "Artist A", "album": "Album 1"},
             {"path": "/music/song2.mp3", "title": "Song 2", "artist": "Artist B", "album": "Album 2"},
@@ -548,9 +546,8 @@ class TestQueueModes(unittest.TestCase):
         self.assertEqual(audio_engine.current_index, 0)
 
     def test_dislike_advance_ownership(self):
-        # Mock taste model and PCA projection space
+        # Mock PCA projection space
         import numpy as np
-        self.app.db_manager.get_taste_model.return_value = None
         self.app.db_manager.get_tracks_with_features.return_value = [
             {"path": "/music/song1.mp3", "title": "Song 1", "artist": "Artist A", "album": "Album 1"},
             {"path": "/music/song2.mp3", "title": "Song 2", "artist": "Artist B", "album": "Album 2"},

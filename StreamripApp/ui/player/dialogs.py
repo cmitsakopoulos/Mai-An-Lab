@@ -7,30 +7,7 @@ import flet as ft
 from ui.tokens import TEXT, DIM, BORDER, SURFACE, SURFACE2, CYAN, BG, LIB_PLAYLIST_COLOR
 
 
-def get_app_dir() -> str:
-    """Returns the primary writable directory for the app, prioritizing 'files'."""
-    for env_var in ("APP_FILES_PATH", "FILES_DIR", "INTERNAL_STORAGE", "FLET_APP_STORAGE_DATA", "HOME"):
-        val = os.getenv(env_var)
-        if val and os.path.isdir(val):
-            return val
-    import tempfile
-    return tempfile.gettempdir()
-
-
-def get_temp_artwork_dir() -> str:
-    """Returns the dedicated directory for temporary artwork, creating it and a .nomedia file if missing."""
-    dir_path = os.path.join(get_app_dir(), "temp")
-    try:
-        os.makedirs(dir_path, exist_ok=True)
-        # Create .nomedia file to exclude from Android's Media Store / Gallery
-        nomedia_file = os.path.join(dir_path, ".nomedia")
-        if not os.path.exists(nomedia_file):
-            with open(nomedia_file, "w") as f:
-                pass
-    except Exception:
-        # Fallback to get_app_dir if temp subdirectory creation fails
-        return get_app_dir()
-    return dir_path
+from utils.filepath_utils import get_temp_artwork_dir
 
 
 def get_asset_path(path: str) -> str:

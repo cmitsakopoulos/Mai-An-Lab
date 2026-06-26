@@ -74,11 +74,8 @@ class PendingConfirmation:
 
 @dataclass
 class PendingPlaylistCreation:
-    """Conversational state container to track progress during step-by-step
-    playlist generation."""
+    """Conversational state for the two-step empty playlist wizard."""
     name: Optional[str] = None
-    mood: Optional[str | bool] = None # None = unasked, False = empty playlist, str = mood name
-    limit: Optional[int] = None       # None = unasked, int = track count
 
 
 # ── Track dict shape used by the audio engine ────────────────────────────────
@@ -539,8 +536,8 @@ class AssistantRunner:
             "{time_greeting}, sir. Caches primed and indexed. Command me."
         ],
         "dsp_prompt": [
-            "Good day, sir. I notice **{missing}** of your **{total}** tracks are not DSP-analyzed. Without features, mood search and similar walks won't work. Analyze now? (yes/no)",
-            "Systems report **{missing}** of **{total}** tracks lack DSP features. This affects mood discovery. Shall I proceed with background analysis, sir?",
+            "Good day, sir. I notice **{missing}** of your **{total}** tracks are not DSP-analyzed. Without features, similarity walks won't work. Analyze now? (yes/no)",
+            "Systems report **{missing}** of **{total}** tracks lack DSP features. This affects similarity discovery. Shall I proceed with background analysis, sir?",
             "Sir, there are **{missing}** unindexed tracks in your database of **{total}**. I recommend running the DSP analyzer. Initiate scan now? (yes/no)",
             "Greetings, sir. Detected **{missing}** tracks requiring DSP profiling. Run analyzer to optimize graph? (yes/no)",
             "Acoustic graph scan complete, sir. **{missing}** of **{total}** tracks lack DSP parameters. Launch background analysis now? (yes/no)"
@@ -628,7 +625,6 @@ class AssistantRunner:
             ai.INTENT_QUEUE_NEXT,
             ai.INTENT_PLAY_SIMILAR,
             ai.INTENT_PLAY_MORE_BY,
-            ai.INTENT_PLAY_MOOD,
             ai.INTENT_PLAY_RANDOM,
             ai.INTENT_PLAYLIST_PLAY,
         }
@@ -786,131 +782,19 @@ class AssistantRunner:
             except Exception:
                 pass
 
-            flow.name = clean_name
-
-            # If mood is already known, skip step 2 and jump to count
-            if flow.mood is not None:
-                return AssistantResponse(
-                    spoken=f"How many {flow.mood} songs should we populate '{flow.name}' with, sir? (Default is 20)",
-                    displayed=f"How many **{flow.mood}** songs should we include? (Default: **20**)"
-                )
-            
-            # Prompt for mood selection
-            from utils import track_graph as tg
-            return AssistantResponse(
-                spoken="Should this be a smart playlist based on a mood, or a simple empty playlist, sir?",
-                displayed=(
-                    "Should this be a smart playlist based on a mood, or a simple empty playlist?\n\n"
-                    "**Smart Moods**: " + ", ".join(sorted(tg.MOODS.keys())) + " (or type **empty**)"
-                )
-            )
-
-        # Step 2: Get Mood
-        if flow.mood is None:
-            input_mood = raw.lower().strip()
-            if input_mood in ("empty", "blank", "none", "no mood", "simple", "empty playlist"):
-                flow.mood = False
-                try:
-                    await self.db.create_playlist(flow.name)
-                    self._playlist_flow = None
-                    return AssistantResponse(
-                        spoken=f"{self._say('affirmative')} I have created the empty playlist '{flow.name}' for you.",
-                        displayed=f"Created empty playlist: **{flow.name}**",
-                    )
-                except Exception as exc:
-                    self._playlist_flow = None
-                    return AssistantResponse(
-                        spoken=f"I couldn't create that playlist: {exc}",
-                        displayed=f"Failed to create playlist: {exc}",
-                        success=False
-                    )
-
-            from utils import track_graph as tg
-            matched_mood = None
-            for m in tg.MOOD_PROFILES.keys():
-                if input_mood == m.lower() or input_mood.startswith(m.lower()) or m.lower() in input_mood:
-                    matched_mood = m
-                    break
-            
-            if not matched_mood:
-                return AssistantResponse(
-                    spoken=f"I didn't recognize '{raw}' as a mood, sir. Should it be empty, or one of the known moods like chill, upbeat, or dark?",
-                    displayed=f"Unknown mood **{raw}**. Try a known mood (e.g. *chill*) or *empty*.",
-                )
-
-            flow.mood = matched_mood
-            return AssistantResponse(
-                spoken=f"Understood. How many {matched_mood} songs should we include in '{flow.name}', sir? (Default is 20)",
-                displayed=f"How many **{matched_mood}** songs should we include in **{flow.name}**? (Default: **20**)"
-            )
-
-        # Step 3: Get Limit
-        if flow.limit is None:
-            import re
-            digit_match = re.search(r"\b\d+\b", raw)
-            limit = 20
-            if digit_match:
-                limit = int(digit_match.group(0))
-            else:
-                word_to_num = {
-                    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
-                    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
-                    "fifteen": 15, "twenty": 20, "thirty": 30, "fifty": 50
-                }
-                for w, num in word_to_num.items():
-                    if w in raw.lower():
-                        limit = num
-                        break
-            
-            flow.limit = limit
-            mood = flow.mood
-            name = flow.name
-
-            from utils.auto_playlist import generate_mood_playlist
-            tracks = await generate_mood_playlist(self.db, mood, target_length=limit)
-            if not tracks:
-                # Still create the empty playlist as a fallback
-                try:
-                    await self.db.create_playlist(name)
-                except Exception:
-                    pass
-                self._playlist_flow = None
-                return AssistantResponse(
-                    spoken=(
-                        f"I haven't analysed enough of your library to pick by mood yet. "
-                        f"I've created the empty playlist '{name}' for you, sir."
-                    ),
-                    displayed=(
-                        f"Created empty playlist **{name}**. Could not populate "
-                        f"with **{mood}** tracks (run **rescan dsp** first)."
-                    ),
-                    success=False
-                )
-            
             try:
-                playlist_id = await self.db.create_playlist(name)
-                for t in tracks:
-                    await self.db.add_track_to_playlist(playlist_id, t["path"])
-                
+                await self.db.create_playlist(flow.name)
                 self._playlist_flow = None
-                first = tracks[0]
                 return AssistantResponse(
-                    spoken=(
-                        f"{self._say('affirmative')} I've built '{name}' with "
-                        f"{len(tracks)} {mood} tracks, opening with "
-                        f"{first.get('title') or 'the top match'}."
-                    ),
-                    displayed=(
-                        f"Created **{name}** with **{len(tracks)}** {mood} tracks "
-                        f"ranked over the library's DSP features."
-                    ),
+                    spoken=f"{self._say('affirmative')} I have created the playlist '{flow.name}' for you.",
+                    displayed=f"Created playlist: **{flow.name}**",
                 )
             except Exception as exc:
                 self._playlist_flow = None
                 return AssistantResponse(
-                    spoken=f"Failed to complete playlist creation, sir: {exc}",
-                    displayed=f"Error: {exc}",
-                    success=False
+                    spoken=f"I couldn't create that playlist, sir: {exc}",
+                    displayed=f"Failed to create playlist: {exc}",
+                    success=False,
                 )
 
     async def dispatch_text(self, text: str,
@@ -926,7 +810,7 @@ class AssistantRunner:
         """Register a path as recently enqueued by the assistant. Updates the
         in-memory cap and fires a fire-and-forget DB write so the long-term
         avoid set (used by the random walk across app restarts) and the
-        listen-feedback signal (used by mood re-ranking) accumulate state
+        long-term avoid set (used by the random walk) accumulate state
         even when the assistant doesn't see playback completion events."""
         if not path:
             return
@@ -1484,73 +1368,6 @@ class AssistantRunner:
             deferred_play=True,
         )
 
-    async def _handle_play_mood(self, intent: ai.Intent) -> AssistantResponse:
-        mood = (intent.query or "").lower().strip()
-        if not mood:
-            return AssistantResponse(
-                spoken="Which mood, sir?",
-                displayed="I need a mood — try 'play something chill' or 'play upbeat music'.",
-                success=False,
-            )
-
-        from utils import track_graph as tg
-        if mood not in tg.MOOD_PROFILES:
-            return AssistantResponse(
-                spoken=f"I don't have a profile for '{mood}', sir.",
-                displayed=(
-                    f"Unknown mood **{mood}**. Try one of: "
-                    f"{', '.join(sorted(tg.MOODS.keys()))}."
-                ),
-                success=False,
-            )
-
-        tracks = await tg.tracks_by_mood(self.db, mood, limit=12)
-        if not tracks:
-            return AssistantResponse(
-                spoken=(
-                    "I haven't analysed enough of your library to pick by mood yet. "
-                    "Let the indexer finish, then try again."
-                ),
-                displayed=(
-                    "Mood search needs DSP features. Wait for the analyser to "
-                    "finish (banner at the top of this sheet), then ask again."
-                ),
-                success=False,
-            )
-
-        engine_tracks = [_to_engine_track(t) for t in tracks]
-        verb = intent.extras.get("verb")
-        is_queue = verb and verb.lower().strip() in ("add", "queue", "enqueue", "put")
-
-        if is_queue and self.engine.queue:
-            for t in engine_tracks:
-                self.engine.queue_last(t)
-                self._remember(t["path"])
-            return AssistantResponse(
-                spoken=f"{self._say('affirmative')} Added {len(tracks)} {mood} tracks to the queue.",
-                displayed=f"Queued **{len(tracks)}** {mood} tracks based on DSP profile.",
-                extras={"mood": mood, "queued": len(tracks),
-                        "entity_intent": "play_mood"},
-            )
-        else:
-            self.engine.set_queue(engine_tracks, start_index=0)
-            for t in engine_tracks:
-                self._remember(t["path"])
-            first = tracks[0]
-            return AssistantResponse(
-                spoken=(
-                    f"{self._say('discovery')} Queued {len(tracks)} {mood} tracks. "
-                    f"Opening with {first.get('title')} by {first.get('artist')}."
-                ),
-                displayed=(
-                    f"Queued **{len(tracks)}** {mood} tracks based on DSP profile. "
-                    f"Starting with **{first.get('title')}** — {first.get('artist')}."
-                ),
-                extras={"mood": mood, "queued": len(tracks),
-                        "entity_intent": "play_mood"},
-                deferred_play=True,
-            )
-
     async def _handle_play_random(self, _intent: ai.Intent) -> AssistantResponse:
         tracks = await self.db.get_all_tracks()
         if not tracks:
@@ -1916,94 +1733,19 @@ class AssistantRunner:
         )
 
     async def _handle_help(self, _intent: ai.Intent) -> AssistantResponse:
-        from utils import track_graph as tg
-        canonical_moods = sorted(tg.MOODS.keys())
-        custom_islets = tg.list_islets()
-
         spoken_msg = (
-            "I can manage your playback, queue tracks, navigate by mood, create playlists, "
-            "or walk the acoustic similarity graph, sir. Just say 'play some chill music' "
+            "I can manage your playback, queue tracks, create playlists, "
+            "or walk the acoustic similarity graph, sir. Just say 'play more like this' "
             "or 'more by this artist' to begin."
         )
-
-        moods_str = ", ".join(canonical_moods)
-        if custom_islets:
-            islets_str = ", ".join(custom_islets)
-        else:
-            islets_str = "None registered yet. Save one by saying *save this as [name]* while a song plays."
-
         displayed_msg = (
             "### Jarvis System Capabilities\n\n"
             "*   **Playback**: `play [song/artist]`, `pause`, `resume`, `skip`, `prev`, `shuffle`\n"
-            f"*   **Acoustic Moods**: `play [mood]` (Available: {moods_str})\n"
-            f"*   **Custom Islets**: `play [islet]` (Available: {islets_str})\n"
             "*   **Similarity Graph**: `play similar`, `more like this`, `more by this artist`\n"
-            "*   **Playlists**: `create playlist [name]`, "
-            "`create [mood] playlist called [name]` (library-wide DSP-ranked, "
-            "e.g. *create a chill playlist called Late Night*), "
-            "`add this to [playlist]`\n"
+            "*   **Playlists**: `create playlist [name]`, `add this to [playlist]`\n"
             "*   **Sub-systems**: `rescan dsp`, `clear queue`, `download [song]`"
         )
         return AssistantResponse(spoken=spoken_msg, displayed=displayed_msg)
-
-    async def _handle_create_mood(self, intent: ai.Intent) -> AssistantResponse:
-        """Single-shot islet creation: the currently-playing track's timbre
-        becomes the centroid; membership is computed on demand by
-        `tracks_in_islet` with the configured cosine threshold."""
-        from utils import track_graph as tg
-        from utils.dsp import unpack_timbre
-
-        name = (intent.query or "").strip().strip("\"'").strip()
-        if not name:
-            return AssistantResponse(
-                spoken="What should we name the islet, sir?",
-                displayed="Please specify a name for the islet (e.g. *save this as Sunday morning*).",
-                success=False,
-            )
-        if name.lower() in tg.MOOD_PROFILES:
-            return AssistantResponse(
-                spoken=f"'{name}' is a built-in mood, sir. Pick a different name.",
-                displayed=f"**{name}** is a built-in mood. Choose a different name.",
-                success=False,
-            )
-
-        track_path = self.engine.current_path
-        if not track_path:
-            return AssistantResponse(
-                spoken="Nothing is playing, sir. Start the track that should seed this islet first.",
-                displayed="No current track. Play the exemplar track first, then say *save this as <name>*.",
-                success=False,
-            )
-
-        row = await self.db.get_track_full(track_path)
-        timbre = unpack_timbre(row.get("timbre")) if row else None
-        if timbre is None:
-            return AssistantResponse(
-                spoken="The current track has not been DSP-analysed yet, sir.",
-                displayed="Current track has no DSP features. Run a rescan first.",
-                success=False,
-            )
-
-        try:
-            tg.save_custom_mood(
-                name,
-                centroid=[float(x) for x in timbre],
-                exemplar_path=track_path,
-            )
-            ai.register_dynamic_mood_vocabulary()
-        except Exception as exc:
-            logger.exception("Failed to save islet %s", name)
-            return AssistantResponse(
-                spoken=f"Failed to save the islet, sir: {exc}",
-                displayed=f"Error saving islet: {exc}",
-                success=False,
-            )
-
-        title = (row.get("title") if row else None) or "this track"
-        return AssistantResponse(
-            spoken=f"Islet '{name}' saved, sir, seeded by {title}.",
-            displayed=f"Islet **{name}** saved — seeded by *{title}*.",
-        )
 
     async def _handle_playlist_create(self, intent: ai.Intent) -> AssistantResponse:
         name = (intent.query or "").strip()
@@ -2025,92 +1767,6 @@ class AssistantRunner:
                 displayed=f"Playlist **{name}** already exists.",
                 success=False,
             )
-
-    async def _handle_playlist_auto(self, intent: ai.Intent) -> AssistantResponse:
-        """Mood-driven playlist: create the playlist row, then populate it
-        with the top library-wide matches for the requested mood profile.
-        Uses the same DSP feature store the assistant's library sweep
-        writes into, so any track Jarvis has already analysed is fair
-        game without re-running DSP. Tracks without features are skipped
-        — the user is told to run a rescan if too few are available."""
-        from utils.auto_playlist import generate_mood_playlist
-        from utils import track_graph as tg
-
-        name = (intent.query or "").strip()
-        mood = (intent.extras.get("mood") or "").strip().lower()
-
-        if mood:
-            matched_mood = None
-            for m in tg.MOOD_PROFILES.keys():
-                if mood == m.lower():
-                    matched_mood = m
-                    break
-            mood = matched_mood
-
-        if not name or not mood or mood not in tg.MOOD_PROFILES:
-            self._playlist_flow = PendingPlaylistCreation(
-                name=name if name else None,
-                mood=mood if (mood and mood in tg.MOOD_PROFILES) else None
-            )
-            if not name:
-                return AssistantResponse(
-                    spoken="What should we name the playlist, sir?",
-                    displayed="Playlist name cannot be empty. Please specify a name:",
-                )
-            else:
-                return AssistantResponse(
-                    spoken="Should this be a smart playlist based on a mood, or a simple empty playlist, sir?",
-                    displayed=(
-                        "Should this be a smart playlist based on a mood, or a simple empty playlist?\n\n"
-                        "**Smart Moods**: " + ", ".join(sorted(tg.MOODS.keys())) + " (or type **empty**)"
-                    )
-                )
-
-        tracks = await generate_mood_playlist(self.db, mood, target_length=20)
-        if not tracks:
-            return AssistantResponse(
-                spoken=(
-                    "I don't have enough analysed tracks yet. Ask me to "
-                    "rescan the library first, sir."
-                ),
-                displayed=(
-                    "Mood-driven playlist needs DSP-analysed tracks. Ask me "
-                    "to **rescan** the library first."
-                ),
-                success=False,
-            )
-
-        try:
-            playlist_id = await self.db.create_playlist(name)
-        except Exception:
-            return AssistantResponse(
-                spoken=f"It seems a playlist called '{name}' already exists, sir.",
-                displayed=f"Playlist **{name}** already exists.",
-                success=False,
-            )
-
-        for t in tracks:
-            try:
-                await self.db.add_track_to_playlist(playlist_id, t["path"])
-            except Exception as ex:
-                logger.warning(
-                    "playlist_auto: add_track failed for %s: %s", t["path"], ex
-                )
-
-        first = tracks[0]
-        return AssistantResponse(
-            spoken=(
-                f"{self._say('affirmative')} I've built '{name}' with "
-                f"{len(tracks)} {mood} tracks, opening with "
-                f"{first.get('title') or 'the top match'}."
-            ),
-            displayed=(
-                f"Created **{name}** with **{len(tracks)}** {mood} tracks "
-                f"ranked over the library's DSP features. Opening with "
-                f"**{first.get('title') or first['path']}**."
-            ),
-            extras={"playlist_id": playlist_id, "queued": len(tracks), "mood": mood},
-        )
 
     async def _handle_playlist_add(self, intent: ai.Intent) -> AssistantResponse:
         playlist_name = intent.extras.get("playlist")
@@ -2316,7 +1972,6 @@ AssistantRunner._INTENT_DISPATCH = {
     ai.INTENT_QUEUE_NEXT:    AssistantRunner._handle_queue_next,
     ai.INTENT_PLAY_SIMILAR:  AssistantRunner._handle_play_similar,
     ai.INTENT_PLAY_MORE_BY:  AssistantRunner._handle_play_more_by,
-    ai.INTENT_PLAY_MOOD:     AssistantRunner._handle_play_mood,
     ai.INTENT_PLAY_RANDOM:    AssistantRunner._handle_play_random,
     ai.INTENT_DOWNLOAD:      AssistantRunner._handle_download,
     ai.INTENT_SKIP:          AssistantRunner._handle_skip,
@@ -2331,10 +1986,8 @@ AssistantRunner._INTENT_DISPATCH = {
     ai.INTENT_NOW_PLAYING:   AssistantRunner._handle_now_playing,
     ai.INTENT_RESCAN_DSP:    AssistantRunner._handle_rescan_dsp,
     ai.INTENT_PLAYLIST_CREATE: AssistantRunner._handle_playlist_create,
-    ai.INTENT_PLAYLIST_AUTO:   AssistantRunner._handle_playlist_auto,
     ai.INTENT_PLAYLIST_ADD:    AssistantRunner._handle_playlist_add,
     ai.INTENT_PLAYLIST_PLAY:   AssistantRunner._handle_playlist_play,
-    ai.INTENT_CREATE_MOOD:     AssistantRunner._handle_create_mood,
     ai.INTENT_GREET:           AssistantRunner._handle_greet,
     ai.INTENT_HELP:          AssistantRunner._handle_help,
     ai.INTENT_UNKNOWN:       AssistantRunner._handle_unknown,

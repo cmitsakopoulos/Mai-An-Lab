@@ -11,23 +11,16 @@ from ui.tokens import (
     SOURCE_COLORS, LIB_ARTIST_COLOR, LIB_ALBUM_COLOR, LIB_TRACK_COLOR, 
     apply_opacity
 )
-from ui.widgets import AnimatedEntry, SkeletonRow, src_color, strip_markup
+from ui.widgets import AnimatedEntry, SkeletonRow, src_color, strip_markup, build_page_ghost_top, build_page_ghost_bottom
 
 if sys.platform == "darwin":
     from utils.audio_engine_macos import audio_engine
 else:
     from utils.audio_engine import audio_engine
 
-logger = logging.getLogger(__name__)
+from utils.filepath_utils import get_app_dir
 
-def get_app_dir() -> str:
-    """Returns the primary writable directory for the app, prioritizing 'files'."""
-    for env_var in ("APP_FILES_PATH", "FILES_DIR", "INTERNAL_STORAGE", "FLET_APP_STORAGE_DATA", "HOME"):
-        val = os.getenv(env_var)
-        if val and os.path.isdir(val):
-            return val
-    import tempfile
-    return tempfile.gettempdir()
+logger = logging.getLogger(__name__)
 
 
 class ConnectionSignal(ft.Row):
@@ -517,43 +510,13 @@ class SearchView:
             except: pass
 
     def _build_top_ghost(self) -> ft.Control:
-        return ft.Container(
-            content=ft.Row(
-                [
-                    ft.Icon(ft.Icons.KEYBOARD_DOUBLE_ARROW_UP_ROUNDED, color=CYAN, size=16),
-                    ft.Text("Tap here to load previous page", color=TEXT, size=11, weight=ft.FontWeight.W_500),
-                    ft.Icon(ft.Icons.KEYBOARD_DOUBLE_ARROW_UP_ROUNDED, color=CYAN, size=16),
-                ],
-                alignment=ft.MainAxisAlignment.CENTER,
-                spacing=10,
-            ),
-            height=48,
-            alignment=ft.Alignment(0, 0),
-            bgcolor=apply_opacity(0.03, CYAN),
-            border=ft.Border.all(1, apply_opacity(0.08, CYAN)),
-            border_radius=12,
-            margin=ft.Margin.only(bottom=12),
-            on_click=lambda e: self.page.run_task(self.change_page, self.current_page - 1, scroll_to_bottom=True),
+        return build_page_ghost_top(
+            lambda e: self.page.run_task(self.change_page, self.current_page - 1, scroll_to_bottom=True)
         )
 
     def _build_bottom_ghost(self) -> ft.Control:
-        return ft.Container(
-            content=ft.Row(
-                [
-                    ft.Icon(ft.Icons.KEYBOARD_DOUBLE_ARROW_DOWN_ROUNDED, color=CYAN, size=16),
-                    ft.Text("Tap here to load next page", color=TEXT, size=11, weight=ft.FontWeight.W_500),
-                    ft.Icon(ft.Icons.KEYBOARD_DOUBLE_ARROW_DOWN_ROUNDED, color=CYAN, size=16),
-                ],
-                alignment=ft.MainAxisAlignment.CENTER,
-                spacing=10,
-            ),
-            height=48,
-            alignment=ft.Alignment(0, 0),
-            bgcolor=apply_opacity(0.03, CYAN),
-            border=ft.Border.all(1, apply_opacity(0.08, CYAN)),
-            border_radius=12,
-            margin=ft.Margin.only(top=12),
-            on_click=lambda e: self.page.run_task(self.change_page, self.current_page + 1, scroll_to_bottom=False),
+        return build_page_ghost_bottom(
+            lambda e: self.page.run_task(self.change_page, self.current_page + 1, scroll_to_bottom=False)
         )
 
     def _update_pagination_ui(self):

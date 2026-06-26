@@ -49,11 +49,9 @@ INTENT_MUTE           = "mute"
 INTENT_UNMUTE         = "unmute"
 INTENT_SHUFFLE        = "shuffle"
 INTENT_NOW_PLAYING    = "now_playing"     # what's playing
-INTENT_PLAY_MOOD      = "play_mood"       # play something <mood>; DSP-driven
 INTENT_PLAY_RANDOM    = "play_random"     # play a random song and shuffle
 INTENT_RESCAN_DSP     = "rescan_dsp"      # run analyser for missing tracks
 INTENT_PLAYLIST_CREATE = "playlist_create"  # create playlist X (empty)
-INTENT_PLAYLIST_AUTO   = "playlist_auto"    # create + KNN-populate playlist X
 INTENT_PLAYLIST_ADD    = "playlist_add"     # add track X to playlist Y
 INTENT_PLAYLIST_PLAY   = "playlist_play"    # play playlist X
 INTENT_AFFIRMATIVE    = "affirmative"     # yes / yeah / do it (confirmation)
@@ -61,27 +59,7 @@ INTENT_NEGATIVE       = "negative"        # no / later / not now (cancel pending
 INTENT_NAME_ENTITY    = "name_entity"     # call it X / name it X
 INTENT_GREET          = "greet"
 INTENT_HELP           = "help"
-INTENT_CREATE_MOOD    = "create_mood"     # create a custom mood called X
 INTENT_UNKNOWN        = "unknown"
-
-
-# Mood vocabulary handled by INTENT_PLAY_MOOD. The canonical source of
-# truth lives in utils.track_graph.MOODS — adding a mood there
-# (or appending an alias to an existing spec) automatically extends the
-# regex. Falls back to a static list if track_graph isn't importable yet
-# (rare: only during isolated unit tests of this module).
-try:
-    from utils.track_graph import MOOD_KEYWORDS as _TG_MOOD_KEYWORDS
-    MOOD_KEYWORDS = tuple(_TG_MOOD_KEYWORDS)
-except Exception:  # pragma: no cover — defensive fallback
-    MOOD_KEYWORDS = (
-        "chill", "chilled", "relaxed", "relaxing", "calm", "mellow", "soft",
-        "upbeat", "energetic", "intense", "hard", "heavy", "powerful", "happy", "uplifting",
-        "fast", "quick", "slow", "dark", "somber",
-        "moody", "bright",
-        "ambient",
-        "noisy", "acoustic", "organic", "clean",
-    )
 
 
 @dataclass
@@ -100,8 +78,7 @@ class Intent:
 #
 # Order matters: more specific patterns first.
 
-def _build_patterns(mood_keywords: list[str]) -> list[tuple[str, re.Pattern]]:
-    mood_alt = "|".join(re.escape(k) for k in mood_keywords)
+def _build_patterns() -> list[tuple[str, re.Pattern]]:
     return [
         # ── Confirmation routine (highest priority) ─────────────────────────────
         # Match these BEFORE play/queue so a bare "yes" or "no" during a
@@ -117,38 +94,6 @@ def _build_patterns(mood_keywords: list[str]) -> list[tuple[str, re.Pattern]]:
         # ── Naming / Entity Specification ───────────────────────────────────────
         (INTENT_NAME_ENTITY, re.compile(
             r"^\s*(?:call\s+(?:the\s+)?playlist|name\s+(?:the\s+)?playlist|call\s+it|name\s+it|make\s+it|called|named|titled)\s+(?P<q>.+?)\s*$",
-            re.I
-        )),
-
-        # ── Islet creation (single-shot) ────────────────────────────────────────
-        # The currently-playing track seeds a named islet in one turn — no
-        # multi-turn exemplar collection. Phrases accepted:
-        #   "save this as <name>" / "save this track as <name>"
-        #   "save current as <name>"
-        #   "name this islet <name>" / "create islet <name>" / "make an islet called <name>"
-        #   "create/make/build/register a custom mood <name>"  (legacy wording)
-        (INTENT_CREATE_MOOD, re.compile(
-            r"^\s*save\s+(?:this(?:\s+(?:track|song))?|current(?:\s+track)?|it)"
-            r"\s+as\s+(?:an?\s+)?(?:islet\s+)?"
-            r"(?:called\s+|named\s+|titled\s+)?(?P<q>.+?)\s*$",
-            re.I
-        )),
-        (INTENT_CREATE_MOOD, re.compile(
-            r"^\s*(?:name|label)\s+this\s+(?:islet|mood)\s+(?P<q>.+?)\s*$",
-            re.I
-        )),
-        (INTENT_CREATE_MOOD, re.compile(
-            r"^\s*(?:create|make|build|register)\s+(?:an?\s+)?islet"
-            r"(?:\s+(?:called|named|titled))?\s+(?P<q>.+?)\s*$",
-            re.I
-        )),
-        (INTENT_CREATE_MOOD, re.compile(
-            r"^\s*(?:create|make|build|register)\s+(?:a\s+)?custom\s+mood"
-            r"(?:\s+(?:called|named|titled))?\s+(?P<q>.+?)\s*$",
-            re.I
-        )),
-        (INTENT_CREATE_MOOD, re.compile(
-            r"^\s*(?:create|make|build|register)\s+(?:a\s+)?(?:custom\s+mood|islet)\s*$",
             re.I
         )),
 
@@ -219,47 +164,7 @@ def _build_patterns(mood_keywords: list[str]) -> list[tuple[str, re.Pattern]]:
             re.I,
         )),
 
-        # ── Mood (DSP-driven) ───────────────────────────────────────────────────
-        # Restricted to mood_alt so we don't steal "play something <artist>"
-        # phrasings. The captured word IS the mood; it's matched against
-        # track_graph.MOOD_PROFILES at dispatch time.
-        (INTENT_PLAY_MOOD, re.compile(
-            rf"^\s*(?P<verb>play|start|put\s+on|add|queue|enqueue|put)?\s*"
-            rf"(?:me\s+)?"
-            rf"(?:a\s+|some\s+|any\s+|something\s+|anything\s+|stuff\s+|tracks?\s+|songs?\s+|music\s+|tunes?\s+)?"
-            rf"(?P<q>{mood_alt})"
-            rf"(?:\s+(?:music|tracks?|songs?|tunes?|stuff))?"
-            rf"(?:\s+(?:to|in)\s+(?:the\s+)?queue)?\s*$",
-            re.I,
-        )),
-        (INTENT_PLAY_MOOD, re.compile(
-            rf"^\s*(?:i\s+(?:want|need|feel\s+like))\s+"
-            rf"(?P<verb>play|queue|add)?\s*"
-            rf"(?:some\s+|something\s+|a\s+)?(?P<q>{mood_alt})"
-            rf"\s*(?:music|tracks?|songs?|tunes?|stuff)?\s*$",
-            re.I,
-        )),
-
         # ── Playlist ops ────────────────────────────────────────────────────────
-        # Mood-driven playlist: "create a chill playlist called X", "make an
-        # energetic playlist named Late Night", etc. The mood word is captured
-        # as `mood`, the name as `q`. Must come BEFORE INTENT_PLAYLIST_CREATE
-        # so the qualified phrasing wins. Also matches the older "magic" /
-        # "smart" wording when paired with a mood adjective for backwards
-        # familiarity ("create a magic chill playlist called X").
-        (INTENT_PLAYLIST_AUTO, re.compile(
-            rf"^\s*(?:create|make|generate|build)\s+(?:a\s+|an\s+)?(?:brand\s+new\s+|new\s+)?"
-            rf"(?:(?:magic|smart|auto|automatic|knn)\s+)?"
-            rf"(?P<mood>{mood_alt})\s+playlist"
-            rf"(?:\s+(?:called|named|titled))?\s+(?P<q>.+?)\s*$",
-            re.I,
-        )),
-        (INTENT_PLAYLIST_AUTO, re.compile(
-            rf"^\s*(?:create|make|generate|build)\s+(?:a\s+|an\s+)?(?:brand\s+new\s+|new\s+)?"
-            rf"(?:(?:magic|smart|auto|automatic|knn)\s+)?"
-            rf"(?P<mood>{mood_alt})\s+playlist\s*$",
-            re.I,
-        )),
         (INTENT_PLAYLIST_CREATE, re.compile(
             r"^\s*(?:create|make|generate|build)\s+(?:a\s+)?(?:brand\s+new\s+|new\s+)?playlist"
             r"(?:\s+(?:called|named|titled))?\s+(?P<q>.+?)\s*$",
@@ -306,34 +211,7 @@ def _build_patterns(mood_keywords: list[str]) -> list[tuple[str, re.Pattern]]:
         )),
     ]
 
-_PATTERNS = _build_patterns(list(MOOD_KEYWORDS))
-
-def register_dynamic_mood_vocabulary():
-    """Load custom moods from disk and dynamically recompile the intent patterns with the new vocabulary."""
-    global _PATTERNS
-    try:
-        from utils.track_graph import load_custom_moods
-        custom_moods = load_custom_moods()
-    except Exception as e:
-        logger.error("Failed to load custom moods for intent compilation: %s", e)
-        custom_moods = {}
-
-    active_keywords = list(MOOD_KEYWORDS)
-    for mood_name in custom_moods.keys():
-        m_clean = mood_name.lower().strip()
-        if m_clean and m_clean not in active_keywords:
-            active_keywords.append(m_clean)
-
-    active_keywords.sort(key=len, reverse=True)
-    _PATTERNS = _build_patterns(active_keywords)
-    logger.info("Dynamic mood vocabulary registered. Total active moods: %d", len(active_keywords))
-
-# Load dynamic vocabulary at module import time
-try:
-    register_dynamic_mood_vocabulary()
-except Exception as e:
-    logger.warning("Could not initialize dynamic mood vocabulary on module load: %s", e)
-
+_PATTERNS = _build_patterns()
 
 
 # Common politeness / filler trailing tokens. Stripped post-match so
@@ -459,14 +337,9 @@ def parse(text: str) -> Intent:
         if groups:
             for k, v in groups.items():
                 if k != "q" and v is not None:
-                    val = _clean_query(v)
-                    if k == "mood":
-                        val = val.lower()
-                    extras[k] = val
+                    extras[k] = _clean_query(v)
                     
         query_val = _clean_query(q) if q else None
-        if name == INTENT_PLAY_MOOD and query_val:
-            query_val = query_val.lower()
 
         return Intent(
             name=name,
@@ -534,7 +407,6 @@ def get_semantic_classifier():
 __all__ = [
     "Intent",
     "parse",
-    "register_dynamic_mood_vocabulary",
     # Intent constants exported so the runner can match against them by name.
     "INTENT_PLAY_NOW",
     "INTENT_QUEUE_ADD",
@@ -552,11 +424,9 @@ __all__ = [
     "INTENT_UNMUTE",
     "INTENT_SHUFFLE",
     "INTENT_NOW_PLAYING",
-    "INTENT_PLAY_MOOD",
     "INTENT_PLAY_RANDOM",
     "INTENT_RESCAN_DSP",
     "INTENT_PLAYLIST_CREATE",
-    "INTENT_PLAYLIST_AUTO",
     "INTENT_PLAYLIST_ADD",
     "INTENT_PLAYLIST_PLAY",
     "INTENT_AFFIRMATIVE",
@@ -564,7 +434,5 @@ __all__ = [
     "INTENT_NAME_ENTITY",
     "INTENT_GREET",
     "INTENT_HELP",
-    "INTENT_CREATE_MOOD",
     "INTENT_UNKNOWN",
-    "MOOD_KEYWORDS",
 ]

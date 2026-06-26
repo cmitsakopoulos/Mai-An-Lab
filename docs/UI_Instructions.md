@@ -14,7 +14,6 @@ The **Library** tab manages and plays locally indexed music.
 
 ### 1.2 View Modes & Navigation
 The Library supports five views, toggled via settings:
-- **Partitions**: Sub-divided into **Default Moods** (6 pre-curated profiles) and **Mood Islets** (custom user-seeded clusters).
 - **Playlists**: Lists custom and imported playlists.
 - **Artists**: Lists artists; expanding reveals albums.
 - **Albums**: Lists albums; expanding reveals tracks.
@@ -35,30 +34,11 @@ Context-aware sort options:
 - **Transitions**: Changing pages triggers a hardware-accelerated slide-in animation (**100ms** animation, **80ms** layout sleep).
 - **Ghost Cards**: Clickable, glassmorphic cards ("Tap to load...") appear at list boundaries to navigate to adjacent pages. Horizontal swipe gestures are disabled to avoid conflicts.
 
-### 1.6 Mood Subsets (Partitions)
-The **Partitions** view organizes the library based on acoustic features:
-- **Default Moods (6 Core Moods)**: Pre-curated profiles (`chill`, `dark`, `upbeat`, `rock`, `beats`, `intense`) calibrated to the library's acoustic feature distribution.
-  - *Quartile Optimization*: Tap the tuning icon to adjust weights. Continuous features are color-coded in real-time by dominant PCA loading: **Timbre (PC1 - Cyan)**, **Tempo (PC2 - Purple)**, and **Harmonic (PC3 - Amber)**.
-  - *Mood Feedback*: Like (thumbs-up) pulls the mood target profile closer to the track's features; dislike (thumbs-down) immediately excludes the track and shifts the profile away.
-  - *Reset Feedback*: The reset button (`ft.Icons.RESTART_ALT_ROUNDED`) resets all default moods to factory defaults.
-- **Mood Islets (Custom Moods)**:
-  - *Creation*: Seeded from the currently playing track via the "New Islet" dialog.
-  - *Editing & Proximity*: Tap the edit button to rename, adjust proximity threshold slider (defaults to `0.25`), or clear the islet's track exclusion blacklist.
-  - *Exclusion*: Tap the minus icon next to a track to exclude it from the islet.
-  - *Deletion*: Custom islets can be deleted via the trash icon.
-
 ---
 
 ## 2. Playback Taste Modeling & Play Similar
 
 Controls that guide queue generation and recommendation behavior.
-
-### 2.1 SGD Taste Model
-A global, on-device **Logistic Regression Layer** mapping user preferences across the 3D PCA projection space.
-- **Biasing Moods**: Personal taste weights bias the candidate ranking inside the **Moods Pane**.
-- **Real-Time Training**: Playback feedback (Like/Dislike) triggers a single-step SGD online update with $L_2$ Ridge Regularization.
-- **Sample Weighting**: Explicit feedback events carry higher weight ($1.0$) than implicit signals like skips ($0.5$).
-- **Cold Start**: With zero feedback, it defaults to a neutral $P(\text{like}) \approx 0.5$ baseline.
 
 ### 2.2 Play Similar & Continuous Playback Walks
 Pure acoustic walks over the $k$-NN graph, decoupled from the taste model regressor for strict sonic consistency.
@@ -134,7 +114,7 @@ The settings screen features a categorized menu linking to sub-panels:
 - **Storage & Paths**: Directory configurations for index folders and download directories.
 
 ### 7.2 Customization
-- **Appearance**: Adjust startup page, default library sort, toggle landing page stats, toggle visibility of specific library tabs (Moods, Islets, Playlists, Artists, Albums, Tracks), and choose custom UI accent colors.
+- **Appearance**: Adjust startup page, default library sort, toggle landing page stats, toggle visibility of specific library tabs, and choose custom UI accent colors.
 - **APPLY VISUALS Button**: Appears conditionally at the bottom when visuals are changed and clears on save.
 - **Audio & DSP**: 5-band Equalizer (60Hz, 230Hz, 910Hz, 4000Hz, 14000Hz) with gains $\in [-15\,\text{dB}, +15\,\text{dB}]$, preset management, and **Dynamism Enhancement (Dynamic Punchiness)**:
   - **Preset Filtering & UI Guarding**: Filter between `System Presets` (default profiles) and `Custom Presets` (user-saved configurations). Custom preset creation tools (naming text field and save button) and the list of custom preset cards are guarded and only visible when the custom mode is active.

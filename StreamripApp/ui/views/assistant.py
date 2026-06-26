@@ -15,16 +15,6 @@ else:
 logger = logging.getLogger(__name__)
 
 
-def get_app_dir() -> str:
-    """Returns the primary writable directory for the app, prioritizing 'files'."""
-    for env_var in ("APP_FILES_PATH", "FILES_DIR", "INTERNAL_STORAGE", "FLET_APP_STORAGE_DATA", "HOME"):
-        val = os.getenv(env_var)
-        if val and os.path.isdir(val):
-            return val
-    import tempfile
-    return tempfile.gettempdir()
-
-
 class AssistantView:
     """Integrated chat surface for the faux-AI assistant.
 
@@ -490,8 +480,7 @@ class AssistantView:
             self._set_banner(visible=True, message="Linking similar tracks…", determinate=None)
             try:
                 # build_acoustic_edges persists the unified Zr geometry
-                # (projection + per-track coords + Louvain communities) too, so
-                # every downstream surface (moods, EQ dialog, islets) loads ready.
+                # (projection + per-track coords + Louvain communities) too.
                 await tg.build_metadata_edges(self.app.db_manager)
                 await tg.build_acoustic_edges(self.app.db_manager)
 
@@ -504,15 +493,12 @@ class AssistantView:
 
             self._set_banner(visible=False)
             
-            # Invalidate the partitions cache on LibraryView since edges / features changed
             if hasattr(self.app, "library_view") and self.app.library_view:
-                self.app.library_view._cached_moods = None
-                self.app.library_view._cached_islets = None
                 self.app.library_view._cached_unanalysed = None
 
             await self._append_bubble(
                 "assistant",
-                "Analysis complete. Mood search and similarity walks are ready.",
+                "Analysis complete. Similarity walks are ready.",
                 speak=True,
             )
         finally:
@@ -803,13 +789,13 @@ class AssistantView:
             self.app.safe_update(_hide_thinking)
         # Build a structured entity dict from the response so future turns
         # can resolve pronouns without any regex or DB round-trip.
-        # Non-canonical seeds (play_random, play_mood, play_similar_bulk) carry
+        # Non-canonical seeds (play_random, play_similar_bulk) carry
         # an entity_intent marker — their "track"/"first" is a system-picked
         # seed, NOT the user's referent, so we don't anchor pronouns on it.
         # Multi-match plays (extras.is_multi) are similar: the opener was
         # randomly picked from many hits, but the artist (if consistent) is
         # still meaningful for "more by them" follow-ups.
-        _NON_CANONICAL_SEEDS = {"play_random", "play_mood", "play_similar_bulk"}
+        _NON_CANONICAL_SEEDS = {"play_random", "play_similar_bulk"}
         _entity_intent = response.extras.get("entity_intent")
         _is_non_canonical = _entity_intent in _NON_CANONICAL_SEEDS
         _is_multi = bool(response.extras.get("is_multi"))

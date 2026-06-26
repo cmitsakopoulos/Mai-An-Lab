@@ -18,32 +18,7 @@ os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
 sys.dont_write_bytecode = True
 
 import pathlib
-import tempfile
-
-def get_app_dir() -> str:
-    """Returns the primary writable directory for the app, prioritizing 'files'."""
-    # Priority order: Standard Android files dir, then Flet storage, then Home
-    for env_var in ("APP_FILES_PATH", "FILES_DIR", "INTERNAL_STORAGE", "FLET_APP_STORAGE_DATA", "HOME"):
-        val = os.getenv(env_var)
-        if val and os.path.isdir(val):
-            return val
-    # Fallback to temp dir
-    return tempfile.gettempdir()
-
-def get_temp_artwork_dir() -> str:
-    """Returns the dedicated directory for temporary artwork, creating it and a .nomedia file if missing."""
-    dir_path = os.path.join(get_app_dir(), "temp")
-    try:
-        os.makedirs(dir_path, exist_ok=True)
-        # Create .nomedia file to exclude from Android's Media Store / Gallery
-        nomedia_file = os.path.join(dir_path, ".nomedia")
-        if not os.path.exists(nomedia_file):
-            with open(nomedia_file, "w") as f:
-                pass
-    except Exception:
-        # Fallback to get_app_dir if temp subdirectory creation fails
-        return get_app_dir()
-    return dir_path
+from utils.filepath_utils import get_app_dir, get_temp_artwork_dir
 
 # CRITICAL: SET THESE BEFORE ANY OTHER IMPORTS
 DATA_DIR = get_app_dir()
@@ -369,7 +344,6 @@ class StreamripFletApp:
                     db_path,
                     get_config_path(),
                     get_search_history_path(),
-                    tg.CUSTOM_MOODS_PATH
                 )
 
                 # Delete the import ZIP
@@ -517,7 +491,6 @@ class StreamripFletApp:
                 get_config_path(),
                 target_dir,
                 get_search_history_path(),
-                tg.CUSTOM_MOODS_PATH,
             )
             logger.info("Auto-export state snapshot: %s", out)
 
@@ -698,11 +671,7 @@ class StreamripFletApp:
             if hasattr(self, "library_view") and self.library_view:
                 self.library_view._tracks_cache = None
                 self.library_view._tracks_cache_key = None
-                self.library_view._cached_moods = None
-                self.library_view._cached_islets = None
                 self.library_view._cached_unanalysed = None
-                self.library_view._mood_feedback_map.clear()
-                self.library_view._mood_recalc_pending = False
 
             # Clear all queue state files
             audio_engine.clear_queue()
@@ -1083,9 +1052,8 @@ class StreamripFletApp:
         # ── Implicit play-event capture ──────────────────────────────────
         # Every transition of `current_path` (skip, natural end via
         # _on_track_ended → next(), or stop which sets path to "") fires
-        # exactly once for the outgoing track. The classifier inside
-        # taste_model discards skips < 5s, so we forward unconditionally
-        # whenever we actually had a previous track.
+        # exactly once for the outgoing track; forward unconditionally
+        # whenever we had a previous track.
         prev_path = self._last_played_path
         prev_pos  = self._last_play_position
         prev_dur  = self._last_play_duration
@@ -1151,25 +1119,11 @@ class StreamripFletApp:
             self.page.run_task(self._force_replenish_similar_queue)
 
     async def _record_play_event_safe(self, path: str, played: float, duration: float):
-        """Background-safe wrapper around tg.record_play_event so the engine's
-        sync dispatch doesn't get coupled to import-time / DB errors. Also
-        feeds the session-scoped negative centroid / trip-wire so consecutive
-        bad continuations get steered away from in the next walk."""
-        from utils import track_graph as tg
-        # from utils import taste_model as _tm  # Commented out to improve loading times / regressor dead code
-        try:
-            await tg.record_play_event(
-                self.db_manager,
-                path,
-                float(played or 0.0),
-                float(duration or 0.0),
-            )
-        except Exception as exc:
-            logger.debug("record_play_event failed for %s: %s", path, exc)
-
-        # Session signal mirrors the same classifier the taste model uses,
-        # so "what the model considers a skip" and "what the centroid
-        # treats as bad" can't drift apart.
+        """Background-safe tracker updates that feed the session-scoped
+        negative centroid / trip-wire so consecutive bad continuations
+        get steered away from in the next walk."""
+        # Session signal tracks engagement (similar to skip detection)
+        # to identify what the centroid treats as bad.
         try:
             played_seconds = float(played or 0.0)
             duration_seconds = float(duration or 0.0)
@@ -1272,46 +1226,6 @@ class StreamripFletApp:
 
         if not like and getattr(self, "auto_dj_mode", False):
             audio_engine.next()
-
-        async def _persist():
-            from utils import track_graph as tg
-            try:
-                # Always record the explicit signal: even an "unlike" carries
-                # information (the user actively walked back a prior like).
-                await tg.record_explicit_feedback(
-                    self.db_manager, current_path, like=like
-                )
-            except Exception as exc:
-                logger.debug("record_explicit_feedback failed: %s", exc)
-
-            # Mirror to the active mood partition, if the user is in one.
-            try:
-                lib = getattr(self, "library_view", None)
-                if (
-                    lib is not None
-                    and getattr(lib, "partition_sub_mode", "") == "moods"
-                    and getattr(lib, "_mood_label", None) is not None
-                ):
-                    label_value = (lib._mood_label.value or "").strip()
-                    canonical = tg.mood_canonical(label_value)
-                    if canonical:
-                        delta = 1 if like else -1
-                        await tg.adjust_mood_profile(
-                            self.db_manager, canonical, current_path, delta
-                        )
-                        # Refresh the partition view so the tile state reflects
-                        # the new partition membership.
-                        try:
-                            await lib.load_library()
-                        except Exception as refresh_exc:
-                            logger.debug(
-                                "Feedback click: partition refresh failed: %s",
-                                refresh_exc,
-                            )
-            except Exception as exc:
-                logger.debug("Feedback click: mood mirror failed: %s", exc)
-
-        self.page.run_task(_persist)
 
         verb = ("Liked" if like else "Disliked") if new_state is not None else "Cleared"
         try:
@@ -2667,14 +2581,11 @@ class StreamripFletApp:
         """Build the initial Auto-DJ queue of curated tracks and start playing."""
         import os
         from utils import track_graph as tg
-        import numpy as np
         try:
             if not self.auto_dj_mode:
                 return
 
-            # Score library
-            w, b, ne, ni = await tg._load_taste_model(self.db_manager)
-            rows, pca_matrix = await tg._load_percentile_matrix(self.db_manager, tg.FEATURES_VERSION)
+            rows = await self.db_manager.get_tracks_with_features(tg.FEATURES_VERSION)
 
             # Preserve current playing track if any
             cur_path = audio_engine.current_path
@@ -2702,43 +2613,19 @@ class StreamripFletApp:
             except Exception:
                 pass
 
-            candidates = []
             if rows:
-                if ne + ni > 0:
-                    # Warm model: score
-                    for i, r in enumerate(rows):
-                        p = r["path"]
-                        if p in avoid:
-                            continue
-                        pc = pca_matrix[i]
-                        z = float(np.dot(w, pc)) + b
-                        z = np.clip(z, -30.0, 30.0)
-                        p_like = 1.0 / (1.0 + np.exp(-z))
-                        candidates.append((r, p_like))
-                    
-                    # Sort and select top 20
-                    candidates.sort(key=lambda x: x[1], reverse=True)
-                    top_candidates = candidates[:20]
-                    import random
-                    selected = random.sample(top_candidates, min(10, len(top_candidates))) if top_candidates else []
-                else:
-                    # Cold model: pick random tracks
-                    import random
-                    pool = [r for r in rows if r["path"] not in avoid]
-                    selected = random.sample(pool, min(10, len(pool))) if pool else []
+                # Pick random tracks (unbiased, taste model removed)
+                import random
+                pool = [r for r in rows if r["path"] not in avoid]
+                selected = random.sample(pool, min(10, len(pool))) if pool else []
 
                 engine_tracks = []
                 # Place current track first if any
                 if cur_track_dict:
                     engine_tracks.append(cur_track_dict)
                 
-                # Check for cold start message
-                if ne + ni == 0:
-                    self.show_snackbar("Auto-DJ learning mode active. Like/play tracks to customize!", icon=ft.Icons.INFO_ROUNDED)
-
                 # Fill remaining spots with recommendations
-                for item in selected:
-                    r = item[0] if isinstance(item, tuple) else item
+                for r in selected:
                     engine_tracks.append({
                         "path":        r.get("path"),
                         "track_title": r.get("title") or r.get("track_title") or os.path.basename(r.get("path")),
@@ -2770,10 +2657,9 @@ class StreamripFletApp:
             logger.exception("Auto-DJ: Failed to build initial queue: %s", exc)
 
     async def _auto_dj_auto_continue_queue(self):
-        """Automatically extend the Auto-DJ queue with 5 tracks optimized by the taste regressor."""
+        """Automatically extend the Auto-DJ queue with 5 random tracks."""
         import os
         from utils import track_graph as tg
-        import numpy as np
         try:
             if not self.auto_dj_mode:
                 return
@@ -2787,56 +2673,22 @@ class StreamripFletApp:
             except Exception:
                 pass
 
-            # Score library
-            w, b, ne, ni = await tg._load_taste_model(self.db_manager)
-            rows, pca_matrix = await tg._load_percentile_matrix(self.db_manager, tg.FEATURES_VERSION)
+            rows = await self.db_manager.get_tracks_with_features(tg.FEATURES_VERSION)
             
-            candidates = []
             if rows:
-                if ne + ni > 0:
-                    # Warm model
-                    for i, r in enumerate(rows):
-                        p = r["path"]
-                        if p in avoid:
-                            continue
-                        pc = pca_matrix[i]
-                        z = float(np.dot(w, pc)) + b
-                        z = np.clip(z, -30.0, 30.0)
-                        p_like = 1.0 / (1.0 + np.exp(-z))
-                        candidates.append((r, p_like))
-                    
-                    # Sort by p_like descending, and take the top 20
-                    candidates.sort(key=lambda x: x[1], reverse=True)
-                    top_candidates = candidates[:20]
-                    # Randomly sample up to 5 tracks from the top candidates to keep it fresh
-                    import random
-                    selected = random.sample(top_candidates, min(5, len(top_candidates))) if top_candidates else []
-                    # Sort them just in case or shuffle
-                    engine_tracks = []
-                    for r, _ in selected:
-                        engine_tracks.append({
-                            "path":        r.get("path"),
-                            "track_title": r.get("title") or r.get("track_title") or os.path.basename(r.get("path")),
-                            "artist_name": r.get("artist") or r.get("artist_name") or "Unknown Artist",
-                            "album_title": r.get("album")  or r.get("album_title")  or "Unknown Album",
-                            "duration":    r.get("duration", 0.0) or 0.0,
-                            "image_url":   r.get("image_url", "") or "",
-                        })
-                else:
-                    # Cold model: pick random tracks
-                    import random
-                    pool = [r for r in rows if r["path"] not in avoid]
-                    selected = random.sample(pool, min(5, len(pool))) if pool else []
-                    engine_tracks = []
-                    for r in selected:
-                        engine_tracks.append({
-                            "path":        r.get("path"),
-                            "track_title": r.get("title") or r.get("track_title") or os.path.basename(r.get("path")),
-                            "artist_name": r.get("artist") or r.get("artist_name") or "Unknown Artist",
-                            "album_title": r.get("album")  or r.get("album_title")  or "Unknown Album",
-                            "duration":    r.get("duration", 0.0) or 0.0,
-                            "image_url":   r.get("image_url", "") or "",
-                        })
+                import random
+                pool = [r for r in rows if r["path"] not in avoid]
+                selected = random.sample(pool, min(5, len(pool))) if pool else []
+                engine_tracks = []
+                for r in selected:
+                    engine_tracks.append({
+                        "path":        r.get("path"),
+                        "track_title": r.get("title") or r.get("track_title") or os.path.basename(r.get("path")),
+                        "artist_name": r.get("artist") or r.get("artist_name") or "Unknown Artist",
+                        "album_title": r.get("album")  or r.get("album_title")  or "Unknown Album",
+                        "duration":    r.get("duration", 0.0) or 0.0,
+                        "image_url":   r.get("image_url", "") or "",
+                    })
 
                 if engine_tracks:
                     # Double check mode wasn't toggled off
@@ -3266,12 +3118,8 @@ class StreamripFletApp:
             if hasattr(self, "library_view") and self.library_view:
                 self.library_view._tracks_cache = None
                 self.library_view._tracks_cache_key = None
-                self.library_view._cached_moods = None
-                self.library_view._cached_islets = None
                 self.library_view._cached_unanalysed = None
-                self.library_view._mood_feedback_map.clear()
-                self.library_view._mood_recalc_pending = False
-            
+
             # Clear all queue state files
             audio_engine.clear_queue()
             for filename in ("queue_state.json", "queue_regular.json", "queue_shuffle.json", "queue_similar.json"):
@@ -3301,15 +3149,9 @@ class StreamripFletApp:
                     await conn.rollback()
                     raise
             
-            # Flush in-memory percentile & mood caches
-            from utils import track_graph as tg
-            tg.invalidate_mood_cache()
-            
             if hasattr(self, "library_view") and self.library_view:
                 self.library_view._tracks_cache = None
                 self.library_view._tracks_cache_key = None
-                self.library_view._cached_moods = None
-                self.library_view._cached_islets = None
                 self.library_view._cached_unanalysed = None
                 await self.library_view.load_library()
                 
@@ -3317,14 +3159,7 @@ class StreamripFletApp:
         except Exception as exc:
             self.show_snackbar(f"Failed to clear DSP features: {exc}")
 
-    async def clear_taste_model_weights(self):
-        try:
-            await self.db_manager.clear_taste_model()
-            from utils import track_graph as tg
-            tg.invalidate_taste_cache()
-            self.show_snackbar("User taste model weights reset successfully.")
-        except Exception as exc:
-            self.show_snackbar(f"Failed to reset taste model: {exc}")
+
 
     def open_maintenance_confirmation(self, title: str, description: str, button_text: str, action_coro):
         """Generic confirmation dialog for maintenance tasks."""

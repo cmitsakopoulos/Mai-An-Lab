@@ -24,7 +24,7 @@ logger = logging.getLogger("state_export")
 
 # Bump this when the bundle layout or any of the included file formats change
 # in an incompatible way. Import refuses bundles with a different major.
-BUNDLE_VERSION = 2  # bumped from 1: bundle now carries custom_moods.json.
+BUNDLE_VERSION = 3  # bumped from 2: custom_moods.json removed.
 
 # Where bundles get written / read from. /sdcard/Download is the obvious spot
 # on Android because the app already has MANAGE_EXTERNAL_STORAGE and the user
@@ -85,15 +85,10 @@ def export_state(
     config_path: str,
     search_history_path: Optional[str] = None,
     out_dir: Optional[str] = None,
-    custom_moods_path: Optional[str] = None,
 ) -> str:
     """Write a bundle ZIP and return its absolute path. The DB file is
     snapshotted via SQLite's online backup API so callers don't have to close
-    their `aiosqlite` connection.
-
-    `custom_moods_path`, when supplied and present on disk, is included in
-    the bundle so user-created islets and their thresholds survive
-    export/import."""
+    their `aiosqlite` connection."""
     out_dir = out_dir or _default_bundle_dir()
     os.makedirs(out_dir, exist_ok=True)
 
@@ -118,11 +113,6 @@ def export_state(
                 zf.write(search_history_path, "recent_searches.json")
                 contents["recent_searches.json"] = {
                     "bytes": os.path.getsize(search_history_path)
-                }
-            if custom_moods_path and os.path.exists(custom_moods_path):
-                zf.write(custom_moods_path, "custom_moods.json")
-                contents["custom_moods.json"] = {
-                    "bytes": os.path.getsize(custom_moods_path)
                 }
 
             manifest = {
@@ -178,7 +168,6 @@ def export_state_snapshot(
     config_path: str,
     out_dir: str,
     search_history_path: Optional[str] = None,
-    custom_moods_path: Optional[str] = None,
 ) -> str:
     """Write a deterministic state bundle (`mai_an_lab_state_latest.zip`) to
     *out_dir*, silently overwriting any previous snapshot.
@@ -212,11 +201,6 @@ def export_state_snapshot(
                 contents["recent_searches.json"] = {
                     "bytes": os.path.getsize(search_history_path)
                 }
-            if custom_moods_path and os.path.exists(custom_moods_path):
-                zf.write(custom_moods_path, "custom_moods.json")
-                contents["custom_moods.json"] = {
-                    "bytes": os.path.getsize(custom_moods_path)
-                }
 
             manifest = {
                 "bundle_version": BUNDLE_VERSION,
@@ -243,16 +227,11 @@ def import_state(
     db_path: str,
     config_path: str,
     search_history_path: Optional[str] = None,
-    custom_moods_path: Optional[str] = None,
 ) -> dict:
     """Replace the live state files with what's inside the bundle. Caller is
     responsible for closing any open DB connection BEFORE calling this and
     restarting the app afterwards — there is no in-place reload of the DB
     handle or in-memory config caches.
-
-    `custom_moods_path` is optional for back-compat with v1 bundles that
-    didn't carry the file. If supplied and the bundle contains the member,
-    the live JSON gets replaced.
 
     Returns a dict describing what was replaced.
     """
@@ -293,6 +272,5 @@ def import_state(
 
         _replace("config.toml", config_path)
         _replace("recent_searches.json", search_history_path)
-        _replace("custom_moods.json", custom_moods_path)
 
     return {"replaced": replaced, "manifest": manifest}

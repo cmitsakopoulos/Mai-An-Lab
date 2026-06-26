@@ -519,3 +519,45 @@ class SkeletonRow(ft.Container):
             padding=ft.Padding.symmetric(horizontal=12, vertical=8),
             height=64,
         )
+
+
+def build_page_ghost_top(on_click) -> ft.Control:
+    return ft.Container(
+        content=ft.Row(
+            [
+                ft.Icon(ft.Icons.KEYBOARD_DOUBLE_ARROW_UP_ROUNDED, color=CYAN, size=16),
+                ft.Text("Tap here to load previous page", color=TEXT, size=11, weight=ft.FontWeight.W_500),
+                ft.Icon(ft.Icons.KEYBOARD_DOUBLE_ARROW_UP_ROUNDED, color=CYAN, size=16),
+            ],
+            alignment=ft.MainAxisAlignment.CENTER,
+            spacing=10,
+        ),
+        height=48,
+        alignment=ft.Alignment(0, 0),
+        bgcolor=apply_opacity(0.03, CYAN),
+        border=ft.Border.all(1, apply_opacity(0.08, CYAN)),
+        border_radius=12,
+        margin=ft.Margin.only(bottom=12),
+        on_click=on_click,
+    )
+
+
+def build_page_ghost_bottom(on_click) -> ft.Control:
+    return ft.Container(
+        content=ft.Row(
+            [
+                ft.Icon(ft.Icons.KEYBOARD_DOUBLE_ARROW_DOWN_ROUNDED, color=CYAN, size=16),
+                ft.Text("Tap here to load next page", color=TEXT, size=11, weight=ft.FontWeight.W_500),
+                ft.Icon(ft.Icons.KEYBOARD_DOUBLE_ARROW_DOWN_ROUNDED, color=CYAN, size=16),
+            ],
+            alignment=ft.MainAxisAlignment.CENTER,
+            spacing=10,
+        ),
+        height=48,
+        alignment=ft.Alignment(0, 0),
+        bgcolor=apply_opacity(0.03, CYAN),
+        border=ft.Border.all(1, apply_opacity(0.08, CYAN)),
+        border_radius=12,
+        margin=ft.Margin.only(top=12),
+        on_click=on_click,
+    )
