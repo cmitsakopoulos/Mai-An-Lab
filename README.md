@@ -34,11 +34,7 @@ Search across streaming endpoints, preview snippets, and download albums or trac
 
 Browse your catalog by artist, album, or track through SQL joins. The playback pane sits alongside the library, providing full queue management, scrubbing, and volume control.
 
-> [!WARNING]
-> **Preset Moods are heavily under construction.** The built-in profiles (`chill`, `happy`, `tonal`, etc.) use library-relative percentile scoring and are functional, but the mood definitions and threshold calibration are actively being revised. Expect behaviour to change between versions.
-
-- **Automatic Preset Moods**: Start playlists using built-in mood profiles that score tracks against library-wide percentile distributions to match the sonic character of your collection.
-- **Acoustic Islets (Custom Moods)**: Create custom moods seeded from a single exemplar track. The player projects tracks into the unified $Z_r$ graph geometry and scores neighbors using a self-tuning Gaussian affinity to the seed, adapting dynamically to the local neighborhood density for precise, tempo-aligned playback.
+- **Acoustic Similarity Walks**: Generate adaptive playlists on the fly seeded from a single track. The player traverses the unified $Z_r$ similarity network using a personalized-PageRank random walk with self-tuning Gaussian kernel affinities, MMR diversity checks, and Louvain community boundaries for cohesive transitions.
 
 <p align="center">
   <img src="assets/library_example.gif" width="48%" alt="Music Library Pane" style="border-radius: 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); border: 1px solid rgba(255, 255, 255, 0.1);">
@@ -50,7 +46,7 @@ Browse your catalog by artist, album, or track through SQL joins. The playback p
 
 ### Jarvis Voice Assistant
 
-Use voice controls or chat to walk similarity graphs, search tracks, manage queues, make playlists, save custom Acoustic Islets, and trigger downloads — all via local keyword parsing and audio focus ducking. Say "Hello" and see what happens.
+Use voice controls or chat to walk similarity graphs, search tracks, manage queues, make playlists, queue recommendations, and trigger downloads — all via local keyword parsing and audio focus ducking. Say "Hello" and see what happens.
 
 <p align="center">
   <img src="assets/idiot_example.gif" width="48%" alt="Jarvis Voice Assistant" style="border-radius: 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); border: 1px solid rgba(255, 255, 255, 0.1);">
@@ -106,9 +102,9 @@ Desktop playback uses Apple `AVAudioPlayer` (`AVFoundation` via dynamic `pyobjc-
 > [!IMPORTANT]
 > **Portability & Build Parity**; this project contains a modified port of `streamrip 2.1.0`. All native C-extension compilation dependencies are removed, allowing the same Python codebase to target Android (ARM64) and macOS (Intel & Apple Silicon) with zero-configuration build compatibility. ONLY Qobuz is supported.
 
-- **Acoustic Auto-Playlists**; extracts a 52-D timbre representation combined with 8-D structural attributes. Built on a unified z-scored Euclidean space with Kaiser-truncated SVD, self-tuning Gaussian affinity reweighting, and Louvain community detection. Integrates automated mood scoring and self-tuning custom Islets.
+- **Acoustic Auto-Playlists**; extracts a 68-D graph embedding timbre representation (from the 88-D sound profile) combined with 10-D structural attributes. Built on a unified z-scored Euclidean space with Kaiser-truncated SVD, self-tuning Gaussian affinity reweighting, and Louvain community detection for partition constraint.
 - **Advanced Equalizer & Real-time DSP** *(v1.2.0)*; features a manual 5-band manual equalizer with filtered System/Custom preset types, keyboard-editable gain values with validation and range clamping, and a live decibel boost monitor badge/card for real-time track Dynamism levels.
-- **Unsupervised PCA Engine** *(v1.1.0)*; double-pass SVD with automatic Pearson correlation cleaving prunes acoustically redundant scalar features before the 3-D projection is committed. The Mood EQ hides zero-weight features and the projection geometry adapts to each library. After every rebuild, four diagnostic PNG figures (full and pruned correlation heatmap + biplot scatter) are written to `<library>/pca_report/`.
+- **Unsupervised PCA Engine** *(v1.1.0)*; double-pass SVD with automatic Pearson correlation cleaving prunes acoustically redundant scalar features before the projection is committed. The projection geometry adapts to each library. After every rebuild, five diagnostic PNG figures (full and pruned correlation heatmaps, scatter by energy, scatter by Louvain clusters) are written to `<library>/pca_report/`.
 - **Jarvis Voice Control**; parses spoken intent with boundary-anchored patterns and voice hesitation stripping to trigger similarity walks and downloads.
 - **Glassmorphic UI**; a responsive interface leveraging Flet containers, backdrop filters, custom color palettes, and transitions.
 - **SQLite Indexing**; uses an `aiosqlite` connection with WAL journaling and a 64 MB page cache to index tracks without blocking the UI thread.

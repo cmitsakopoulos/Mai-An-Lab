@@ -33,16 +33,85 @@ _CLUSTER_PALETTE = [
 _CLUSTER_NEUTRAL = "#8A93A0"
 
 
-def _genre_color(genre) -> str:
-    """Deterministic colour for a genre string (FNV-1a hash → palette), so the
-    same genre is always the same colour across sessions. Grey when missing."""
+def _canon_genre(genre) -> str:
+    """Punctuation/case/whitespace-insensitive key for a free-text genre tag, so
+    'Hip-Hop', 'Hip hop' and 'HIP  HOP' all collapse to one key ('hiphop')."""
     if not genre:
-        return _CLUSTER_NEUTRAL
-    g = str(genre).strip().lower()
-    if not g:
+        return ""
+    return "".join(ch for ch in str(genre).lower() if ch.isalnum())
+
+
+# Semantic synonyms for tags that pca_engine.genre_bucket's coarse rules don't
+# cover, keyed by canonical token (alnum-lower) → (group_key, display_label).
+# Spelling/spacing variants are already unified by _canon_genre, so we only need
+# one canonical token per synonym. A group_key equal to a real bucket label
+# ('Electronic', 'Soul/R&B') deliberately merges these into that bucket's colour
+# + legend row; the rest give niche families a stable label of their own. Exact
+# (not substring) lookup, so e.g. 'reggaeton' lands in Latin, never Reggae.
+_GENRE_ALIASES: dict[str, tuple[str, str]] = {
+    "drumandbass":    ("Electronic", "Electronic"),
+    "drumnbass":      ("Electronic", "Electronic"),
+    "idm":            ("Electronic", "Electronic"),
+    "ebm":            ("Electronic", "Electronic"),
+    "rhythmandblues": ("Soul/R&B",   "Soul/R&B"),
+    "randb":          ("Soul/R&B",   "Soul/R&B"),
+    "triphop":        ("Trip-Hop",   "Trip-Hop"),
+    "jazz":           ("Jazz",       "Jazz"),
+    "nujazz":         ("Jazz",       "Jazz"),
+    "acidjazz":       ("Jazz",       "Jazz"),
+    "smoothjazz":     ("Jazz",       "Jazz"),
+    "reggae":         ("Reggae",     "Reggae"),
+    "ragga":          ("Reggae",     "Reggae"),
+    "dancehall":      ("Reggae",     "Reggae"),
+    "ambient":        ("Ambient",    "Ambient"),
+    "soundtrack":     ("Soundtrack", "Soundtrack"),
+    "score":          ("Soundtrack", "Soundtrack"),
+    "ost":            ("Soundtrack", "Soundtrack"),
+    "disco":          ("Disco",      "Disco"),
+    "gospel":         ("Gospel",     "Gospel"),
+    "latin":          ("Latin",      "Latin"),
+    "salsa":          ("Latin",      "Latin"),
+    "reggaeton":      ("Latin",      "Latin"),
+    "bachata":        ("Latin",      "Latin"),
+    "world":          ("World",      "World"),
+    "afrobeat":       ("World",      "World"),
+    "afrobeats":      ("World",      "World"),
+}
+
+
+def _genre_group(genre) -> tuple[str, str]:
+    """(grouping_key, display_label) for a genre tag. Known families collapse via
+    pca_engine.genre_bucket so 'Hip-Hop' / 'hip hop' / 'rap' / 'trap' share one
+    key, colour and legend row — the same coarse buckets the genre diagnostic
+    treats as communities. Unmatched niche tags fall back to a canonical key so
+    'Jazz' / 'jazz' merge yet stay distinct from each other. Empty → ('', '')."""
+    from utils.pca_engine import genre_bucket
+    # Collapse whitespace runs first — genre_bucket's substring rules expect
+    # single spaces ('hip hop'), so 'HIP  HOP' would otherwise miss the bucket.
+    norm = " ".join(str(genre).split()) if genre else ""
+    bucket = genre_bucket(norm)
+    if bucket == "Unknown":
+        return "", ""
+    if bucket != "Other":
+        return bucket, bucket
+    canon = _canon_genre(genre)
+    if not canon:
+        return "", ""
+    alias = _GENRE_ALIASES.get(canon)
+    if alias is not None:
+        return alias
+    return canon, str(genre).strip()
+
+
+def _genre_color(genre) -> str:
+    """Deterministic colour for a genre, keyed by its merged group (FNV-1a hash →
+    palette) so spelling/alias variants share a colour across sessions. Grey when
+    the tag is missing or unrecognised."""
+    key, _label = _genre_group(genre)
+    if not key:
         return _CLUSTER_NEUTRAL
     h = 2166136261
-    for ch in g:
+    for ch in key:
         h = ((h ^ ord(ch)) * 16777619) & 0xFFFFFFFF
     return _CLUSTER_PALETTE[h % len(_CLUSTER_PALETTE)]
 
@@ -192,6 +261,14 @@ class LibraryView:
         self._net_tooltip_overlay: ft.Control | None = None
         self._network_seed_path: str | None = None  # pinned seed for Local navigation
         self._net_canvas: ft.Control | None = None
+        # Live-tracking of the playing node. When ON, the graph recenters on the
+        # active track once it falls off-screen (maps-style); the pulse always
+        # follows it in place while it's a visible node. OFF lets the user
+        # explore a pinned neighbourhood freely (the pulse still glows if shown).
+        self._net_follow_current: bool = True
+        self._net_follow_btn: ft.Control | None = None
+        self._net_follow_icon: ft.Control | None = None
+        self._net_reseed_task: asyncio.Task | None = None  # debounced follow rebuild
         self._view_tabs_row = ft.Row(spacing=6)
         self._update_view_tabs()
 
@@ -554,6 +631,14 @@ class LibraryView:
                 })
 
         if not raw_nodes:
+            # Nothing to plot — drop any references to the previous canvas so a
+            # later track change can't try to move a pulse/redraw shapes that are
+            # no longer mounted (see _sync_network_now_playing).
+            self._net_nodes = []
+            self._net_node_by_path = {}
+            self._net_edges = []
+            self._net_canvas_obj = None
+            self._net_pulse_overlay = None
             # Fallback: empty label
             return ft.Container(
                 content=ft.Text(
@@ -799,21 +884,52 @@ class LibraryView:
             padding=ft.Padding.symmetric(horizontal=4, vertical=3),
         )
 
+        # ── Follow-current toggle (maps-style recenter, below mode selector) ─
+        follow_icon = ft.Icon(
+            ft.Icons.MY_LOCATION if self._net_follow_current else ft.Icons.LOCATION_SEARCHING,
+            color=CYAN if self._net_follow_current else DIM, size=16,
+        )
+        self._net_follow_icon = follow_icon
+        # The GestureDetector wraps the full 30×30 chip (not the bare icon) so the
+        # whole button is tappable — wrapping just the 16px icon left most of the
+        # chip dead, which read as "the button does nothing".
+        follow_inner = ft.Container(
+            content=follow_icon,
+            width=30, height=30, alignment=ft.Alignment(0, 0),
+            bgcolor=apply_opacity(0.88, SURFACE2),
+            border=ft.Border.all(
+                1, apply_opacity(0.22, CYAN) if self._net_follow_current
+                else apply_opacity(0.14, TEXT),
+            ),
+            border_radius=10,
+            tooltip="Follow the playing track",
+        )
+        self._net_follow_btn = follow_inner
+        follow_overlay = ft.Container(
+            content=ft.GestureDetector(content=follow_inner, on_tap=self._toggle_net_follow),
+            right=8, top=48,
+        )
+
         # ── Genre legend (top-left), shown when >1 genre is on screen ───────
-        genres_present: dict[str, str] = {}
+        # Group by merged genre key so spelling/alias variants share one legend
+        # row + colour (see _genre_group); label is the bucket / first-seen tag.
+        genres_present: dict[str, tuple[str, str]] = {}  # key -> (label, color)
         for nd in self._net_nodes:
             g = nd.get("genre")
-            if g:
-                genres_present.setdefault(str(g), nd["color"])
+            if not g:
+                continue
+            key, label = _genre_group(g)
+            if key and key not in genres_present:
+                genres_present[key] = (label, nd["color"])
         legend_overlay = None
         if len(genres_present) > 1:
             legend_rows = []
-            for g in sorted(genres_present)[:8]:
+            for label, color in sorted(genres_present.values())[:8]:
                 legend_rows.append(ft.Row(
                     [
                         ft.Container(width=9, height=9, border_radius=5,
-                                     bgcolor=genres_present[g]),
-                        ft.Text(g[:16] + ("…" if len(g) > 16 else ""),
+                                     bgcolor=color),
+                        ft.Text(label[:16] + ("…" if len(label) > 16 else ""),
                                 size=8.5, color=TEXT, no_wrap=True),
                     ],
                     spacing=4, tight=True,
@@ -829,30 +945,36 @@ class LibraryView:
             )
 
         # ── Now-playing pulse overlay ───────────────────────────────────────
-        # A cyan ring over the currently-playing track whenever it's on screen,
-        # animated by a small repeating task — independent of which node is seed.
-        self._net_pulse_overlay = None
+        # A cyan ring over the currently-playing track. Always created (so live
+        # track changes can show/move it without a rebuild) but hidden when the
+        # active track isn't on screen. animate_position lets it glide to the
+        # next node as playback advances — the "tracking" effect.
         np_node = self._net_node_by_path.get(now_playing) if now_playing else None
-        pulse_overlay = None
         if np_node is not None:
             d = (np_node["radius"] + 9) * 2
-            pulse_overlay = ft.Container(
-                width=d, height=d, border_radius=d / 2,
-                border=ft.Border.all(2, CYAN),
-                left=np_node["px"] - d / 2, top=np_node["py"] - d / 2,
-                animate_scale=ft.Animation(700, ft.AnimationCurve.EASE_IN_OUT),
-                animate_opacity=ft.Animation(700, ft.AnimationCurve.EASE_IN_OUT),
-                scale=1.0, opacity=0.9,
-            )
-            self._net_pulse_overlay = pulse_overlay
+            pulse_left, pulse_top, pulse_visible = np_node["px"] - d / 2, np_node["py"] - d / 2, True
+        else:
+            d, pulse_left, pulse_top, pulse_visible = 24, -100.0, -100.0, False
+        pulse_overlay = ft.Container(
+            width=d, height=d, border_radius=d / 2,
+            border=ft.Border.all(2, CYAN),
+            left=pulse_left, top=pulse_top,
+            visible=pulse_visible,
+            animate_scale=ft.Animation(700, ft.AnimationCurve.EASE_IN_OUT),
+            animate_opacity=ft.Animation(700, ft.AnimationCurve.EASE_IN_OUT),
+            animate_position=ft.Animation(280, ft.AnimationCurve.EASE_OUT),
+            scale=1.0, opacity=0.9,
+        )
+        self._net_pulse_overlay = pulse_overlay
 
-        # Stack: canvas, legend, mode selector, pulse ring, tooltip (top).
+        # Stack: canvas, legend, mode selector, follow toggle, pulse ring,
+        # tooltip (top).
         stack_controls: list = [gesture]
         if legend_overlay is not None:
             stack_controls.append(legend_overlay)
         stack_controls.append(mode_overlay)
-        if pulse_overlay is not None:
-            stack_controls.append(pulse_overlay)
+        stack_controls.append(follow_overlay)
+        stack_controls.append(pulse_overlay)
         stack_controls.append(tooltip_container)
 
         stack = ft.Stack(
@@ -954,6 +1076,111 @@ class LibraryView:
         self._net_canvas_obj.shapes = self._emit_net_shapes()
         self.try_update(self._net_canvas_obj)
 
+    def _net_set_pulse_node(self, nd: dict | None):
+        """Move the now-playing ring onto `nd` (or hide it when None). The
+        overlay is already mounted, so a bare update flushes it; animate_position
+        glides it from the old node to the new one."""
+        ov = self._net_pulse_overlay
+        if ov is None:
+            return
+        if nd is None:
+            if ov.visible:
+                ov.visible = False
+                self.try_update(ov)
+            return
+        d = (nd["radius"] + 9) * 2
+        ov.width = d
+        ov.height = d
+        ov.border_radius = d / 2
+        ov.left = nd["px"] - d / 2
+        ov.top = nd["py"] - d / 2
+        ov.scale = 1.0
+        ov.opacity = 0.9
+        ov.visible = True
+        self.try_update(ov)
+
+    def _sync_network_now_playing(self, prev_path, current_path):
+        """React to a track change while the Network view is live, without a
+        full rebuild when possible. If the new track is already a node we just
+        move the pulse ring onto it in place (covers Walk auto-advance and
+        playing a visible Local neighbour). If it has fallen off the graph and
+        follow-current is on, we reseed so the graph recenters on it."""
+        nbp = self._net_node_by_path
+        if not nbp:
+            # No graph mounted yet (empty/setup state) — seed it from the live
+            # track if we're meant to follow.
+            if self._net_follow_current and current_path:
+                self._schedule_net_reseed()
+            return
+
+        if prev_path:
+            old = nbp.get(prev_path)
+            if old is not None:
+                old["is_now_playing"] = False
+
+        new = nbp.get(current_path) if current_path else None
+        if new is not None:
+            new["is_now_playing"] = True
+            self._net_set_pulse_node(new)
+            return
+
+        # The active track isn't on the current graph.
+        if self._net_follow_current and current_path:
+            self._schedule_net_reseed()         # recenter on the live track
+        else:
+            self._net_set_pulse_node(None)      # not following → just hide it
+
+    def _schedule_net_reseed(self, delay: float = 0.35):
+        """Debounced rebuild of the network around the live track. Collapses a
+        burst of rapid skips into a single DB+canvas rebuild instead of one per
+        skipped track; the latest call wins (older pending rebuilds cancelled)."""
+        self._network_seed_path = None
+        task = self._net_reseed_task
+        if task is not None and not task.done():
+            task.cancel()
+
+        async def _run():
+            try:
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                await self.load_library()
+            except asyncio.CancelledError:
+                pass
+
+        self._net_reseed_task = asyncio.create_task(_run())
+
+    def _toggle_net_follow(self, _e=None):
+        self._net_follow_current = not self._net_follow_current
+        on = self._net_follow_current
+        icon = self._net_follow_icon
+        if icon is not None:
+            icon.name = ft.Icons.MY_LOCATION if on else ft.Icons.LOCATION_SEARCHING
+            icon.color = CYAN if on else DIM
+        btn = self._net_follow_btn
+        if btn is not None:
+            btn.border = ft.Border.all(
+                1, apply_opacity(0.22, CYAN) if on else apply_opacity(0.14, TEXT)
+            )
+        self.try_update(icon, btn)
+        # Confirm the toggle so its effect is legible even when no track is
+        # currently advancing (otherwise it only shows on the next track change).
+        try:
+            self.app.show_snackbar(
+                "Following the playing track" if on
+                else "Free exploration — graph stays put",
+                icon=ft.Icons.MY_LOCATION if on else ft.Icons.LOCATION_SEARCHING,
+                color=CYAN,
+            )
+        except Exception:
+            pass
+        # Turning follow back on snaps straight to the live track.
+        if on:
+            cur = audio_engine.current_path or ""
+            if cur and (self._network_seed_path or self._net_node_by_path.get(cur) is None):
+                self._schedule_net_reseed(delay=0.0)  # explicit tap → no debounce
+            elif cur:
+                self._net_set_pulse_node(self._net_node_by_path.get(cur))
+
     async def _run_net_pulse(self, token: int):
         """Pulse the now-playing ring until a newer build supersedes this token.
         The scale/opacity transitions are animated client-side; we just toggle
@@ -965,14 +1192,35 @@ class LibraryView:
         resumes pushing the moment the view is foregrounded again."""
         await asyncio.sleep(1.0)  # let finalize mount the overlay first
         big = True
+        settled = False
         while token == self._net_pulse_token:
             ov = self._net_pulse_overlay
             if ov is None:
                 return
-            # Pause work when not visibly on screen.
-            if getattr(self.app, "is_background", False) or self.view_mode != "network":
-                await asyncio.sleep(1.5)
+            # Only animate (and drive the bridge) when the ring is actually on
+            # screen AND the track is advancing. Off-screen / backgrounded /
+            # ring-hidden / paused all idle without pushing updates — the pulse
+            # animation is this view's one continuous draw, so freezing it while
+            # a track is paused is the main remaining battery saving.
+            on_screen = (
+                not getattr(self.app, "is_background", False)
+                and self.view_mode == "network"
+                and getattr(ov, "visible", True)
+            )
+            if not on_screen or not getattr(audio_engine, "is_playing", True):
+                # Settle the ring to a calm, fully-formed state once so a paused
+                # track doesn't freeze mid-fade; then idle without pushing.
+                if not settled and on_screen:
+                    try:
+                        ov.scale = 1.0
+                        ov.opacity = 0.9
+                        ov.update()
+                    except Exception:
+                        return
+                    settled = True
+                await asyncio.sleep(0.6)
                 continue
+            settled = False
             try:
                 ov.scale = 1.4 if big else 1.0
                 ov.opacity = 0.25 if big else 0.9
@@ -1999,10 +2247,16 @@ class LibraryView:
         if prev_path == current_path:
             return
 
+        # Network view tracks the playing node on the canvas, not list rows.
+        if self.view_mode == "network":
+            self._sync_network_now_playing(prev_path, current_path)
+            self._last_highlighted_path = current_path
+            return
+
         if prev_path:
             for ctrl in self._path_to_controls.get(prev_path, []):
                 self._update_row_highlight(ctrl, is_current=False)
-        
+
         if current_path:
             for ctrl in self._path_to_controls.get(current_path, []):
                 self._update_row_highlight(ctrl, is_current=True)
@@ -2549,6 +2803,12 @@ class LibraryView:
         self._is_scanning = False
         self._toggling_nodes = set()
         self.page.run_task(self.load_library)
+
+        # Top up external metadata for any newly-indexed artists (incremental:
+        # enrich_library only fetches artists without a cached row). Background.
+        enrich = getattr(self.app, "_enrich_metadata_async", None)
+        if enrich is not None:
+            self.page.run_task(enrich)
 
         def _hide_scanner():
             self._scan_progress_container.visible = False

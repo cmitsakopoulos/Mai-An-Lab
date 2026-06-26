@@ -469,6 +469,36 @@ class StreamripFletApp:
         # Prune caches asynchronously to keep disk footprint bounded
         self.page.run_task(self._prune_caches_async)
 
+        # Incrementally enrich any artists missing external metadata (covers an
+        # existing library on first launch after update; re-scans top up via
+        # library_view._on_scan_complete). Fire-and-forget, offline-safe.
+        self.page.run_task(self._enrich_metadata_async)
+
+    async def _enrich_metadata_async(self):
+        """Background, incremental artist-metadata enrichment (MusicBrainz
+        country + genres). Only fetches artists with no cached enrichment, so
+        each library top-up enriches just the new artists, then refreshes the
+        NPMI genre model. Rate-limited, offline-safe, never blocks the UI."""
+        if getattr(self, "_enriching_metadata", False):
+            return
+        try:
+            from utils.streamrip_api import load_config
+            if not load_config().get("general", {}).get("auto_enrich_metadata", True):
+                return
+        except Exception:
+            pass
+        self._enriching_metadata = True
+        try:
+            await asyncio.sleep(3)  # let startup / the scan settle before network
+            from utils.metadata_enrich import enrich_library
+            summary = await enrich_library(self.db_manager, with_genres=True)
+            if summary.get("enriched"):
+                logger.info("Metadata enrichment complete: %s", summary)
+        except Exception as exc:
+            logger.warning("Metadata enrichment failed: %s", exc)
+        finally:
+            self._enriching_metadata = False
+
     async def _auto_export_state_snapshot(self):
         """Background task: write a deterministic state bundle to the standard
         Downloads folder (and library folder if configured) so the desktop offload

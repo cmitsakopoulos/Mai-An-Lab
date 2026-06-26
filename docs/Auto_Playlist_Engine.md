@@ -13,7 +13,7 @@
 The engine bridges low-level digital signal processing (DSP) and high-level relational metadata to construct a sparse, dual-tier directed network of similar tracks:
 
 ```text
-audio file ──► MediaCodec (Android) ──► mono int16 PCM @ 22050 Hz (90s)
+audio file ──► MediaCodec (Android) ──► mono int16 PCM @ 22050 Hz (120s)
                                                    │
                                                    ▼
                                         Pure-Numpy DSP Analyser
@@ -27,12 +27,20 @@ audio file ──► MediaCodec (Android) ──► mono int16 PCM @ 22050 Hz (9
                                                            BPM + beat strength               │
                                                                                    ┌──────────┼──────────┐
                                                                                    ▼          ▼          ▼
-                                                                              MFCC mean  MFCC Δ-mean  chroma
-                                                                                 (20)        (20)       (12)
-                                                                                                    (52-D Timbre)
+                                                                              MFCC mean   MFCC std   chroma
+                                                                              + rhythm    (timbre)    (12)
+                                                                                (36)        (20)      
+                                                                                   │          │          │
+                                                                                   └──────────┼──────────┘
+                                                                                              ▼
+                                                                                   88-D Packed Profile
+                                                                                              │
+                                                                                     (Drop MFCC Delta)
+                                                                                              ▼
+                                                                                     68-D Graph Embedding
                                                    │
                                                    ▼
-               52-D Timbre + covariance-surviving scalars
+               68-D Graph Embedding + covariance-surviving scalars
                                                     │
                                           ┌─────────┴──────────┐
                                           ▼                    ▼
@@ -40,38 +48,38 @@ audio file ──► MediaCodec (Android) ──► mono int16 PCM @ 22050 Hz (9
                             Z-score → ×1.5 scalar boost   Z-score (separate μ/σ)
                                           │                    │
                                           ▼                    │
-                            Kaiser-truncated PCA (~18-D)       │
+                            Kaiser-truncated PCA (~20-D)       │
                                           │                    ▼
-                                          └──── concat ◄── ×1.5 harmonic weight
+                                           └──── concat ◄── ×1.5 harmonic weight
                                                     │
                                                     ▼
-                                            Zr  (~21-D, un-normalised)
+                                            Zr  (~23-D, un-normalised)
                                                    │
                                                    ▼
-                            Acoustic Euclidean Self-Tuning Affinity Graph
-                                (Top K=20 nearest neighbours, mutual-kNN)
+                             Acoustic Euclidean Self-Tuning Affinity Graph
+                                 (Top K=20 nearest neighbours, mutual-kNN)
                                                    │
-         Junction Metadata Edges ◄─────────────────┼────────────────► Same-Artist / Album Edges
-      (Album sequence / Recent additions)          │                  (Biased distance weighting)
-                                                   ▼
-                          HYBRID k-NN ADJACENCY NETWORK  +  Louvain communities
-                                                   │
-                                                   ▼
-                Personalised-PageRank Walker 
-                  (restart · softmax τ · MMR ·    (scalar-percentile targets ·
-                   multi-tier · persistent avoid)  EQ adjustment · Camelot)
+          Junction Metadata Edges ◄─────────────────┼────────────────► Same-Artist / Album Edges
+       (Album sequence / Recent additions)          │                  (Biased distance weighting)
+                                                    ▼
+                           HYBRID k-NN ADJACENCY NETWORK  +  Louvain communities
                                                    │
                                                    ▼
-                                    Seamless Dynamic Playback Queue
+                 Personalised-PageRank Walker 
+                   (restart · softmax τ · MMR ·    (scalar-percentile targets ·
+                    multi-tier · persistent avoid)  Camelot)
+                                                   │
+                                                   ▼
+                                     Seamless Dynamic Playback Queue
 ```
 
 ---
 
-## 1. Feature Extraction & Vector Space (v3)
+## 1. Feature Extraction & Vector Space (v4)
 
 Acoustic vectors are extracted by a pure-NumPy DSP analyzer (no Librosa, no SciPy; works on every host). The analyser is invoked from the laptop-side offload script (see §7); the on-device fallback exists but is no longer the primary path because library-wide DSP on a phone is impractically slow (10+ s/track vs ~200 ms/track on a laptop).
 
-### The 62-Dimensional Feature Space (v3, `FEATURES_VERSION = 3`)
+### The 88-Dimensional Packed Profile and 68-Dimensional Graph Embedding (v4, `FEATURES_VERSION = 4`)
 
 #### Quick reference; what each feature tells you about a track
 
@@ -88,17 +96,29 @@ Acoustic vectors are extracted by a pure-NumPy DSP analyzer (no Librosa, no SciP
 | `sin_h` | scalar | Sine component of Camelot key clock | (drives key similarity projection) |
 | `key_mode` | scalar | 1.0 for major (Camelot B-ring), 0.0 for minor (A-ring) | (drives major/minor mode grouping) |
 | `mfcc_mean` | 20 floats | Average **timbre fingerprint**; "what instruments / kind of sound" | (vector; cosine compared track-to-track) |
-| `mfcc_delta` | 20 floats | How fast timbre changes frame-to-frame | (vector; captures evolution, not just stasis) |
+| `mfcc_std` | 20 floats | Timbral spread / **dispersion**; variation of timbre over time | (vector; captures timbral variation) |
+| `mfcc_delta` | 20 floats | How fast timbre changes frame-to-frame (dropped for similarity graph) | (vector; captures timbre evolution/speed) |
 | `chroma` | 12 floats | Proportion of each pitch class (C, C#, D, …) | (vector; basis for the K-S key estimate) |
+| `rhythm` | 16 floats | Groove, tempogram components, onset density, and pulse clarity | (vector; distinguishes rhythm styles/speeds) |
 
-The raw scalars get their own DB columns; the 52-D timbre triple (`mfcc_mean` + `mfcc_delta` + `chroma`) is packed into one `float32` LE BLOB on `play_counts.timbre`. Total: **62 dimensions per track** (52-D timbre + 10 scalars in the build space; the 3 harmonic scalars are late-fused after PCA — see §2.A).
+The raw scalars get their own DB columns. The 88-D sound profile (`mfcc_mean` + `mfcc_std` + `mfcc_delta` + `chroma` + `rhythm`) is packed as a `float32` LE BLOB in `play_counts.timbre`.
+However, because feature-group ablation tests showed `mfcc_delta` carries no genre signal on its own and dilutes the Euclidean metric, it is dropped from the similarity graph view.
+Thus, the similarity graph consumes a **68-dimensional graph embedding** (`GRAPH_EMBED_DIMS` = 68), which combines:
+- `mfcc_mean` (20 dimensions)
+- `mfcc_std` (20 dimensions)
+- `chroma` (12 dimensions)
+- `rhythm` (16 dimensions)
+
+Together with the 10-dimensional scalar descriptors from the DB columns, this results in a **78-dimensional build space** before SVD/PCA.
 
 #### Component details
 
-1. **52-Dimensional Timbre Profile** (packed as one `float32` LE BLOB on `play_counts.timbre`):
+1. **88-Dimensional Sound Profile** (packed as one `float32` LE BLOB on `play_counts.timbre`):
    * **MFCC Mean (20 dimensions)**: Average spectral envelope of the HPSS-harmonic component (cleaner timbre; no kick-drum bleed into the mel cepstrum).
-   * **MFCC Δ-Mean (20 dimensions)**: First-order temporal derivative of MFCC, averaged across frames. Captures *how* timbre evolves; strictly more informative than raw standard deviation.
+   * **MFCC std (20 dimensions)**: Standard deviation of MFCC coefficients across frames, capturing timbral spread/dispersion over time.
+   * **MFCC Δ-Mean (20 dimensions)**: First-order temporal derivative of MFCC, averaged across frames. Captures *how* timbre evolves (excluded from graph traversal/similarity edges).
    * **Chroma Pitch Profile (12 dimensions)**: Pitch-class profile of the HPSS-harmonic component; the basis for both the harmonic-similarity score and the Krumhansl–Schmuckler key estimate.
+   * **Rhythm Profile (16 dimensions)**: Groove descriptors derived from the HPSS-percussive onset envelope (full-band, low-band, and high-band beat-relative tempogram rates, onset density, ratio, and pulse clarity).
 
 2. **10-Dimensional Scalar Descriptors** (assembled during edge building):
    * **log_bpm**: Log2 of the estimated BPM, reflecting multiplicative/octave-based tempo perception.
@@ -127,20 +147,20 @@ Implementation is in `StreamripApp/utils/dsp.py` (`_hpss`, `_median_filter_axis`
 The backend [DatabaseManager](file:///Users/chrismitsacopoulos/Desktop/Mai-An-Lab/StreamripApp/utils/db_manager.py) and [track_graph.py](file:///Users/chrismitsacopoulos/Desktop/Mai-An-Lab/StreamripApp/utils/track_graph.py) build a sparse $k$-NN database table (`track_neighbors`) split into two distinct tiers.
 
 ### A. The Acoustic Similarity Tier (`edge_kind = 'acoustic'`)
-The engine loads every track with a current-version feature BLOB and assembles a feature row from the 52-D timbre vector plus the scalar descriptors that survive covariance cleaving.
+The engine loads every track with a current-version feature BLOB and assembles a feature row from the 68-D graph embedding block plus the scalar descriptors that survive covariance cleaving.
 
-* **Covariance cleaving (centrality).** A Pearson-correlation pass over the continuous raw scalars (`bpm`, `brightness`, `energy`, `rolloff`, `beat_strength`, `spectral_flatness`, `spectral_contrast`) removes redundant ones: within any group correlating at $|r| \ge 0.70$, the feature with the highest mean $|r|$ to the group — its best representative — is kept and the rest dropped. The harmonic coords `cos_h`/`sin_h`/`key_mode` are structural and always kept (they are late-fused after PCA — see below). The surviving scalars are appended to the 52-D timbre block (≈60-D on a typical library).
+* **Covariance cleaving (centrality).** A Pearson-correlation pass over the continuous raw scalars (`bpm`, `brightness`, `energy`, `rolloff`, `beat_strength`, `spectral_flatness`, `spectral_contrast`) removes redundant ones: within any group correlating at $|r| \ge 0.70$, the feature with the highest mean $|r|$ to the group — its best representative — is kept and the rest dropped. The harmonic coords `cos_h`/`sin_h`/`key_mode` are structural and always kept (they are late-fused after PCA — see below). The surviving scalars are appended to the 68-D graph embedding block (≈75-D on a typical library).
 
 * **Standardisation (Z-Scoring)**; putting every feature on a common ruler. Each column is centred on mean 0 and scaled to unit standard deviation:
   $$Z_{ij} = \frac{X_{ij} - \mu_j}{\sigma_j}$$
   so every feature contributes proportionally to its *spread across the library*. The per-column $\mu$/$\sigma$ are persisted with the projection so any new or exemplar track projects identically.
 
-* **Scalar Boosting**: after scaling, the non-harmonic scalar columns are multiplied by `scalar_weight = 1.5` so tempo and dynamics carry weight comparable to the 52 individual timbre axes. The harmonic columns (`cos_h`, `sin_h`, `key_mode`) are **not** boosted here — they are handled separately by the late-fusion step below.
+* **Scalar Boosting**: after scaling, the non-harmonic scalar columns are multiplied by `scalar_weight = 1.5` so tempo and dynamics carry weight comparable to the 68 individual graph embedding axes. The harmonic columns (`cos_h`, `sin_h`, `key_mode`) are **not** boosted here — they are handled separately by the late-fusion step below.
 
 * **Late Fusion PCA reduction (Kaiser).** The harmonic unit-circle coordinates (`cos_h`, `sin_h`, `key_mode`) encode the rigid Camelot wheel geometry. Because PCA is a global linear rotation, running SVD on these columns would destroy the geometric integrity of the 12-hour circle. The engine therefore uses a **Late Fusion** strategy:
-  1. The z-scored feature matrix is **split** into a continuous block (52-D timbre + surviving non-harmonic scalars, ~59-D) and a harmonic block (3-D: `cos_h`, `sin_h`, `key_mode`), each z-scored with its own $\mu$/$\sigma$.
-  2. A thin SVD reduces **only the continuous block** to the components with eigenvalue $> 1$ (Kaiser; floored at 3), giving $Z_{r,\text{cont}}$ (~18-D). $Z_{r,\text{cont}}$ is kept **un-normalised**: Euclidean distance here preserves magnitude — how far a track sits from the library's "average" — which is real perceptual signal.
-  3. The raw z-scored harmonic coordinates are multiplied by `harmonic_weight = 1.5` and **concatenated** back onto $Z_{r,\text{cont}}$, producing the final unified coordinate space $Z_r$ (~21-D).
+  1. The z-scored feature matrix is **split** into a continuous block (68-D graph embedding + surviving non-harmonic scalars, ~75-D) and a harmonic block (3-D: `cos_h`, `sin_h`, `key_mode`), each z-scored with its own $\mu$/$\sigma$.
+  2. A thin SVD reduces **only the continuous block** to the components with eigenvalue $> 1$ (Kaiser; floored at 3), giving $Z_{r,\text{cont}}$ (typically ~20-D to 30-D). $Z_{r,\text{cont}}$ is kept **un-normalised**: Euclidean distance here preserves magnitude — how far a track sits from the library's "average" — which is real perceptual signal.
+  3. The raw z-scored harmonic coordinates are multiplied by `harmonic_weight = 1.5` and **concatenated** back onto $Z_{r,\text{cont}}$, producing the final unified coordinate space $Z_r$ (typically ~23-D to 33-D).
 
   This guarantees that Euclidean distance in $Z_r$ matches perfect-fifth compatibility on the Camelot clock with 100% fidelity, while PCA still denoises the high-dimensional timbre and dynamics axes. The projection ($\mu_{\text{cont}}$, $\sigma_{\text{cont}}$, $\mu_{\text{harm}}$, $\sigma_{\text{harm}}$, surviving-feature list, $V_{\text{keep}}$, `harmonic_weight`) and every track's $Z_r$ coordinates are persisted in `pca_space` / `play_counts.pca_coords`; this single geometry drives the walk and clustering.
 
@@ -188,13 +208,15 @@ When the same track appears in two tiers (e.g. an acoustic neighbour that's also
 
 ### 3.2 Score; composite logit
 
-The per-candidate logit is a composite of three terms computed before the softmax:
+The per-candidate logit is a composite of edge affinity, metadata fusion, diversity, negative feedback, and community constraint penalties computed before the softmax:
 
-$$\text{logit}_c = \underbrace{w_c \cdot \mu_{\text{tier}} \cdot \mathbf{penalty}_{\text{comm}}}_\text{effective edge weight} - \underbrace{\lambda_{\text{MMR}} \cdot \max_{v \in \text{visited}} \cos(e_c, e_v)}_\text{diversity penalty} - \underbrace{\lambda_{\text{neg}} \cdot \max_{r \in \text{rejected}} \cos(e_c, e_r)}_\text{negative-centroid penalty}$$
+$$\text{logit}_c = \Big( \big( w_c \cdot \mu_{\text{tier}(c)} \cdot (1 + \lambda_{\text{meta}} \cdot S_{\text{meta}}) \big) - \lambda_{\text{MMR\_eff}} \cdot \max_{v \in \text{visited}} \cos(e_c, e_v) - \lambda_{\text{neg}} \cdot \max_{r \in \text{rejected}} \cos(e_c, e_r) \Big) \cdot \mathbf{penalty}_{\text{comm}}$$
 
-where the community constraint scales the effective weight:
+where the community constraint scales the entire logit:
 
 $$\mathbf{penalty}_{\text{comm}} = \begin{cases} 1.0 & \text{if } \text{community}_c = \text{community}_{\text{current}} \text{ or either is None} \\ 1 - \lambda_{\text{comm}} & \text{if } \text{community}_c \neq \text{community}_{\text{current}} \end{cases}$$
+
+Here, $\lambda_{\text{comm}}$ corresponds to the parameter `cluster_lambda` in the walker signature (default 0.5), which penalizes transitions into different Louvain modularity communities.
 
 | Term | Default | Purpose |
 |---|---|---|
@@ -210,11 +232,11 @@ $$p_i = \frac{e^{\text{logit}_i / \tau}}{\sum_j e^{\text{logit}_j / \tau}}$$
 
 A single flat temperature $\tau$ governs the whole walk (default 0.04; small → near-greedy, large → near-uniform). Before exponentiating, each node's logits are **z-standardised** (subtract mean, divide by std) so $\tau$ has the same meaning everywhere regardless of how that node's candidate affinities are spread; the code also subtracts $\max_j$ for numerical stability (softmax is shift-invariant).
 
-The **MMR diversity penalty** (Maximal Marginal Relevance) is the first subtractive term in the composite logit. For each candidate $c$ we compute its maximum cosine to anything already in the walk:
+The **MMR diversity penalty** (Maximal Marginal Relevance) is the subtractive term in the composite logit. For each candidate $c$ we compute its maximum cosine to anything already in the walk:
 
-$$\text{logit}_c \mathrel{-}= \lambda \cdot \max_{v \in \text{visited}} \cos(\text{timbre}_c, \text{timbre}_v)$$
+$$\text{logit}_c \mathrel{-}= \lambda_{\text{MMR\_eff}} \cdot \max_{v \in \text{visited}} \cos(\text{timbre}_c, \text{timbre}_v)$$
 
-with $\lambda = 0.15$ by default, decaying as $\lambda/(1+\text{step})$. If candidate $c$ sounds very similar to a track we already added, subtract $\lambda \times$ that similarity from its logit. The walker still prefers candidates similar to the *seed* (high affinity via the edge) but inside that pool prefers candidates that are *different from each other* — a small sliver of seed-similarity traded for more variety across repeated *play similar* calls from the same seed.
+with $\lambda_{\text{MMR\_eff}} = 0.15 / (1 + \text{step})$ by default. If candidate $c$ sounds very similar to a track we already added, subtract $\lambda \times$ that similarity from its logit. The walker still prefers candidates similar to the *seed* (high affinity via the edge) but inside that pool prefers candidates that are *different from each other* — a small sliver of seed-similarity traded for more variety across repeated *play similar* calls from the same seed.
 
 ### 3.4 Sample; Personalised-PageRank restart
 
@@ -233,7 +255,7 @@ That $\alpha$ fraction is the **anchor**. Without it, the walker's distance from
 ### 3.6 Louvain Community Walker Constraint
 
 To keep walks within cohesive sonic boundaries and stop them drifting across major genre divisions, the walker applies a soft community penalty.
-At each step, candidates in a different Louvain community (§2.C) from the current track have their effective weights multiplied by $(1 - \lambda_{\text{comm}})$:
+At each step, candidates in a different Louvain community (§2.C) from the current track have their effective weights multiplied by $(1 - \lambda_{\text{comm}})$ (implemented via `cluster_lambda` in the signature):
 
 $$\text{effective\_weight} \leftarrow \text{effective\_weight} \times (1 - \lambda_{\text{comm}})$$
 
@@ -264,21 +286,28 @@ fn walk(seed, length, kinds, weights, α, λ_mmr, λ_neg, τ, avoid, teleport, c
             if current ≠ teleport: current = teleport; continue
             else: break
 
-        # 3.6: Louvain community constraint
-        curr_comm = community_map.get(current)
-        for c in candidates:
-            c_comm = community_map.get(c.path)
-            if curr_comm is not None and c_comm is not None and c_comm != curr_comm:
-                c.effective_weight *= (1 - λ_comm)
-
-        # 3.2: composite logit
+        # 3.2: composite logit calculation
+        # Base weights/affinity + metadata fusion boost
         logits = [c.effective_weight for c in candidates]
-        if λ_mmr > 0 and visited_embs:
+        if meta_active:
             for i, c in enumerate(candidates):
-                logits[i] -= λ_mmr * max(cos(emb(c), v) for v in visited_embs)
+                logits[i] *= (1.0 + λ_meta * meta_score(current, c.path))
+
+        # Additive diversity (MMR) & negative centroid penalties
+        λ_mmr_eff = λ_mmr / (1.0 + step)
+        if λ_mmr_eff > 0 and visited_embs:
+            for i, c in enumerate(candidates):
+                logits[i] -= λ_mmr_eff * max(cos(emb(c), v) for v in visited_embs)
         if λ_neg > 0 and neg_embs:
             for i, c in enumerate(candidates):
                 logits[i] -= λ_neg * max(cos(emb(c), r) for r in neg_embs)
+
+        # 3.6: Louvain community constraint applied to final logit
+        curr_comm = community_map.get(current)
+        for i, c in enumerate(candidates):
+            c_comm = community_map.get(c.path)
+            if curr_comm is not None and c_comm is not None and c_comm != curr_comm:
+                logits[i] *= (1 - λ_comm)
 
         # 3.3: flat-temperature softmax over per-node z-standardised logits
         probs  = softmax(zstandardise(logits) / τ)
@@ -442,7 +471,7 @@ The unified coordinate space $Z_r$ (§2.A) is the engine's single projection. `b
 
 ### 8.1 Projecting a new track
 
-`project_to_zr(row, projection)` places any track absent from the last build — a new import, or an islet exemplar — into that same space. It replicates the Late Fusion split from §2.A: assemble the 52-D timbre + surviving scalars, split off the harmonic columns, z-score each part with its own persisted $\mu$/$\sigma$, apply the ×1.5 scalar boost to the continuous scalars, project the continuous part through $V_{\text{keep}}$, then concatenate the raw weighted harmonics: $Z_r = [z_{\text{cont}} \cdot V_{\text{keep}} \;|\; z_{\text{harm}} \times w_{\text{harm}}]$. A legacy fallback handles projections saved before the late-fusion change (no `harmonic_names` in `feature_spec`).
+`project_to_zr(row, projection)` places any track absent from the last build — a new import, or an islet exemplar — into that same space. It replicates the Late Fusion split from §2.A: assemble the 68-D graph embedding timbre block + surviving scalars, split off the harmonic columns, z-score each part with its own persisted $\mu$/$\sigma$, apply the ×1.5 scalar boost to the continuous scalars, project the continuous part through $V_{\text{keep}}$, then concatenate the raw weighted harmonics: $Z_r = [z_{\text{cont}} \cdot V_{\text{keep}} \;|\; z_{\text{harm}} \times w_{\text{harm}}]$. A legacy fallback handles projections saved before the late-fusion change (no `harmonic_names` in `feature_spec`).
 
 ### 8.2 On-Device Mathematical Truth Report
 

@@ -31,6 +31,9 @@ class DatabaseManager:
         # Caches to speed up indexing: (name) -> id or (artist_id, title) -> id
         self._artist_cache: dict[str, int] = {}
         self._album_cache: dict[tuple[int, str], int] = {}
+        # Load-once cache for the persisted NPMI genre-similarity model so the
+        # walk reads it from memory after a single DB hit (rebuilt at graph gen).
+        self._genre_affinity_cache: dict | None = None
 
     def clear_caches(self):
         """Clears the in-memory metadata caches. Call when DB state changes significantly."""
@@ -59,6 +62,7 @@ class DatabaseManager:
             await self._migrate_partitions(self._conn)
             await self._migrate_pca(self._conn)
             await self._migrate_clusters(self._conn)
+            await self._migrate_enrichment(self._conn)
         return self._conn
 
     async def get_total_tracks(self) -> int:
@@ -2000,6 +2004,213 @@ class DatabaseManager:
         ) as cursor:
             row = await cursor.fetchone()
             return int(row[0]) if row and row[0] is not None else None
+
+    # ── Artist metadata enrichment (provenance / fine genre) ──────────────────
+    # A standalone cache table: external lookups (MusicBrainz etc.) keyed by
+    # artist name. Deliberately a *new* table — never an ALTER on tracks/albums —
+    # so shipping this to an existing phone DB only creates an empty table and
+    # NEVER touches acoustic features, pca_coords or neighbours (no recompute).
+    async def _migrate_enrichment(self, conn):
+        """Idempotent migration: create the artist_enrichment cache table.
+
+        Purely additive. `CREATE TABLE IF NOT EXISTS` is a no-op on a DB that
+        already has it and harmless on one that doesn't, so an upgrade install
+        can never break or force a re-analysis of the existing library."""
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS artist_enrichment (
+                artist_name TEXT PRIMARY KEY COLLATE NOCASE,
+                mbid        TEXT,
+                country     TEXT,
+                area        TEXT,
+                genres      TEXT,     -- JSON: [{"name": str, "count": int}, ...]
+                source      TEXT,     -- e.g. 'musicbrainz'
+                score       INTEGER,  -- match confidence (0-100) from the search
+                status      TEXT,     -- 'ok' | 'lowconfidence' | 'notfound' | 'error'
+                fetched_at  REAL
+            )
+        ''')
+        # NPMI genre-similarity model, precomputed at graph generation and read
+        # by the walk's metadata gate. Single-row JSON blob (small + atomic),
+        # mirroring pca_space. Additive: harmless on a DB that predates it.
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS genre_affinity (
+                id         INTEGER PRIMARY KEY CHECK (id = 1),
+                model      TEXT NOT NULL,   -- JSON {"a|b": npmi, ...}, a < b
+                updated_at REAL NOT NULL
+            )
+        ''')
+        await conn.commit()
+
+    async def get_artist_enrichment(self, name: str) -> dict | None:
+        """Lock-free read of one artist's cached enrichment, or None if absent.
+        `genres` is decoded back to a list; other columns pass through."""
+        if not name:
+            return None
+        conn = await self.get_connection()
+        async with conn.execute(
+            "SELECT artist_name, mbid, country, area, genres, source, score, status, fetched_at "
+            "FROM artist_enrichment WHERE artist_name = ?",
+            (name,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if not row:
+            return None
+        out = dict(row)
+        try:
+            out["genres"] = json.loads(out["genres"]) if out["genres"] else []
+        except Exception:
+            out["genres"] = []
+        return out
+
+    async def upsert_artist_enrichment(
+        self, artist_name: str, *, mbid: str | None = None,
+        country: str | None = None, area: str | None = None,
+        genres=None, source: str = "musicbrainz",
+        score: int | None = None, status: str = "ok",
+    ) -> None:
+        """Mutation: insert/replace one artist's enrichment row. `genres` may be a
+        list (stored as JSON) or None. One row per artist; cheap to re-run."""
+        genres_text = json.dumps(genres) if genres is not None else None
+        async with self._write_lock:
+            conn = await self.get_connection()
+            await conn.execute('''
+                INSERT OR REPLACE INTO artist_enrichment
+                    (artist_name, mbid, country, area, genres, source, score, status, fetched_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, strftime('%s','now'))
+            ''', (artist_name, mbid, country, area, genres_text, source, score, status))
+            await conn.commit()
+
+    async def get_artists_needing_enrichment(
+        self, limit: int | None = None, include_failed: bool = False,
+    ) -> list[str]:
+        """Lock-free read: distinct artist names that have no cached enrichment
+        yet (or, with include_failed, also those whose last attempt errored /
+        wasn't found). Drives the batch enrichment pass."""
+        conn = await self.get_connection()
+        if include_failed:
+            sql = (
+                "SELECT a.name FROM artists a "
+                "LEFT JOIN artist_enrichment e ON e.artist_name = a.name "
+                "WHERE e.artist_name IS NULL OR e.status IN ('error', 'notfound') "
+                "ORDER BY a.track_count DESC"
+            )
+        else:
+            sql = (
+                "SELECT a.name FROM artists a "
+                "LEFT JOIN artist_enrichment e ON e.artist_name = a.name "
+                "WHERE e.artist_name IS NULL "
+                "ORDER BY a.track_count DESC"
+            )
+        if limit is not None:
+            sql += f" LIMIT {int(limit)}"
+        async with conn.execute(sql) as cursor:
+            rows = await cursor.fetchall()
+        return [r[0] for r in rows if r[0]]
+
+    async def get_artist_meta_for_paths(self, paths: list[str]) -> dict:
+        """Lock-free read powering the walk's metadata-fusion gate. Returns
+        {path: {'artist', 'country', 'genres'}} where `genres` is a frozenset of
+        canonicalised genre tokens (possibly empty). Paths whose artist has no
+        enrichment row still come back with artist + empty provenance, so the
+        caller can apply the same-artist exclusion. Chunked to stay under
+        SQLite's bound-variable limit."""
+        if not paths:
+            return {}
+        conn = await self.get_connection()
+        out: dict = {}
+        CHUNK = 400
+        for i in range(0, len(paths), CHUNK):
+            chunk = paths[i:i + CHUNK]
+            placeholders = ",".join("?" * len(chunk))
+            sql = (
+                "SELECT t.path AS path, ar.name AS artist, "
+                "e.country AS country, e.genres AS genres "
+                "FROM tracks t "
+                "JOIN albums al ON al.id = t.album_id "
+                "JOIN artists ar ON ar.id = al.artist_id "
+                "LEFT JOIN artist_enrichment e ON e.artist_name = ar.name "
+                f"WHERE t.path IN ({placeholders})"
+            )
+            async with conn.execute(sql, chunk) as cursor:
+                for row in await cursor.fetchall():
+                    toks = set()
+                    if row["genres"]:
+                        try:
+                            for g in json.loads(row["genres"]):
+                                tk = "".join(
+                                    c for c in (g.get("name", "") or "").lower()
+                                    if c.isalnum()
+                                )
+                                if tk:
+                                    toks.add(tk)
+                        except Exception:
+                            pass
+                    out[row["path"]] = {
+                        "artist": row["artist"],
+                        "country": row["country"],
+                        "genres": frozenset(toks),
+                    }
+        return out
+
+    async def get_all_artist_genre_sets(self) -> list:
+        """Lock-free read: one canonicalised genre-token set per enriched artist,
+        the co-occurrence corpus for the NPMI genre model. Empty sets dropped."""
+        conn = await self.get_connection()
+        out: list = []
+        async with conn.execute(
+            "SELECT genres FROM artist_enrichment "
+            "WHERE genres IS NOT NULL AND status IN ('ok', 'lowconfidence')"
+        ) as cursor:
+            for (genres,) in await cursor.fetchall():
+                toks = set()
+                try:
+                    for g in json.loads(genres or "[]"):
+                        tk = "".join(
+                            c for c in (g.get("name", "") or "").lower()
+                            if c.isalnum()
+                        )
+                        if tk:
+                            toks.add(tk)
+                except Exception:
+                    pass
+                if toks:
+                    out.append(toks)
+        return out
+
+    async def save_genre_affinity(self, model: dict) -> None:
+        """Mutation: persist the NPMI genre model (single-row JSON) + refresh the
+        in-memory cache. Called at graph generation."""
+        model = model or {}
+        async with self._write_lock:
+            conn = await self.get_connection()
+            await conn.execute(
+                "INSERT OR REPLACE INTO genre_affinity (id, model, updated_at) "
+                "VALUES (1, ?, strftime('%s','now'))",
+                (json.dumps(model),),
+            )
+            await conn.commit()
+        self._genre_affinity_cache = model
+        logger.info("Genre affinity model persisted (%d pairs).", len(model))
+
+    async def get_genre_affinity(self) -> dict:
+        """Lock-free read of the persisted NPMI genre model, memoised after the
+        first hit (it's rebuilt — and the cache refreshed — only at graph gen).
+        Returns {} when unset, which makes soft_set_sim degrade to Dice."""
+        if self._genre_affinity_cache is not None:
+            return self._genre_affinity_cache
+        conn = await self.get_connection()
+        model: dict = {}
+        async with conn.execute(
+            "SELECT model FROM genre_affinity WHERE id = 1"
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row and row[0]:
+            try:
+                model = json.loads(row[0])
+            except Exception:
+                model = {}
+        self._genre_affinity_cache = model
+        return model
 
     async def get_track_clusters_bulk(
         self, paths: list[str]

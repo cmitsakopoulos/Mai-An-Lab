@@ -674,7 +674,7 @@ async def build_acoustic_edges(
     # The graph — and the Louvain communities + similarity walk built on it —
     # uses every feature that survives the unsupervised PCA / Pearson-covariance
     # analysis. Collinear scalars (e.g. rolloff ↔ brightness) are cleaved so
-    # they don't double-count toward distance. The 52-D timbre block and the
+    # they don't double-count toward distance. The 68-D graph embedding timbre block and the
     # harmonic unit-circle coords (cos_h/sin_h) are structural and always kept;
     # only the raw scalar descriptors are subject to cleaving.
     from utils.pca_engine import redundant_raw_features
@@ -711,7 +711,7 @@ async def build_acoustic_edges(
     # The harmonic unit-circle coords (cos_h, sin_h, key_mode) encode the
     # rigid Camelot wheel geometry. SVD rotates *all* axes into mixed PCs,
     # which destroys that geometric integrity. Late Fusion keeps them out of
-    # the PCA entirely: the SVD denoises only the ~58-D timbre+dynamics, and
+    # the PCA entirely: the SVD denoises only the ~75-D timbre+dynamics, and
     # the raw harmonic coordinates are concatenated back after projection.
     harmonic_names_in_surviving = [s for s in surviving if s in _HARMONIC_SCALARS]
     harm_col_indices = []   # column indices in X that are harmonic
@@ -915,7 +915,38 @@ async def build_acoustic_edges(
             "track_graph: skipping community detection (N=%d < 6)", N,
         )
 
+    # ── Genre-similarity model (NPMI 'genre-BLOSUM') ───────────────────────
+    # Precompute + persist from the artist enrichment cache so the walk's
+    # metadata gate loads it instead of rebuilding it each session. Non-fatal:
+    # no enrichment → empty model → the walk's genre term degrades to Dice.
+    try:
+        await build_genre_affinity(db_manager)
+    except Exception as gerr:
+        logger.warning("track_graph: genre affinity build skipped (%s)", gerr)
+
     return len(edges)
+
+
+async def build_genre_affinity(db_manager) -> int:
+    """(Re)build + persist the NPMI genre-similarity model from the artist
+    enrichment cache, so the walk's metadata gate loads a precomputed model
+    rather than recomputing it per session. Returns the number of genre pairs
+    stored — a graceful 0 when the backend lacks the enrichment accessors (test
+    fakes) or there's no enrichment yet."""
+    if not (
+        hasattr(db_manager, "get_all_artist_genre_sets")
+        and hasattr(db_manager, "save_genre_affinity")
+    ):
+        return 0
+    from utils.genre_similarity import build_npmi_model
+    token_sets = await db_manager.get_all_artist_genre_sets()
+    model = build_npmi_model(token_sets)
+    await db_manager.save_genre_affinity(model)
+    logger.info(
+        "track_graph: genre affinity model built (%d pairs from %d tagged artists)",
+        len(model), len(token_sets),
+    )
+    return len(model)
 
 
 async def build_metadata_edges(
@@ -1062,6 +1093,7 @@ async def walk(
     teleport_path: Optional[str] = None,
     prefetch_k: int = 40,
     cluster_lambda: float = 0.5,
+    meta_lambda: float = 0.35,
 ) -> list[str]:
     """Personalised-PageRank-flavoured random walk over the track graph.
 
@@ -1117,10 +1149,19 @@ async def walk(
         prefetch. Default 40 (full quality). Pass 20 for the cheap Play
         Similar path; the graph is still well-connected at that depth.
     cluster_lambda : penalty for cross-cluster transitions. At each step,
-        candidates in a different K-Means cluster from the current node
+        candidates in a different Louvain community from the current node
         have their effective weight multiplied by (1 - cluster_lambda).
         0 disables the constraint; 0.5 (default) halves the logit;
         1.0 would hard-block (not recommended).
+    meta_lambda : strength of the enriched-metadata gate. Each candidate's
+        affinity is multiplied by (1 + meta_lambda * S_meta) where
+        S_meta = 0.5*same-country + 0.5*cross-artist genre-Jaccard, nudging
+        the walk toward same-provenance / genre-sharing tracks WITHOUT
+        trapping on one artist (the genre term is zeroed for same-artist
+        pairs because the enriched genre set is artist-level). 0 disables it;
+        it also self-disables when the DB has no enrichment, or when the
+        backend lacks `get_artist_meta_for_paths` (test fakes). Tuned to 0.35
+        in tools/eval_metadata_fusion.py.
 
     Returns
     -------
@@ -1188,6 +1229,57 @@ async def walk(
             for n in nbrs:
                 cid = n.get("cluster_id")
                 cluster_map[n["path"]] = int(cid) if cid is not None else None
+
+    # ── Metadata fusion map (provenance + cross-artist genre) ─────────────
+    # A low-weight gate nudging the walk toward same-country / genre-sharing
+    # tracks without trapping on one artist. The genre term is zeroed for
+    # same-artist pairs because the enriched genre set is artist-level (constant
+    # within an artist → it would act as an artist-identity signal and trap;
+    # see tools/eval_metadata_fusion.py). Self-disables when there's no
+    # enrichment, or on backends without the batched accessor (test fakes).
+    from utils.genre_similarity import soft_set_sim
+    meta_active = meta_lambda > 0.0 and hasattr(
+        db_manager, "get_artist_meta_for_paths"
+    )
+    meta_map: dict[str, dict] = {}
+    genre_model: dict = {}
+    if meta_active:
+        meta_paths = {seed_path}
+        for nbrs in horizon.values():
+            for n in nbrs:
+                meta_paths.add(n["path"])
+        try:
+            meta_map = await db_manager.get_artist_meta_for_paths(list(meta_paths))
+        except Exception:
+            meta_map = {}
+        # Nothing to gate on (no country/genre anywhere) → skip the term.
+        if not any(m.get("country") or m.get("genres") for m in meta_map.values()):
+            meta_active = False
+        elif hasattr(db_manager, "get_genre_affinity"):
+            # Load-once the precomputed NPMI model (rebuilt at graph gen). With
+            # an empty model soft_set_sim degrades to Dice, so this is safe.
+            try:
+                genre_model = await db_manager.get_genre_affinity()
+            except Exception:
+                genre_model = {}
+
+    def _meta_score(a_path: str, b_path: str) -> float:
+        ma = meta_map.get(a_path)
+        mb = meta_map.get(b_path)
+        if not ma or not mb:
+            return 0.0
+        ca, cb = ma.get("country"), mb.get("country")
+        cty = 1.0 if (ca and ca == cb) else 0.0
+        aa, ab = ma.get("artist"), mb.get("artist")
+        if aa and aa == ab:
+            gx = 0.0  # cross-artist only — within-artist genre is degenerate
+        else:
+            gx = soft_set_sim(
+                ma.get("genres") or frozenset(),
+                mb.get("genres") or frozenset(),
+                genre_model,
+            )
+        return 0.5 * cty + 0.5 * gx
 
     # ── MMR setup ─────────────────────────────────────────────────────────
     # Pull embeddings for the seed + any node we might reach in two hops.
@@ -1297,6 +1389,11 @@ async def walk(
         logits = np.empty(len(cands), dtype=np.float32)
         for i, c in enumerate(cands):
             eff = float(c["_eff"])
+            # Metadata gate: a multiplicative boost on the positive affinity
+            # base, applied BEFORE the additive diversity/negative penalties so
+            # it can never invert their sign.
+            if meta_active:
+                eff *= 1.0 + meta_lambda * _meta_score(current, c["path"])
             cand_emb: Optional[np.ndarray] = None
             if diversity_active or neg_active:
                 cand_emb = candidate_embs.get(c["path"])
