@@ -623,14 +623,14 @@ def plot_pca_report(
 # majority co-tags ("Pop, Rock, Metal" → Metal).
 _GENRE_RULES = [
     ("Classical",  ("classical", "classique")),
-    ("Hip-Hop",    ("rap", "hip hop", "hip-hop", "hiphop", "trap", "хип", "рэп")),
+    ("Hip-Hop",    ("rap", "hip hop", "hip-hop", "hiphop", "trap", "хип", "рэп", "grime")),
     ("Electronic", ("électron", "electron", "électro", "house", "techno",
-                    "dance", "edm", "trance", "drum & bass", "dnb")),
-    ("Folk/Cntry", ("folk", "country", "blues", "bluegrass", "americana")),
+                    "dance", "edm", "trance", "drum & bass", "dnb", "coldwave", "synth", "wave")),
+    ("Folk/Cntry", ("folk", "country", "blues", "bluegrass", "americana", "laika", "λαϊκά", "rebetiko", "world", "musiques du monde")),
     ("Soul/R&B",   ("soul", "r&b", "funk", "rnb", "motown")),
     ("Metal",      ("metal", "métal", "hard rock", "grunge")),
     ("Rock/Alt",   ("rock", "alternatif", "alternative", "indé", "indie",
-                    "punk", "new wave", "рок")),
+                    "punk", "new wave", "рок", "post-punk")),
     ("Pop",        ("pop", "поп")),
 ]
 

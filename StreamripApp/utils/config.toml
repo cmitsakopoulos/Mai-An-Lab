@@ -210,9 +210,12 @@ custom_presets = {}
 [haptics]
 # Enable tactile haptic feedback for user gestures (Android/iOS only)
 haptic_feedback_enabled = true
-# Vibration intensities for specific gestures: "none", "light", "medium", "heavy"
+# Vibration intensities for specific gestures: "none", "light", "medium", "heavy", "selection", "vibrate"
 eq_drag_intensity = "light"
 swipe_queue_intensity = "medium"
 swipe_dismiss_intensity = "medium"
 long_press_intensity = "heavy"
+network_tap_intensity = "selection"
+network_reseed_intensity = "medium"
+network_walk_intensity = "light"
 

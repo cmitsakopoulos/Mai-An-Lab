@@ -2234,3 +2234,93 @@ class DatabaseManager:
                     out[r[0]] = int(cid) if cid is not None else None
         return out
 
+    async def fix_and_normalize_track_genres(self) -> dict:
+        """Fix, back-fill, and normalize track genres using API artist metadata
+        and canonical genre rules (pca_engine.genre_bucket).
+
+        - Tracks with missing/empty/Unknown/Other genres are back-filled from
+          artist_enrichment.genres (MusicBrainz API tags).
+        - Unnormalized raw genre strings (e.g. 'hip hop', 'rap', 'classique') are
+          normalized to their canonical bucket ('Hip-Hop', 'Electronic', 'Classical', etc.).
+
+        Returns summary dict: {'scanned': N, 'updated': N, 'backfilled': N, 'normalized': N}.
+        """
+        from utils.pca_engine import genre_bucket
+        conn = await self.get_connection()
+
+        sql = (
+            "SELECT al.id AS album_id, al.genre AS current_genre, ar.name AS artist_name, "
+            "e.genres AS api_genres "
+            "FROM albums al "
+            "JOIN artists ar ON ar.id = al.artist_id "
+            "LEFT JOIN artist_enrichment e ON e.artist_name = ar.name"
+        )
+
+        async with conn.execute(sql) as cursor:
+            rows = await cursor.fetchall()
+
+        updates: list[tuple[str, int]] = []  # [(new_genre, album_id), ...]
+        backfilled_count = 0
+        normalized_count = 0
+
+        for row in rows:
+            album_id = row["album_id"]
+            curr_genre = (row["current_genre"] or "").strip()
+            api_genres_raw = row["api_genres"]
+
+            target_genre = None
+
+            # Parse API genres list if present
+            api_tags = []
+            if api_genres_raw:
+                try:
+                    parsed = json.loads(api_genres_raw)
+                    if isinstance(parsed, list):
+                        api_tags = [g.get("name") for g in parsed if isinstance(g, dict) and g.get("name")]
+                except Exception:
+                    pass
+
+            curr_bucket = genre_bucket(curr_genre) if curr_genre else "Unknown"
+
+            if curr_bucket in ("Unknown", "Other") or not curr_genre:
+                # Try to derive canonical genre from API tags
+                derived = None
+                for tag in api_tags:
+                    b = genre_bucket(tag)
+                    if b not in ("Unknown", "Other"):
+                        derived = b
+                        break
+                if not derived and api_tags:
+                    derived = api_tags[0].title()
+
+                if derived and derived != curr_genre:
+                    target_genre = derived
+                    backfilled_count += 1
+            else:
+                # Normalize existing genre if genre_bucket refined it
+                if curr_bucket != curr_genre:
+                    target_genre = curr_bucket
+                    normalized_count += 1
+
+            if target_genre and target_genre != curr_genre:
+                updates.append((target_genre, album_id))
+
+        if updates:
+            async with self._write_lock:
+                conn = await self.get_connection()
+                await conn.executemany(
+                    "UPDATE albums SET genre = ? WHERE id = ?",
+                    updates,
+                )
+                await conn.commit()
+
+        summary = {
+            "scanned": len(rows),
+            "updated": len(updates),
+            "backfilled": backfilled_count,
+            "normalized": normalized_count,
+        }
+        logger.info("fix_and_normalize_track_genres: %s", summary)
+        return summary
+
+

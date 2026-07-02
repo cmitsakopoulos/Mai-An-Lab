@@ -53,6 +53,11 @@ _GENRE_ALIASES: dict[str, tuple[str, str]] = {
     "drumnbass":      ("Electronic", "Electronic"),
     "idm":            ("Electronic", "Electronic"),
     "ebm":            ("Electronic", "Electronic"),
+    "coldwave":       ("Electronic", "Electronic"),
+    "grime":          ("Hip-Hop",    "Hip-Hop"),
+    "laika":          ("Folk/Cntry", "Folk/Cntry"),
+    "laika":          ("Folk/Cntry", "Folk/Cntry"),
+    "postpunk":       ("Rock/Alt",   "Rock/Alt"),
     "rhythmandblues": ("Soul/R&B",   "Soul/R&B"),
     "randb":          ("Soul/R&B",   "Soul/R&B"),
     "triphop":        ("Trip-Hop",   "Trip-Hop"),
@@ -253,14 +258,17 @@ class LibraryView:
         self._net_dims: tuple[int, int, int] = (0, 0, 0)  # (w, h, pad)
         self._net_canvas_obj: ft.Control | None = None    # the cv.Canvas itself
         self._net_pressed: dict | None = None     # node under last tap-down
-        self._net_drag: dict | None = None        # node grabbed for moving
         self._net_panning: bool = False           # dragging the whole graph
         self._net_pan_last: tuple[float, float] = (0.0, 0.0)
         self._net_pulse_overlay: ft.Control | None = None
         self._net_pulse_token: int = 0
         self._net_tooltip_overlay: ft.Control | None = None
-        self._network_seed_path: str | None = None  # pinned seed for Local navigation
+        self._network_seed_path: str | None = None  # pinned seed for navigation
+        self._net_selected_path: str | None = None  # focused node path
+        self._net_k_neighbors: int = 24             # neighborhood depth (12, 24, 36, 48)
+        self._net_walk_length: int = 10             # walk path length (5, 10, 15, 20)
         self._net_canvas: ft.Control | None = None
+        self._net_inspector_card: ft.Control | None = None
         # Live-tracking of the playing node. When ON, the graph recenters on the
         # active track once it falls off-screen (maps-style); the pulse always
         # follows it in place while it's a visible node. OFF lets the user
@@ -514,25 +522,21 @@ class LibraryView:
         self, rows, mode, current_path, neighbors_list, walk_paths,
     ) -> ft.Control:
         """
-        Build a fully interactive Flet Canvas graph that fits the mobile
-        viewport.  Supports tap-to-play, pan, pinch-zoom, active-track
-        glow and an info tooltip overlay.
+        Build an interactive Flet Canvas graph with modern visual feel and
+        enhanced track traversal capabilities. Supports canvas pan/zoom, node tap
+        inspection, cyan selection halos, parameter depth controls, and walk stepping.
         """
         # ── Resolve canvas dimensions from the page ────────────────────────
         avail_w = max(260, (self.page.width or 360) - 24)
-        canvas_h = int(avail_w * (1.0 if mode == 0 else 0.72))
+        canvas_h = int(avail_w * (0.85 if mode == 0 else 0.70))
         canvas_w = int(avail_w)
-        pad = 28                                   # edge padding in px
+        pad = 32                                   # edge padding in px
         self._net_dims = (canvas_w, canvas_h, pad)
         self._net_mode = mode
 
         now_playing = audio_engine.current_path or ""
         path_to_row = {r["path"]: r for r in rows if r.get("pca_coords")}
 
-        # ── Collect raw node / edge data ────────────────────────────────────
-        # Nodes carry cluster_id (community colour) and play_count (radius);
-        # edges reference endpoints by path so a live drag just moves a node and
-        # the connected edges follow.
         raw_nodes: list[dict] = []
         raw_edges: list[dict] = []     # {src, dst, weight}
 
@@ -540,19 +544,20 @@ class LibraryView:
             return s[:n] + "…" if len(s) > n else s
 
         def _mk_node(rx, ry, *, is_seed, base_radius, label, genre,
-                     play_count, path, title, artist):
+                     play_count, path, title, artist, album=None):
             return {
                 "rx": rx, "ry": ry, "path": path,
-                "title": title, "artist": artist,
+                "title": title, "artist": artist, "album": album or "",
                 "genre": genre,
                 "color": _genre_color(genre),
                 "radius": _node_radius(base_radius, play_count),
                 "is_seed": is_seed,
                 "is_now_playing": (path == now_playing),
                 "label": label,
+                "play_count": play_count or 0,
             }
 
-        if mode == 0:  # Local — seed + neighbours (navigable)
+        if mode == 0:  # Local — seed + neighbours
             seed_row = path_to_row.get(current_path) if current_path else None
             if not seed_row:
                 for r in rows:
@@ -561,14 +566,15 @@ class LibraryView:
                         break
             if seed_row:
                 sc = seed_row["pca_coords"][:2]
-                seed_title = seed_row.get("title") or "Active"
+                seed_title = seed_row.get("title") or "Active Seed"
                 raw_nodes.append(_mk_node(
-                    sc[0], sc[1], is_seed=True, base_radius=13,
+                    sc[0], sc[1], is_seed=True, base_radius=14,
                     label=_trunc(seed_title, 14),
                     genre=seed_row.get("genre"),
                     play_count=seed_row.get("play_count"),
                     path=seed_row["path"], title=seed_title,
                     artist=seed_row.get("artist") or "Unknown",
+                    album=seed_row.get("album"),
                 ))
                 for idx, n in enumerate(neighbors_list):
                     n_path = n.get("path")
@@ -578,6 +584,7 @@ class LibraryView:
                         nc = n_row["pca_coords"][:2]
                         n_title = n_row.get("title") or n.get("title") or "Neighbor"
                         n_artist = n_row.get("artist") or n.get("artist") or "Unknown"
+                        n_album = n_row.get("album") or n.get("album")
                         n_genre = n_row.get("genre")
                         n_pc = n_row.get("play_count")
                     else:
@@ -585,17 +592,18 @@ class LibraryView:
                         nc = [sc[0] + 0.8 * math.cos(theta), sc[1] + 0.8 * math.sin(theta)]
                         n_title = n.get("title") or "Neighbor"
                         n_artist = n.get("artist") or "Unknown"
+                        n_album = n.get("album")
                         n_genre = None
                         n_pc = 0
                     raw_nodes.append(_mk_node(
-                        nc[0], nc[1], is_seed=False, base_radius=8,
-                        label="",  # neighbour titles via tooltip; keeps a denser graph readable
+                        nc[0], nc[1], is_seed=False, base_radius=8.5,
+                        label="",  # neighbour labels off for graph clarity
                         genre=n_genre, play_count=n_pc,
-                        path=n_path, title=n_title, artist=n_artist,
+                        path=n_path, title=n_title, artist=n_artist, album=n_album,
                     ))
                     raw_edges.append({"src": seed_row["path"], "dst": n_path, "weight": float(n_weight)})
 
-        elif mode == 1:  # Walk — sequential path
+        elif mode == 1:  # Walk — sequential trajectory
             seed_row = path_to_row.get(current_path) if current_path else None
             if not seed_row:
                 for r in rows:
@@ -614,16 +622,17 @@ class LibraryView:
                 is_seed = (idx == 0)
                 raw_nodes.append(_mk_node(
                     c[0], c[1], is_seed=is_seed,
-                    base_radius=12 if is_seed else 7,
+                    base_radius=13 if is_seed else 8,
                     label=str(idx),
                     genre=wr.get("genre"),
                     play_count=wr.get("play_count"),
                     path=wr["path"],
                     title=wr.get("title") or f"Step {idx}",
                     artist=wr.get("artist") or "Unknown",
+                    album=wr.get("album"),
                 ))
             for i in range(len(walk_rows_ordered) - 1):
-                alpha_w = max(0.3, 0.8 - i / max(1, len(walk_rows_ordered)) * 0.5)
+                alpha_w = max(0.35, 0.85 - i / max(1, len(walk_rows_ordered)) * 0.5)
                 raw_edges.append({
                     "src": walk_rows_ordered[i]["path"],
                     "dst": walk_rows_ordered[i + 1]["path"],
@@ -631,22 +640,23 @@ class LibraryView:
                 })
 
         if not raw_nodes:
-            # Nothing to plot — drop any references to the previous canvas so a
-            # later track change can't try to move a pulse/redraw shapes that are
-            # no longer mounted (see _sync_network_now_playing).
             self._net_nodes = []
             self._net_node_by_path = {}
             self._net_edges = []
             self._net_canvas_obj = None
             self._net_pulse_overlay = None
-            # Fallback: empty label
             return ft.Container(
-                content=ft.Text(
-                    "Play a track to seed the network.",
-                    color=DIM, size=13, text_align=ft.TextAlign.CENTER,
+                content=ft.Column(
+                    [
+                        ft.Icon(ft.Icons.HUB_ROUNDED, color=apply_opacity(0.4, CYAN), size=36),
+                        ft.Text("Play a track to seed the network.", color=DIM, size=13, text_align=ft.TextAlign.CENTER),
+                    ],
+                    alignment=ft.MainAxisAlignment.CENTER,
+                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                    spacing=8,
                 ),
                 alignment=ft.Alignment(0, 0),
-                padding=32,
+                padding=40,
             )
 
         # ── Normalise raw coords → canvas pixel coords ─────────────────────
@@ -662,7 +672,6 @@ class LibraryView:
             py = pad + (ry - min_y) / range_y * (canvas_h - 2 * pad)
             return px, py
 
-        # Pixel-space node list (mutated in place by drag) + path index.
         self._net_nodes = []
         self._net_node_by_path = {}
         for n in raw_nodes:
@@ -670,19 +679,24 @@ class LibraryView:
             nd = {
                 "px": px, "py": py,
                 "path": n["path"], "title": n["title"], "artist": n["artist"],
+                "album": n.get("album", ""),
                 "color": n["color"], "radius": n["radius"],
                 "is_seed": n["is_seed"], "is_now_playing": n["is_now_playing"],
                 "genre": n["genre"], "label": n.get("label", ""),
+                "play_count": n.get("play_count", 0),
             }
             self._net_nodes.append(nd)
             self._net_node_by_path[nd["path"]] = nd
         self._net_edges = raw_edges
 
-        # Canvas shapes are emitted by _emit_net_shapes() from self._net_nodes /
-        # self._net_edges, so a live drag can cheaply regenerate them. See that
-        # method for cluster colouring, weight-scaled edges and node rendering.
+        # Auto-select initial node if none selected or invalid
+        if not self._net_selected_path or self._net_selected_path not in self._net_node_by_path:
+            if current_path and current_path in self._net_node_by_path:
+                self._net_selected_path = current_path
+            elif self._net_nodes:
+                self._net_selected_path = self._net_nodes[0]["path"]
 
-        # ── Tooltip overlay (initially hidden) ─────────────────────────────
+        # ── Tooltip overlay ────────────────────────────────────────────────
         tooltip_title = ft.Text("", color=TEXT, size=11, weight=ft.FontWeight.W_700,
                                 max_lines=1, overflow=ft.TextOverflow.ELLIPSIS, no_wrap=True)
         tooltip_artist = ft.Text("", color=DIM, size=9.5,
@@ -690,7 +704,7 @@ class LibraryView:
         tooltip_container = ft.Container(
             content=ft.Column([tooltip_title, tooltip_artist], spacing=1, tight=True),
             bgcolor=apply_opacity(0.92, SURFACE2),
-            border=ft.Border.all(1, apply_opacity(0.25, CYAN)),
+            border=ft.Border.all(1, apply_opacity(0.3, CYAN)),
             border_radius=8,
             padding=ft.Padding.symmetric(horizontal=10, vertical=6),
             visible=False,
@@ -701,7 +715,7 @@ class LibraryView:
         self._net_tooltip_title = tooltip_title
         self._net_tooltip_artist = tooltip_artist
 
-        # ── Canvas ──────────────────────────────────────────────────────────
+        # ── Canvas Control ──────────────────────────────────────────────────
         canvas = cv.Canvas(
             shapes=self._emit_net_shapes(),
             width=canvas_w,
@@ -711,13 +725,12 @@ class LibraryView:
 
         # ── Hit-test helpers ────────────────────────────────────────────────
         def _find_node_at(lx: float, ly: float) -> dict | None:
-            """Return the nearest node within tap radius, preferring seeds."""
             best, best_dist = None, float("inf")
             for nd in self._net_nodes:
                 dx = lx - nd["px"]
                 dy = ly - nd["py"]
                 dist = math.sqrt(dx * dx + dy * dy)
-                tap_radius = nd["radius"] + 14  # generous touch target
+                tap_radius = nd["radius"] + 14
                 if dist <= tap_radius and dist < best_dist:
                     best = nd
                     best_dist = dist
@@ -743,11 +756,6 @@ class LibraryView:
                 self.try_update(tooltip_container)
 
         def _on_tap_down(e):
-            # Record the pressed node + preview its tooltip. The play/reseed
-            # action fires on _on_tap (a clean tap), so a drag never triggers it.
-            # Clear any prior grab so a fresh touch always starts clean (a
-            # long-press that never produced a drag won't leave a node stuck).
-            self._net_drag = None
             lx, ly = _evt_xy(e)
             nd = _find_node_at(lx, ly)
             self._net_pressed = nd
@@ -759,20 +767,19 @@ class LibraryView:
         def _on_tap(e=None):
             nd = self._net_pressed
             if not nd:
+                _hide_tooltip_now()
                 return
-            self.page.run_task(self.app.play_track, nd["path"], ("library", None))
-            # Local mode: tapping a neighbour re-seeds the graph around it.
-            if mode == 0 and not nd["is_seed"]:
-                self._network_seed_path = nd["path"]
-                self.page.run_task(self.load_library)
-            else:
-                async def _hide_later():
-                    await asyncio.sleep(1.8)
-                    _hide_tooltip_now()
-                self.page.run_task(_hide_later)
+            # Select node and display in inspector with tactile feedback
+            self._net_selected_path = nd["path"]
+            self.app.trigger_haptic("network_tap")
+            self._redraw_net_canvas()
+            self._update_net_inspector_card()
+            async def _hide_later():
+                await asyncio.sleep(1.8)
+                _hide_tooltip_now()
+            self.page.run_task(_hide_later)
 
         def _pan_all(dx, dy):
-            # Translate the whole graph (every node) + the pulse ring overlay.
             for _nd in self._net_nodes:
                 _nd["px"] += dx
                 _nd["py"] += dy
@@ -783,55 +790,30 @@ class LibraryView:
                 self.try_update(ov)
             self._redraw_net_canvas()
 
-        def _on_long_press(e):
-            # Press-and-hold picks a node up so the following drag moves *it*
-            # (instead of panning the whole network).
-            lx, ly = _evt_xy(e)
-            nd = _find_node_at(lx, ly)
-            if nd:
-                self._net_drag = nd
-                self._net_pressed = None
-                _show_tooltip(nd, lx, ly, subtitle="moving — drag to reposition")
-
         def _on_pan_start(e):
             lx, ly = _evt_xy(e)
             self._net_pressed = None
             self._net_pan_last = (lx, ly)
-            # A node grabbed via long-press → drag moves it; otherwise pan.
-            self._net_panning = self._net_drag is None
+            self._net_panning = True
 
         def _on_pan_update(e):
             lx, ly = _evt_xy(e)
             plx, ply = self._net_pan_last
             dx, dy = lx - plx, ly - ply
             self._net_pan_last = (lx, ly)
-            nd = self._net_drag
-            if nd is not None:
-                nd["px"] = max(6.0, min(float(canvas_w - 6), lx))
-                nd["py"] = max(6.0, min(float(canvas_h - 6), ly))
-                self._redraw_net_canvas()
-                ov = self._net_pulse_overlay
-                if ov is not None and nd.get("is_now_playing"):
-                    d = (nd["radius"] + 9) * 2
-                    ov.left = nd["px"] - d / 2
-                    ov.top = nd["py"] - d / 2
-                    self.try_update(ov)
-            elif self._net_panning:
-                _pan_all(dx, dy)
+            _pan_all(dx, dy)
 
         def _on_pan_end(e):
-            self._net_drag = None       # release pins the moved node
             self._net_panning = False
 
         def _on_scroll(e):
-            # Scroll wheel / two-finger scroll pans the network too.
             sd = getattr(e, "scroll_delta", None)
             dx = getattr(sd, "x", 0.0) or 0.0 if sd is not None else 0.0
             dy = getattr(sd, "y", 0.0) or 0.0 if sd is not None else 0.0
             if dx or dy:
                 _pan_all(-dx, -dy)
 
-        # ── Gesture wrapper ─────────────────────────────────────────────────
+        # ── Gesture detector (panning & node tap selection) ───────────────────
         gesture = ft.GestureDetector(
             content=canvas,
             on_tap_down=_on_tap_down,
@@ -840,80 +822,127 @@ class LibraryView:
             on_pan_update=_on_pan_update,
             on_pan_end=_on_pan_end,
             on_scroll=_on_scroll,
-            on_long_press_start=_on_long_press,
             drag_interval=16,
         )
 
-        # ── Mode selector overlay (top-right: − | LAYER | +) ────────────────
-        _mode_labels = ["LOCAL", "WALK"]
-
-        def _on_mode_minus(_e):
-            self._select_network_index((mode - 1) % 2)
-
-        def _on_mode_plus(_e):
-            self._select_network_index((mode + 1) % 2)
-
-        def _mode_btn(symbol, on_tap):
-            return ft.GestureDetector(
-                content=ft.Container(
-                    content=ft.Text(symbol, color=CYAN, size=15, weight=ft.FontWeight.W_700),
-                    width=26, height=26, alignment=ft.Alignment(0, 0),
+        # ── Top Controls Header (Segmented mode switch + Depth chip + Follow)
+        def _build_segmented_tab(label: str, icon_name, is_active: bool, on_tap):
+            return ft.Container(
+                content=ft.Row(
+                    [
+                        ft.Icon(icon_name, size=13, color=CYAN if is_active else DIM),
+                        ft.Text(label, size=10, weight=ft.FontWeight.W_700 if is_active else ft.FontWeight.W_500, color=TEXT if is_active else DIM),
+                    ],
+                    spacing=4,
+                    tight=True,
                 ),
-                on_tap=on_tap,
+                padding=ft.Padding.symmetric(horizontal=8, vertical=4),
+                bgcolor=apply_opacity(0.18, CYAN) if is_active else "transparent",
+                border_radius=8,
+                border=ft.Border.all(1, apply_opacity(0.35, CYAN)) if is_active else None,
+                on_click=on_tap,
             )
 
-        mode_overlay = ft.Container(
-            content=ft.Row(
-                [
-                    _mode_btn("−", _on_mode_minus),
-                    ft.Text(
-                        _mode_labels[mode], color=TEXT, size=9,
-                        weight=ft.FontWeight.W_700,
-                        text_align=ft.TextAlign.CENTER, no_wrap=True,
-                    ),
-                    _mode_btn("+", _on_mode_plus),
-                ],
-                spacing=2,
-                vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                tight=True,
-            ),
-            right=8, top=8,
-            bgcolor=apply_opacity(0.88, SURFACE2),
-            border=ft.Border.all(1, apply_opacity(0.22, CYAN)),
-            border_radius=10,
-            padding=ft.Padding.symmetric(horizontal=4, vertical=3),
+        def _switch_mode(target_idx: int):
+            self.app.trigger_haptic("network_tap")
+            self._select_network_index(target_idx)
+
+        mode_tabs = ft.Row(
+            [
+                _build_segmented_tab("Local", ft.Icons.HUB_ROUNDED, mode == 0, lambda _e: _switch_mode(0)),
+                _build_segmented_tab("Walk", ft.Icons.SHUFFLE_ROUNDED, mode == 1, lambda _e: _switch_mode(1)),
+            ],
+            spacing=3,
+            tight=True,
         )
 
-        # ── Follow-current toggle (maps-style recenter, below mode selector) ─
+        def _set_depth_value(val: int):
+            self.app.trigger_haptic("network_tap")
+            if mode == 0:
+                self._net_k_neighbors = val
+            else:
+                self._net_walk_length = val
+            self.page.run_task(self.load_library)
+
+        options = [12, 24, 36, 48] if mode == 0 else [5, 10, 15, 20]
+        curr_val = self._net_k_neighbors if mode == 0 else self._net_walk_length
+        depth_label = f"Density: {curr_val}" if mode == 0 else f"Steps: {curr_val}"
+
+        depth_menu_items = []
+        for opt in options:
+            label_text = f"Density: {opt} tracks" if mode == 0 else f"Steps: {opt} steps"
+            depth_menu_items.append(
+                ft.PopupMenuItem(
+                    content=ft.Row(
+                        [
+                            ft.Icon(ft.Icons.CHECK_ROUNDED if opt == curr_val else ft.Icons.TUNE_ROUNDED, size=13, color=CYAN if opt == curr_val else DIM),
+                            ft.Text(label_text, size=11, color=TEXT if opt == curr_val else DIM, weight=ft.FontWeight.W_700 if opt == curr_val else ft.FontWeight.W_400),
+                        ],
+                        spacing=6,
+                        tight=True,
+                    ),
+                    on_click=lambda _e, v=opt: _set_depth_value(v),
+                )
+            )
+
+        depth_chip = ft.PopupMenuButton(
+            content=ft.Container(
+                content=ft.Row(
+                    [
+                        ft.Icon(ft.Icons.TUNE_ROUNDED, size=12, color=CYAN),
+                        ft.Text(depth_label, size=9.5, weight=ft.FontWeight.W_700, color=CYAN),
+                        ft.Icon(ft.Icons.ARROW_DROP_DOWN_ROUNDED, size=14, color=CYAN),
+                    ],
+                    spacing=2,
+                    tight=True,
+                ),
+                bgcolor=apply_opacity(0.85, SURFACE2),
+                border=ft.Border.all(1, apply_opacity(0.25, CYAN)),
+                border_radius=8,
+                padding=ft.Padding.symmetric(horizontal=7, vertical=4),
+                tooltip="Select neighborhood density / walk steps",
+            ),
+            items=depth_menu_items,
+            bgcolor=SURFACE2,
+        )
+
+        # Follow live track toggle chip
         follow_icon = ft.Icon(
             ft.Icons.MY_LOCATION if self._net_follow_current else ft.Icons.LOCATION_SEARCHING,
-            color=CYAN if self._net_follow_current else DIM, size=16,
+            color=CYAN if self._net_follow_current else DIM, size=13,
         )
         self._net_follow_icon = follow_icon
-        # The GestureDetector wraps the full 30×30 chip (not the bare icon) so the
-        # whole button is tappable — wrapping just the 16px icon left most of the
-        # chip dead, which read as "the button does nothing".
-        follow_inner = ft.Container(
+        follow_chip = ft.Container(
             content=follow_icon,
-            width=30, height=30, alignment=ft.Alignment(0, 0),
-            bgcolor=apply_opacity(0.88, SURFACE2),
+            bgcolor=apply_opacity(0.85, SURFACE2),
             border=ft.Border.all(
-                1, apply_opacity(0.22, CYAN) if self._net_follow_current
-                else apply_opacity(0.14, TEXT),
+                1, apply_opacity(0.22, CYAN) if self._net_follow_current else apply_opacity(0.14, TEXT),
             ),
-            border_radius=10,
-            tooltip="Follow the playing track",
+            border_radius=8,
+            padding=ft.Padding.all(5),
+            tooltip="Follow live playing track",
+            on_click=self._toggle_net_follow,
         )
-        self._net_follow_btn = follow_inner
-        follow_overlay = ft.Container(
-            content=ft.GestureDetector(content=follow_inner, on_tap=self._toggle_net_follow),
-            right=8, top=48,
+        self._net_follow_btn = follow_chip
+
+        top_controls_overlay = ft.Container(
+            content=ft.Row(
+                [
+                    mode_tabs,
+                    ft.Row([depth_chip, follow_chip], spacing=4, tight=True),
+                ],
+                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            left=8, right=8, top=8,
+            bgcolor=apply_opacity(0.88, SURFACE2),
+            border=ft.Border.all(1, apply_opacity(0.18, CYAN)),
+            border_radius=10,
+            padding=ft.Padding.symmetric(horizontal=8, vertical=4),
         )
 
-        # ── Genre legend (top-left), shown when >1 genre is on screen ───────
-        # Group by merged genre key so spelling/alias variants share one legend
-        # row + colour (see _genre_group); label is the bucket / first-seen tag.
-        genres_present: dict[str, tuple[str, str]] = {}  # key -> (label, color)
+        # ── Genre legend (top-left below control header) ────────────────────
+        genres_present: dict[str, tuple[str, str]] = {}
         for nd in self._net_nodes:
             g = nd.get("genre")
             if not g:
@@ -924,31 +953,24 @@ class LibraryView:
         legend_overlay = None
         if len(genres_present) > 1:
             legend_rows = []
-            for label, color in sorted(genres_present.values())[:8]:
+            for label, color in sorted(genres_present.values())[:6]:
                 legend_rows.append(ft.Row(
                     [
-                        ft.Container(width=9, height=9, border_radius=5,
-                                     bgcolor=color),
-                        ft.Text(label[:16] + ("…" if len(label) > 16 else ""),
-                                size=8.5, color=TEXT, no_wrap=True),
+                        ft.Container(width=8, height=8, border_radius=4, bgcolor=color),
+                        ft.Text(label[:14] + ("…" if len(label) > 14 else ""), size=8, color=TEXT, no_wrap=True),
                     ],
-                    spacing=4, tight=True,
-                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    spacing=4, tight=True, vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 ))
             legend_overlay = ft.Container(
                 content=ft.Column(legend_rows, spacing=2, tight=True),
-                left=8, top=8,
+                left=8, top=44,
                 bgcolor=apply_opacity(0.82, SURFACE2),
-                border=ft.Border.all(1, apply_opacity(0.18, CYAN)),
+                border=ft.Border.all(1, apply_opacity(0.16, CYAN)),
                 border_radius=8,
-                padding=ft.Padding.symmetric(horizontal=6, vertical=5),
+                padding=ft.Padding.symmetric(horizontal=6, vertical=4),
             )
 
-        # ── Now-playing pulse overlay ───────────────────────────────────────
-        # A cyan ring over the currently-playing track. Always created (so live
-        # track changes can show/move it without a rebuild) but hidden when the
-        # active track isn't on screen. animate_position lets it glide to the
-        # next node as playback advances — the "tracking" effect.
+        # ── Now-playing pulse ring overlay ──────────────────────────────────
         np_node = self._net_node_by_path.get(now_playing) if now_playing else None
         if np_node is not None:
             d = (np_node["radius"] + 9) * 2
@@ -967,13 +989,11 @@ class LibraryView:
         )
         self._net_pulse_overlay = pulse_overlay
 
-        # Stack: canvas, legend, mode selector, follow toggle, pulse ring,
-        # tooltip (top).
+        # Canvas Stack
         stack_controls: list = [gesture]
         if legend_overlay is not None:
             stack_controls.append(legend_overlay)
-        stack_controls.append(mode_overlay)
-        stack_controls.append(follow_overlay)
+        stack_controls.append(top_controls_overlay)
         stack_controls.append(pulse_overlay)
         stack_controls.append(tooltip_container)
 
@@ -984,55 +1004,65 @@ class LibraryView:
             clip_behavior=ft.ClipBehavior.HARD_EDGE,
         )
 
-        # Outer container with rounded border matching the app aesthetic
-        container = ft.Container(
+        canvas_container = ft.Container(
             content=stack,
-            border=ft.Border.all(1, apply_opacity(0.12, TEXT)),
+            border=ft.Border.all(1, apply_opacity(0.14, CYAN)),
             border_radius=14,
             bgcolor=BG,
             clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
-            margin=ft.Margin.only(bottom=12, left=4, right=4, top=4),
+            margin=ft.Margin.symmetric(horizontal=4, vertical=4),
             alignment=ft.Alignment(0, 0),
         )
+        self._net_canvas = canvas_container
 
-        self._net_canvas = container
-        # Bump the token (supersedes any previous pulse loop) and start anew.
+        # ── Build Track Inspector Card ─────────────────────────────────────
+        inspector_card = self._build_net_inspector_card()
+        self._net_inspector_card = inspector_card
+
+        # Start pulse animation token
         self._net_pulse_token += 1
         if self._net_pulse_overlay is not None:
             self.page.run_task(self._run_net_pulse, self._net_pulse_token)
-        return container
+
+        # Return combined layout: Canvas + Inspector Action Card
+        return ft.Column(
+            [
+                canvas_container,
+                inspector_card,
+            ],
+            spacing=8,
+            tight=True,
+        )
 
     def _emit_net_shapes(self) -> list:
-        """Build the canvas shape list from the current node/edge state.
-
-        Called on the initial build and on every drag frame, so it stays cheap
-        (a few dozen shapes). Edges are weight-scaled (opacity + width) and
-        coloured by the source node's community; nodes are cluster-coloured and
-        play-count-sized; the seed gets a glow + white ring.
+        """Build the canvas shape list from current node/edge state with enhanced
+        neon visuals, radial glow auras, and cyan selection halos.
         """
         canvas_w, canvas_h, _pad = self._net_dims
         mode = self._net_mode
         nbp = self._net_node_by_path
+        sel_path = self._net_selected_path
+
         shapes: list = [
-            cv.Rect(0, 0, canvas_w, canvas_h,
-                    paint=ft.Paint(color=BG, style=ft.PaintingStyle.FILL)),
+            cv.Rect(0, 0, canvas_w, canvas_h, paint=ft.Paint(color=BG, style=ft.PaintingStyle.FILL)),
         ]
 
+        # Render edges
         for e in self._net_edges:
             a = nbp.get(e["src"])
             b = nbp.get(e["dst"])
             if a is None or b is None:
                 continue
             w = max(0.0, min(1.0, float(e.get("weight", 0.5))))
+            edge_color = apply_opacity(0.18 + 0.72 * w, a["color"])
             paint = ft.Paint(
-                color=apply_opacity(0.15 + 0.75 * w, a["color"]),
-                stroke_width=0.8 + 2.4 * w,
+                color=edge_color,
+                stroke_width=0.9 + 2.5 * w,
                 style=ft.PaintingStyle.STROKE,
                 stroke_cap=ft.StrokeCap.ROUND,
             )
             elems = [cv.Path.MoveTo(a["px"], a["py"]), cv.Path.LineTo(b["px"], b["py"])]
             if mode == 1:
-                # Arrow head at the destination for the directed walk.
                 dx, dy = b["px"] - a["px"], b["py"] - a["py"]
                 length = math.sqrt(dx * dx + dy * dy) or 1.0
                 ux, uy = dx / length, dy / length
@@ -1047,27 +1077,213 @@ class LibraryView:
                 ]
             shapes.append(cv.Path(elements=elems, paint=paint))
 
-        # Nodes — non-seed first so the seed (and its ring) draws on top.
-        for nd in sorted(self._net_nodes, key=lambda n: n["is_seed"]):
+        # Render node auras & halos first (so they sit underneath main circles)
+        for nd in self._net_nodes:
             px, py, r = nd["px"], nd["py"], nd["radius"]
             col = nd["color"]
+            is_selected = (nd["path"] == sel_path)
+
             if nd["is_seed"]:
-                shapes.append(cv.Circle(px, py, r + 8,
-                              paint=ft.Paint(color=apply_opacity(0.18, col),
-                                             style=ft.PaintingStyle.FILL)))
-                shapes.append(cv.Circle(px, py, r + 3,
-                              paint=ft.Paint(color=apply_opacity(0.6, "#FFFFFF"),
-                                             stroke_width=1.6,
-                                             style=ft.PaintingStyle.STROKE)))
-            shapes.append(cv.Circle(px, py, r,
-                          paint=ft.Paint(color=col, style=ft.PaintingStyle.FILL)))
+                # Seed node radial glow aura
+                shapes.append(cv.Circle(px, py, r + 9, paint=ft.Paint(color=apply_opacity(0.20, col), style=ft.PaintingStyle.FILL)))
+                shapes.append(cv.Circle(px, py, r + 3, paint=ft.Paint(color=apply_opacity(0.75, "#FFFFFF"), stroke_width=1.8, style=ft.PaintingStyle.STROKE)))
+
+            if is_selected:
+                # Selected node Cyan Halo ring & aura
+                shapes.append(cv.Circle(px, py, r + 11, paint=ft.Paint(color=apply_opacity(0.30, CYAN), style=ft.PaintingStyle.FILL)))
+                shapes.append(cv.Circle(px, py, r + 4.5, paint=ft.Paint(color=CYAN, stroke_width=2.4, style=ft.PaintingStyle.STROKE)))
+
+        # Render main node circles & labels
+        for nd in self._net_nodes:
+            px, py, r = nd["px"], nd["py"], nd["radius"]
+            col = nd["color"]
+
+            shapes.append(cv.Circle(px, py, r, paint=ft.Paint(color=col, style=ft.PaintingStyle.FILL)))
+
             if nd["label"]:
+                # Text with dark pill backdrop for crisp readability
+                lbl_str = str(nd["label"])
+                lw = len(lbl_str) * 6
+                shapes.append(cv.Rect(
+                    px - lw / 2 - 3, py - r - 16, lw + 6, 13, border_radius=3,
+                    paint=ft.Paint(color=apply_opacity(0.75, SURFACE2), style=ft.PaintingStyle.FILL),
+                ))
                 shapes.append(cv.Text(
-                    px - len(nd["label"]) * 3, py - r - 12, nd["label"],
+                    px - lw / 2, py - r - 15, lbl_str,
                     style=ft.TextStyle(size=8.5, weight=ft.FontWeight.W_700, color="#FFFFFF"),
                     max_width=120,
                 ))
+
         return shapes
+
+    def _redraw_net_canvas(self):
+        """Regenerate canvas shapes in place."""
+        if self._net_canvas_obj is None:
+            return
+        self._net_canvas_obj.shapes = self._emit_net_shapes()
+        self.try_update(self._net_canvas_obj)
+
+    def _build_net_inspector_card(self) -> ft.Control:
+        """Build the interactive Selected Track Inspector Card & Traversal Action Panel."""
+        sel_node = self._net_node_by_path.get(self._net_selected_path) if self._net_selected_path else None
+        if not sel_node and self._net_nodes:
+            sel_node = self._net_nodes[0]
+            self._net_selected_path = sel_node["path"]
+
+        if not sel_node:
+            return ft.Container()
+
+        title = sel_node.get("title") or "Unknown Track"
+        artist = sel_node.get("artist") or "Unknown Artist"
+        album = sel_node.get("album") or ""
+        genre = sel_node.get("genre") or "Unknown Genre"
+        color = sel_node.get("color") or CYAN
+        play_count = sel_node.get("play_count") or 0
+
+        # Action handlers
+        def _play_selected(_e):
+            self.app.trigger_haptic("network_tap")
+            self.page.run_task(self.app.play_track, sel_node["path"], ("library", None))
+
+        def _queue_selected(_e):
+            self.app.trigger_haptic("swipe_queue")
+            meta = {
+                "track_path": sel_node["path"],
+                "track_title": title,
+                "artist_name": artist,
+                "album_name": album,
+                "genre": genre,
+            }
+            audio_engine.queue_last(meta)
+            self.app.show_snackbar(f"'{title}' added to queue", icon=ft.Icons.PLAYLIST_ADD_ROUNDED, color=CYAN)
+
+        def _reseed_local(_e):
+            self.app.trigger_haptic("network_reseed")
+            self._network_seed_path = sel_node["path"]
+            self.page.run_task(self.load_library)
+
+        def _start_walk_here(_e):
+            self.app.trigger_haptic("network_walk")
+            self._network_seed_path = sel_node["path"]
+            self.selected_network_index = 1
+            self.page.run_task(self.load_library)
+
+        # Step navigation for Walk mode
+        step_controls = []
+        if self._net_mode == 1 and len(self._net_nodes) > 1:
+            current_idx = next((i for i, n in enumerate(self._net_nodes) if n["path"] == sel_node["path"]), 0)
+
+            def _step_prev(_e):
+                self.app.trigger_haptic("network_walk")
+                prev_idx = (current_idx - 1) % len(self._net_nodes)
+                self._net_selected_path = self._net_nodes[prev_idx]["path"]
+                self._redraw_net_canvas()
+                self._update_net_inspector_card()
+
+            def _step_next(_e):
+                self.app.trigger_haptic("network_walk")
+                next_idx = (current_idx + 1) % len(self._net_nodes)
+                self._net_selected_path = self._net_nodes[next_idx]["path"]
+                self._redraw_net_canvas()
+                self._update_net_inspector_card()
+
+            step_controls = [
+                ft.IconButton(icon=ft.Icons.SKIP_PREVIOUS_ROUNDED, icon_color=CYAN, icon_size=18, tooltip="Step Previous in Walk", on_click=_step_prev),
+                ft.Text(f"Step {current_idx + 1}/{len(self._net_nodes)}", size=10, weight=ft.FontWeight.W_700, color=CYAN),
+                ft.IconButton(icon=ft.Icons.SKIP_NEXT_ROUNDED, icon_color=CYAN, icon_size=18, tooltip="Step Next in Walk", on_click=_step_next),
+            ]
+
+        def _btn(label: str, icon_name, on_click, is_primary=False):
+            return ft.ElevatedButton(
+                content=ft.Row(
+                    [
+                        ft.Icon(icon_name, size=13, color=TEXT if is_primary else CYAN),
+                        ft.Text(label, size=10, weight=ft.FontWeight.W_700, color=TEXT if is_primary else CYAN),
+                    ],
+                    spacing=4,
+                    tight=True,
+                ),
+                style=ft.ButtonStyle(
+                    bgcolor=apply_opacity(0.85, CYAN) if is_primary else apply_opacity(0.12, CYAN),
+                    shape=ft.RoundedRectangleBorder(radius=8),
+                    padding=ft.Padding.symmetric(horizontal=10, vertical=6),
+                ),
+                on_click=on_click,
+            )
+
+        action_buttons = [
+            _btn("Play", ft.Icons.PLAY_ARROW_ROUNDED, _play_selected, is_primary=True),
+            _btn("Queue", ft.Icons.QUEUE_MUSIC_ROUNDED, _queue_selected),
+            _btn("Reseed", ft.Icons.CENTER_FOCUS_WEAK_ROUNDED, _reseed_local),
+            _btn("Walk", ft.Icons.SHUFFLE_ROUNDED, _start_walk_here),
+        ]
+
+        header_controls = [
+            ft.Container(
+                content=ft.Icon(ft.Icons.MUSIC_NOTE_ROUNDED, color=color, size=18),
+                width=34, height=34, border_radius=8,
+                bgcolor=apply_opacity(0.20, color),
+                alignment=ft.Alignment(0, 0),
+            ),
+            ft.Column(
+                [
+                    ft.Text(title, color=TEXT, size=12, weight=ft.FontWeight.W_700, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+                    ft.Row(
+                        [
+                            ft.Text(artist, color=DIM, size=10, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+                            ft.Text("•", color=DIM, size=9),
+                            ft.Container(
+                                content=ft.Text(genre, color=color, size=9, weight=ft.FontWeight.W_600),
+                                bgcolor=apply_opacity(0.15, color),
+                                border_radius=4,
+                                padding=ft.Padding.symmetric(horizontal=5, vertical=1.5),
+                            ),
+                        ],
+                        spacing=4,
+                        tight=True,
+                    ),
+                ],
+                spacing=1,
+                expand=True,
+            ),
+        ]
+        if step_controls:
+            header_controls.append(ft.Row(step_controls, spacing=2, tight=True))
+
+        card_content = ft.Column(
+            [
+                # Header row: Artwork pill, track metadata, and step controls
+                ft.Row(
+                    header_controls,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                # Action buttons row
+                ft.Row(
+                    action_buttons,
+                    spacing=6,
+                    alignment=ft.MainAxisAlignment.START,
+                    wrap=True,
+                ),
+            ],
+            spacing=8,
+            tight=True,
+        )
+
+        return ft.Container(
+            content=card_content,
+            bgcolor=apply_opacity(0.85, SURFACE),
+            border=ft.Border.all(1, apply_opacity(0.18, CYAN)),
+            border_radius=12,
+            padding=10,
+            margin=ft.Margin.symmetric(horizontal=4, vertical=2),
+        )
+
+    def _update_net_inspector_card(self):
+        """Rebuild inspector card in place on node selection change."""
+        if self._net_inspector_card is not None:
+            new_card = self._build_net_inspector_card()
+            self._net_inspector_card.content = new_card.content
+            self.try_update(self._net_inspector_card)
 
     def _redraw_net_canvas(self):
         """Regenerate canvas shapes in place — used during a node drag."""
@@ -1805,9 +2021,7 @@ class LibraryView:
 
                         if current_path:
                             from utils import track_graph as tg
-                            # Denser local neighbourhood now that the canvas is
-                            # pan/zoom-able and uncluttered (neighbour labels off).
-                            neighbors_list = await tg.neighbors(self.app.db_manager, current_path, k=24)
+                            neighbors_list = await tg.neighbors(self.app.db_manager, current_path, k=self._net_k_neighbors)
 
                         # Collect only the paths we need PCA coords for
                         needed_paths = [current_path] if current_path else []
@@ -1815,7 +2029,7 @@ class LibraryView:
                         pca_rows = await self.app.db_manager.get_tracks_pca_coords_for_paths(needed_paths)
 
                     elif self.selected_network_index == 1:  # Walk
-                        current_path = audio_engine.current_path or ""
+                        current_path = self._network_seed_path or audio_engine.current_path or ""
                         if not current_path:
                             conn = await self.app.db_manager.get_connection()
                             async with conn.execute(
@@ -1826,7 +2040,7 @@ class LibraryView:
 
                         if current_path:
                             from utils import track_graph as tg
-                            walk_paths = await tg.walk(self.app.db_manager, current_path, length=10)
+                            walk_paths = await tg.walk(self.app.db_manager, current_path, length=self._net_walk_length)
 
                         needed_paths = [current_path] if current_path else []
                         needed_paths.extend(walk_paths)
@@ -2801,14 +3015,7 @@ class LibraryView:
         self._cached_unanalysed = None
         self._scan_update_count = 0
         self._is_scanning = False
-        self._toggling_nodes = set()
         self.page.run_task(self.load_library)
-
-        # Top up external metadata for any newly-indexed artists (incremental:
-        # enrich_library only fetches artists without a cached row). Background.
-        enrich = getattr(self.app, "_enrich_metadata_async", None)
-        if enrich is not None:
-            self.page.run_task(enrich)
 
         def _hide_scanner():
             self._scan_progress_container.visible = False

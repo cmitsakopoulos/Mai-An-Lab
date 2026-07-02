@@ -73,7 +73,7 @@ class QobuzSpoofer:
         # Android Python environments often lack up-to-date CA certificates.
         # Since this is just fetching public JS files to scrape the app secret,
         # it's safe to disable SSL verification to prevent crashes on Android.
-        connector = aiohttp.TCPConnector(verify_ssl=False)
+        connector = aiohttp.TCPConnector(ssl=False)
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:83.0) Gecko/20100101 Firefox/83.0"}
         async with aiohttp.ClientSession(connector=connector, headers=headers) as session:
             async with session.get("https://play.qobuz.com/login", timeout=30) as req:
@@ -258,30 +258,76 @@ class QobuzClient(Client):
                     "app_id": str(c.app_id),
                 }
             else:
+                password = c.password_or_token
+                is_md5 = len(password) == 32 and all(char in "0123456789abcdefABCDEF" for char in password)
+                if not is_md5:
+                    import hashlib
+                    password = hashlib.md5(password.encode("utf-8")).hexdigest()
                 params = {
                     "email": c.email_or_userid,
-                    "password": c.password_or_token,
+                    "password": password,
                     "app_id": str(c.app_id),
                 }
 
-            logger.debug("Request params %s", params)
+            # Filesystem logging for Flet runtime debug
+            log_path = "/Users/chrismitsacopoulos/Desktop/Mai-An-Lab/qobuz_auth_log.txt"
+            try:
+                with open(log_path, "w", encoding="utf-8") as lf:
+                    lf.write("Login Attempt Started\n")
+                    lf.write(f"Config path: {getattr(self.config, 'path', 'unknown')}\n")
+                    lf.write(f"use_auth_token: {c.use_auth_token}\n")
+                    lf.write(f"email_or_userid: {c.email_or_userid}\n")
+                    lf.write(f"password_or_token length: {len(c.password_or_token) if c.password_or_token else 0}\n")
+                    lf.write(f"app_id: {c.app_id}\n")
+            except Exception as e:
+                logger.error("Could not write initial auth log: %s", e)
+
+            logger.debug("Request params %s", self._redact_auth_payload(params))
             status, resp = await self._api_request("user/login", params)
-            logger.debug("Login resp: %s", resp)
+            logger.debug("Login resp: %s", self._redact_auth_payload(resp))
+
+            try:
+                with open(log_path, "a", encoding="utf-8") as lf:
+                    lf.write(f"\nAPI Response from user/login:\n")
+                    lf.write(f"Status: {status}\n")
+                    lf.write(f"Body: {resp}\n")
+            except Exception as e:
+                logger.error("Could not write api response to auth log: %s", e)
+
+            # Check the error message in response body to distinguish between credential issue and app ID issue
+            error_msg = ""
+            if isinstance(resp, dict):
+                error_msg = resp.get("message", "").lower()
+
+            is_app_id_issue = any(phrase in error_msg for phrase in ("app_id", "app id", "appid"))
 
             if status == 401:
-                raise AuthenticationError(f"Invalid credentials from params {params}")
+                if not force_refresh and is_app_id_issue:
+                    logger.warning("Authentication failed (possibly stale App ID), forcing refresh...")
+                    return False, None
+                if is_app_id_issue:
+                    raise InvalidAppIdError(f"Stale or invalid Qobuz app id: {c.app_id}. Response: {resp}")
+                if c.use_auth_token:
+                    raise AuthenticationError(
+                        "Invalid Qobuz token or user id. The token may have expired; "
+                        "refresh user_auth_token from a logged-in browser session."
+                    )
+                raise AuthenticationError("Invalid Qobuz credentials.")
             elif status == 400:
                 if not force_refresh:
                     logger.warning("Cached App ID seems invalid, forcing refresh...")
                     return False, None
-                raise InvalidAppIdError(f"Invalid app id from params {params}")
+                raise InvalidAppIdError(f"Invalid app id from params {self._redact_auth_payload(params)}. Response: {resp}")
             elif status != 200 or not resp.get("user"):
-                raise Exception(f"Login failed with status {status}. Response: {resp}")
+                raise Exception(f"Login failed with status {status}. Response: {self._redact_auth_payload(resp) if isinstance(resp, dict) else resp}")
 
             if not resp["user"]["credential"]["parameters"]:
                 raise IneligibleError("Free accounts are not eligible to download tracks.")
 
-            uat = resp["user_auth_token"]
+            uat = resp.get("user_auth_token")
+            if not uat and c.use_auth_token:
+                logger.warning("user_auth_token not found in login response, falling back to configured token")
+                uat = c.password_or_token
             self.session.headers.update({"X-User-Auth-Token": uat})
 
             try:
@@ -292,6 +338,13 @@ class QobuzClient(Client):
                     return False, None
                 raise
                 
+            try:
+                with open(log_path, "a", encoding="utf-8") as lf:
+                    lf.write(f"Successful login. Secret verified.\n")
+                    lf.write(f"Successful login response: {self._redact_auth_payload(resp)}\n")
+            except Exception:
+                pass
+
             return True, resp
 
         success, resp = await _attempt_login(force_refresh=False)
@@ -470,7 +523,9 @@ class QobuzClient(Client):
         if app_id:
             params.update({"app_id": str(app_id)})
         status, page = await self._api_request(epoint, params, progress_callback=progress_callback)
-        assert status == 200, status
+        if status != 200:
+            logger.error("Paginate failed. Status: %d, Response: %s", status, page)
+            assert status == 200, f"Status: {status}, Response: {page}"
         logger.debug("paginate: initial request made with status %d", status)
         # albums, tracks, etc.
         key = epoint.split("/")[0] + "s"
@@ -505,6 +560,7 @@ class QobuzClient(Client):
             pages.append(resp)
 
         return pages
+
 
     async def _get_app_id_and_secrets(self) -> tuple[str, list[str]]:
         spoofer = QobuzSpoofer(verify_ssl=self.config.session.downloads.verify_ssl)
@@ -581,3 +637,13 @@ class QobuzClient(Client):
     def get_quality(quality: int):
         quality_map = (5, 6, 7, 27)
         return quality_map[quality - 1]
+
+    @staticmethod
+    def _redact_auth_payload(payload: dict) -> dict:
+        if not isinstance(payload, dict):
+            return payload
+        redacted = dict(payload)
+        for key in ("password", "user_auth_token"):
+            if key in redacted and redacted[key]:
+                redacted[key] = "***REDACTED***"
+        return redacted

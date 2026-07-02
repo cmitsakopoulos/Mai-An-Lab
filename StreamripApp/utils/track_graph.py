@@ -670,6 +670,15 @@ async def build_acoustic_edges(
         logger.info("track_graph: acoustic edges skipped (only %d tracks with features)", len(rows))
         return 0
 
+    # ── Pre-Network Metadata Enrichment & Genre Normalization Phase ──────────
+    # Enrich artist country provenance & canonical genres BEFORE unsupervised
+    # PCA graph embedding generation & metadata fusion gates.
+    try:
+        from utils.metadata_enrich import enrich_library
+        await enrich_library(db_manager, with_genres=True)
+    except Exception as exc:
+        logger.debug("Pre-network metadata enrichment skipped: %s", exc)
+
     # ── Feature selection: drop covariance-redundant scalars ──────────────
     # The graph — and the Louvain communities + similarity walk built on it —
     # uses every feature that survives the unsupervised PCA / Pearson-covariance
