@@ -242,6 +242,13 @@ async def enrich_library(
         except Exception as exc:
             logger.debug("genre model refresh after enrichment failed: %s", exc)
 
-    summary = {"enriched": done, "model_pairs": model_pairs, **counts}
+    # Automatically fix and normalize track genres in the database using new API metadata
+    norm_summary = None
+    try:
+        norm_summary = await db_manager.fix_and_normalize_track_genres()
+    except Exception as exc:
+        logger.debug("Automatic track genre normalization after enrichment failed: %s", exc)
+
+    summary = {"enriched": done, "model_pairs": model_pairs, "genre_fix": norm_summary, **counts}
     logger.info("enrich_library: %s", summary)
     return summary

@@ -476,6 +476,57 @@ class SettingsView:
                 ft.dropdown.Option("vibrate", "Vibrate (Long)"),
             ]
         )
+        self._haptic_network_tap_dropdown = ft.Dropdown(
+            label="Network node tap & inspect",
+            bgcolor=SURFACE2,
+            border_color=BORDER,
+            focused_border_color=CYAN,
+            text_style=ft.TextStyle(color=TEXT, size=13),
+            label_style=ft.TextStyle(color=CYAN, size=11),
+            border_radius=10,
+            on_select=self._on_haptic_intensity_change,
+            options=[
+                ft.dropdown.Option("none", "None"),
+                ft.dropdown.Option("selection", "Selection Click"),
+                ft.dropdown.Option("light", "Light"),
+                ft.dropdown.Option("medium", "Medium"),
+                ft.dropdown.Option("heavy", "Heavy"),
+            ]
+        )
+        self._haptic_network_reseed_dropdown = ft.Dropdown(
+            label="Network reseed graph",
+            bgcolor=SURFACE2,
+            border_color=BORDER,
+            focused_border_color=CYAN,
+            text_style=ft.TextStyle(color=TEXT, size=13),
+            label_style=ft.TextStyle(color=CYAN, size=11),
+            border_radius=10,
+            on_select=self._on_haptic_intensity_change,
+            options=[
+                ft.dropdown.Option("none", "None"),
+                ft.dropdown.Option("light", "Light"),
+                ft.dropdown.Option("medium", "Medium"),
+                ft.dropdown.Option("heavy", "Heavy"),
+                ft.dropdown.Option("vibrate", "Vibrate (Long)"),
+            ]
+        )
+        self._haptic_network_walk_dropdown = ft.Dropdown(
+            label="Network walk step traversal",
+            bgcolor=SURFACE2,
+            border_color=BORDER,
+            focused_border_color=CYAN,
+            text_style=ft.TextStyle(color=TEXT, size=13),
+            label_style=ft.TextStyle(color=CYAN, size=11),
+            border_radius=10,
+            on_select=self._on_haptic_intensity_change,
+            options=[
+                ft.dropdown.Option("none", "None"),
+                ft.dropdown.Option("selection", "Selection Click"),
+                ft.dropdown.Option("light", "Light"),
+                ft.dropdown.Option("medium", "Medium"),
+                ft.dropdown.Option("heavy", "Heavy"),
+            ]
+        )
         self._eq_preset_type_radio = ft.RadioGroup(
             content=ft.Row([
                 ft.Radio(value="system", label="System Presets", fill_color=CYAN, label_style=ft.TextStyle(color=TEXT, size=12)),
@@ -698,6 +749,7 @@ class SettingsView:
                      "Clear DSP", 
                      self.app.clear_dsp_features
                 )),
+                ft.TextButton("Fix & Normalize Genres", icon=ft.Icons.AUTO_FIX_HIGH_ROUNDED, on_click=self._on_fix_genres_click),
                 ft.TextButton("Wipe DB", icon=ft.Icons.DELETE_FOREVER, icon_color="#FF4444", on_click=lambda _: self._on_wipe_db_click()),
             ], wrap=True, spacing=10),
             ft.Divider(color=BORDER, height=20),
@@ -1041,6 +1093,29 @@ class SettingsView:
             color=CYAN,
         )
 
+    def _on_fix_genres_click(self, _e=None):
+        self.page.run_task(self._do_fix_genres)
+
+    async def _do_fix_genres(self):
+        self.app.show_snackbar(
+            "Fixing & normalizing track genres via MusicBrainz API metadata...",
+            icon=ft.Icons.AUTO_FIX_HIGH_ROUNDED,
+            color=CYAN,
+        )
+        try:
+            res = await self.app.db_manager.fix_and_normalize_track_genres()
+            up = res.get("updated", 0)
+            bf = res.get("backfilled", 0)
+            nm = res.get("normalized", 0)
+            self.app.show_snackbar(
+                f"Genre Normalization Complete: {up} tracks updated ({bf} backfilled from API, {nm} normalized)",
+                icon=ft.Icons.CHECK_CIRCLE_ROUNDED,
+                color=CYAN,
+            )
+        except Exception as exc:
+            logger.exception("Genre normalization failed: %s", exc)
+            self.app.show_snackbar(f"Genre normalization failed: {exc}", color="#FF4444")
+
     # ── State bundle (export/import) ────────────────────────────────────────
     def _on_export_state_click(self, _e):
         if hasattr(sys, 'getandroidapilevel'):
@@ -1332,6 +1407,9 @@ class SettingsView:
             self._haptic_swipe_queue_dropdown.value = haptics.get("swipe_queue_intensity", "medium")
             self._haptic_swipe_dismiss_dropdown.value = haptics.get("swipe_dismiss_intensity", "medium")
             self._haptic_long_press_dropdown.value = haptics.get("long_press_intensity", "heavy")
+            self._haptic_network_tap_dropdown.value = haptics.get("network_tap_intensity", "selection")
+            self._haptic_network_reseed_dropdown.value = haptics.get("network_reseed_intensity", "medium")
+            self._haptic_network_walk_dropdown.value = haptics.get("network_walk_intensity", "light")
             active_p = dsp.get("active_preset", "Flat")
             self._refresh_eq_presets_dropdown(active_value=active_p)
             self._update_eq_sliders_from_active_preset()
@@ -2122,6 +2200,9 @@ class SettingsView:
                 "swipe_queue_intensity": self._haptic_swipe_queue_dropdown.value,
                 "swipe_dismiss_intensity": self._haptic_swipe_dismiss_dropdown.value,
                 "long_press_intensity": self._haptic_long_press_dropdown.value,
+                "network_tap_intensity": self._haptic_network_tap_dropdown.value,
+                "network_reseed_intensity": self._haptic_network_reseed_dropdown.value,
+                "network_walk_intensity": self._haptic_network_walk_dropdown.value,
             }
         })
         if e.control.value and e.control.value != "none":
@@ -2163,6 +2244,12 @@ class SettingsView:
                     self._haptic_swipe_dismiss_dropdown,
                     ft.Container(height=5),
                     self._haptic_long_press_dropdown,
+                    ft.Container(height=5),
+                    self._haptic_network_tap_dropdown,
+                    ft.Container(height=5),
+                    self._haptic_network_reseed_dropdown,
+                    ft.Container(height=5),
+                    self._haptic_network_walk_dropdown,
                 ], spacing=10),
                 padding=16,
                 bgcolor=SURFACE2,

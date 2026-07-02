@@ -406,6 +406,8 @@ The catalog database (SQLite) manages records across the following tables:
 | `play_counts` | Extended sound profile, feature space, and play history. | `track_path`, `count`, `last_played`, `bpm`, `energy`, `brightness`, `rolloff`, `beat_strength`, `spectral_flatness`, `spectral_contrast`, `key_index`, `timbre` (52D BLOB), `features_version`, `cluster_id` |
 | `track_neighbors` | Sparse adjacency table representing the $k$-NN acoustic/metadata graph. | `track_path`, `neighbor_path`, `weight`, `edge_kind` |
 | `pca_space` | Persists the active PCA projection produced by the double-pass SVD engine. | `id` (always 1), `means` (8×float32 BLOB), `stds` (8×float32 BLOB), `projection` (8×3 float32 BLOB), `eigenvalues` (8×float32 BLOB) |
+| `artist_enrichment` | Caches external MusicBrainz provenance (country/area) and community genre tags. | `artist_name` (PK), `mbid`, `country`, `area`, `genres` (JSON list), `source`, `score`, `status`, `fetched_at` |
+| `genre_affinity` | Pre-computed NPMI genre$\times$genre similarity model for random walk metadata gates. | `id` (always 1), `model` (JSON dict `"a|b": npmi`), `updated_at` |
 
 > [!NOTE]
 > **Sound Profile BLOB Layout (v3)**: The high-dimensional feature profile is packed as a single 52-float, little-endian binary BLOB inside the `play_counts.timbre` column (208 bytes total) to keep database size minimal and query speeds fast. The BLOB contains the 20D MFCC Mean, 20D MFCC First-Order Derivative (Delta Mean), and 12D Chroma Pitch Profile. The `features_version` column acts as a schema version, letting the engine dynamically invalidate and re-analyze features if extraction logic evolves.

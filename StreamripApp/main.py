@@ -469,11 +469,6 @@ class StreamripFletApp:
         # Prune caches asynchronously to keep disk footprint bounded
         self.page.run_task(self._prune_caches_async)
 
-        # Incrementally enrich any artists missing external metadata (covers an
-        # existing library on first launch after update; re-scans top up via
-        # library_view._on_scan_complete). Fire-and-forget, offline-safe.
-        self.page.run_task(self._enrich_metadata_async)
-
     async def _enrich_metadata_async(self):
         """Background, incremental artist-metadata enrichment (MusicBrainz
         country + genres). Only fetches artists with no cached enrichment, so
@@ -743,7 +738,10 @@ class StreamripFletApp:
                 "eq_drag": "light",
                 "swipe_queue": "medium",
                 "swipe_dismiss": "medium",
-                "long_press": "heavy"
+                "long_press": "heavy",
+                "network_tap": "selection",
+                "network_reseed": "medium",
+                "network_walk": "light",
             }
             intensity = haptics_cfg.get(f"{action}_intensity", action if action in ["light", "medium", "heavy", "selection", "vibrate", "none"] else defaults.get(action, "light"))
 

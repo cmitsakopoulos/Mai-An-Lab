@@ -18,10 +18,19 @@ The Library supports five views, toggled via settings:
 - **Artists**: Lists artists; expanding reveals albums.
 - **Albums**: Lists albums; expanding reveals tracks.
 - **Tracks**: A flat, paginated list of all indexed tracks.
-- **Network**: An interactive, 2D force-directed layout representation of the acoustic similarity graph. It has two modes:
-  * **Local**: Displays the seed/playing track and its immediate 1-hop nearest neighbors, colored by genre. Pinned nodes allow local navigation.
-  * **Walk**: Visualizes the actual path and nodes traversed during similarity walks.
-  * Double-clicking a node plays that track, while mouse wheels or pinch/swipe gestures pan and zoom the visualization. Requires having analyzed the library first to construct the PCA space.
+- **Network**: An interactive, 2D layout representation of the acoustic similarity space built from PCA graph embeddings. Features include:
+  * **Modes (`[ Local | Walk ]`)**:
+    - **Local**: Renders the seed track and its $K$ nearest acoustic neighbors, colored by coarse genre.
+    - **Walk**: Visualizes sequential similarity walk trajectories with directed arrowheads pointing step-by-step through the acoustic space.
+  * **Controls & Aesthetics**:
+    - **Top Control Header**: Glassmorphic overlay containing segmented mode tabs, compact PopupMenu dropdown selector (`Density: 24` dropdown in Local mode, `Steps: 10` dropdown in Walk mode) allowing direct selection of parameters, and Follow Live Playing Track toggle button.
+    - **Visual Feel**: Multi-layer radial glow auras for seed nodes, glowing pulse rings for currently playing tracks, **Cyan Selection Halos** for focused nodes, translucent neon edge lines, and pill backdrops (`cv.Rect`, `border_radius=3`) ensuring text legibility over intersecting edges.
+    - **Gestures**: Smooth pan and zoom gestures for canvas navigation with node drag/drop removed for optimal touch responsiveness on mobile.
+  * **Selected Track Inspector Card & Action Panel**:
+    - Mounted directly below the network canvas when a node is selected.
+    - Displays artwork pill, Title, Artist, Album, Genre pill, and Play Count tag.
+    - **Quick Action Buttons**: Play Now, Add to Queue, Reseed Local, and Start Walk Here.
+    - **Walk Step Traversal**: Sequential `[ ◀ Step Prev ]` / `[ Step Next ▶ ]` navigation buttons on the inspector card for track-by-track trajectory exploration in Walk mode.
 
 ### 1.3 Searching & Filtering
 - **Real-Time Filter**: The top search bar filters the current view instantly, debounced by **300ms** to ensure responsiveness. Tap the 'X' button to clear.
@@ -138,11 +147,21 @@ The settings screen features a categorized menu linking to sub-panels:
     $$\text{gain\_db} = 1.0 + 3.0 \times \text{score}$$
   - **Psychoacoustic Contour (Applied only when Manual EQ is disabled):**
     $$\text{dyn\_offsets} = \text{score} \times [3.0, 1.5, 0.0, 1.0, 2.5]\text{ dB}$$
-- **Haptic Feedback**: Modify vibration intensities (none, light, medium, heavy) for actions: EQ drag, swipe to queue, swipe to remove, and long press.
+- **Haptic Feedback**: Modify vibration intensities (`Selection Click`, `Light`, `Medium`, `Heavy`, `Vibrate (Long)`, `None`) for user actions:
+  - EQ sliders & node drag
+  - Swipe track to Queue
+  - Swipe to Remove from Queue
+  - Long press track
+  - **Network node tap & inspect** (`network_tap`)
+  - **Network reseed graph** (`network_reseed`)
+  - **Network walk step traversal** (`network_walk`)
 
 ### 7.3 Developer & Advanced Tools
 - **Permissions**: Request Android permissions (Notifications, Audio, Storage, Manage Storage, Microphone).
-- **Database Management**: Wipes database tables (Index, DSP features, Taste weights, or Full DB wipe) and manual triggers to compute DSP features or recompute PCA space.
+- **Database Management**:
+  - *Table Purges*: Wipes database tables (Library Index, DSP features, or Full DB wipe).
+  - *Compute Pipeline*: Manual triggers to compute DSP features or recompute PCA space.
+  - *Fix & Normalize Genres*: Manual trigger to execute MusicBrainz API metadata enrichment and back-fill/normalize all track & album genres in `mai_an_lab.db`.
 - **Advanced**: Configure recommendation temperature (softmax exploration divisor $\in [0.01, 0.20]$), clear caches (artwork, preview), edit raw TOML config directly, and debug play count population.
 - **State Import / Export**:
   - *Auto-Import startup hook*: Scans downloads directory for `mai_an_lab_state_import.zip` on boot. Overwrites local database (safely deleting stale `-wal` and `-shm` transaction logs to prevent database corruption), updates graph edges (`build_metadata_edges` and `build_acoustic_edges`), rebuilds PCA coords (`optimize_pca_spacing`), and deletes zip.

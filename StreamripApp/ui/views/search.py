@@ -896,10 +896,14 @@ class SearchView:
             self._search_indicator.visible = False
             
             if results is None:
-                self.app.show_snackbar("Search failed: Network error.")
+                self._results_list.controls.clear()
+                self.page.update()
+                self.app._show_error("Search failed: Network error.")
                 return
 
             if isinstance(results, dict) and "error" in results:
+                self._results_list.controls.clear()
+                self.page.update()
                 self.app._show_error(results.get("error", "Unknown error"))
                 return
 

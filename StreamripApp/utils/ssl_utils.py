@@ -55,13 +55,13 @@ def get_aiohttp_connector_kwargs(verify_ssl=True):
         Dictionary of kwargs to pass to aiohttp.TCPConnector
     """
     if not verify_ssl:
-        return {"verify_ssl": False}
+        return {"ssl": False}
 
     if HAS_CERTIFI:
         ssl_context = create_ssl_context(verify=True)
         return {"ssl": ssl_context}
     else:
-        return {"verify_ssl": True}
+        return {"ssl": True}
 
 
 def print_ssl_error_help():
