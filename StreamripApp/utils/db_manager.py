@@ -2263,6 +2263,7 @@ class DatabaseManager:
         backfilled_count = 0
         normalized_count = 0
 
+        from collections import Counter
         for row in rows:
             album_id = row["album_id"]
             curr_genre = (row["current_genre"] or "").strip()
@@ -2270,37 +2271,44 @@ class DatabaseManager:
 
             target_genre = None
 
-            # Parse API genres list if present
-            api_tags = []
+            # Parse API genres list and sum weighted votes per bucket
+            bucket_votes: Counter = Counter()
+            api_top_tag = None
             if api_genres_raw:
                 try:
                     parsed = json.loads(api_genres_raw)
                     if isinstance(parsed, list):
-                        api_tags = [g.get("name") for g in parsed if isinstance(g, dict) and g.get("name")]
+                        for g in parsed:
+                            if isinstance(g, dict) and g.get("name"):
+                                tag_name = g.get("name")
+                                if not api_top_tag:
+                                    api_top_tag = tag_name
+                                try:
+                                    cnt = max(int(g.get("count", 1) or 1), 1)
+                                except (TypeError, ValueError):
+                                    cnt = 1
+                                b = genre_bucket(tag_name)
+                                if b not in ("Unknown", "Other"):
+                                    bucket_votes[b] += cnt
                 except Exception:
                     pass
 
             curr_bucket = genre_bucket(curr_genre) if curr_genre else "Unknown"
+            api_consensus = bucket_votes.most_common(1)[0][0] if bucket_votes else None
 
-            if curr_bucket in ("Unknown", "Other") or not curr_genre:
-                # Try to derive canonical genre from API tags
-                derived = None
-                for tag in api_tags:
-                    b = genre_bucket(tag)
-                    if b not in ("Unknown", "Other"):
-                        derived = b
-                        break
-                if not derived and api_tags:
-                    derived = api_tags[0].title()
-
-                if derived and derived != curr_genre:
-                    target_genre = derived
+            if api_consensus:
+                target_genre = api_consensus
+                if curr_bucket in ("Unknown", "Other") or not curr_genre:
                     backfilled_count += 1
-            else:
-                # Normalize existing genre if genre_bucket refined it
+                else:
+                    normalized_count += 1
+            elif curr_bucket not in ("Unknown", "Other"):
                 if curr_bucket != curr_genre:
                     target_genre = curr_bucket
                     normalized_count += 1
+            elif api_top_tag:
+                target_genre = api_top_tag.title()
+                backfilled_count += 1
 
             if target_genre and target_genre != curr_genre:
                 updates.append((target_genre, album_id))

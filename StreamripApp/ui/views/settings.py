@@ -1098,17 +1098,22 @@ class SettingsView:
 
     async def _do_fix_genres(self):
         self.app.show_snackbar(
-            "Fixing & normalizing track genres via MusicBrainz API metadata...",
+            "Fetching MusicBrainz metadata & normalizing genres...",
             icon=ft.Icons.AUTO_FIX_HIGH_ROUNDED,
             color=CYAN,
         )
         try:
+            from utils.metadata_enrich import enrich_library
+            enrich_summary = await enrich_library(
+                self.app.db_manager, with_genres=True, include_failed=True
+            )
             res = await self.app.db_manager.fix_and_normalize_track_genres()
             up = res.get("updated", 0)
             bf = res.get("backfilled", 0)
             nm = res.get("normalized", 0)
+            en = enrich_summary.get("enriched", 0)
             self.app.show_snackbar(
-                f"Genre Normalization Complete: {up} tracks updated ({bf} backfilled from API, {nm} normalized)",
+                f"MusicBrainz Sync Complete: {en} artists enriched, {up} album genres updated ({bf} backfilled, {nm} normalized)",
                 icon=ft.Icons.CHECK_CIRCLE_ROUNDED,
                 color=CYAN,
             )

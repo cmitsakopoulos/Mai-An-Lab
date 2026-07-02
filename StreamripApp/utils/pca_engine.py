@@ -623,15 +623,13 @@ def plot_pca_report(
 # majority co-tags ("Pop, Rock, Metal" → Metal).
 _GENRE_RULES = [
     ("Classical",  ("classical", "classique")),
-    ("Hip-Hop",    ("rap", "hip hop", "hip-hop", "hiphop", "trap", "хип", "рэп", "grime")),
-    ("Electronic", ("électron", "electron", "électro", "house", "techno",
-                    "dance", "edm", "trance", "drum & bass", "dnb", "coldwave", "synth", "wave")),
-    ("Folk/Cntry", ("folk", "country", "blues", "bluegrass", "americana", "laika", "λαϊκά", "rebetiko", "world", "musiques du monde")),
-    ("Soul/R&B",   ("soul", "r&b", "funk", "rnb", "motown")),
-    ("Metal",      ("metal", "métal", "hard rock", "grunge")),
-    ("Rock/Alt",   ("rock", "alternatif", "alternative", "indé", "indie",
-                    "punk", "new wave", "рок", "post-punk")),
-    ("Pop",        ("pop", "поп")),
+    ("Hip-Hop",    ("rap", "hip hop", "hip-hop", "hiphop", "trap", "хип", "рэп", "grime", "boom bap", "drill")),
+    ("Electronic", ("électronique", "electronica", "house", "techno", "edm", "trance", "drum & bass", "dnb", "dubstep", "ambient")),
+    ("Folk/Cntry", ("folk", "country", "blues", "bluegrass", "americana", "laiko", "laika", "laïko", "laïka", "laiki", "λαϊκό", "λαϊκά", "rebetiko", "ρεμπέτικο", "entechno", "έντεχνο", "greek folk", "world", "musiques du monde")),
+    ("Soul/R&B",   ("soul", "r&b", "funk", "rnb", "motown", "neo soul")),
+    ("Metal",      ("metal", "métal", "hard rock", "grunge", "heavy metal")),
+    ("Rock/Alt",   ("rock", "alternatif", "alternative", "indé", "indie", "punk", "new wave", "post-punk", "рок")),
+    ("Pop",        ("pop", "поп", "greek pop", "greek")),
 ]
 
 _GENRE_PALETTE = {
