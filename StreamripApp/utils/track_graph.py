@@ -1272,23 +1272,44 @@ async def walk(
             except Exception:
                 genre_model = {}
 
+    from utils.pca_engine import genre_bucket
+
+    def _resolve_gamma(genres_a, genres_b) -> float:
+        """Adaptive regional affinity factor (gamma) based on mega-genre categories.
+        - Global/Transnational (Electronic, Classical): gamma = 0.05 (minimal country barrier)
+        - Regional/Scene-Heavy (Folk/Cntry, Laiko): gamma = 0.30 (strong local scene boost)
+        - Default Pop/Rock/Soul/Hip-Hop: gamma = 0.15
+        """
+        all_genres = (genres_a or set()) | (genres_b or set())
+        if not all_genres:
+            return 0.15
+        buckets = {genre_bucket(g) for g in all_genres}
+        if any(b in ("Electronic", "Classical") for b in buckets):
+            return 0.05
+        if any(b in ("Folk/Cntry",) for b in buckets):
+            return 0.30
+        return 0.15
+
     def _meta_score(a_path: str, b_path: str) -> float:
         ma = meta_map.get(a_path)
         mb = meta_map.get(b_path)
         if not ma or not mb:
             return 0.0
         ca, cb = ma.get("country"), mb.get("country")
-        cty = 1.0 if (ca and ca == cb) else 0.0
+        same_cty = 1.0 if (ca and ca == cb) else 0.0
         aa, ab = ma.get("artist"), mb.get("artist")
         if aa and aa == ab:
             gx = 0.0  # cross-artist only — within-artist genre is degenerate
         else:
-            gx = soft_set_sim(
-                ma.get("genres") or frozenset(),
-                mb.get("genres") or frozenset(),
-                genre_model,
-            )
-        return 0.5 * cty + 0.5 * gx
+            ga = ma.get("genres") or frozenset()
+            gb = mb.get("genres") or frozenset()
+            gx = soft_set_sim(ga, gb, genre_model)
+
+        if gx <= 0.0:
+            return 0.0
+
+        gamma = _resolve_gamma(ma.get("genres"), mb.get("genres"))
+        return gx * (1.0 + gamma * same_cty)
 
     # ── MMR setup ─────────────────────────────────────────────────────────
     # Pull embeddings for the seed + any node we might reach in two hops.

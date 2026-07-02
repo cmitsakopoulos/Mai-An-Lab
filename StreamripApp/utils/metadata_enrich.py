@@ -45,12 +45,32 @@ def _norm_name(s: str) -> str:
     return "".join(c for c in (s or "").lower() if c.isalnum())
 
 
+def _norm_tokens(s: str) -> set[str]:
+    """Extract lowercased alphanumeric word tokens."""
+    return set("".join(c if c.isalnum() else " " for c in (s or "").lower()).split())
+
+
 def _name_close(a: str, b: str) -> bool:
     na, nb = _norm_name(a), _norm_name(b)
     if not na or not nb:
         return False
-    return na == nb or na in nb or nb in na
+    if na == nb:
+        return True
 
+    ta = _norm_tokens(a)
+    tb = _norm_tokens(b)
+    if not ta or not tb:
+        return False
+    if ta == tb:
+        return True
+
+    # Exact token match or tight subset match
+    inter = len(ta & tb)
+    if inter > 0:
+        if inter == len(ta) and len(ta) == len(tb):
+            return True
+        if inter >= min(len(ta), len(tb)) and abs(len(ta) - len(tb)) <= 1:
+            return True
 
 def _extract_genres(obj: dict, top: int = 8) -> list[dict]:
     """Genre/tag list from an artist object → [{'name', 'count'}], count-desc.
@@ -72,13 +92,85 @@ def _extract_genres(obj: dict, top: int = 8) -> list[dict]:
 
 def _best_match(name: str, artists: list[dict]) -> dict | None:
     """MusicBrainz returns artists score-sorted. Prefer the highest-scoring one
-    whose name actually matches; otherwise fall back to the top result."""
+    whose name, sort-name, or aliases actually match; otherwise fall back to top result."""
     if not artists:
         return None
     for a in artists:
         if _name_close(name, a.get("name", "")):
             return a
+        if _name_close(name, a.get("sort-name", "")):
+            return a
+        aliases = a.get("aliases") or []
+        for al in aliases:
+            if isinstance(al, dict):
+                if al.get("name") and _name_close(name, al.get("name")):
+                    return a
+                if al.get("sort-name") and _name_close(name, al.get("sort-name")):
+                    return a
+            elif isinstance(al, str) and _name_close(name, al):
+                return a
     return artists[0]
+
+
+_COUNTRY_NAME_TO_ISO = {
+    # North America & Caribbean
+    "united states": "US", "usa": "US", "canada": "CA", "mexico": "MX", "puerto rico": "PR",
+    "jamaica": "JM", "cuba": "CU", "trinidad": "TT", "dominican republic": "DO",
+    
+    # Europe
+    "united kingdom": "GB", "uk": "GB", "england": "GB", "scotland": "GB", "wales": "GB", "northern ireland": "GB",
+    "greece": "GR", "ελλάδα": "GR", "france": "FR", "germany": "DE", "deutschland": "DE",
+    "sweden": "SE", "norway": "NO", "finland": "FI", "denmark": "DK", "iceland": "IS",
+    "netherlands": "NL", "holland": "NL", "belgium": "BE", "switzerland": "CH", "austria": "AT",
+    "italy": "IT", "spain": "ES", "portugal": "PT", "ireland": "IE", "poland": "PL",
+    "czech": "CZ", "czechia": "CZ", "slovakia": "SK", "hungary": "HU", "romania": "RO",
+    "bulgaria": "BG", "serbia": "RS", "croatia": "HR", "slovenia": "SI", "bosnia": "BA",
+    "ukraine": "UA", "russia": "RU", "belarus": "BY", "georgia": "GE", "armenia": "AM",
+    "turkey": "TR", "türkiye": "TR", "cyprus": "CY", "albania": "AL", "north macedonia": "MK",
+    
+    # South & Central America
+    "brazil": "BR", "brasil": "BR", "argentina": "AR", "chile": "CL", "colombia": "CO",
+    "peru": "PE", "venezuela": "VE", "uruguay": "UY",
+    
+    # Asia & Middle East
+    "japan": "JP", "nippon": "JP", "south korea": "KR", "korea": "KR", "china": "CN",
+    "taiwan": "TW", "hong kong": "HK", "india": "IN", "indonesia": "ID", "philippines": "PH",
+    "thailand": "TH", "vietnam": "VN", "singapore": "SG", "malaysia": "MY",
+    "israel": "IL", "palestine": "PS", "lebanon": "LB", "egypt": "EG", "iran": "IR",
+    
+    # Oceania & Africa
+    "australia": "AU", "new zealand": "NZ", "south africa": "ZA", "nigeria": "NG",
+    "ghana": "GH", "kenya": "KE", "ethiopia": "ET", "morocco": "MA", "senegal": "SN",
+}
+
+
+def _extract_country(obj: dict) -> str | None:
+    """Extract 2-letter ISO country code from a MusicBrainz artist dict.
+    Checks top-level `country`, `area.iso-3166-1-codes`, `begin-area.iso-3166-1-codes`,
+    and `area.name` fallback."""
+    if not obj or not isinstance(obj, dict):
+        return None
+
+    c = obj.get("country")
+    if c and isinstance(c, str) and len(c.strip()) == 2:
+        return c.strip().upper()
+
+    area = obj.get("area") or {}
+    codes = area.get("iso-3166-1-codes") or []
+    if codes and isinstance(codes, list) and len(codes[0]) == 2:
+        return str(codes[0]).upper()
+
+    begin_area = obj.get("begin-area") or {}
+    begin_codes = begin_area.get("iso-3166-1-codes") or []
+    if begin_codes and isinstance(begin_codes, list) and len(begin_codes[0]) == 2:
+        return str(begin_codes[0]).upper()
+
+    aname = (area.get("name") or begin_area.get("name") or "").lower().strip()
+    for k, iso in _COUNTRY_NAME_TO_ISO.items():
+        if k in aname:
+            return iso
+
+    return None
 
 
 class MusicBrainzClient:
@@ -131,17 +223,41 @@ class MusicBrainzClient:
         raises — failures come back as status='error'/'notfound'."""
         empty = {"status": "notfound", "mbid": None, "country": None,
                  "area": None, "genres": [], "score": 0}
-        if not name or not name.strip():
+        raw_name = (name or "").strip()
+        if not raw_name:
             return empty
 
-        q = _escape_lucene(name.strip())
+        q = _escape_lucene(raw_name)
+        parts = raw_name.split()
+        sort_name_q = None
+        if len(parts) >= 2:
+            sort_str = f"{parts[-1]}, {' '.join(parts[:-1])}"
+            sort_name_q = _escape_lucene(sort_str)
+
+        # Tier 1: Direct exact artist search e.g. artist:"Vasilis Karras"
         data, status = await self._get(
             "artist", {"query": f'artist:"{q}"', "fmt": "json", "limit": 5}
         )
+        # Tier 2: MusicBrainz sort-name search e.g. sortname:"Karras, Vasilis"
+        if sort_name_q and (data is None or not data.get("artists")):
+            data, status = await self._get(
+                "artist", {"query": f'sortname:"{sort_name_q}"', "fmt": "json", "limit": 5}
+            )
+        # Tier 3: Unquoted artist alias search for transliterated names
+        if data is None or not data.get("artists"):
+            data, status = await self._get(
+                "artist", {"query": f'artist:{q}', "fmt": "json", "limit": 5}
+            )
+        # Tier 4: General search across all artist fields and aliases
+        if data is None or not data.get("artists"):
+            data, status = await self._get(
+                "artist", {"query": q, "fmt": "json", "limit": 5}
+            )
+
         if data is None:
             return {**empty, "status": "error"}
 
-        best = _best_match(name, data.get("artists") or [])
+        best = _best_match(raw_name, data.get("artists") or [])
         if best is None:
             return empty
 
@@ -150,10 +266,27 @@ class MusicBrainzClient:
         except (TypeError, ValueError):
             score = 0
         mbid = best.get("id")
-        country = best.get("country")
+        country = _extract_country(best)
         area = (best.get("area") or {}).get("name")
         genres = _extract_genres(best)
-        ok = score >= 90 and _name_close(name, best.get("name", ""))
+
+        ok_name = (
+            _name_close(raw_name, best.get("name", "")) or
+            _name_close(raw_name, best.get("sort-name", ""))
+        )
+        if not ok_name:
+            aliases = best.get("aliases") or []
+            for al in aliases:
+                if isinstance(al, dict):
+                    if (al.get("name") and _name_close(raw_name, al.get("name"))) or \
+                       (al.get("sort-name") and _name_close(raw_name, al.get("sort-name"))):
+                        ok_name = True
+                        break
+                elif isinstance(al, str) and _name_close(raw_name, al):
+                    ok_name = True
+                    break
+
+        ok = score >= 90 and ok_name
         result = {
             "status": "ok" if ok else "lowconfidence",
             "mbid": mbid, "country": country, "area": area,
@@ -169,7 +302,7 @@ class MusicBrainzClient:
                 g2 = _extract_genres(gdata)
                 if g2:
                     result["genres"] = g2
-                result["country"] = result["country"] or gdata.get("country")
+                result["country"] = _extract_country(gdata) or result["country"]
                 result["area"] = result["area"] or (gdata.get("area") or {}).get("name")
         return result
 
