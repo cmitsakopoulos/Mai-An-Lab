@@ -20,11 +20,11 @@ The Library supports five views, toggled via settings:
 - **Tracks**: A flat, paginated list of all indexed tracks.
 - **Network**: An interactive, 2D layout representation of the acoustic similarity space built from PCA graph embeddings. Features include:
   * **Modes (`[ Local | Walk ]`)**:
-    - **Local**: Renders the seed track and its $K$ nearest acoustic neighbors, colored by coarse genre.
+    - **Local**: Renders the seed track and its $K$ nearest acoustic neighbors, color-coded by primary genre category. Multi-genre tags (`"Pop / Rock"`) parse their leading primary segment (`Pop` $\rightarrow$ Soft Pink `#FF80AB`, `Rock/Alt` $\rightarrow$ Bright Cyan `#40C4FF`, `Hip-Hop` $\rightarrow$ Amber Gold `#FFD740`, `Electronic` $\rightarrow$ Neon Lime `#76FF03`).
     - **Walk**: Visualizes sequential similarity walk trajectories with directed arrowheads pointing step-by-step through the acoustic space.
   * **Controls & Aesthetics**:
     - **Top Control Header**: Glassmorphic overlay containing segmented mode tabs, compact PopupMenu dropdown selector (`Density: 24` dropdown in Local mode, `Steps: 10` dropdown in Walk mode) allowing direct selection of parameters, and Follow Live Playing Track toggle button.
-    - **Visual Feel**: Multi-layer radial glow auras for seed nodes, glowing pulse rings for currently playing tracks, **Cyan Selection Halos** for focused nodes, translucent neon edge lines, and pill backdrops (`cv.Rect`, `border_radius=3`) ensuring text legibility over intersecting edges.
+    - **Visual Feel**: Multi-layer radial glow auras for seed nodes, glowing pulse rings for currently playing tracks, **Cyan Selection Halos** for focused nodes, translucent neon edge lines, an expanded **24-color dark-theme palette** with direct mega-genre color mapping, and deduplicated legend entries.
     - **Gestures**: Smooth pan and zoom gestures for canvas navigation with node drag/drop removed for optimal touch responsiveness on mobile.
   * **Selected Track Inspector Card & Action Panel**:
     - Mounted directly below the network canvas when a node is selected.
@@ -126,8 +126,8 @@ The **Search** tab (implemented in [search.py](file:///Users/chrismitsacopoulos/
 The settings screen features a categorized menu linking to sub-panels:
 
 ### 7.1 Set-up
-- **Authentication**: Credentials (User ID, Auth Token, password hash) for Qobuz.
-- **Storage & Paths**: Directory configurations for index folders and download directories.
+- **Authentication**: Credentials (User ID, Auth Token, Password Hash, Qobuz App ID, Qobuz App Secret) for Qobuz API access. Supports authenticated streaming and Guest Signed Catalog mode.
+- **Storage & Paths**: Directory configurations for index folders and download directories (defaults to `~/Music/Streamrip` on Desktop).
 
 ### 7.2 Customization
 - **Appearance**: Adjust startup page, default library sort, toggle landing page stats, toggle visibility of specific library tabs, and choose custom UI accent colors.

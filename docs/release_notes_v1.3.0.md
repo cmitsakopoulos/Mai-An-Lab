@@ -7,9 +7,9 @@ This release introduces an interactive acoustic network graph view, direct audio
 ### Interactive Acoustic Network Graph View
 * **Acoustic Network Canvas**: Integrates an interactive 2D force-directed layout representation of the similarity graph directly inside the Library tab. Toggled via the "Acoustic Network" appearance switch in settings.
 * **Dual Navigation Modes**: Renders in "Local" mode (plots the current playing/seed track and its 1-hop nearest neighbors) or "Walk" mode (visualizes the actual sequence traversed during similarity walks).
-* **High-Fidelity Interactivity**: Nodes are color-coded by genre community, support smooth pan/zoom gestures, and double-clicking any track node immediately starts its playback. Requires analyzing the library first to compute the PCA coordinates.
-
-### Direct Track Preview Streaming & Progress UI
+* **High-Fidelity Interactivity & 24-Color Genre Palette**: Nodes are color-coded by primary genre category (`Pop` $\rightarrow$ Soft Pink, `Rock/Alt` $\rightarrow$ Bright Cyan, `Hip-Hop` $\rightarrow$ Amber Gold, `Electronic` $\rightarrow$ Neon Lime) using an expanded 24-color dark-theme palette. Multi-genre tags map via primary segment parsing, and legend entries are strictly deduplicated by label.
+* **Qobuz Android API Signing & Guest Catalog Mode**: Integrates OrpheusDL MD5 request signing (`request_ts` & `request_sig`) and Android client platform headers (`X-Device-Platform: android`, `X-App-Version: 5.16.1.5`). Automatically falls back to Guest Signed Catalog Mode for error-free search when credentials are missing or unauthenticated.
+* **Dynamic Settings UI & Token Header Preservation**: Exposes explicit text fields for Qobuz App ID and App Secret in the Settings tab, persisting configuration to workspace storage while preserving `X-User-Auth-Token` across authenticated sessions.
 * **Direct Network Streaming**: Resolves authenticated stream URLs (MP3 128kbps) directly from the Qobuz API. Plays previews instantly over the network without disk-write operations.
 * **Preview Progress Card**: Adds a dedicated loading card in the search tab stack displaying real-time connection status (i.e., resolving, downloading, error reports).
 * **Granular Cancellation**: Provides a cancel button on the progress card that instantly halts active lookup tasks or interrupts the background download thread.

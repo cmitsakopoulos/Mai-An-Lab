@@ -26,6 +26,11 @@ def get_platform_name():
     return 'linux'
 
 def get_config_path():
+    app_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    local_cfg = os.path.join(app_root, "utils", "config.toml")
+    if os.path.exists(local_cfg):
+        return local_cfg
+
     try:
         from utils.filepath_utils import get_app_dir
         base = get_app_dir()

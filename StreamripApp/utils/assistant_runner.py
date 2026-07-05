@@ -1466,25 +1466,14 @@ class AssistantRunner:
         # Save the original seed track on the engine for subsequent continuation walks
         self.engine.play_similar_seed_path = seed_path
  
-        # One pooled walk over acoustic + artist tiers. The walk picks the
-        # first step itself (restart probability + softmax handle anchoring
-        # and exploration), and the multi-tier pool means we don't need a
-        # separate "acoustic neighbours empty → fall back to artist" branch
-        # at the seed; the walk does it implicitly per step.
-        from utils.streamrip_api import load_config
-        cfg = load_config()
-        temp = float(cfg.get("general", {}).get("play_similar_temperature", 0.05))
-
+        # Seed-anchored smooth walk over the acoustic graph. The 0.3·seed term
+        # keeps it anchored, and the metadata/cluster factors keep it in the
+        # seed's genre/community; dead-end steps fall back to seed neighbours.
         try:
             walk_paths = await track_graph.walk(
                 self.db, seed_path,
                 length=12,
-                edge_kinds=(track_graph.KIND_ACOUSTIC, track_graph.KIND_ARTIST),
                 avoid=avoid,
-                restart_prob=0.15,
-                diversity_lambda=0.3,
-                temperature=temp,
-                teleport_path=seed_path,
             )
         except Exception as exc:
             logger.warning("track_graph.walk failed: %s", exc)

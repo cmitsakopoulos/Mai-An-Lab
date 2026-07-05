@@ -90,18 +90,19 @@ def _extract_genres(obj: dict, top: int = 8) -> list[dict]:
     return out[:top]
 
 
-def _best_match(name: str, artists: list[dict]) -> dict | None:
-    """MusicBrainz returns artists score-sorted. Prefer the highest-scoring one
-    whose name, sort-name, or aliases actually match; otherwise fall back to top result."""
-    if not artists:
-        return None
-    for a in artists:
+def _closest_match(name: str, artists: list[dict]) -> dict | None:
+    """First artist whose name, sort-name, OR an alias genuinely matches `name`
+    (see `_name_close`), else None. Unlike `_best_match` this does NOT fall back
+    to the top search hit, so a tribute band / mashup that merely contains the
+    query string (e.g. 'Kanye West Tribute Band') is rejected instead of accepted
+    as truth. Alias matching is what recovers renamed artists — MusicBrainz
+    renamed 'Kanye West' → 'Ye', keeping 'Kanye West' only as an alias."""
+    for a in artists or []:
         if _name_close(name, a.get("name", "")):
             return a
         if _name_close(name, a.get("sort-name", "")):
             return a
-        aliases = a.get("aliases") or []
-        for al in aliases:
+        for al in a.get("aliases") or []:
             if isinstance(al, dict):
                 if al.get("name") and _name_close(name, al.get("name")):
                     return a
@@ -109,7 +110,33 @@ def _best_match(name: str, artists: list[dict]) -> dict | None:
                     return a
             elif isinstance(al, str) and _name_close(name, al):
                 return a
-    return artists[0]
+    return None
+
+
+_JUNK_ENTITY_MARKERS = ("tribute", "karaoke", "cover band", "covers band")
+
+
+def _looks_like_junk(a: dict) -> bool:
+    """A search hit that is clearly not the real artist — a tribute/karaoke/cover
+    act. These outrank real artists on literal-string searches (a 'Kanye West
+    Tribute Band' scores 100 for `artist:\"Kanye West\"`) and must never be the
+    fallback we enrich from."""
+    txt = ((a.get("name") or "") + " " + (a.get("disambiguation") or "")).lower()
+    return any(m in txt for m in _JUNK_ENTITY_MARKERS)
+
+
+def _best_match(name: str, artists: list[dict]) -> dict | None:
+    """Highest-scoring genuinely-matching artist, else the top non-junk hit (kept
+    for callers that want a best-effort guess)."""
+    if not artists:
+        return None
+    m = _closest_match(name, artists)
+    if m is not None:
+        return m
+    for a in artists:
+        if not _looks_like_junk(a):
+            return a
+    return None
 
 
 _COUNTRY_NAME_TO_ISO = {
@@ -234,32 +261,49 @@ class MusicBrainzClient:
             sort_str = f"{parts[-1]}, {' '.join(parts[:-1])}"
             sort_name_q = _escape_lucene(sort_str)
 
-        # Tier 1: Direct exact artist search e.g. artist:"Vasilis Karras"
-        data, status = await self._get(
-            "artist", {"query": f'artist:"{q}"', "fmt": "json", "limit": 5}
-        )
-        # Tier 2: MusicBrainz sort-name search e.g. sortname:"Karras, Vasilis"
-        if sort_name_q and (data is None or not data.get("artists")):
-            data, status = await self._get(
-                "artist", {"query": f'sortname:"{sort_name_q}"', "fmt": "json", "limit": 5}
-            )
-        # Tier 3: Unquoted artist alias search for transliterated names
-        if data is None or not data.get("artists"):
-            data, status = await self._get(
-                "artist", {"query": f'artist:{q}', "fmt": "json", "limit": 5}
-            )
-        # Tier 4: General search across all artist fields and aliases
-        if data is None or not data.get("artists"):
-            data, status = await self._get(
-                "artist", {"query": q, "fmt": "json", "limit": 5}
-            )
+        # Query cascade. Each tier is tried in turn; we keep going until a tier
+        # yields a GENUINE name/alias match (`_closest_match`), not merely a
+        # non-empty result. Key changes vs "stop on first non-empty tier + accept
+        # artists[0]":
+        #   • the `alias:` tier recovers renamed artists — MusicBrainz renamed
+        #     'Kanye West' → 'Ye', so name/sortname searches only surface a
+        #     'Kanye West Tribute Band'; the real entity is reachable only by
+        #     alias;
+        #   • a non-matching tier no longer short-circuits the cascade;
+        #   • if no tier produces a genuine match we fall back to the first
+        #     non-junk hit (so multi-artist strings like 'Digga D, Sav'O' still
+        #     get a best-effort genre), but never to a tribute/karaoke entity.
+        queries = [f'artist:"{q}"']
+        if sort_name_q:
+            queries.append(f'sortname:"{sort_name_q}"')
+        queries.append(f'alias:"{q}"')   # recovers renamed / aliased artists
+        queries.append(f'artist:{q}')    # unquoted (transliteration slack)
+        queries.append(q)                # general, all fields
 
-        if data is None:
-            return {**empty, "status": "error"}
+        best = None
+        matched = False       # True = genuine name/alias match; False = weak fallback
+        weak = None           # first non-junk hit, used only if nothing matches
+        saw_error = False
+        for query in queries:
+            data, status = await self._get(
+                "artist", {"query": query, "fmt": "json", "limit": 5}
+            )
+            if data is None:
+                saw_error = True
+                continue
+            arts = data.get("artists") or []
+            m = _closest_match(raw_name, arts)
+            if m is not None:
+                best, matched = m, True
+                break
+            if weak is None:
+                weak = next((a for a in arts if not _looks_like_junk(a)), None)
 
-        best = _best_match(raw_name, data.get("artists") or [])
         if best is None:
-            return empty
+            best = weak
+        if best is None:
+            # Nothing usable (all junk, or requests failed). notfound → retried.
+            return {**empty, "status": "error" if saw_error else "notfound"}
 
         try:
             score = int(best.get("score", 0) or 0)
@@ -270,23 +314,9 @@ class MusicBrainzClient:
         area = (best.get("area") or {}).get("name")
         genres = _extract_genres(best)
 
-        ok_name = (
-            _name_close(raw_name, best.get("name", "")) or
-            _name_close(raw_name, best.get("sort-name", ""))
-        )
-        if not ok_name:
-            aliases = best.get("aliases") or []
-            for al in aliases:
-                if isinstance(al, dict):
-                    if (al.get("name") and _name_close(raw_name, al.get("name"))) or \
-                       (al.get("sort-name") and _name_close(raw_name, al.get("sort-name"))):
-                        ok_name = True
-                        break
-                elif isinstance(al, str) and _name_close(raw_name, al):
-                    ok_name = True
-                    break
-
-        ok = score >= 90 and ok_name
+        # 'ok' requires a genuine name/alias match (not a weak fallback) AND a
+        # high MB score; a weak-fallback guess is always 'lowconfidence'.
+        ok = matched and score >= 90
         result = {
             "status": "ok" if ok else "lowconfidence",
             "mbid": mbid, "country": country, "area": area,
@@ -306,11 +336,56 @@ class MusicBrainzClient:
                 result["area"] = result["area"] or (gdata.get("area") or {}).get("name")
         return result
 
+    async def search_candidates(self, name: str, limit: int = 10) -> list[dict]:
+        """Perform a direct MusicBrainz search and return candidate dicts."""
+        raw_name = (name or "").strip()
+        if not raw_name:
+            return []
+        q = _escape_lucene(raw_name)
+        data, status = await self._get(
+            "artist", {"query": f'artist:"{q}" OR alias:"{q}" OR {q}', "fmt": "json", "limit": limit}
+        )
+        if not data:
+            return []
+        arts = data.get("artists") or []
+        results = []
+        for a in arts:
+            mbid = a.get("id")
+            g = _extract_genres(a)
+            c = _extract_country(a)
+            try:
+                sc = int(a.get("score", 0) or 0)
+            except (TypeError, ValueError):
+                sc = 0
+            results.append({
+                "name": a.get("name") or raw_name,
+                "mbid": mbid,
+                "disambiguation": a.get("disambiguation", ""),
+                "country": c,
+                "area": (a.get("area") or {}).get("name"),
+                "genres": g,
+                "score": sc,
+                "is_junk": _looks_like_junk(a),
+            })
+        return results
+
+
+async def search_musicbrainz_artists_candidates(
+    name: str, contact: str = DEFAULT_CONTACT, limit: int = 10
+) -> list[dict]:
+    """Standalone helper to query MusicBrainz candidate entities for an artist name."""
+    if aiohttp is None:
+        return []
+    async with aiohttp.ClientSession() as session:
+        client = MusicBrainzClient(session, contact=contact)
+        return await client.search_candidates(name, limit=limit)
+
 
 async def enrich_library(
     db_manager, *, with_genres: bool = True, limit=None,
     contact: str = DEFAULT_CONTACT, include_failed: bool = False,
     max_consecutive_errors: int = 3, progress=None,
+    cancel_event: asyncio.Event | None = None,
 ) -> dict:
     """Incrementally enrich artists that have no cached metadata yet.
 
@@ -339,6 +414,9 @@ async def enrich_library(
     async with aiohttp.ClientSession() as session:
         client = MusicBrainzClient(session, contact=contact)
         for i, name in enumerate(artists, 1):
+            if cancel_event and cancel_event.is_set():
+                counts["cancelled"] = 1
+                break
             try:
                 res = await client.lookup_artist(name, with_genres=with_genres)
             except Exception:

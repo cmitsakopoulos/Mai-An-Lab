@@ -179,13 +179,11 @@ async def run_simulation():
         print(f"{'Step':<5} | {'Track Title':<30} | {'Artist':<22} | {'BPM':<6} | {'Energy':<7} | {'Transition Cost':<15}")
         print("-" * 104)
 
-        # Run Personalized PageRank Walk (Long-Flow, Gentle-Reset in Action)
+        # Run the seed-anchored smooth-flow walk.
         walk_paths = await tg.walk(
             db,
             seed_path,
             length=10,
-            edge_kinds=(tg.KIND_ACOUSTIC, tg.KIND_ARTIST),
-            teleport_path=seed_path,
         )
 
         prev_pc = seed_meta["pca_coords"]

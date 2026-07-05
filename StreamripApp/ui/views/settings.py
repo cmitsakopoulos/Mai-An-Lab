@@ -312,6 +312,28 @@ class SettingsView:
             password=True,
             can_reveal_password=True,
         )
+        self._qobuz_app_id_field = ft.TextField(
+            label="Qobuz App ID",
+            hint_text="Default: 312369995",
+            bgcolor=SURFACE2,
+            border_color=BORDER,
+            focused_border_color=CYAN,
+            text_style=ft.TextStyle(color=TEXT, size=13),
+            label_style=ft.TextStyle(color=CYAN, size=11),
+            border_radius=10,
+        )
+        self._qobuz_app_secret_field = ft.TextField(
+            label="Qobuz App Secret",
+            hint_text="Default: e79f8b9be485692b0e5f9dd895826368",
+            bgcolor=SURFACE2,
+            border_color=BORDER,
+            focused_border_color=CYAN,
+            text_style=ft.TextStyle(color=TEXT, size=13),
+            label_style=ft.TextStyle(color=CYAN, size=11),
+            border_radius=10,
+            password=True,
+            can_reveal_password=True,
+        )
         self._qobuz_use_token_switch = ft.Switch(
             value=True,
             active_color=CYAN
@@ -672,9 +694,9 @@ class SettingsView:
             ft.Row([
                 ft.IconButton(ft.Icons.ARROW_BACK_IOS_NEW_ROUNDED, icon_color=CYAN, icon_size=16, 
                               on_click=lambda _: self._show_hub()),
-                ft.Text(title, size=24, weight=ft.FontWeight.W_700, color=TEXT),
+                ft.Text(title, size=18, weight=ft.FontWeight.W_700, color=TEXT, overflow=ft.TextOverflow.ELLIPSIS, max_lines=1, expand=True),
             ], spacing=10),
-            ft.Container(height=20),
+            ft.Container(height=15),
             content_control
         ]
         self.app.safe_update(lambda: None)
@@ -683,9 +705,11 @@ class SettingsView:
 
     def _build_auth_group(self):
         return ft.Column([
-            ft.Text("Enter your Qobuz credentials to enable search and preview.", color=DIM, size=12),
+            ft.Text("Enter your Qobuz credentials, App ID, and App Secret.", color=DIM, size=12),
             self._qobuz_user_id_field,
             self._qobuz_token_field,
+            self._qobuz_app_id_field,
+            self._qobuz_app_secret_field,
             ft.Row([self._qobuz_use_token_switch, ft.Text("Use Auth Token", color=TEXT, size=12)], spacing=10),
             OnyxButton("SAVE CREDENTIALS", ft.Icons.SAVE, on_tap=lambda _: self._save_qobuz_credentials())
         ], spacing=20)
@@ -749,7 +773,7 @@ class SettingsView:
                      "Clear DSP", 
                      self.app.clear_dsp_features
                 )),
-                ft.TextButton("Fix & Normalize Genres", icon=ft.Icons.AUTO_FIX_HIGH_ROUNDED, on_click=self._on_fix_genres_click),
+                ft.TextButton("Enrich Metadata", icon=ft.Icons.AUTO_FIX_HIGH_ROUNDED, on_click=self._on_launch_enrichment_wizard_click),
                 ft.TextButton("Wipe DB", icon=ft.Icons.DELETE_FOREVER, icon_color="#FF4444", on_click=lambda _: self._on_wipe_db_click()),
             ], wrap=True, spacing=10),
             ft.Divider(color=BORDER, height=20),
@@ -1093,33 +1117,10 @@ class SettingsView:
             color=CYAN,
         )
 
-    def _on_fix_genres_click(self, _e=None):
-        self.page.run_task(self._do_fix_genres)
-
-    async def _do_fix_genres(self):
-        self.app.show_snackbar(
-            "Fetching MusicBrainz metadata & normalizing genres...",
-            icon=ft.Icons.AUTO_FIX_HIGH_ROUNDED,
-            color=CYAN,
-        )
-        try:
-            from utils.metadata_enrich import enrich_library
-            enrich_summary = await enrich_library(
-                self.app.db_manager, with_genres=True, include_failed=True
-            )
-            res = await self.app.db_manager.fix_and_normalize_track_genres()
-            up = res.get("updated", 0)
-            bf = res.get("backfilled", 0)
-            nm = res.get("normalized", 0)
-            en = enrich_summary.get("enriched", 0)
-            self.app.show_snackbar(
-                f"MusicBrainz Sync Complete: {en} artists enriched, {up} album genres updated ({bf} backfilled, {nm} normalized)",
-                icon=ft.Icons.CHECK_CIRCLE_ROUNDED,
-                color=CYAN,
-            )
-        except Exception as exc:
-            logger.exception("Genre normalization failed: %s", exc)
-            self.app.show_snackbar(f"Genre normalization failed: {exc}", color="#FF4444")
+    def _on_launch_enrichment_wizard_click(self, _e=None):
+        from ui.player.enrichment_wizard import MetadataEnrichmentWizardPane
+        pane = MetadataEnrichmentWizardPane(self.app, on_back=lambda: self._show_hub())
+        self._show_sub_page("Enrich Metadata", pane)
 
     # ── State bundle (export/import) ────────────────────────────────────────
     def _on_export_state_click(self, _e):
@@ -1367,7 +1368,8 @@ class SettingsView:
         self.app.page.update()
 
     def refresh(self):
-        self._dl_path_field.value  = self.app.target_folder
+        from utils.streamrip_api import get_default_download_path
+        self._dl_path_field.value  = self.app.target_folder or get_default_download_path()
         self._lib_path_field.value = self.app.library_folder
         try:
             from utils.streamrip_api import load_config, get_config_path
@@ -1384,6 +1386,9 @@ class SettingsView:
             qobuz = cfg.get("qobuz", {})
             self._qobuz_user_id_field.value = str(qobuz.get("email_or_userid", ""))
             self._qobuz_token_field.value   = str(qobuz.get("password_or_token", ""))
+            self._qobuz_app_id_field.value  = str(qobuz.get("app_id", "312369995"))
+            secrets_list = qobuz.get("secrets", [])
+            self._qobuz_app_secret_field.value = str(secrets_list[0]) if (secrets_list and isinstance(secrets_list, list) and len(secrets_list) > 0) else "e79f8b9be485692b0e5f9dd895826368"
             self._qobuz_use_token_switch.value = bool(qobuz.get("use_auth_token", True))
 
             landing = cfg.get("landing", {})
@@ -1568,8 +1573,10 @@ class SettingsView:
             self.app.show_snackbar(f"Save failed: {exc}")
 
     def _save_qobuz_credentials(self):
-        uid   = self._qobuz_user_id_field.value.strip()
-        token = self._qobuz_token_field.value.strip()
+        uid        = self._qobuz_user_id_field.value.strip()
+        token      = self._qobuz_token_field.value.strip()
+        app_id     = self._qobuz_app_id_field.value.strip() or "312369995"
+        app_secret = self._qobuz_app_secret_field.value.strip() or "e79f8b9be485692b0e5f9dd895826368"
         if not uid or not token:
             self.app.show_snackbar("Credentials cannot be empty.")
             return
@@ -1580,7 +1587,9 @@ class SettingsView:
             "qobuz": {
                 "use_auth_token": use_token,
                 "email_or_userid": uid,
-                "password_or_token": token
+                "password_or_token": token,
+                "app_id": app_id,
+                "secrets": [app_secret]
             }
         })
         if success:

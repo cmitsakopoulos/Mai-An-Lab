@@ -16,6 +16,9 @@ AMBER    = "#FFBF00"
 TEXT     = "#FFFFFF"
 DIM      = "#A0A0A0"
 BORDER   = "#262626"
+ACCENT_GREEN = "#00FF88"
+ACCENT_AMBER = AMBER
+ACCENT_RED   = "#FF4444"
 
 SOURCE_COLORS = {
     "qobuz":      "#00E5FF",
