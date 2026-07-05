@@ -95,9 +95,13 @@ class StreamripSearcher:
                 old_c = StreamripSearcher._client.config.session.qobuz
                 new_c = config.session.qobuz
                 if (old_c.email_or_userid != new_c.email_or_userid or 
-                    old_c.password_or_token != new_c.password_or_token):
+                    old_c.password_or_token != new_c.password_or_token or
+                    getattr(old_c, "app_id", None) != getattr(new_c, "app_id", None) or
+                    old_c.use_auth_token != new_c.use_auth_token):
                     logger.info("Qobuz credentials changed, resetting client session.")
-                    if StreamripSearcher._client.session and not StreamripSearcher._client.session.closed:
+                    if hasattr(StreamripSearcher._client, "close"):
+                        await StreamripSearcher._client.close()
+                    elif StreamripSearcher._client.session and not StreamripSearcher._client.session.closed:
                         await StreamripSearcher._client.session.close()
                     StreamripSearcher._client = None
 

@@ -63,6 +63,7 @@ class DatabaseManager:
             await self._migrate_pca(self._conn)
             await self._migrate_clusters(self._conn)
             await self._migrate_enrichment(self._conn)
+            await self._migrate_album_genre_bucket(self._conn)
         return self._conn
 
     async def get_total_tracks(self) -> int:
@@ -106,12 +107,13 @@ class DatabaseManager:
 
                 await conn.execute('''
                     CREATE TABLE IF NOT EXISTS albums (
-                        id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                        artist_id   INTEGER NOT NULL,
-                        title       TEXT    NOT NULL COLLATE NOCASE,
-                        year        TEXT,
-                        genre       TEXT,
-                        track_count INTEGER DEFAULT 0,
+                        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                        artist_id    INTEGER NOT NULL,
+                        title        TEXT    NOT NULL COLLATE NOCASE,
+                        year         TEXT,
+                        genre        TEXT,
+                        genre_bucket TEXT,
+                        track_count  INTEGER DEFAULT 0,
                         FOREIGN KEY (artist_id) REFERENCES artists(id) ON DELETE CASCADE,
                         UNIQUE (artist_id, title)
                     )
@@ -1976,6 +1978,17 @@ class DatabaseManager:
         except Exception:
             pass  # Column already exists
 
+    async def _migrate_album_genre_bucket(self, conn):
+        """Idempotent migration: adds the `genre_bucket` column to albums — the
+        coarse family (pca_engine.genre_bucket) kept ALONGSIDE the specific
+        display `genre`, so grouping/colour has a canonical key without the
+        display tag having to be flattened to it."""
+        try:
+            await conn.execute("ALTER TABLE albums ADD COLUMN genre_bucket TEXT")
+            await conn.commit()
+        except Exception:
+            pass  # Column already exists
+
     async def save_track_clusters(
         self, path_cluster_pairs: list[tuple[str, int]]
     ) -> None:
@@ -2067,12 +2080,23 @@ class DatabaseManager:
         country: str | None = None, area: str | None = None,
         genres=None, source: str = "musicbrainz",
         score: int | None = None, status: str = "ok",
+        force: bool = False,
     ) -> None:
         """Mutation: insert/replace one artist's enrichment row. `genres` may be a
-        list (stored as JSON) or None. One row per artist; cheap to re-run."""
+        list (stored as JSON) or None. One row per artist; cheap to re-run.
+        Guards existing source='manual' rows from being overwritten unless source is 'manual' or force is True."""
         genres_text = json.dumps(genres) if genres is not None else None
         async with self._write_lock:
             conn = await self.get_connection()
+            if not force and source != "manual":
+                async with conn.execute(
+                    "SELECT source FROM artist_enrichment WHERE artist_name = ?",
+                    (artist_name,),
+                ) as cursor:
+                    existing = await cursor.fetchone()
+                if existing and existing[0] == "manual":
+                    logger.info("Preserving manual override for artist: %s", artist_name)
+                    return
             await conn.execute('''
                 INSERT OR REPLACE INTO artist_enrichment
                     (artist_name, mbid, country, area, genres, source, score, status, fetched_at)
@@ -2080,18 +2104,101 @@ class DatabaseManager:
             ''', (artist_name, mbid, country, area, genres_text, source, score, status))
             await conn.commit()
 
+    async def set_manual_artist_enrichment(
+        self, artist_name: str, *, country: str | None = None,
+        genres: list[str] | list[dict] | None = None,
+    ) -> None:
+        """User-entered override. Stored as source='manual', status='ok' so it feeds
+        the genre model and is never overwritten by automated MusicBrainz syncs."""
+        genre_objs = []
+        if genres:
+            for g in genres:
+                if isinstance(g, dict):
+                    genre_objs.append(g)
+                elif isinstance(g, str) and g.strip():
+                    genre_objs.append({"name": g.strip(), "count": 1})
+        await self.upsert_artist_enrichment(
+            artist_name, country=(country or None), genres=genre_objs,
+            source="manual", status="ok", score=100, force=True,
+        )
+
+    async def get_metadata_gap_artists(self, limit: int = 200) -> list[dict]:
+        """Artists whose enrichment is missing genres and/or country, most-played
+        first, excluding manual rows. Powers the wizard failure/gap resolution list."""
+        conn = await self.get_connection()
+        sql = (
+            "SELECT a.name AS artist_name, a.track_count AS track_count, "
+            "e.country AS country, e.genres AS genres, e.source AS source, e.status AS status "
+            "FROM artists a LEFT JOIN artist_enrichment e ON e.artist_name = a.name "
+            "WHERE (e.artist_name IS NULL OR e.genres IS NULL OR e.genres = '' OR e.genres = '[]' "
+            "       OR e.country IS NULL OR e.country = '') "
+            "  AND (e.source IS NULL OR e.source <> 'manual') "
+            "ORDER BY a.track_count DESC LIMIT ?"
+        )
+        async with conn.execute(sql, (limit,)) as cursor:
+            rows = await cursor.fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["genres"] = json.loads(d["genres"]) if d["genres"] else []
+            except Exception:
+                d["genres"] = []
+            out.append(d)
+        return out
+
+    async def get_low_confidence_artists(self, limit: int = 200) -> list[dict]:
+        """Artists whose enrichment has status='lowconfidence'. Powers the wizard match resolution list."""
+        conn = await self.get_connection()
+        sql = (
+            "SELECT a.name AS artist_name, a.track_count AS track_count, "
+            "e.mbid AS mbid, e.country AS country, e.area AS area, e.genres AS genres, "
+            "e.source AS source, e.score AS score, e.status AS status "
+            "FROM artists a JOIN artist_enrichment e ON e.artist_name = a.name "
+            "WHERE e.status = 'lowconfidence' "
+            "ORDER BY a.track_count DESC LIMIT ?"
+        )
+        async with conn.execute(sql, (limit,)) as cursor:
+            rows = await cursor.fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["genres"] = json.loads(d["genres"]) if d["genres"] else []
+            except Exception:
+                d["genres"] = []
+            out.append(d)
+        return out
+
+    async def confirm_artist_match(
+        self, artist_name: str, *, mbid: str | None = None,
+        country: str | None = None, area: str | None = None,
+        genres=None, status: str = "ok", score: int = 100,
+    ) -> None:
+        """Promote or resolve an artist match, marking it as confirmed status='ok' (or 'notfound')."""
+        await self.upsert_artist_enrichment(
+            artist_name, mbid=mbid, country=country, area=area,
+            genres=genres, source="musicbrainz", score=score, status=status, force=True,
+        )
+
     async def get_artists_needing_enrichment(
         self, limit: int | None = None, include_failed: bool = False,
     ) -> list[str]:
         """Lock-free read: distinct artist names that have no cached enrichment
         yet (or, with include_failed, also those whose last attempt errored /
-        wasn't found). Drives the batch enrichment pass."""
+        wasn't found / came back INCOMPLETE — empty genres). The incomplete case
+        lets a re-sync heal rows the old MusicBrainz search populated from the
+        wrong entity (e.g. a tribute band → empty genres). Rows the user filled
+        by hand (source='manual') are never re-fetched. Drives the batch pass."""
         conn = await self.get_connection()
         if include_failed:
             sql = (
                 "SELECT a.name FROM artists a "
                 "LEFT JOIN artist_enrichment e ON e.artist_name = a.name "
-                "WHERE e.artist_name IS NULL OR e.status IN ('error', 'notfound') "
+                "WHERE (e.artist_name IS NULL "
+                "       OR e.status IN ('error', 'notfound') "
+                "       OR e.genres IS NULL OR e.genres = '' OR e.genres = '[]') "
+                "  AND (e.source IS NULL OR e.source <> 'manual') "
                 "ORDER BY a.track_count DESC"
             )
         else:
@@ -2235,98 +2342,133 @@ class DatabaseManager:
         return out
 
     async def fix_and_normalize_track_genres(self) -> dict:
-        """Fix, back-fill, and normalize track genres using API artist metadata
-        and canonical genre rules (pca_engine.genre_bucket).
+        """Back-fill album genres from API artist metadata — NON-DESTRUCTIVELY —
+        and maintain the coarse `genre_bucket` alongside the specific `genre`.
 
-        - Tracks with missing/empty/Unknown/Other genres are back-filled from
-          artist_enrichment.genres (MusicBrainz API tags).
-        - Unnormalized raw genre strings (e.g. 'hip hop', 'rap', 'classique') are
-          normalized to their canonical bucket ('Hip-Hop', 'Electronic', 'Classical', etc.).
+        Two columns per album:
+          • `genre`        — the human DISPLAY tag. A genuinely specific existing
+            tag is KEPT (a 'Trap' / 'Boom Bap' is never flattened to 'Hip-Hop').
+            A value that is empty, a placeholder ('Various'/'Unknown'), or itself
+            just a coarse bucket label (an artifact of the OLD collapsing
+            normalization) is re-derived to the artist's top MusicBrainz tag —
+            so prior collapses are gently undone ('Hip-Hop' → 'Grime').
+          • `genre_bucket` — the coarse family (pca_engine.genre_bucket) for
+            grouping/colour/legend, from the weighted API-tag vote, else the
+            bucket of the display tag.
 
-        Returns summary dict: {'scanned': N, 'updated': N, 'backfilled': N, 'normalized': N}.
+        This supersedes the old behaviour, which overwrote `genre` with the coarse
+        bucket and destroyed sub-genre nuance. NB the walk reads NEITHER column
+        (it uses artist_enrichment.genres directly), so this is display-only.
+
+        Returns {'scanned', 'genre_rederived', 'bucket_updated'}.
         """
-        from utils.pca_engine import genre_bucket
+        from utils.pca_engine import (
+            genre_bucket, genre_display_label, GENRE_BUCKET_LABELS,
+        )
         conn = await self.get_connection()
 
         sql = (
-            "SELECT al.id AS album_id, al.genre AS current_genre, ar.name AS artist_name, "
+            "SELECT al.id AS album_id, al.genre AS current_genre, "
+            "al.genre_bucket AS current_bucket, ar.name AS artist_name, "
             "e.genres AS api_genres "
             "FROM albums al "
             "JOIN artists ar ON ar.id = al.artist_id "
             "LEFT JOIN artist_enrichment e ON e.artist_name = ar.name"
         )
-
         async with conn.execute(sql) as cursor:
             rows = await cursor.fetchall()
 
-        updates: list[tuple[str, int]] = []  # [(new_genre, album_id), ...]
-        backfilled_count = 0
-        normalized_count = 0
+        # Display values we treat as carrying no more information than the bucket
+        # column will — safe to re-derive to a finer tag.
+        _PLACEHOLDER = {"", "various", "various artists", "misc", "unknown", "other"}
 
         from collections import Counter
+        genre_updates: list[tuple[str, int]] = []   # (display_tag, album_id)
+        bucket_updates: list[tuple[str, int]] = []   # (bucket, album_id)
+
         for row in rows:
             album_id = row["album_id"]
             curr_genre = (row["current_genre"] or "").strip()
+            curr_bucket = (row["current_bucket"] or "").strip()
             api_genres_raw = row["api_genres"]
 
-            target_genre = None
-
-            # Parse API genres list and sum weighted votes per bucket
+            # Parse API tags → weighted bucket votes + tags sorted by count desc.
             bucket_votes: Counter = Counter()
-            api_top_tag = None
+            tags_by_count: list[str] = []
             if api_genres_raw:
                 try:
                     parsed = json.loads(api_genres_raw)
                     if isinstance(parsed, list):
+                        scored = []
                         for g in parsed:
                             if isinstance(g, dict) and g.get("name"):
                                 tag_name = g.get("name")
-                                if not api_top_tag:
-                                    api_top_tag = tag_name
                                 try:
                                     cnt = max(int(g.get("count", 1) or 1), 1)
                                 except (TypeError, ValueError):
                                     cnt = 1
+                                scored.append((cnt, tag_name))
                                 b = genre_bucket(tag_name)
                                 if b not in ("Unknown", "Other"):
                                     bucket_votes[b] += cnt
+                        scored.sort(key=lambda x: -x[0])
+                        tags_by_count = [t for _, t in scored]
                 except Exception:
                     pass
-
-            curr_bucket = genre_bucket(curr_genre) if curr_genre else "Unknown"
             api_consensus = bucket_votes.most_common(1)[0][0] if bucket_votes else None
 
-            if api_consensus:
-                target_genre = api_consensus
-                if curr_bucket in ("Unknown", "Other") or not curr_genre:
-                    backfilled_count += 1
-                else:
-                    normalized_count += 1
-            elif curr_bucket not in ("Unknown", "Other"):
-                if curr_bucket != curr_genre:
-                    target_genre = curr_bucket
-                    normalized_count += 1
-            elif api_top_tag:
-                target_genre = api_top_tag.title()
-                backfilled_count += 1
+            # ── DISPLAY tag ──────────────────────────────────────────────────
+            # Keep genuinely specific tags. Re-derive only placeholders and old
+            # collapse-artifact bucket labels, and ONLY to a tag that belongs to
+            # the consensus family — so the display can never contradict the
+            # bucket or drift into a noisy off-genre top tag (a 'Psychobilly'
+            # buckets to Other ≠ consensus → rejected; 'grime' buckets to the
+            # Hip-Hop consensus → accepted as 'Grime').
+            rederivable = (
+                curr_genre.lower() in _PLACEHOLDER
+                or curr_genre in GENRE_BUCKET_LABELS
+            )
+            display = curr_genre
+            if rederivable:
+                if api_consensus:
+                    rep = next(
+                        (t for t in tags_by_count if genre_bucket(t) == api_consensus),
+                        None,
+                    )
+                    if rep:
+                        display = rep.title()
+                elif curr_genre.lower() in _PLACEHOLDER and tags_by_count:
+                    # No family consensus and nothing to keep — surface the raw
+                    # top tag rather than leave an empty/placeholder.
+                    display = genre_display_label(tags_by_count[0])
+            if display != curr_genre:
+                genre_updates.append((display, album_id))
 
-            if target_genre and target_genre != curr_genre:
-                updates.append((target_genre, album_id))
+            # ── BUCKET: weighted API consensus, else the bucket of the display tag.
+            new_bucket = api_consensus
+            if not new_bucket and display:
+                b = genre_bucket(display)
+                new_bucket = b if b not in ("Unknown", "Other") else None
+            if new_bucket and new_bucket != curr_bucket:
+                bucket_updates.append((new_bucket, album_id))
 
-        if updates:
-            async with self._write_lock:
-                conn = await self.get_connection()
+        async with self._write_lock:
+            conn = await self.get_connection()
+            if genre_updates:
                 await conn.executemany(
-                    "UPDATE albums SET genre = ? WHERE id = ?",
-                    updates,
+                    "UPDATE albums SET genre = ? WHERE id = ?", genre_updates,
                 )
+            if bucket_updates:
+                await conn.executemany(
+                    "UPDATE albums SET genre_bucket = ? WHERE id = ?", bucket_updates,
+                )
+            if genre_updates or bucket_updates:
                 await conn.commit()
 
         summary = {
             "scanned": len(rows),
-            "updated": len(updates),
-            "backfilled": backfilled_count,
-            "normalized": normalized_count,
+            "genre_rederived": len(genre_updates),
+            "bucket_updated": len(bucket_updates),
         }
         logger.info("fix_and_normalize_track_genres: %s", summary)
         return summary

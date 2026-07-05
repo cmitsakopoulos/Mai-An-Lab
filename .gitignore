@@ -32,7 +32,7 @@ StreamripApp/requirements.txt.bak
 .gemini/
 .idea/
 .vscode/
-
+tools/orpheusdl
 
 # Python
 __pycache__/

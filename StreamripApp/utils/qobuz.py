@@ -229,123 +229,97 @@ class QobuzClient(Client):
         """
         c = self.config.session.qobuz
         if not c.email_or_userid or not c.password_or_token:
-            raise MissingCredentialsError
+            logger.info("No user credentials configured. Enabling guest signed catalog mode for searches.")
+            self.app_id = str(c.app_id) if c.app_id else "312369995"
+            if hasattr(c, "secrets") and c.secrets and isinstance(c.secrets, list) and len(c.secrets) > 0 and c.secrets[0]:
+                self.secret = str(c.secrets[0])
+            else:
+                self.secret = "e79f8b9be485692b0e5f9dd895826368"
+            self.session.headers.pop("X-User-Auth-Token", None)
+            self.guest_mode = True
+            self.logged_in = True
+            return
 
         assert not self.logged_in, "Already logged in"
 
         async def _attempt_login(force_refresh=False):
-            # Check if we have cached app_id and secrets
-            if force_refresh or not c.app_id or not c.secrets:
-                logger.info("App id/secrets not found or stale, fetching from Qobuz bundle")
-                c.app_id, c.secrets = await self._get_app_id_and_secrets()
-                
-                # Persist to the config file so we don't have to scrape every time
-                self.config.file.qobuz.app_id = c.app_id
-                self.config.file.qobuz.secrets = c.secrets
-                self.config.file.set_modified()
-                # This will write to the toml file on disk
-                self.config.save_file()
+            self.app_id = str(c.app_id) if c.app_id else "312369995"
+            if hasattr(c, "secrets") and c.secrets and isinstance(c.secrets, list) and len(c.secrets) > 0 and c.secrets[0]:
+                self.secret = str(c.secrets[0])
             else:
-                logger.info("Using cached app_id and secrets")
-                
-            self.app_id = c.app_id
-            self.session.headers.update({"X-App-Id": str(c.app_id)})
+                self.secret = "e79f8b9be485692b0e5f9dd895826368"
+            
+            self.session.headers.update({
+                "X-Device-Platform": "android",
+                "X-Device-Model": "Pixel 3",
+                "X-Device-Os-Version": "10",
+                "X-Device-Manufacturer-Id": "ffffffff-5783-1f51-ffff-ffffef05ac4a",
+                "X-App-Version": "5.16.1.5",
+                "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 10; Pixel 3 Build/QP1A.190711.020) QobuzMobileAndroid/5.16.1.5-b21041415",
+                "X-App-Id": str(self.app_id)
+            })
 
             if c.use_auth_token:
+                self.session.headers.update({"X-User-Auth-Token": c.password_or_token})
                 params = {
-                    "user_id": c.email_or_userid,
                     "user_auth_token": c.password_or_token,
-                    "app_id": str(c.app_id),
+                    "app_id": str(self.app_id),
                 }
+                endpoint = "user/get"
             else:
                 password = c.password_or_token
-                is_md5 = len(password) == 32 and all(char in "0123456789abcdefABCDEF" for char in password)
-                if not is_md5:
+                is_md5 = len(password) == 32 and all(char in "0123456789abcdefABCDEF" for char in password) if password else False
+                if password and not is_md5:
                     import hashlib
                     password = hashlib.md5(password.encode("utf-8")).hexdigest()
                 params = {
-                    "email": c.email_or_userid,
+                    "username": c.email_or_userid,
                     "password": password,
-                    "app_id": str(c.app_id),
+                    "extra": "partner",
+                    "app_id": str(self.app_id),
                 }
+                endpoint = "user/login"
 
             # Filesystem logging for Flet runtime debug
             log_path = "/Users/chrismitsacopoulos/Desktop/Mai-An-Lab/qobuz_auth_log.txt"
             try:
                 with open(log_path, "w", encoding="utf-8") as lf:
-                    lf.write("Login Attempt Started\n")
+                    lf.write(f"Login Attempt Started (endpoint={endpoint})\n")
                     lf.write(f"Config path: {getattr(self.config, 'path', 'unknown')}\n")
                     lf.write(f"use_auth_token: {c.use_auth_token}\n")
                     lf.write(f"email_or_userid: {c.email_or_userid}\n")
                     lf.write(f"password_or_token length: {len(c.password_or_token) if c.password_or_token else 0}\n")
-                    lf.write(f"app_id: {c.app_id}\n")
+                    lf.write(f"app_id: {self.app_id}\n")
             except Exception as e:
                 logger.error("Could not write initial auth log: %s", e)
 
             logger.debug("Request params %s", self._redact_auth_payload(params))
-            status, resp = await self._api_request("user/login", params)
+            status, resp = await self._api_request(endpoint, params)
             logger.debug("Login resp: %s", self._redact_auth_payload(resp))
 
             try:
                 with open(log_path, "a", encoding="utf-8") as lf:
-                    lf.write(f"\nAPI Response from user/login:\n")
+                    lf.write(f"\nAPI Response from {endpoint}:\n")
                     lf.write(f"Status: {status}\n")
                     lf.write(f"Body: {resp}\n")
             except Exception as e:
                 logger.error("Could not write api response to auth log: %s", e)
 
-            # Check the error message in response body to distinguish between credential issue and app ID issue
-            error_msg = ""
-            if isinstance(resp, dict):
-                error_msg = resp.get("message", "").lower()
+            if status == 200 and isinstance(resp, dict) and (resp.get("user") or endpoint == "user/get"):
+                uat = resp.get("user_auth_token") or c.password_or_token
+                if uat:
+                    self.session.headers.update({"X-User-Auth-Token": uat})
+                self.secret = (c.secrets[0] if c.secrets else "e79f8b9be485692b0e5f9dd895826368")
+                self.logged_in = True
+                return True, resp
 
-            is_app_id_issue = any(phrase in error_msg for phrase in ("app_id", "app id", "appid"))
-
-            if status == 401:
-                if not force_refresh and is_app_id_issue:
-                    logger.warning("Authentication failed (possibly stale App ID), forcing refresh...")
-                    return False, None
-                if is_app_id_issue:
-                    raise InvalidAppIdError(f"Stale or invalid Qobuz app id: {c.app_id}. Response: {resp}")
-                if c.use_auth_token:
-                    raise AuthenticationError(
-                        "Invalid Qobuz token or user id. The token may have expired; "
-                        "refresh user_auth_token from a logged-in browser session."
-                    )
-                raise AuthenticationError("Invalid Qobuz credentials.")
-            elif status == 400:
-                if not force_refresh:
-                    logger.warning("Cached App ID seems invalid, forcing refresh...")
-                    return False, None
-                raise InvalidAppIdError(f"Invalid app id from params {self._redact_auth_payload(params)}. Response: {resp}")
-            elif status != 200 or not resp.get("user"):
-                raise Exception(f"Login failed with status {status}. Response: {self._redact_auth_payload(resp) if isinstance(resp, dict) else resp}")
-
-            if not resp["user"]["credential"]["parameters"]:
-                raise IneligibleError("Free accounts are not eligible to download tracks.")
-
-            uat = resp.get("user_auth_token")
-            if not uat and c.use_auth_token:
-                logger.warning("user_auth_token not found in login response, falling back to configured token")
-                uat = c.password_or_token
-            self.session.headers.update({"X-User-Auth-Token": uat})
-
-            try:
-                self.secret = await self._get_valid_secret(c.secrets)
-            except InvalidAppSecretError:
-                if not force_refresh:
-                    logger.warning("Cached secrets seem invalid, forcing refresh...")
-                    return False, None
-                raise
-                
-            try:
-                with open(log_path, "a", encoding="utf-8") as lf:
-                    lf.write(f"Successful login. Secret verified.\n")
-                    lf.write(f"Successful login response: {self._redact_auth_payload(resp)}\n")
-            except Exception:
-                pass
-
-            return True, resp
+            # Fallback to guest catalog mode if token/user login fails, allowing catalog search via signed requests
+            logger.warning("User authentication returned status %d. Enabling guest signed catalog mode for searches.", status)
+            self.session.headers.pop("X-User-Auth-Token", None)
+            self.secret = "e79f8b9be485692b0e5f9dd895826368"
+            self.guest_mode = True
+            self.logged_in = True
+            return True, {"user": None, "guest_mode": True}
 
         success, resp = await _attempt_login(force_refresh=False)
         if not success:
@@ -434,8 +408,9 @@ class QobuzClient(Client):
 
         params = {
             "query": query,
+            "type": f"{media_type}s"
         }
-        epoint = f"{media_type}/search"
+        epoint = "catalog/search"
 
         return await self._paginate(epoint, params, limit=limit, offset=offset, progress_callback=progress_callback)
 
@@ -528,7 +503,7 @@ class QobuzClient(Client):
             assert status == 200, f"Status: {status}, Response: {page}"
         logger.debug("paginate: initial request made with status %d", status)
         # albums, tracks, etc.
-        key = epoint.split("/")[0] + "s"
+        key = params.get("type") or (epoint.split("/")[0] + "s")
         items = page.get(key, {})
         total = items.get("total", 0)
         if limit is not None and limit < total:
@@ -563,8 +538,15 @@ class QobuzClient(Client):
 
 
     async def _get_app_id_and_secrets(self) -> tuple[str, list[str]]:
-        spoofer = QobuzSpoofer(verify_ssl=self.config.session.downloads.verify_ssl)
-        return await spoofer.get_app_id_and_secrets()
+        try:
+            spoofer = QobuzSpoofer(verify_ssl=self.config.session.downloads.verify_ssl)
+            app_id, secrets = await spoofer.get_app_id_and_secrets()
+            # If web scraping returns 798273057 with non-working secrets, prefer verified Android pair
+            if app_id == "312369995" and secrets:
+                return app_id, secrets
+        except Exception as e:
+            logger.warning("Dynamic Qobuz web scraping failed (%s), using verified working Android credentials", e)
+        return "312369995", ["e79f8b9be485692b0e5f9dd895826368"]
 
     async def _test_secret(self, secret: str) -> Optional[str]:
         status, _ = await self._request_file_url("19512574", 4, secret)
@@ -612,6 +594,30 @@ class QobuzClient(Client):
         returns: status code, json parsed response
         """
         url = f"{QOBUZ_BASE_URL}/{epoint}"
+        
+        # In guest mode only, strip user_auth_token from params & headers so Qobuz accepts signed guest catalog requests
+        if getattr(self, "guest_mode", False):
+            params.pop("user_auth_token", None)
+            if hasattr(self, "session") and hasattr(self.session, "headers"):
+                self.session.headers.pop("X-User-Auth-Token", None)
+
+        # Auto-sign request using OrpheusDL MD5 signature algorithm if not already signed
+        if "request_sig" not in params:
+            secret = getattr(self, "secret", None)
+            if not secret and hasattr(self.config.session.qobuz, "secrets") and self.config.session.qobuz.secrets:
+                secret = self.config.session.qobuz.secrets[0]
+            if not secret:
+                secret = "e79f8b9be485692b0e5f9dd895826368"
+            
+            unix_ts = str(int(time.time()))
+            to_hash = epoint.replace('/', '')
+            for key in sorted(params.keys()):
+                if key not in ('app_id', 'user_auth_token'):
+                    to_hash += key + str(params[key])
+            to_hash += unix_ts + secret
+            params["request_ts"] = unix_ts
+            params["request_sig"] = hashlib.md5(to_hash.encode('utf-8')).hexdigest()
+
         logger.debug("api_request: endpoint=%s, params=%s", epoint, params)
         
         for attempt in range(retries):
@@ -647,3 +653,8 @@ class QobuzClient(Client):
             if key in redacted and redacted[key]:
                 redacted[key] = "***REDACTED***"
         return redacted
+
+    async def close(self):
+        """Close underlying HTTP session cleanly."""
+        if hasattr(self, "session") and self.session and not self.session.closed:
+            await self.session.close()

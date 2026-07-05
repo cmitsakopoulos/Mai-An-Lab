@@ -104,8 +104,7 @@ async def _pick_varied_seeds(db: DatabaseManager, rng: random.Random,
     return seeds
 
 
-async def _print_walk(db: DatabaseManager, seed: dict, length: int,
-                      rng: random.Random) -> None:
+async def _print_walk(db: DatabaseManager, seed: dict, length: int) -> None:
     seed_path = seed["path"]
     seed_cid = await db.get_track_cluster(seed_path)
     seed_label = (
@@ -113,20 +112,12 @@ async def _print_walk(db: DatabaseManager, seed: dict, length: int,
         f"(BPM {seed['bpm']:.0f}, key {_camelot_str(seed['key_index'])}, Cluster {seed_cid})"
     )
     print(f"\n=== SEED: {seed_label}")
+    # Mirror the Play Similar callers — the seed-anchored smooth walk.
     out = await tg.walk(
         db,
         seed_path,
         length=length,
-        edge_kinds=(tg.KIND_ACOUSTIC, tg.KIND_ARTIST),
         avoid={seed_path},
-        # Mirror the Play Similar callers — see main.py for rationale.
-        restart_prob=0.30,
-        diversity_lambda=0.15,
-        temperature=0.05,
-        taste_weight=0.0,
-        teleport_path=seed_path,
-        prefetch_k=20,
-        seed_rng=rng,
     )
     if not out:
         print("  (no walk produced — graph dry from this seed)")
@@ -220,7 +211,7 @@ async def main() -> None:
     print(f"\nPicked {len(seeds)} seeds spanning the BPM range.")
 
     for seed in seeds:
-        await _print_walk(db, seed, length=10, rng=random.Random(rng.randint(0, 2**32 - 1)))
+        await _print_walk(db, seed, length=10)
 
     # Close the aiosqlite connection on the loop that owns it, otherwise the
     # background worker thread races shutdown with the closing loop and prints

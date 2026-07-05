@@ -1,6 +1,6 @@
 import pytest
 import numpy as np
-from utils.pca_engine import genre_bucket, genre_tokens
+from utils.pca_engine import genre_bucket, genre_tokens, genre_display_label
 from utils.genre_eval import (
     jaccard,
     knn_purity,
@@ -28,6 +28,55 @@ def test_genre_bucket_regression_guards():
     assert genre_bucket("Pop, Rock, Metal") == "Metal"
     # "Pop, Rock" -> Rock/Alt (since Rock/Alt matches before Pop)
     assert genre_bucket("Pop, Rock") == "Rock/Alt"
+
+
+def test_genre_bucket_niche_families():
+    # New niche buckets resolve instead of collapsing to 'Other'.
+    assert genre_bucket("Jazz") == "Jazz"
+    assert genre_bucket("Acid Jazz") == "Jazz"
+    assert genre_bucket("Reggae") == "Reggae"
+    assert genre_bucket("Dancehall") == "Reggae"
+    assert genre_bucket("Salsa") == "Latin"
+    assert genre_bucket("Gospel") == "Gospel"
+    assert genre_bucket("Disco") == "Disco"
+    assert genre_bucket("Soundtrack") == "Soundtrack"
+    # Asian-Pop resolves via distinctive / hyphen-kept keys.
+    assert genre_bucket("K-Pop") == "Asian-Pop"
+    assert genre_bucket("jpop") == "Asian-Pop"
+    assert genre_bucket("Cantopop") == "Asian-Pop"
+
+
+def test_genre_bucket_substring_collision_guards():
+    # 'reggaeton' contains 'reggae' but is Latin — Latin must be tried first.
+    assert genre_bucket("Reggaeton") == "Latin"
+    # 'dubstep' contains no reggae/disco token — stays Electronic.
+    assert genre_bucket("Dubstep") == "Electronic"
+    # The niche block sits AFTER Soul, so funk co-tags stay Soul/R&B.
+    assert genre_bucket("Jazz Funk") == "Soul/R&B"
+    # 'k-pop' contains 'pop' but Asian-Pop precedes Pop.
+    assert genre_bucket("K-Pop") != "Pop"
+    # Separator-stripped compounds must NOT hide an Asian-Pop key: tags are stored
+    # as 'folk pop'->'folkpop', 'psychedelic pop'->'psychedelicpop', so bare
+    # 'kpop'/'cpop' keys would collide. Guard the fix.
+    assert genre_bucket("folkpop") == "Folk/Cntry"
+    assert genre_bucket("psychedelicpop") == "Pop"   # via 'pop', NOT Asian-Pop
+    assert genre_bucket("darkpop") == "Pop"
+    # Electronic / Classical / Folk keep original priority (γ invariants).
+    assert genre_bucket("Deep House") == "Electronic"
+    assert genre_bucket("classique") == "Classical"
+    assert genre_bucket("World") == "Folk/Cntry"
+
+
+def test_genre_display_label():
+    # Known tags map to their coarse bucket…
+    assert genre_display_label("Rap") == "Hip-Hop"
+    assert genre_display_label("bossa nova") == "Latin"
+    # …unmatched tags surface their raw tag (title-cased), never 'Other'.
+    assert genre_display_label("Polka") == "Polka"
+    assert genre_display_label("throat singing") == "Throat Singing"
+    # Empty / None → 'Unknown'.
+    assert genre_display_label("") == "Unknown"
+    assert genre_display_label(None) == "Unknown"
 
 
 def test_genre_tokens():

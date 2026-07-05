@@ -1290,27 +1290,14 @@ class StreamripFletApp:
             # history doesn't strip the seed's top-K neighbours mid-walk.
             # `recent_played_paths` stays in db_manager for future features.
 
-            from utils.streamrip_api import load_config
-            cfg = load_config()
-            temp = float(cfg.get("general", {}).get("play_similar_temperature", 0.05))
-
+            # Seed-anchored smooth walk: the 0.3·seed term + metadata/cluster
+            # penalties keep the queue in the seed's genre/community, replacing
+            # the old restart-probability band-aid for two-hop genre drift.
             walk_paths = await tg.walk(
                 self.db_manager,
                 path,
                 length=8,
-                edge_kinds=(tg.KIND_ACOUSTIC, tg.KIND_ARTIST),
-                teleport_path=path,
                 avoid=avoid,
-                # Stronger seed anchoring (was 0.15). Cuts the two-hop
-                # drift that lets low-energy bridges (sustained synth/pad
-                # passages) walk into adjacent-but-genre-foreign clusters
-                # like modern classical or ambient.
-                restart_prob=0.30,
-                diversity_lambda=0.15,   # lighter MMR — no embedding fetch
-                temperature=temp,
-                taste_weight=0.0,        # acoustic-only, regressor reserved for DJ
-                negative_embs=None,      # no negative centroid — avoid set handles it
-                prefetch_k=20,           # half the DJ/Jarvis k — cheaper DB fetch
             )
 
             # Re-check after the await — user may have toggled off mid-walk
@@ -1387,26 +1374,12 @@ class StreamripFletApp:
             # history doesn't strip the seed's top-K neighbours mid-walk.
             # `recent_played_paths` stays in db_manager for future features.
 
-            from utils.streamrip_api import load_config
-            cfg = load_config()
-            temp = float(cfg.get("general", {}).get("play_similar_temperature", 0.05))
-
-            teleport = getattr(audio_engine, "play_similar_seed_path", "") or path
             walk_len = max(count + 4, count * 2)
             walk_tracks = await tg.walk(
                 self.db_manager,
                 path,
                 length=walk_len,
-                edge_kinds=(tg.KIND_ACOUSTIC, tg.KIND_ARTIST),
-                teleport_path=teleport,
                 avoid=avoid,
-                # Matches _initiate_play_similar_queue_async — see comment there.
-                restart_prob=0.30,
-                diversity_lambda=0.15,   # lighter MMR — no embedding fetch
-                temperature=temp,
-                taste_weight=0.0,
-                negative_embs=None,
-                prefetch_k=20,
             )
 
             # Re-check after the await
@@ -1535,26 +1508,12 @@ class StreamripFletApp:
         # Play Similar continuation also skips the recent-played avoid window
         # (see _initiate_play_similar_queue_async for rationale).
 
-        from utils.streamrip_api import load_config
-        cfg = load_config()
-        temp = float(cfg.get("general", {}).get("play_similar_temperature", 0.05))
-
         try:
-            teleport = getattr(audio_engine, "play_similar_seed_path", "") or seed_path
             walk_paths = await tg.walk(
                 self.db_manager,
                 seed_path,
                 length=8,
-                edge_kinds=(tg.KIND_ACOUSTIC, tg.KIND_ARTIST),
                 avoid=avoid,
-                # Matches _initiate_play_similar_queue_async — see comment there.
-                restart_prob=0.30,
-                diversity_lambda=0.15,
-                temperature=temp,
-                taste_weight=0.0,
-                negative_embs=None,
-                teleport_path=teleport,
-                prefetch_k=20,
             )
         except Exception as exc:
             logger.warning("Play Similar continuation: graph walk failed: %s", exc)
@@ -1655,51 +1614,21 @@ class StreamripFletApp:
         for t in audio_engine.queue:
             if t.get("path"):
                 avoid.add(t["path"])
-        # Bad paths from this session are always avoided outright — the
-        # centroid penalises *similar* tracks, the avoid set blocks the
-        # exact ones.
+        # Rejected tracks from this session are hard-avoided outright. (The old
+        # "penalise acoustically-similar tracks" negative centroid lived in the
+        # removed PageRank walker; re-porting it into `walk` as a negative-taste
+        # term is a planned enhancement — for now the avoid set blocks the exact
+        # rejects and the seed anchoring keeps the flow near the liked seed.)
         for bad in self._session_bad_paths:
             avoid.add(bad)
 
-        # ── Session negative centroid ────────────────────────────────────────
-        # Fetch embeddings for the session's rejected tracks once per
-        # continuation. Bounded by `_session_bad_paths.maxlen`, so this is
-        # ≤10 rows and a single batched query.
-        negative_embs: list = []
-        if self._session_bad_paths:
-            try:
-                blobs = await self.db_manager.get_embeddings_for_paths(
-                    list(self._session_bad_paths)
-                )
-                for blob in blobs.values():
-                    v = tg._unpack_embedding(blob)
-                    if v is not None:
-                        negative_embs.append(v)
-            except Exception as exc:
-                logger.debug("Jarvis continuation: negative emb load failed: %s", exc)
-
         # ── Acoustic graph walk ───────────────────────────────────────────────
-        # On the trip-wire path, drop taste exploration so the walk leans
-        # fully on the (now-anchored) seed plus the negative centroid.
-        from utils.streamrip_api import load_config
-        cfg = load_config()
-        temp = float(cfg.get("general", {}).get("play_similar_temperature", 0.05))
-
         try:
-            # Anchored PageRank: teleport back to original seed track to prevent genre drift
-            teleport = getattr(audio_engine, "play_similar_seed_path", "") or seed_path
             walk_paths = await tg.walk(
                 self.db_manager,
                 seed_path,
                 length=5,
-                edge_kinds=(tg.KIND_ACOUSTIC, tg.KIND_ARTIST),
                 avoid=avoid,
-                restart_prob=0.15,
-                diversity_lambda=0.15,
-                temperature=temp,
-                taste_explore=0.0 if tripwire else 0.05,
-                negative_embs=negative_embs or None,
-                teleport_path=teleport,
             )
         except Exception as exc:
             logger.warning("Jarvis continuation: graph walk failed: %s", exc)
@@ -2846,6 +2775,15 @@ class StreamripFletApp:
     def open_metadata_editor(self, edit_type: str, meta: dict):
         self.metadata_editor.open(edit_type, meta)
 
+    def open_artist_metadata_editor(self, artist_name: str, on_saved=None):
+        from ui.player.dialogs import ArtistMetadataDialog
+        dlg = ArtistMetadataDialog(self)
+        dlg.open(artist_name, on_saved=on_saved)
+
+    def open_metadata_enrichment_wizard(self):
+        self.switch_tab(3)
+        self.settings_view._on_launch_enrichment_wizard_click()
+
     async def apply_metadata_edit(self, edit_type: str, meta: dict,
                               new_title: str, new_artist: str, new_album: str):
         self.show_snackbar("Saving metadata…")
@@ -3221,10 +3159,12 @@ class StreamripFletApp:
     # ── config / prefs ───────────────────────────────────────────────────────
     def sync_config_to_ui(self):
         try:
+            from utils.streamrip_api import load_config, get_default_download_path
             cfg = load_config()
-            self.target_folder = cfg.get("downloads", {}).get("folder", "") or ""
+            self.target_folder = cfg.get("downloads", {}).get("folder", "") or get_default_download_path()
         except Exception:
-            self.target_folder = ""
+            from utils.streamrip_api import get_default_download_path
+            self.target_folder = get_default_download_path()
         self.library_folder = self._prefs.get("library_path", "") or ""
 
     def _load_prefs(self):

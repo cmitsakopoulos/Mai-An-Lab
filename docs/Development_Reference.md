@@ -242,8 +242,10 @@ To guarantee an ultra-responsive user experience, prevent socket leaks, and prot
 * **Single Session**: To avoid costly connection renegotiations and socket exhaustion, a single `QobuzClient` session is cached at the class level (`StreamripSearcher._client`).
 * **Lock Synchronization**: Access to the cached client and session setup is strictly governed by an asynchronous loop lock (`StreamripSearcher._client_lock`). This prevents race conditions or duplicate session initialization when concurrent API calls are triggered.
 
-#### 3. Dynamic Credentials Hot-Reloading
-* When settings are mutated, the searcher detects modifications in the Qobuz credentials configuration on the subsequent request. It gracefully shuts down the active `aiohttp.ClientSession` and dynamically re-authenticates with the new credentials in-place without requiring an application restart.
+#### 3. Dynamic Credentials Hot-Reloading & Request Signing
+* **Credentials Hot-Reloading**: When settings are mutated, the searcher detects modifications in the Qobuz credentials configuration (User ID, token, App ID, or secret) on the subsequent request. It gracefully shuts down the active `aiohttp.ClientSession` and dynamically re-authenticates in-place.
+* **OrpheusDL Signature & Android Spoofing**: Requests to Qobuz API v0.2 compute an MD5 digest (`request_sig`) over sorted query parameters, timestamp, and secret, accompanied by Android device platform headers (`X-Device-Platform: android`, `X-App-Version: 5.16.1.5`).
+* **Header Retention & Guest Fallback**: Authenticated user sessions retain `X-User-Auth-Token` in HTTP headers across searches and stream calls. If user credentials are missing or expired, the client automatically degrades to **Guest Signed Catalog Mode** for error-free search.
 
 #### 4. Metadata-Based Search Deduplication
 * Qobuz search results frequently contain duplicate tracks and albums due to single releases, standard/deluxe editions, and varied compilations.

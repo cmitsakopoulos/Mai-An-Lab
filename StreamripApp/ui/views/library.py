@@ -27,8 +27,10 @@ logger = logging.getLogger(__name__)
 # distinctness on the dark theme; cycles for libraries with more genres than
 # colours. Tracks with no genre fall back to grey.
 _CLUSTER_PALETTE = [
-    "#4C9BE8", "#E8794C", "#5AC8A8", "#C779E0", "#E8C34C", "#E85C8A",
-    "#7AD15A", "#5A6BE8", "#E0A04C", "#4CD0E8", "#B8E84C", "#EB5C5C",
+    "#40C4FF", "#FF80AB", "#FF5252", "#FFD740", "#76FF03", "#B388FF",
+    "#FFFFFF", "#FF6E40", "#26C6DA", "#FF7043", "#66BB6A", "#BA68C8",
+    "#5C6BC0", "#F50057", "#E040FB", "#00E676", "#FF9100", "#D500F9",
+    "#00E5FF", "#1DE9B6", "#FF3D00", "#C0CA33", "#00B0FF", "#E6EE9C",
 ]
 _CLUSTER_NEUTRAL = "#8A93A0"
 
@@ -49,6 +51,14 @@ def _canon_genre(genre) -> str:
 # + legend row; the rest give niche families a stable label of their own. Exact
 # (not substring) lookup, so e.g. 'reggaeton' lands in Latin, never Reggae.
 _GENRE_ALIASES: dict[str, tuple[str, str]] = {
+    "electro":        ("Electronic", "Electronic"),
+    "electronica":    ("Electronic", "Electronic"),
+    "electronicdance":("Electronic", "Electronic"),
+    "dance":          ("Electronic", "Electronic"),
+    "house":          ("Electronic", "Electronic"),
+    "techno":         ("Electronic", "Electronic"),
+    "trance":         ("Electronic", "Electronic"),
+    "synthpop":       ("Electronic", "Electronic"),
     "drumandbass":    ("Electronic", "Electronic"),
     "drumnbass":      ("Electronic", "Electronic"),
     "idm":            ("Electronic", "Electronic"),
@@ -94,34 +104,45 @@ _GENRE_ALIASES: dict[str, tuple[str, str]] = {
 def _genre_group(genre) -> tuple[str, str]:
     """(grouping_key, display_label) for a genre tag. Known families collapse via
     pca_engine.genre_bucket so 'Hip-Hop' / 'hip hop' / 'rap' / 'trap' share one
-    key, colour and legend row — the same coarse buckets the genre diagnostic
-    treats as communities. Unmatched niche tags fall back to a canonical key so
-    'Jazz' / 'jazz' merge yet stay distinct from each other. Empty → ('', '')."""
+    key, colour and legend row. Multi-genre tags map via their primary segment."""
     from utils.pca_engine import genre_bucket
-    # Collapse whitespace runs first — genre_bucket's substring rules expect
-    # single spaces ('hip hop'), so 'HIP  HOP' would otherwise miss the bucket.
-    norm = " ".join(str(genre).split()) if genre else ""
-    bucket = genre_bucket(norm)
-    if bucket == "Unknown":
+    import re
+    if not genre:
         return "", ""
-    if bucket != "Other":
-        return bucket, bucket
-    canon = _canon_genre(genre)
+
+    raw_str = str(genre).strip()
+    primary = re.split(r'[/,;&+]', raw_str)[0].strip()
+
+    norm_primary = " ".join(primary.split())
+    bucket_primary = genre_bucket(norm_primary)
+    if bucket_primary not in ("Unknown", "Other"):
+        return bucket_primary, bucket_primary
+
+    norm_full = " ".join(raw_str.split())
+    bucket_full = genre_bucket(norm_full)
+    if bucket_full not in ("Unknown", "Other"):
+        return bucket_full, bucket_full
+
+    canon = _canon_genre(primary) or _canon_genre(raw_str)
     if not canon:
         return "", ""
+
     alias = _GENRE_ALIASES.get(canon)
     if alias is not None:
         return alias
-    return canon, str(genre).strip()
+
+    return canon, raw_str.title()
 
 
 def _genre_color(genre) -> str:
-    """Deterministic colour for a genre, keyed by its merged group (FNV-1a hash →
-    palette) so spelling/alias variants share a colour across sessions. Grey when
-    the tag is missing or unrecognised."""
+    """Deterministic colour for a genre, mapped directly to mega-genre palettes
+    or hashed across an expanded palette for niche genres."""
+    from utils.pca_engine import _GENRE_PALETTE
     key, _label = _genre_group(genre)
     if not key:
         return _CLUSTER_NEUTRAL
+    if key in _GENRE_PALETTE:
+        return _GENRE_PALETTE[key]
     h = 2166136261
     for ch in key:
         h = ((h ^ ord(ch)) * 16777619) & 0xFFFFFFFF
@@ -896,7 +917,6 @@ class LibraryView:
             content=ft.Container(
                 content=ft.Row(
                     [
-                        ft.Icon(ft.Icons.TUNE_ROUNDED, size=12, color=CYAN),
                         ft.Text(depth_label, size=9.5, weight=ft.FontWeight.W_700, color=CYAN),
                         ft.Icon(ft.Icons.ARROW_DROP_DOWN_ROUNDED, size=14, color=CYAN),
                     ],
@@ -932,20 +952,23 @@ class LibraryView:
         )
         self._net_follow_btn = follow_chip
 
+        right_chips = [depth_chip, follow_chip]
+
         top_controls_overlay = ft.Container(
             content=ft.Row(
                 [
                     mode_tabs,
-                    ft.Row([depth_chip, follow_chip], spacing=4, tight=True),
+                    ft.Row(right_chips, spacing=3, tight=True),
                 ],
                 alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
             ),
-            left=8, right=8, top=8,
+            left=6, right=6, top=6,
             bgcolor=apply_opacity(0.88, SURFACE2),
             border=ft.Border.all(1, apply_opacity(0.18, CYAN)),
             border_radius=10,
-            padding=ft.Padding.symmetric(horizontal=8, vertical=4),
+            padding=ft.Padding.symmetric(horizontal=6, vertical=4),
+            clip_behavior=ft.ClipBehavior.NONE,
         )
 
         # ── Genre legend (top-left below control header) ────────────────────
@@ -955,8 +978,10 @@ class LibraryView:
             if not g:
                 continue
             key, label = _genre_group(g)
-            if key and key not in genres_present:
-                genres_present[key] = (label, nd["color"])
+            if key:
+                norm_label = label.lower().strip()
+                if norm_label not in genres_present:
+                    genres_present[norm_label] = (label, nd["color"])
         legend_overlay = None
         if len(genres_present) > 1:
             legend_rows = []
@@ -1161,8 +1186,8 @@ class LibraryView:
                 "album_name": album,
                 "genre": genre,
             }
-            audio_engine.queue_last(meta)
-            self.app.show_snackbar(f"'{title}' added to queue", icon=ft.Icons.PLAYLIST_ADD_ROUNDED, color=CYAN)
+            audio_engine.queue_next(meta)
+            self.app.show_snackbar(f"'{title}' queued next", icon=ft.Icons.QUEUE_PLAY_NEXT_ROUNDED, color=CYAN)
 
         def _reseed_local(_e):
             self.app.trigger_haptic("network_reseed")
@@ -1196,12 +1221,12 @@ class LibraryView:
 
             step_controls = [
                 ft.IconButton(icon=ft.Icons.SKIP_PREVIOUS_ROUNDED, icon_color=CYAN, icon_size=18, tooltip="Step Previous in Walk", on_click=_step_prev),
-                ft.Text(f"Step {current_idx + 1}/{len(self._net_nodes)}", size=10, weight=ft.FontWeight.W_700, color=CYAN),
+                ft.Text(f"{current_idx + 1}/{len(self._net_nodes)}", size=11, weight=ft.FontWeight.W_700, color=CYAN),
                 ft.IconButton(icon=ft.Icons.SKIP_NEXT_ROUNDED, icon_color=CYAN, icon_size=18, tooltip="Step Next in Walk", on_click=_step_next),
             ]
 
         def _btn(label: str, icon_name, on_click, is_primary=False):
-            return ft.ElevatedButton(
+            return ft.Button(
                 content=ft.Row(
                     [
                         ft.Icon(icon_name, size=13, color=TEXT if is_primary else CYAN),
@@ -1220,7 +1245,7 @@ class LibraryView:
 
         action_buttons = [
             _btn("Play", ft.Icons.PLAY_ARROW_ROUNDED, _play_selected, is_primary=True),
-            _btn("Queue", ft.Icons.QUEUE_MUSIC_ROUNDED, _queue_selected),
+            _btn("Play Next", ft.Icons.QUEUE_PLAY_NEXT_ROUNDED, _queue_selected),
             _btn("Reseed", ft.Icons.CENTER_FOCUS_WEAK_ROUNDED, _reseed_local),
             _btn("Walk", ft.Icons.SHUFFLE_ROUNDED, _start_walk_here),
         ]
@@ -2047,7 +2072,11 @@ class LibraryView:
 
                         if current_path:
                             from utils import track_graph as tg
-                            walk_paths = await tg.walk(self.app.db_manager, current_path, length=self._net_walk_length)
+                            walk_paths = await tg.walk(
+                                self.app.db_manager,
+                                current_path,
+                                length=self._net_walk_length,
+                            )
 
                         needed_paths = [current_path] if current_path else []
                         needed_paths.extend(walk_paths)

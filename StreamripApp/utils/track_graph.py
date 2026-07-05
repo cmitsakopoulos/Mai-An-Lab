@@ -16,22 +16,22 @@ Two tiers of edges:
                 falls back to library order.
 
 The graph is the navigation backbone for the assistant: it routes 'play
-something similar' to a personalised-PageRank-flavoured random walk over
-acoustic + artist edges (see `walk`), and 'more by this artist' to artist
-neighbours. Provides the continuous proximity the assistant needs instead of
-discrete buckets.
+something similar' to a seed-anchored trajectory walk over the acoustic graph
+(see `walk`), and 'more by this artist' to artist neighbours. Provides the
+continuous proximity the assistant needs instead of discrete buckets.
 
-Walk improvements (versus a textbook random walk):
-  • multi-tier pooling per step so the walker doesn't dead-end on
-    un-analysed tracks mid-walk;
-  • personalised-PageRank restart probability (α≈0.15) so it stays
-    semantically anchored to the seed across longer sequences;
-  • softmax-temperature selection (one tunable knob) instead of an
-    implicit cosine² shaping;
-  • MMR-style diversity term so re-asking from the same seed doesn't
-    deterministically replay the same cluster;
-  • batched 2-hop prefetch — one DB round-trip per walk regardless of
-    length.
+The walk (`walk`, "Seed-Anchored Smooth Flow"):
+  • deterministic greedy trajectory — at each step pick the unvisited acoustic
+    neighbour maximising 0.7·Sim(current) + 0.3·Sim(seed), so the queue flows
+    forward while staying anchored to the seed (no random teleports);
+  • a multiplicative metadata factor (genre-NPMI + shared-country, `_meta_score`)
+    and a soft cross-community penalty, so the trajectory stays inside the seed's
+    genre/community instead of riding a timbre bridge into a foreign one;
+  • graceful degradation — with no enrichment / cluster labels the factors
+    collapse to 1.0 and it's the pure acoustic dual-similarity flow.
+
+(A stochastic Personalised-PageRank walker previously lived here; it was removed
+in favour of this single, metadata-aware walker.)
 
 All builders are async (DB-bound) but the numpy work runs synchronously —
 no off-thread call is necessary for libraries up to ~20K tracks; Euclidean kNN
@@ -1070,10 +1070,11 @@ _DEFAULT_EDGE_KIND_WEIGHTS: dict[str, float] = {
 
 
 def _unpack_embedding(blob: bytes | None) -> Optional[np.ndarray]:
-    """Local helper: unpack a timbre BLOB to an L2-normalised float32 vector
-    suitable for cosine on the graph timbre sub-space (mfcc mean/std + chroma +
-    rhythm; delta excluded, matching the geometry). Returns None when the blob
-    is absent or malformed. Used by the MMR diversity term."""
+    """Unpack a timbre BLOB to an L2-normalised float32 vector suitable for
+    cosine on the graph timbre sub-space (mfcc mean/std + chroma + rhythm; delta
+    excluded, matching the geometry). Returns None when the blob is absent or
+    malformed. Cosine helper for embedding-space scoring (e.g. a negative-taste
+    centroid); callers fetch BLOBs via db_manager.get_embeddings_for_paths."""
     v = unpack_graph_embedding(blob)
     if v is None:
         return None
@@ -1083,435 +1084,232 @@ def _unpack_embedding(blob: bytes | None) -> Optional[np.ndarray]:
     return (v / n).astype(np.float32)
 
 
+# ── Country-bonus γ tiers (see `_resolve_gamma`) ─────────────────────────────
+# γ scales how much a shared artist-country reinforces genre similarity in
+# `_meta_score`. Two opposing intuitions decide the tier of a genre bucket:
+#   • REGIONAL scenes travel with a country/language, so co-nationality is a
+#     STRONG extra cue → boost γ. Folk/laiko was the sole original member; Latin,
+#     Reggae and Asian-Pop have the same shape (salsa↔Latin America, dancehall↔
+#     Jamaica, K/J/C-pop↔their nation).
+#   • BORDERLESS genres are international scenes where nationality says little
+#     → damp γ so provenance doesn't over-count.
+# Borderless is contagious and wins ties: if either track carries a borderless
+# genre we damp regardless of co-tags (preserves the original precedence).
+# Everything else (Hip-Hop, Rock, Pop, Metal, Soul, Jazz, Gospel, Disco,
+# Soundtrack, Other) stays neutral — candidates for future tiering.
+_GAMMA_REGIONAL = frozenset({"Folk/Cntry", "Latin", "Reggae", "Asian-Pop"})
+_GAMMA_BORDERLESS = frozenset({"Electronic", "Classical"})
+_GAMMA_DAMP, _GAMMA_NEUTRAL, _GAMMA_BOOST = 0.05, 0.15, 0.30
+
+
+def _resolve_gamma(genres_a, genres_b) -> float:
+    """Country-bonus scale γ for `_meta_score`. Damped where nationality is a
+    weak similarity cue (borderless genres) and boosted where it's strong
+    (regional scenes that travel with a country/language)."""
+    from utils.pca_engine import genre_bucket
+    all_genres = (genres_a or set()) | (genres_b or set())
+    if not all_genres:
+        return _GAMMA_NEUTRAL
+    buckets = {genre_bucket(g) for g in all_genres}
+    if buckets & _GAMMA_BORDERLESS:
+        return _GAMMA_DAMP
+    if buckets & _GAMMA_REGIONAL:
+        return _GAMMA_BOOST
+    return _GAMMA_NEUTRAL
+
+
+def _meta_score(a_path: str, b_path: str, meta_map: dict, genre_model: dict) -> float:
+    """Metadata affinity between two tracks: soft genre-set similarity (NPMI
+    'genre-BLOSUM') plus an ADDITIVE shared-country term.
+
+    Two independent provenance signals, summed:  gx + β·same_country.
+      • gx  — soft genre-set similarity (NPMI), in [0, ~1].
+      • β   — the tiered country weight from `_resolve_gamma` (0.30 for regional
+              scenes that travel with a nation, 0.05 for borderless genres,
+              0.15 otherwise).
+    Additive (not the old gx·(1+β·same_cty)) so shared provenance contributes
+    EVEN WHEN genre overlap is thin — the multiplicative form zeroed the country
+    signal whenever gx≈0, which is exactly the same-country-but-different-subgenre
+    case where nationality is the only cue left (e.g. two GB drill/grime artists
+    whose NPMI genre sets barely overlap).
+
+    Returns 0 when either track lacks enrichment, or when they're the same
+    artist (that coherence is already carried by the artist edge tier). Used by
+    `walk` to fold provenance/genre proximity into the acoustic score.
+    """
+    from utils.genre_similarity import soft_set_sim
+    ma = meta_map.get(a_path)
+    mb = meta_map.get(b_path)
+    if not ma or not mb:
+        return 0.0
+    aa, ab = ma.get("artist"), mb.get("artist")
+    if aa and aa == ab:
+        return 0.0  # same-artist coherence already carried by the artist edge tier
+
+    ca, cb = ma.get("country"), mb.get("country")
+    same_cty = 1.0 if (ca and ca == cb) else 0.0
+    ga = ma.get("genres") or frozenset()
+    gb = mb.get("genres") or frozenset()
+    gx = soft_set_sim(ga, gb, genre_model)
+
+    beta = _resolve_gamma(ga, gb)
+    return gx + beta * same_cty
+
+
 async def walk(
     db_manager,
     seed_path: str,
     length: int = 10,
-    edge_kind: Optional[str] = None,
-    edge_kinds: Optional[tuple[str, ...]] = None,
-    edge_kind_weights: Optional[dict[str, float]] = None,
     avoid: Optional[set[str]] = None,
-    restart_prob: float = 0.15,
-    diversity_lambda: float = 0.15,
-    temperature: float = 0.04,
-    taste_weight: float = 0.0,
-    taste_explore: float = 0.05,
-    negative_embs: Optional[list[np.ndarray]] = None,
-    negative_lambda: float = 0.6,
-    seed_rng: Optional[random.Random] = None,
-    teleport_path: Optional[str] = None,
-    prefetch_k: int = 40,
-    cluster_lambda: float = 0.5,
     meta_lambda: float = 0.35,
+    cluster_lambda: float = 0.5,
 ) -> list[str]:
-    """Personalised-PageRank-flavoured random walk over the track graph.
+    """Seed-Anchored Smooth Flow trajectory walk over the track graph.
 
-    Pipeline differences vs. the old version:
-      • multi-tier: pools acoustic + artist (and optionally album) neighbours
-        per step so the walk doesn't dead-end on un-analysed tracks mid-walk.
-      • restart_prob: at each step, with probability α jump back to the seed
-        instead of stepping forward. Anchors the walk semantically; without
-        this the walker drifts away from the seed in 4–8 steps.
-      • softmax-temperature selection (replaces cosine² shaping). One knob
-        (`temperature`): small → near-greedy, large → near-uniform.
-      • MMR-style diversity term: candidates close to already-visited tracks
-        in the timbre sub-space get a penalty proportional to
-        `diversity_lambda * max_cos_to_visited`. Prevents the walk grinding
-        inside one tight cluster.
-      • Batched 2-hop prefetch: one round-trip to materialise the local
-        neighbourhood graph instead of `length` sequential DB calls.
+    This is *the* walk: a deterministic, seed-anchored trajectory over the
+    acoustic graph, shaped by the metadata (genre/country) and community terms.
+    The stochastic Personalised-PageRank walker was removed — smooth+meta is the
+    single queue builder, so the enrichment we compute is actually used.
 
-    Parameters
-    ----------
-    edge_kind / edge_kinds : the legacy `edge_kind: str` is still accepted
-        and shimmed onto `edge_kinds=(edge_kind,)`. New callers should pass
-        `edge_kinds=(KIND_ACOUSTIC, KIND_ARTIST)` or similar.
-    edge_kind_weights : per-tier multiplier applied before the softmax.
-        Defaults: acoustic=1.0, artist=0.4, album=0.2.
-    avoid : externally-managed exclusion set (e.g. the assistant's persistent
-        recent-playback history). The seed itself is always avoided.
-    restart_prob : 0 disables restart (pure random walk); 0.15 is the
-        classic personalised PageRank α.
-    diversity_lambda : 0 disables MMR; 0.3 trades a little similarity for
-        much more diversity across re-asks from the same seed.
-    temperature : softmax temperature on the effective weights. Tuning
-        guidance — similarity (≈ greedy): 0.05–0.10; discovery: 0.15–0.25.
-    taste_weight : γ on the taste-model contribution to per-candidate
-        logits. 0 disables the taste re-rank entirely (e.g. for tests).
-        Cold taste model (no feedback events yet) is also a no-op
-        regardless of `taste_weight`.
-    taste_explore : ε ∈ [0, 1]. At each step, with probability ε the taste
-        term is skipped for that step. Counters the filter-bubble effect
-        where the walk only surfaces tracks the user already likes.
-    negative_embs : session-scoped embeddings of tracks the user just
-        rejected (skips, dislikes). Candidates close to any of these in the
-        timbre sub-space get a penalty proportional to
-        `negative_lambda * max_cos_to_negative`. Symmetric to the MMR
-        diversity term, but the centroid is "things actively disliked in
-        this session" instead of "things already played in this walk."
-        Pass `None`/empty to disable.
-    negative_lambda : weight on the per-step negative-centroid penalty.
-        Larger than `diversity_lambda` by default because a skip is a
-        stronger signal than "we've already seen something similar."
+    At each step i -> C, candidates are unvisited acoustic neighbours scored by
 
-    prefetch_k : number of neighbours to fetch per node in the 2-hop horizon
-        prefetch. Default 40 (full quality). Pass 20 for the cheap Play
-        Similar path; the graph is still well-connected at that depth.
-    cluster_lambda : penalty for cross-cluster transitions. At each step,
-        candidates in a different Louvain community from the current node
-        have their effective weight multiplied by (1 - cluster_lambda).
-        0 disables the constraint; 0.5 (default) halves the logit;
-        1.0 would hard-block (not recommended).
-    meta_lambda : strength of the enriched-metadata gate. Each candidate's
-        affinity is multiplied by (1 + meta_lambda * S_meta) where
-        S_meta = 0.5*same-country + 0.5*cross-artist genre-Jaccard, nudging
-        the walk toward same-provenance / genre-sharing tracks WITHOUT
-        trapping on one artist (the genre term is zeroed for same-artist
-        pairs because the enriched genre set is artist-level). 0 disables it;
-        it also self-disables when the DB has no enrichment, or when the
-        backend lacks `get_artist_meta_for_paths` (test fakes). Tuned to 0.35
-        in tools/eval_metadata_fusion.py.
+        Score(C) = (0.7·Sim(T_i, C) + 0.3·Sim(Seed, C))         # acoustic
+                   · (1 + meta_lambda·meta(T_i, C))             # genre/country
+                   · (1 - cluster_lambda   if C leaves T_i's community)
 
-    Returns
-    -------
-    list[str] : paths in walk order (the seed itself is not included),
-        length ≤ `length`. Stops early if the local neighbourhood is
-        exhausted.
+    The dual acoustic term keeps step-to-step coherence anchored to the seed;
+    the metadata factor (see `_meta_score`) and the soft cross-community penalty
+    fold in the provenance/genre signal, so the queue is genuinely acoustic +
+    metadata rather than acoustic-only. Selection is deterministic greedy — no
+    teleport, no MMR.
+
+    Both metadata terms degrade gracefully: a backend without the enrichment /
+    cluster accessors (e.g. the test fakes) or a library without enrichment
+    collapses the factors to 1.0 and the walk is the original dual-similarity
+    flow.
     """
-    rng = seed_rng or random.Random()
     visited: set[str] = set(avoid or set())
     visited.add(seed_path)
     path_seq: list[str] = []
 
-    # Normalise the kind parameters: legacy single-kind kwarg → tuple.
-    if edge_kinds is None:
-        if edge_kind is not None:
-            kinds: tuple[str, ...] = (edge_kind,)
-        else:
-            kinds = (KIND_ACOUSTIC, KIND_ARTIST)
+    # Prefetch seed's acoustic neighbors for seed-anchor scoring & fallback
+    if hasattr(db_manager, "get_neighbors_multi"):
+        seed_nbrs = await db_manager.get_neighbors_multi(
+            seed_path, (KIND_ACOUSTIC,), k=50
+        )
+    elif hasattr(db_manager, "get_neighbors"):
+        seed_nbrs = await db_manager.get_neighbors(
+            seed_path, k=50, edge_kind=KIND_ACOUSTIC
+        )
     else:
-        kinds = edge_kinds
-    weights_per_kind = dict(_DEFAULT_EDGE_KIND_WEIGHTS)
-    if edge_kind_weights:
-        weights_per_kind.update(edge_kind_weights)
+        seed_nbrs = []
 
-    # ── Batched neighbourhood prefetch ────────────────────────────────────
-    # 1-hop from the seed, then 2-hop on the union of seed + 1-hop. Walking
-    # in memory avoids `length` round-trips and dominates the DB cost.
-    seed_neighbours = await db_manager.get_neighbors_multi(
-        seed_path, kinds, k=prefetch_k,
-    )
-    horizon: dict[str, list[dict]] = {seed_path: seed_neighbours}
-    second_hop_paths = [
-        n["path"] for n in seed_neighbours if n["path"] not in horizon
-    ]
-    # De-dup the 1-hop fan-out before issuing 2-hop queries.
-    second_hop_paths = list(dict.fromkeys(second_hop_paths))
-    if second_hop_paths:
-        # One batched window-function query instead of one round-trip per
-        # first-hop node. Falls back to the per-path loop for db backends
-        # (e.g. test fakes) that don't expose the batched method.
-        if hasattr(db_manager, "get_neighbors_multi_batch"):
-            batched = await db_manager.get_neighbors_multi_batch(
-                second_hop_paths, kinds, k=prefetch_k,
-            )
-            for p in second_hop_paths:
-                horizon[p] = batched.get(p, [])
-        else:
-            for p in second_hop_paths:
-                horizon[p] = await db_manager.get_neighbors_multi(p, kinds, k=prefetch_k)
+    seed_sim_map: dict[str, float] = {
+        n["path"]: float(n.get("weight", 0.5)) for n in seed_nbrs if n.get("path")
+    }
 
-    # ── Cluster map (for cross-cluster penalty) ───────────────────────────
-    # Build a path→cluster_id lookup from the prefetched neighbour rows.
-    # The get_neighbors_multi query now JOINs play_counts and includes
-    # cluster_id, so this is zero extra cost.
-    cluster_active = cluster_lambda > 0.0
-    cluster_map: dict[str, int | None] = {}
-    if cluster_active:
-        # Seed cluster: look up from the first-hop results or DB fallback.
-        if hasattr(db_manager, "get_track_cluster"):
-            seed_cluster = await db_manager.get_track_cluster(seed_path)
-        else:
-            seed_cluster = None
-        cluster_map[seed_path] = seed_cluster
-        for nbrs in horizon.values():
-            for n in nbrs:
-                cid = n.get("cluster_id")
-                cluster_map[n["path"]] = int(cid) if cid is not None else None
-
-    # ── Metadata fusion map (provenance + cross-artist genre) ─────────────
-    # A low-weight gate nudging the walk toward same-country / genre-sharing
-    # tracks without trapping on one artist. The genre term is zeroed for
-    # same-artist pairs because the enriched genre set is artist-level (constant
-    # within an artist → it would act as an artist-identity signal and trap;
-    # see tools/eval_metadata_fusion.py). Self-disables when there's no
-    # enrichment, or on backends without the batched accessor (test fakes).
-    from utils.genre_similarity import soft_set_sim
-    meta_active = meta_lambda > 0.0 and hasattr(
-        db_manager, "get_artist_meta_for_paths"
-    )
+    # ── Metadata context (genre-NPMI + country) ──────────────────────────
+    # meta_map is filled lazily as candidates are seen; the genre model loads
+    # once. If the backend can't serve enrichment, meta_active latches off and
+    # the metadata factor is 1.0 for the rest of the walk.
+    meta_active = meta_lambda > 0.0 and hasattr(db_manager, "get_artist_meta_for_paths")
     meta_map: dict[str, dict] = {}
     genre_model: dict = {}
-    if meta_active:
-        meta_paths = {seed_path}
-        for nbrs in horizon.values():
-            for n in nbrs:
-                meta_paths.add(n["path"])
+    if meta_active and hasattr(db_manager, "get_genre_affinity"):
         try:
-            meta_map = await db_manager.get_artist_meta_for_paths(list(meta_paths))
+            genre_model = await db_manager.get_genre_affinity()
         except Exception:
-            meta_map = {}
-        # Nothing to gate on (no country/genre anywhere) → skip the term.
-        if not any(m.get("country") or m.get("genres") for m in meta_map.values()):
+            genre_model = {}
+
+    async def _ensure_meta(paths: list[str]) -> None:
+        nonlocal meta_active
+        if not meta_active:
+            return
+        missing = [p for p in paths if p not in meta_map]
+        if not missing:
+            return
+        try:
+            meta_map.update(await db_manager.get_artist_meta_for_paths(missing))
+        except Exception:
             meta_active = False
-        elif hasattr(db_manager, "get_genre_affinity"):
-            # Load-once the precomputed NPMI model (rebuilt at graph gen). With
-            # an empty model soft_set_sim degrades to Dice, so this is safe.
+
+    # ── Cluster context: soft penalty for hopping to a different community ──
+    cluster_active = cluster_lambda > 0.0 and hasattr(db_manager, "get_track_cluster")
+    cluster_map: dict[str, int | None] = {}
+
+    async def _cluster_of(path: str) -> int | None:
+        if path not in cluster_map:
             try:
-                genre_model = await db_manager.get_genre_affinity()
+                cid = await db_manager.get_track_cluster(path)
             except Exception:
-                genre_model = {}
+                cid = None
+            cluster_map[path] = int(cid) if cid is not None else None
+        return cluster_map[path]
 
-    from utils.pca_engine import genre_bucket
-
-    def _resolve_gamma(genres_a, genres_b) -> float:
-        """Adaptive regional affinity factor (gamma) based on mega-genre categories.
-        - Global/Transnational (Electronic, Classical): gamma = 0.05 (minimal country barrier)
-        - Regional/Scene-Heavy (Folk/Cntry, Laiko): gamma = 0.30 (strong local scene boost)
-        - Default Pop/Rock/Soul/Hip-Hop: gamma = 0.15
-        """
-        all_genres = (genres_a or set()) | (genres_b or set())
-        if not all_genres:
-            return 0.15
-        buckets = {genre_bucket(g) for g in all_genres}
-        if any(b in ("Electronic", "Classical") for b in buckets):
-            return 0.05
-        if any(b in ("Folk/Cntry",) for b in buckets):
-            return 0.30
-        return 0.15
-
-    def _meta_score(a_path: str, b_path: str) -> float:
-        ma = meta_map.get(a_path)
-        mb = meta_map.get(b_path)
-        if not ma or not mb:
-            return 0.0
-        ca, cb = ma.get("country"), mb.get("country")
-        same_cty = 1.0 if (ca and ca == cb) else 0.0
-        aa, ab = ma.get("artist"), mb.get("artist")
-        if aa and aa == ab:
-            gx = 0.0  # cross-artist only — within-artist genre is degenerate
-        else:
-            ga = ma.get("genres") or frozenset()
-            gb = mb.get("genres") or frozenset()
-            gx = soft_set_sim(ga, gb, genre_model)
-
-        if gx <= 0.0:
-            return 0.0
-
-        gamma = _resolve_gamma(ma.get("genres"), mb.get("genres"))
-        return gx * (1.0 + gamma * same_cty)
-
-    # ── MMR setup ─────────────────────────────────────────────────────────
-    # Pull embeddings for the seed + any node we might reach in two hops.
-    # The visited-embedding set is what the diversity term scores against;
-    # the negative-centroid term reuses the same per-candidate vectors.
-    neg_active = bool(negative_embs) and negative_lambda > 0
-    diversity_active = diversity_lambda > 0
-    need_candidate_embs = diversity_active or neg_active
-    seed_emb: Optional[np.ndarray] = None
-    candidate_embs: dict[str, np.ndarray] = {}
-    if need_candidate_embs:
-        emb_paths = {seed_path}
-        for nbrs in horizon.values():
-            for n in nbrs:
-                emb_paths.add(n["path"])
-        blobs = await db_manager.get_embeddings_for_paths(list(emb_paths))
-        for p, blob in blobs.items():
-            v = _unpack_embedding(blob)
-            if v is not None:
-                candidate_embs[p] = v
-        seed_emb = candidate_embs.get(seed_path)
-
-    visited_embs: list[np.ndarray] = []
-    if seed_emb is not None:
-        visited_embs.append(seed_emb)
-
-    neg_emb_arr: Optional[np.ndarray] = None
-    if neg_active:
-        cleaned = [v for v in (negative_embs or []) if v is not None]
-        if cleaned:
-            neg_emb_arr = np.asarray(cleaned, dtype=np.float32)
-        else:
-            neg_active = False
-
-    # Taste-model is detached/removed.
-
-    def _merge_candidates(raw: list[dict]) -> list[dict]:
-        """De-duplicate on `path`, taking the maximum effective weight across
-        tiers. A track that's both an acoustic and an artist neighbour should
-        appear once with the stronger signal."""
-        merged: dict[str, dict] = {}
-        for c in raw:
-            if c["path"] in visited:
-                continue
-            kind_w = weights_per_kind.get(c["edge_kind"], 0.0)
-            eff = max(0.0, float(c["weight"])) * kind_w
-            existing = merged.get(c["path"])
-            if existing is None or eff > existing["_eff"]:
-                merged[c["path"]] = {**c, "_eff": eff}
-        return list(merged.values())
+    await _ensure_meta([seed_path, *seed_sim_map.keys()])
 
     current = seed_path
-    teleport_target = teleport_path or seed_path
-    for step in range(length):
-        # MMR penalty decays by step index so the diversity term doesn't
-        # snowball into a flat -diversity_lambda on every reasonable
-        # candidate by step ~5 (visited_embs grows monotonically and the
-        # max-cos converges to ~1). 1/(1+step) keeps step 0 at full
-        # weight, halves it by step 1, and is ~λ/6 by step 5 — enough
-        # to keep the walk anchored to the seed cluster late in a chain.
-        diversity_lambda_eff = float(diversity_lambda) / (1.0 + step)
-        # Restart roll. We always step from `current` afterwards, so toggling
-        # current back to the teleport target implements the personalised-PageRank
-        # teleport without special-casing the selection.
-        if restart_prob > 0 and rng.random() < restart_prob:
-            current = teleport_target
-
-        raw = horizon.get(current)
-        if raw is None:
-            # The walker stepped to a node we didn't prefetch (rare with the
-            # 2-hop horizon, but possible if restart sent us back to a seed
-            # whose own neighbours we already exhausted). Fall back to a
-            # single round-trip and cache the result.
-            raw = await db_manager.get_neighbors_multi(current, kinds, k=40)
-            horizon[current] = raw
-            if cluster_active:
-                if current not in cluster_map:
-                    if hasattr(db_manager, "get_track_cluster"):
-                        current_cid = await db_manager.get_track_cluster(current)
-                    else:
-                        current_cid = None
-                    cluster_map[current] = current_cid
-                for n in raw:
-                    cid = n.get("cluster_id")
-                    cluster_map[n["path"]] = int(cid) if cid is not None else None
-            if need_candidate_embs:
-                new_paths = [n["path"] for n in raw if n["path"] not in candidate_embs]
-                if new_paths:
-                    blobs = await db_manager.get_embeddings_for_paths(new_paths)
-                    for p, blob in blobs.items():
-                        v = _unpack_embedding(blob)
-                        if v is not None:
-                            candidate_embs[p] = v
-
-        cands = _merge_candidates(raw)
-        if not cands:
-            # If we're stuck mid-walk but the teleport target still has fresh options,
-            # one-shot restart and try again. If both are dry, we're done.
-            if current != teleport_target:
-                current = teleport_target
-                cands = _merge_candidates(horizon.get(teleport_target, []))
-            if not cands:
-                break
-
-        # Compute logits: effective weight, optionally penalised by the
-        # max cosine to any already-visited node in the timbre sub-space.
-        logits = np.empty(len(cands), dtype=np.float32)
-        for i, c in enumerate(cands):
-            eff = float(c["_eff"])
-            # Metadata gate: a multiplicative boost on the positive affinity
-            # base, applied BEFORE the additive diversity/negative penalties so
-            # it can never invert their sign.
-            if meta_active:
-                eff *= 1.0 + meta_lambda * _meta_score(current, c["path"])
-            cand_emb: Optional[np.ndarray] = None
-            if diversity_active or neg_active:
-                cand_emb = candidate_embs.get(c["path"])
-            if diversity_active and visited_embs and cand_emb is not None:
-                sims = np.array(
-                    [float(np.dot(cand_emb, v)) for v in visited_embs],
-                    dtype=np.float32,
-                )
-                eff -= diversity_lambda_eff * float(sims.max())
-            if neg_active and neg_emb_arr is not None and cand_emb is not None:
-                # Max cosine to any session-rejected track. The candidate
-                # embedding is already L2-normalised by `_unpack_embedding`,
-                # so a plain dot product is the cosine.
-                neg_sims = neg_emb_arr @ cand_emb
-                eff -= float(negative_lambda) * float(neg_sims.max())
-            # Cluster constraint: penalise cross-cluster transitions.
-            if cluster_active:
-                cur_cid = cluster_map.get(current)
-                cand_cid = cluster_map.get(c["path"])
-                if (
-                    cur_cid is not None
-                    and cand_cid is not None
-                    and cur_cid != cand_cid
-                ):
-                    eff *= (1.0 - cluster_lambda)
-            logits[i] = eff
-
-        # Softmax with temperature. Subtract max for numerical stability.
-        if temperature <= 0:
-            chosen_idx = int(np.argmax(logits))
+    for _step in range(length):
+        if hasattr(db_manager, "get_neighbors_multi"):
+            raw_nbrs = await db_manager.get_neighbors_multi(
+                current, (KIND_ACOUSTIC,), k=40
+            )
+        elif hasattr(db_manager, "get_neighbors"):
+            raw_nbrs = await db_manager.get_neighbors(
+                current, k=40, edge_kind=KIND_ACOUSTIC
+            )
         else:
-            # Per-node logit standardisation. Raw effective weights are not
-            # calibrated across source nodes — a hub track has neighbours
-            # crowded near the top of its (0, 1] affinity range, an outlier
-            # spreads thinly. Without rescaling, `temperature = 0.05` reads
-            # as near-greedy at the hub but near-uniform at the outlier.
-            # Z-scoring before the softmax normalises the spread so the
-            # temperature has consistent semantics everywhere in the graph.
-            sd = float(logits.std())
-            if sd > 1e-9:
-                z_logits = (logits - float(logits.mean())) / sd
-            else:
-                # Degenerate: all candidates have equal effective weight
-                # (rare; happens when avoid set strips everything but
-                # near-duplicates). Keep raw logits so argmax is well-defined.
-                z_logits = logits - float(logits.mean())
-            # Flat temperature: every step has the same low transition cost
-            # so the walk stays acoustically close to the seed throughout.
-            # The previous "Long-Flow Gentle-Reset" modulation (0.75× normal,
-            # 1.5× every 6th step) introduced deliberate hot jumps that broke
-            # similarity chains — removed per user intent.
-            scaled = (z_logits - z_logits.max()) / float(temperature)
-            probs = np.exp(scaled)
-            total = float(probs.sum())
-            if not np.isfinite(total) or total <= 0:
-                chosen_idx = int(np.argmax(logits))
-            else:
-                probs = probs / total
-                # Manual sampler so we keep the caller-supplied RNG.
-                r = rng.random()
-                acc = 0.0
-                chosen_idx = len(cands) - 1
-                for i, p in enumerate(probs):
-                    acc += float(p)
-                    if r <= acc:
-                        chosen_idx = i
-                        break
+            raw_nbrs = []
 
-        chosen = cands[chosen_idx]
-        next_path = chosen["path"]
-        
-        logger.debug(
-            "walk step: Selected candidate '%s' (final logit=%.4f)",
-            os.path.basename(next_path), logits[chosen_idx]
-        )
-        
+        candidates = [n for n in raw_nbrs if n.get("path") and n["path"] not in visited]
+
+        # Fallback to seed's acoustic neighbors if current node hits a dead end
+        if not candidates and current != seed_path:
+            candidates = [n for n in seed_nbrs if n.get("path") and n["path"] not in visited]
+
+        if not candidates:
+            break
+
+        # Cache candidate cluster ids carried on the neighbour rows (no extra
+        # query) and resolve the current node's cluster once per step.
+        cur_cid: int | None = None
+        if cluster_active:
+            for c in candidates:
+                if c["path"] not in cluster_map:
+                    cid = c.get("cluster_id")
+                    cluster_map[c["path"]] = int(cid) if cid is not None else None
+            cur_cid = await _cluster_of(current)
+
+        await _ensure_meta([c["path"] for c in candidates])
+
+        # Score candidates: acoustic dual-similarity, then metadata + cluster.
+        best_cand = None
+        best_score = -1.0
+        for c in candidates:
+            w_curr = max(0.0, float(c.get("weight", 0.5)))
+            w_seed = seed_sim_map.get(c["path"], 0.0)
+            score = 0.7 * w_curr + 0.3 * w_seed
+            if meta_active:
+                score *= 1.0 + meta_lambda * _meta_score(
+                    current, c["path"], meta_map, genre_model,
+                )
+            if cluster_active and cur_cid is not None:
+                cand_cid = cluster_map.get(c["path"])
+                if cand_cid is not None and cand_cid != cur_cid:
+                    score *= (1.0 - cluster_lambda)
+            if score > best_score:
+                best_score = score
+                best_cand = c
+
+        if not best_cand:
+            break
+
+        next_path = best_cand["path"]
         path_seq.append(next_path)
         visited.add(next_path)
-        if diversity_active:
-            emb = candidate_embs.get(next_path)
-            if emb is not None:
-                visited_embs.append(emb)
         current = next_path
 
     return path_seq
-
-
-
 
 
 async def bulk_analyze_library(
