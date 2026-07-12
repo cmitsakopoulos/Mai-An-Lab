@@ -26,19 +26,30 @@ def get_platform_name():
     return 'linux'
 
 def get_config_path():
-    app_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    local_cfg = os.path.join(app_root, "utils", "config.toml")
-    if os.path.exists(local_cfg):
-        return local_cfg
+    """Absolute path to the LIVE, user-writable config file.
 
-    try:
-        from utils.filepath_utils import get_app_dir
-        base = get_app_dir()
-    except ImportError:
-        base = os.path.join(os.path.expanduser("~"), ".streamrip")
-    path = os.path.join(base, "config.toml")
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    return path
+    This MUST be a persistent, writable location — never the in-package
+    template. The template (`BLANK_CONFIG_PATH` == ``<pkg>/utils/config.toml``)
+    ships inside the app bundle and is re-extracted (reset to defaults) on every
+    (re)install; the previous implementation returned that template whenever it
+    existed — which is always, since it's asserted present at import — so the
+    "live" config lived in the read-only, reinstall-replaced code directory.
+    That's why user settings broke on repeated installs while the DB (which
+    lives under ``get_app_dir()``) survived.
+
+    We resolve to the canonical ``DEFAULT_CONFIG_PATH`` (under the persistent app
+    dir, alongside library.db), so config shares the DB's persistence and is
+    captured/restored by the state-bundle export/import. An explicit
+    ``STREAMRIP_CONFIG_PATH`` env var overrides this for dev convenience (e.g.
+    pointing at a repo-local config when running from source)."""
+    override = os.getenv("STREAMRIP_CONFIG_PATH")
+    if override:
+        parent = os.path.dirname(os.path.abspath(override))
+        os.makedirs(parent, exist_ok=True)
+        return override
+
+    os.makedirs(os.path.dirname(DEFAULT_CONFIG_PATH), exist_ok=True)
+    return DEFAULT_CONFIG_PATH
 
 def get_default_download_path():
     plat = get_platform_name()
@@ -77,6 +88,15 @@ def ensure_config_exists():
             logger.info(f"Migrating config from {current_v} to {CURRENT_CONFIG_VERSION}")
             from .config import Config
             Config.update_file(path)
+            # Inject version key explicitly so we do not loop infinitely
+            with open(path, "r", encoding="utf-8") as f:
+                new_doc = parse(f.read())
+            if "misc" not in new_doc:
+                new_doc["misc"] = {}
+            new_doc["misc"]["version"] = CURRENT_CONFIG_VERSION
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(dumps(new_doc))
+            logger.info(f"Config successfully migrated and versioned to {CURRENT_CONFIG_VERSION}")
     except Exception as e:
         logger.error(f"Config migration failed: {e}")
 
@@ -118,6 +138,25 @@ def update_config_params(params):
         return True
     except Exception as e:
         logger.error(f"Failed to update config: {e}")
+        return False
+
+def get_walk_params():
+    try:
+        cfg = load_config()
+        gen = cfg.get("general", {})
+        temp = gen.get("walk_temperature")
+        if temp is None:
+            temp = gen.get("play_similar_temperature", 0.3)
+        mmr = gen.get("walk_mmr_lambda", 0.15)
+        return float(temp), float(mmr)
+    except Exception:
+        return 0.3, 0.15
+
+def get_walk_coordinates_only() -> bool:
+    try:
+        cfg = load_config()
+        return bool(cfg.get("general", {}).get("walk_coordinates_only", False))
+    except Exception:
         return False
 
 def repair_config():

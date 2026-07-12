@@ -438,9 +438,17 @@ def set_user_defaults(path: str, /):
 
 
 def toml_set_user_defaults(toml: TOMLDocument):
+    if "downloads" not in toml:
+        toml["downloads"] = {}
     toml["downloads"]["folder"] = ""  # type: ignore
+
+    if "database" not in toml:
+        toml["database"] = {}
     toml["database"]["downloads_path"] = DEFAULT_DOWNLOADS_DB_PATH  # type: ignore
     toml["database"]["failed_downloads_path"] = DEFAULT_FAILED_DOWNLOADS_DB_PATH  # type: ignore
+
+    if "youtube" not in toml:
+        toml["youtube"] = {}
     toml["youtube"]["video_downloads_folder"] = DEFAULT_YOUTUBE_VIDEO_DOWNLOADS_FOLDER  # type: ignore
 
 

@@ -16,9 +16,9 @@ listener and preventing all future events from reaching the Dart side.
 import json
 import os
 import time
+import uuid
 import logging
 import threading
-import random
 import pathlib
 import flet as ft
 from flet_audio_service import AudioServiceControl
@@ -54,7 +54,11 @@ class AudioEngine:
         # progress directly instead of inferring it from is_playing+position.
         self.processing_state = "idle"
         self._is_shuffle    = False
-        self._shuffle_order: list[int] = []
+        # Read-only cache of just_audio's shuffle order (play-position → logical
+        # index), refreshed from every Dart state/op event. Dart OWNS the order
+        # now; Python only reads this to render "up next" and to compute the
+        # next/previous target under shuffle. Empty when not shuffling.
+        self._shuffle_indices: list[int] = []
         self._repeat_mode   = "none"
 
         self.queue: list[dict] = []
@@ -69,23 +73,33 @@ class AudioEngine:
         self._restore_position: float = 0.0
         self._load_gen: int = 0
 
-        # Wall-clock cutoff: after a user-initiated queue change, ignore
-        # Dart-side queue_index mirroring until this time. Prevents stale
-        # events from the previously-playing track flipping current_index
-        # into a wrong row of the new queue while Dart is still catching up.
-        self._queue_change_until: float = 0.0
+        # Queue-generation counter. Bumped on every Python-initiated queue
+        # mutation OR skip and sent to Dart with the command. Dart adopts it
+        # once the op lands and stamps it on every event; Python mirrors a
+        # queue_index only when the event's epoch matches this value (Dart has
+        # caught up). Deterministic replacement for the old wall-clock gate.
+        self._queue_epoch: int = 0
 
         self._observers: dict[str, list] = {}
         self._obs_lock = threading.Lock()
-        self._native_lock = None
         self._eq_gains: list[float] = [0.0] * 5
         self._loudness_boost_db: float = 0.0
         self.loudness_boost_db: float = 0.0
         self._base_eq: list[float] = [0.0] * 5
         self._dyn_offsets: list[float] = [0.0] * 5
         self._completed_terminal = False
-        self._skip_target: int | None = None   # native (post-shuffle) index
-        self._skip_task = None
+
+    def _next_epoch(self) -> int:
+        """Advance and return the queue-generation counter. Call on every
+        Python-initiated mutation/skip immediately before dispatching to Dart."""
+        self._queue_epoch += 1
+        return self._queue_epoch
+
+    @property
+    def shuffle_indices(self) -> list[int]:
+        """Dart-reported shuffle order (play-position → logical index). Read-only
+        cache for the queue sheet and next/previous target computation."""
+        return self._shuffle_indices
 
     @property
     def is_shuffle(self) -> bool:
@@ -100,78 +114,28 @@ class AudioEngine:
         self._on_shuffle_changed()
 
     def _on_shuffle_changed(self):
-        if self._is_shuffle:
-            indices = list(range(len(self.queue)))
-            if 0 <= self.current_index < len(self.queue):
-                indices.remove(self.current_index)
-                random.shuffle(indices)
-                self._shuffle_order = [self.current_index] + indices
-            else:
-                random.shuffle(indices)
-                self._shuffle_order = indices
-        else:
-            self._shuffle_order = []
-
-        if self._page and self.queue:
-            self._arm_queue_gate()
-            self._page.run_task(self._push_queue_native, self.current_index, self.is_playing)
-
-    def _on_track_added_to_shuffle(self, insert_at: int, play_next: bool = True):
-        if not getattr(self, "_shuffle_order", None):
-            self._shuffle_order = list(range(len(self.queue)))
+        # Dart owns the shuffle order. Toggle native shuffle IN PLACE (no source
+        # reload, so the current track keeps playing) and let the fresh
+        # shuffle_indices arrive on the op ack / next state event. Insert/remove/
+        # move against the live ConcatenatingAudioSource keep the native shuffle
+        # order coherent automatically — no hand-maintained permutation.
+        if not self._is_shuffle:
+            self._shuffle_indices = []
+        if not (self._page and self._audio):
             return
-        # Adjust indices greater than or equal to the inserted index
-        self._shuffle_order = [
-            (x + 1 if x >= insert_at else x) for x in self._shuffle_order
-        ]
-        # Insert the new index into shuffle order
-        if play_next:
-            try:
-                curr_pos = self._shuffle_order.index(self.current_index)
-                self._shuffle_order.insert(curr_pos + 1, insert_at)
-            except ValueError:
-                self._shuffle_order.append(insert_at)
-        else:
-            # Append randomly to the remaining unplayed portion or just the end
-            try:
-                curr_pos = self._shuffle_order.index(self.current_index)
-                if curr_pos < len(self._shuffle_order) - 1:
-                    insert_pos = random.randint(curr_pos + 1, len(self._shuffle_order))
-                    self._shuffle_order.insert(insert_pos, insert_at)
-                else:
-                    self._shuffle_order.append(insert_at)
-            except ValueError:
-                self._shuffle_order.append(insert_at)
-
-    def _on_track_removed_from_shuffle(self, index: int):
-        if not getattr(self, "_shuffle_order", None):
+        # Defensive: this runs at startup (is_shuffle restored from prefs). If a
+        # build bundled an OLDER flet_audio_service control (local-dep version
+        # skew: the file:// package's version wasn't bumped so pip reused a
+        # cached install), set_shuffle won't exist. Skip rather than let the
+        # AttributeError abort _heavy_init and hang the app on the splash screen.
+        if not hasattr(self._audio, "set_shuffle"):
+            logger.error(
+                "ADB_AUDIO: audio control lacks set_shuffle — stale "
+                "flet_audio_service build; native shuffle disabled until rebuild"
+            )
             return
-        # Remove the index from shuffle order
-        if index in self._shuffle_order:
-            self._shuffle_order.remove(index)
-        # Adjust indices larger than the removed index
-        self._shuffle_order = [
-            (x - 1 if x > index else x) for x in self._shuffle_order
-        ]
-
-    def _on_track_moved_in_shuffle(self, old_index: int, new_index: int):
-        if not getattr(self, "_shuffle_order", None):
-            return
-        new_order = []
-        for x in self._shuffle_order:
-            if x == old_index:
-                new_order.append(new_index)
-            elif old_index < new_index:
-                if old_index < x <= new_index:
-                    new_order.append(x - 1)
-                else:
-                    new_order.append(x)
-            else:  # new_index < old_index
-                if new_index <= x < old_index:
-                    new_order.append(x + 1)
-                else:
-                    new_order.append(x)
-        self._shuffle_order = new_order
+        ep = self._next_epoch()
+        self._page.run_task(self._audio.set_shuffle, self._is_shuffle, ep)
 
     @property
     def repeat_mode(self) -> str:
@@ -298,28 +262,99 @@ class AudioEngine:
         }
 
     def _build_playlist_payload(self) -> list[dict]:
+        # Always LOGICAL order now — Dart applies shuffle natively and reports
+        # the resulting order back. The native index Dart emits is therefore an
+        # index into THIS list, i.e. a logical index, so mirroring is a direct
+        # assignment with no permutation lookup.
         items = []
-        order = self._shuffle_order if (self._is_shuffle and getattr(self, "_shuffle_order", None)) else range(len(self.queue))
-        for idx in order:
-            if 0 <= idx < len(self.queue):
-                track = self.queue[idx]
-                item = self._track_to_playlist_item(track)
-                if item is not None:
-                    items.append(item)
+        for track in self.queue:
+            item = self._track_to_playlist_item(track)
+            if item is not None:
+                items.append(item)
         return items
 
-    async def _push_queue_native(self, start_index: int = 0, autoplay: bool = True):
-        """Push the current Python queue to Dart's ConcatenatingAudioSource so
-        the native player owns advancement, notification skip, and background
-        continuation. Atomic: set_playlist takes start_index, so there's no
-        race between source-load and a follow-up skip."""
-        import asyncio
-        if self._native_lock is None:
-            self._native_lock = asyncio.Lock()
-        async with self._native_lock:
-            await self._push_queue_native_unlocked(start_index, autoplay)
+    # ── Epoch / ack plumbing ───────────────────────────────────────────────────
 
-    async def _push_queue_native_unlocked(self, start_index: int = 0, autoplay: bool = True):
+    def _apply_ack(self, ack: dict):
+        """Reconcile local state against a Dart op ack. Always refreshes the
+        shuffle_indices cache; reconciles current_index only when the ack is for
+        the LATEST generation (no newer mutation pending), so a slow ack can't
+        yank the index back after a subsequent user action."""
+        if not ack:
+            return
+        si = ack.get("shuffle_indices")
+        if isinstance(si, list):
+            self._shuffle_indices = [int(x) for x in si]
+        elif not self._is_shuffle:
+            self._shuffle_indices = []
+        ci = ack.get("current_index")
+        if (
+            isinstance(ci, int)
+            and ack.get("epoch") == self._queue_epoch
+            and self.queue
+        ):
+            ci = max(0, min(ci, len(self.queue) - 1))
+            if ci != self.current_index:
+                self.current_index = ci
+                self._sync_metadata_for_current()
+                self.dispatch("on_queue_mutated")
+
+    async def _dispatch_op(self, send) -> dict:
+        """Register a pending ack, invoke `send(request_id)` to issue the
+        command, and await the ack. Returns the ack payload ({} / {'ok': False}
+        on failure). Dart serializes ops, so awaiting this before the next
+        command guarantees ordering."""
+        if not self._audio:
+            return {"ok": False}
+        rid = uuid.uuid4().hex
+        try:
+            self._audio.register_op(rid)
+            await send(rid)
+            return await self._audio.wait_for_op(rid)
+        except Exception as exc:
+            logger.warning("ADB_AUDIO: native op failed: %s", exc)
+            return {"ok": False}
+
+    def _schedule_push(self, start_index: int | None = None, autoplay: bool = True):
+        """Bump the epoch synchronously (so any state event arriving before Dart
+        applies the push is rejected) and schedule a full logical-order playlist
+        push. Replaces the old arm_queue_gate + run_task(_push_queue_native)."""
+        if start_index is None:
+            start_index = self.current_index
+        ep = self._next_epoch()
+        if self._page:
+            self._page.run_task(self._push_queue_native, start_index, autoplay, ep)
+
+    def _schedule_skip(self, logical_index: int, autoplay: bool = True):
+        """Bump the epoch synchronously and schedule a skip to a LOGICAL index.
+        Dart serializes it after any pending mutation, so append-then-skip is
+        race-free without Python-side coalescing."""
+        ep = self._next_epoch()
+        if self._page:
+            self._page.run_task(self._do_skip, logical_index, autoplay, ep)
+
+    async def _do_skip(self, logical_index: int, autoplay: bool, epoch: int):
+        self._ensure_audio()
+        if not self._audio:
+            return
+        async def send(rid):
+            await self._audio.skip_to_index(
+                logical_index, autoplay=autoplay, epoch=epoch, request_id=rid
+            )
+        ack = await self._dispatch_op(send)
+        self._apply_ack(ack)
+
+    async def _push_queue_native(self, start_index: int = 0, autoplay: bool = True,
+                                 epoch: int | None = None):
+        """Push the current (logical-order) Python queue to Dart's
+        ConcatenatingAudioSource so the native player owns advancement,
+        notification skip, and background continuation. The shuffle flag is
+        folded into set_playlist so source + shuffle state can't disagree; the
+        follow-up play() rides inside the same serialized op."""
+        await self._push_queue_native_unlocked(start_index, autoplay, epoch)
+
+    async def _push_queue_native_unlocked(self, start_index: int = 0, autoplay: bool = True,
+                                          epoch: int | None = None):
         self._ensure_audio()
         if not self._audio:
             logger.error("ADB_AUDIO: Audio control not available.")
@@ -331,19 +366,15 @@ class AudioEngine:
             except Exception:
                 pass
             return
-        try:
-            target = start_index
-            if self._is_shuffle and getattr(self, "_shuffle_order", None):
-                try:
-                    target = self._shuffle_order.index(start_index)
-                except ValueError:
-                    target = 0
-            target = max(0, min(target, len(items) - 1))
-            await self._audio.set_playlist(items, start_index=target)
-            if autoplay:
-                await self._audio.play()
-        except RuntimeError as exc:
-            logger.error("ADB_AUDIO: _push_queue_native failed; %s", exc)
+        target = max(0, min(start_index, len(items) - 1))
+        ep = epoch if epoch is not None else self._next_epoch()
+        async def send(rid):
+            await self._audio.set_playlist(
+                items, start_index=target, autoplay=autoplay,
+                shuffle=self._is_shuffle, epoch=ep, request_id=rid,
+            )
+        ack = await self._dispatch_op(send)
+        self._apply_ack(ack)
 
     async def _load_src(self, path, title="", artist="", album="", artwork="",
                         autoplay: bool = True):
@@ -355,11 +386,16 @@ class AudioEngine:
 
     def _on_state_change(self, e):
         queue_index = None
+        ev_epoch = 0
         try:
             payload = json.loads(e.data)
             status = payload.get("status", "paused")
             processing_state = payload.get("processing_state", "idle")
             queue_index = payload.get("queue_index")
+            ev_epoch = payload.get("epoch", 0)
+            si = payload.get("shuffle_indices")
+            if isinstance(si, list):
+                self._shuffle_indices = [int(x) for x in si]
             dur_ms = payload.get("duration_ms")
             if dur_ms is not None:
                 self._set("duration", dur_ms / 1000.0)
@@ -371,29 +407,26 @@ class AudioEngine:
         # it directly (dirty-checked _set → no dispatch churn when unchanged).
         self._set("processing_state", processing_state)
 
-        # Mirror the native queue index (changed by skip_to_next, notification
-        # next/previous, or auto-advance at end-of-track) so Python-side UI
-        # stays in sync. Suppressed briefly after a user-initiated queue
-        # change so stale events from the prior playback don't flip
-        # current_index into a wrong row of the freshly-installed queue.
+        # Mirror the native (logical) queue index — changed by skip, notification
+        # next/previous, OR gapless auto-advance — but ONLY when the event's
+        # epoch equals the latest epoch we sent. A lower epoch means Dart hasn't
+        # yet applied our most recent queue change, so its index still describes
+        # the previous generation; accepting it would flip current_index into a
+        # wrong row. This deterministic check replaces the old wall-clock gate.
         if (
             isinstance(queue_index, int)
             and self.queue
-            and time.time() >= self._queue_change_until
+            and ev_epoch == self._queue_epoch
         ):
-            qi = max(0, min(queue_index, len(self.queue) - 1))
-            target_idx = qi
-            if self._is_shuffle and getattr(self, "_shuffle_order", None):
-                if 0 <= qi < len(self._shuffle_order):
-                    target_idx = self._shuffle_order[qi]
+            target_idx = max(0, min(queue_index, len(self.queue) - 1))
             if target_idx != self.current_index:
                 self.current_index = target_idx
                 self._sync_metadata_for_current()
                 self.dispatch("on_queue_mutated")
 
         logger.debug(
-            "ADB_AUDIO: _on_state_change status=%s, processing=%s, qi=%s",
-            status, processing_state, queue_index
+            "ADB_AUDIO: _on_state_change status=%s, processing=%s, qi=%s, epoch=%s/%s",
+            status, processing_state, queue_index, ev_epoch, self._queue_epoch
         )
 
         if status == "playing":
@@ -402,16 +435,17 @@ class AudioEngine:
             self._set("is_playing", False)
 
         if processing_state == "completed":
-            # Auto-loop back to the first song if repeat_mode is "all"
+            # Auto-loop back to the first PLAY-ORDER track if repeat is "all".
+            # Under shuffle the first play-order row is shuffle_indices[0]; Dart
+            # will report the authoritative index back once the re-push lands.
             if self.repeat_mode == "all" and self.queue:
                 target_idx = 0
-                if self._is_shuffle and getattr(self, "_shuffle_order", None) and len(self._shuffle_order) > 0:
-                    target_idx = self._shuffle_order[0]
+                if self._is_shuffle and self._shuffle_indices:
+                    target_idx = self._shuffle_indices[0]
+                target_idx = max(0, min(target_idx, len(self.queue) - 1))
                 self.current_index = target_idx
                 self._sync_metadata_for_current()
-                if self._page:
-                    self._arm_queue_gate()
-                    self._page.run_task(self._push_queue_native, target_idx, True)
+                self._schedule_push(target_idx, True)
             else:
                 self._set("is_playing", False)
                 if getattr(self, "jarvis_controlled", False):
@@ -549,66 +583,18 @@ class AudioEngine:
 
     # ── Queue management ──────────────────────────────────────────────────────
 
-    def _arm_queue_gate(self, seconds: float = 1.5):
-        """Block Dart→Python queue_index mirroring for the next `seconds`
-        seconds. Called whenever Python initiates a queue mutation or skip
-        so that in-flight state events from the previously-playing track
-        can't flip current_index to a wrong row before Dart catches up."""
-        self._queue_change_until = time.time() + seconds
-
-    def _request_skip(self, native_index: int):
-        """Coalesce rapid skips: the UI index is already updated by the caller;
-        debounce the actual Dart skip so a burst of taps issues ONE
-        skip_to_index(final) under the native lock instead of N racing skips
-        (the source of the 'malformed queue' errors)."""
-        self._skip_target = native_index
-        self._arm_queue_gate(0.8)
-        if self._page and (self._skip_task is None or self._skip_task.done()):
-            self._skip_task = self._page.run_task(self._run_coalesced_skip)
-
-    async def _run_coalesced_skip(self):
-        import asyncio
-        # Settle: wait out the burst until the target stops moving.
-        last = object()
-        while last != self._skip_target:
-            last = self._skip_target
-            await asyncio.sleep(0.18)
-        target = self._skip_target
-        if target is None:
-            return
-        if self._native_lock is None:
-            self._native_lock = asyncio.Lock()
-        async with self._native_lock:        # serialize against mutations
-            if self._audio:
-                try:
-                    await self._audio.skip_to_index(target)
-                    await self._audio.play()
-                except Exception as exc:
-                    logger.warning("coalesced skip failed: %s", exc)
-
     def set_queue(self, tracks: list[dict], start_index: int = 0):
         """Set the playback queue and start from the given index. The full
-        queue is pushed to Dart's ConcatenatingAudioSource so notification
-        skip and background auto-advance work without Python in the loop."""
+        queue is pushed (in logical order) to Dart's ConcatenatingAudioSource so
+        notification skip and background auto-advance work without Python in the
+        loop. Dart applies shuffle natively per the engine's is_shuffle flag."""
         self._completed_terminal = False
         self.queue = tracks
         self.current_index = min(max(0, start_index), len(self.queue) - 1) if self.queue else 0
-        if self._is_shuffle:
-            indices = list(range(len(self.queue)))
-            if 0 <= self.current_index < len(self.queue):
-                indices.remove(self.current_index)
-                random.shuffle(indices)
-                self._shuffle_order = [self.current_index] + indices
-            else:
-                random.shuffle(indices)
-                self._shuffle_order = indices
-        else:
-            self._shuffle_order = []
         self.dispatch("on_queue_mutated")
         self._sync_metadata_for_current()
         if self._page and self.queue:
-            self._arm_queue_gate()
-            self._page.run_task(self._push_queue_native, self.current_index, True)
+            self._schedule_push(self.current_index, True)
 
     async def play_current(self):
         """Re-push the queue to Dart starting at current_index. Kept for
@@ -637,8 +623,7 @@ class AudioEngine:
             self._completed_terminal = False
             self.current_index = 0
             self._sync_metadata_for_current()
-            self._arm_queue_gate()
-            self._page.run_task(self._push_queue_native, 0, True)
+            self._schedule_push(0, True)
             return
         self._page.run_task(self._audio.play)
 
@@ -697,6 +682,28 @@ class AudioEngine:
 
         self._page.run_task(_safe_seek)
 
+    def _logical_neighbour(self, delta: int) -> int | None:
+        """Return the logical index `delta` steps from current_index in PLAY
+        order — the Dart-reported shuffle order when shuffling, sequential
+        otherwise — or None if there is no such neighbour (queue end, before any
+        repeat-all wrap handling)."""
+        if not self.queue:
+            return None
+        order = self._shuffle_indices
+        if self._is_shuffle and order and len(order) == len(self.queue):
+            try:
+                pos = order.index(self.current_index)
+            except ValueError:
+                return None
+            npos = pos + delta
+            if 0 <= npos < len(order):
+                return order[npos]
+            return None
+        n = self.current_index + delta
+        if 0 <= n < len(self.queue):
+            return n
+        return None
+
     def next(self):
         if not self._audio or not self._page:
             return
@@ -705,51 +712,28 @@ class AudioEngine:
             self._page.run_task(self._audio.seek, 0)
             self._page.run_task(self._audio.play)
             return
-        self._arm_queue_gate(0.8)
-        if self._is_shuffle and len(self.queue) > 1 and getattr(self, "_shuffle_order", None):
-            try:
-                curr_shuf_idx = self._shuffle_order.index(self.current_index)
-            except ValueError:
-                curr_shuf_idx = -1
-            
-            if curr_shuf_idx != -1 and curr_shuf_idx < len(self._shuffle_order) - 1:
-                target_shuf_idx = curr_shuf_idx + 1
-                target = self._shuffle_order[target_shuf_idx]
-                self.current_index = target
-                self._sync_metadata_for_current()
-                self._request_skip(target_shuf_idx)
-                return
-            elif self.repeat_mode == "all":
-                target = self._shuffle_order[0]
-                self.current_index = target
-                self._sync_metadata_for_current()
-                self._request_skip(0)
-                return
-            else:
-                if getattr(self, "jarvis_controlled", False):
-                    self.dispatch("on_jarvis_continue")
-                elif getattr(self, "play_similar_seed_path", ""):
-                    self.dispatch("on_similar_continue")
-                else:
-                    self.stop()
-                return
 
-        if self.current_index < len(self.queue) - 1:
-            self.current_index += 1
+        target = self._logical_neighbour(+1)
+        if target is not None:
+            self.current_index = target
             self._sync_metadata_for_current()
-            target = self.current_index
-            self._request_skip(target)
-        elif self.repeat_mode == "all":
-            self.current_index = 0
+            self._schedule_skip(target)
+            return
+
+        # No successor in play order.
+        if self.repeat_mode == "all" and self.queue:
+            target = self._shuffle_indices[0] if (self._is_shuffle and self._shuffle_indices) else 0
+            target = max(0, min(target, len(self.queue) - 1))
+            self.current_index = target
             self._sync_metadata_for_current()
-            self._request_skip(0)
+            self._schedule_skip(target)
+            return
+        if getattr(self, "jarvis_controlled", False):
+            self.dispatch("on_jarvis_continue")
+        elif getattr(self, "play_similar_seed_path", ""):
+            self.dispatch("on_similar_continue")
         else:
-            if getattr(self, "jarvis_controlled", False):
-                self.dispatch("on_jarvis_continue")
-            elif getattr(self, "play_similar_seed_path", ""):
-                self.dispatch("on_similar_continue")
-            else:
-                self.stop()
+            self.stop()
 
     def previous(self):
         if self.position > 3.0:
@@ -758,117 +742,78 @@ class AudioEngine:
         if not self._audio or not self._page:
             return
         self._completed_terminal = False
-        if self._is_shuffle and len(self.queue) > 1 and getattr(self, "_shuffle_order", None):
-            try:
-                curr_shuf_idx = self._shuffle_order.index(self.current_index)
-            except ValueError:
-                curr_shuf_idx = -1
-            
-            if curr_shuf_idx > 0:
-                target_shuf_idx = curr_shuf_idx - 1
-                target = self._shuffle_order[target_shuf_idx]
-                self._arm_queue_gate(0.8)
-                self.current_index = target
-                self._sync_metadata_for_current()
-                self._request_skip(target_shuf_idx)
-                return
-
-        if self.current_index > 0:
-            self._arm_queue_gate(0.8)
-            self.current_index -= 1
+        target = self._logical_neighbour(-1)
+        if target is not None:
+            self.current_index = target
             self._sync_metadata_for_current()
-            target = self.current_index
-            self._request_skip(target)
+            self._schedule_skip(target)
 
     # ── Queue mutation ────────────────────────────────────────────────────────
+
+    async def _run_native_mutation(self, epoch: int, send):
+        """Await an incremental queue-mutation's ack. On success, refresh the
+        shuffle cache / reconcile the index from Dart's authoritative reply; on
+        failure, fall back to a full logical re-push (reusing the SAME epoch, so
+        the generation counter stays consistent)."""
+        ack = await self._dispatch_op(send)
+        if not ack.get("ok", False):
+            logger.warning("ADB_AUDIO: native mutation failed; full re-push fallback")
+            await self._push_queue_native_unlocked(
+                start_index=self.current_index, autoplay=False, epoch=epoch
+            )
+            return
+        self._apply_ack(ack)
 
     def queue_next(self, track: dict):
         if not self.queue:
             self.set_queue([track])
             return
+        # Insert directly after the current track (logical). insert_at is always
+        # > current_index, so current_index needs no adjustment.
         insert_at = min(self.current_index + 1, len(self.queue))
         self.queue.insert(insert_at, track)
-        
-        native_idx = insert_at
-        if self._is_shuffle:
-            self._on_track_added_to_shuffle(insert_at, play_next=True)
-            try:
-                native_idx = self._shuffle_order.index(insert_at)
-            except ValueError:
-                native_idx = insert_at
-
         self.dispatch("on_queue_mutated")
         if self._page:
-            self._arm_queue_gate()
-            self._page.run_task(self._native_add_queue_item, track, native_idx)
+            ep = self._next_epoch()
+            self._page.run_task(self._native_add_queue_item, track, insert_at, ep)
 
     def queue_last(self, track: dict):
         if not self.queue:
             self.set_queue([track])
             return
         self.queue.append(track)
-        
-        native_idx = len(self.queue) - 1
-        if self._is_shuffle:
-            self._on_track_added_to_shuffle(native_idx, play_next=False)
-            try:
-                native_idx = self._shuffle_order.index(native_idx)
-            except ValueError:
-                native_idx = len(self.queue) - 1
-
+        insert_at = len(self.queue) - 1
         self.dispatch("on_queue_mutated")
         if self._page:
-            self._arm_queue_gate()
-            # Append: use the Python-side length AFTER our local insert as the
-            # native insert index. Dart clamps to the actual playlist length,
-            # so any drift between the two sides resolves to a tail append.
-            self._page.run_task(
-                self._native_add_queue_item, track, native_idx
+            ep = self._next_epoch()
+            self._page.run_task(self._native_add_queue_item, track, insert_at, ep)
+
+    async def _native_add_queue_item(self, track: dict, index: int, epoch: int):
+        """Non-destructive insert at a LOGICAL index into the live
+        ConcatenatingAudioSource via Dart's addQueueItemAt. Does NOT reload the
+        source, so playback/position is preserved. Under shuffle, just_audio
+        updates its own shuffle order and reports it back on the ack. Falls back
+        to a full logical re-push if Dart reports the op failed."""
+        self._ensure_audio()
+        if not self._audio:
+            return
+        item = self._track_to_playlist_item(track)
+        if item is None:
+            return
+        async def send(rid):
+            await self._audio.add_queue_item(
+                src=item["src"], title=item["title"], artist=item["artist"],
+                album=item.get("album"), album_art=item.get("album_art"),
+                duration_ms=item.get("duration_ms"), index=index,
+                epoch=epoch, request_id=rid,
             )
-
-    async def _native_add_queue_item(self, track: dict, index: int):
-        """Non-destructive insert into the live ConcatenatingAudioSource via
-        Dart's addQueueItemAt. Does NOT call set_playlist, so the currently
-        playing source isn't torn down and position is preserved.
-
-        Falls back to a full set_playlist push if the native call fails
-        (network race, Dart side not yet ready), at which point the user
-        will see the legacy 'restart on resume' behaviour for that one
-        mutation — better than a silently dropped queue insert."""
-        import asyncio
-        if self._native_lock is None:
-            self._native_lock = asyncio.Lock()
-        async with self._native_lock:
-            self._ensure_audio()
-            if not self._audio:
-                return
-            item = self._track_to_playlist_item(track)
-            if item is None:
-                return
-            try:
-                await self._audio.add_queue_item(
-                    src=item["src"],
-                    title=item["title"],
-                    artist=item["artist"],
-                    album=item.get("album"),
-                    album_art=item.get("album_art"),
-                    duration_ms=item.get("duration_ms"),
-                    index=index,
-                )
-            except Exception as exc:
-                logger.warning("ADB_AUDIO: add_queue_item failed; falling back to "
-                               "set_playlist (will reset position): %s", exc)
-                await self._push_queue_native_unlocked(
-                    start_index=self.current_index, autoplay=False
-                )
+        await self._run_native_mutation(epoch, send)
 
     def queue_extend(self, tracks: list[dict]):
-        """Append several tracks in one batch. Mirrors calling queue_last for
-        each track, but dispatches on_queue_mutated only ONCE (one queue-sheet
-        rebuild, one coalesced queue-save) and pushes every insert to Dart
-        under a single native task. Used by Play Similar block-replenishment,
-        which appends up to 8 tracks at a time — per-track queue_last would
-        otherwise rebuild the queue sheet eight times per replenish."""
+        """Append several tracks in one batch. Dispatches on_queue_mutated only
+        ONCE (one queue-sheet rebuild, one coalesced save) and sends every insert
+        to Dart in a single serialized op. Used by Play Similar block-
+        replenishment, which appends up to 8 tracks at a time."""
         if not tracks:
             return
         if not self.queue:
@@ -880,90 +825,54 @@ class AudioEngine:
         for track in tracks:
             insert_at = len(self.queue)
             self.queue.append(track)
-            native_idx = insert_at
-            if self._is_shuffle:
-                self._on_track_added_to_shuffle(insert_at, play_next=False)
-                try:
-                    native_idx = self._shuffle_order.index(insert_at)
-                except ValueError:
-                    native_idx = insert_at
-            native_items.append((track, native_idx))
+            native_items.append((track, insert_at))
         self.dispatch("on_queue_mutated")
         if self._page:
-            self._arm_queue_gate()
-            self._page.run_task(self._native_add_queue_items, native_items)
+            ep = self._next_epoch()
+            self._page.run_task(self._native_add_queue_items, native_items, ep)
 
-    async def _native_add_queue_items(self, items: list[tuple[dict, int]]):
+    async def _native_add_queue_items(self, items: list[tuple[dict, int]], epoch: int):
         """Batch sibling of _native_add_queue_item: insert the whole block into
-        the live ConcatenatingAudioSource in ONE Dart call (add_queue_items)
-        under a single lock acquisition. The per-item indices are computed in
-        append order by queue_extend, so Dart replaying them in order is
-        equivalent to N sequential add_queue_item calls. Falls back to one full
-        set_playlist rebuild if the native call fails (including against an
-        older Dart bundle that predates add_queue_items)."""
-        import asyncio
-        if self._native_lock is None:
-            self._native_lock = asyncio.Lock()
-        async with self._native_lock:
-            self._ensure_audio()
-            if not self._audio:
-                return
-            payload = []
-            for track, index in items:
-                item = self._track_to_playlist_item(track)
-                if item is None:
-                    continue
-                payload.append({
-                    "src": item["src"],
-                    "title": item["title"],
-                    "artist": item["artist"],
-                    "album": item.get("album"),
-                    "album_art": item.get("album_art"),
-                    "duration_ms": item.get("duration_ms"),
-                    "index": index,
-                })
-            if not payload:
-                return
-            try:
-                await self._audio.add_queue_items(payload)
-            except Exception as exc:
-                logger.warning("ADB_AUDIO: batch add_queue_items failed; falling "
-                               "back to set_playlist (will reset position): %s", exc)
-                await self._push_queue_native_unlocked(
-                    start_index=self.current_index, autoplay=False
-                )
+        the live ConcatenatingAudioSource in ONE serialized Dart call. Indices
+        are LOGICAL, computed in append order by queue_extend, so Dart replaying
+        them in order is equivalent to N sequential inserts. Falls back to one
+        full re-push if Dart reports failure."""
+        self._ensure_audio()
+        if not self._audio:
+            return
+        payload = []
+        for track, index in items:
+            item = self._track_to_playlist_item(track)
+            if item is None:
+                continue
+            payload.append({
+                "src": item["src"],
+                "title": item["title"],
+                "artist": item["artist"],
+                "album": item.get("album"),
+                "album_art": item.get("album_art"),
+                "duration_ms": item.get("duration_ms"),
+                "index": index,
+            })
+        if not payload:
+            return
+        async def send(rid):
+            await self._audio.add_queue_items(payload, epoch=epoch, request_id=rid)
+        await self._run_native_mutation(epoch, send)
 
     def play_track_at(self, index: int):
         if not (0 <= index < len(self.queue)) or not self._audio or not self._page:
             return
         self._completed_terminal = False
-        self._arm_queue_gate(0.8)
         self.current_index = index
         self._sync_metadata_for_current()
-        
-        target = index
-        if self._is_shuffle and getattr(self, "_shuffle_order", None):
-            try:
-                target = self._shuffle_order.index(index)
-            except ValueError:
-                target = index
-                
-        self._request_skip(target)
+        # skip_to_index takes a LOGICAL index; Dart resolves it under shuffle.
+        self._schedule_skip(index)
 
     def remove_from_queue(self, index: int):
         if not 0 <= index < len(self.queue):
             return
         removed_active = (index == self.current_index)
-        native_index = index
-        curr_shuf_idx = -1
-        if self._is_shuffle and getattr(self, "_shuffle_order", None):
-            try:
-                native_index = self._shuffle_order.index(index)
-                curr_shuf_idx = native_index
-            except ValueError:
-                native_index = index
-            self._on_track_removed_from_shuffle(index)
-
         self.queue.pop(index)
         if not self.queue:
             self.stop()
@@ -971,83 +880,51 @@ class AudioEngine:
         if index < self.current_index:
             self.current_index -= 1
         elif removed_active:
-            if self._is_shuffle and getattr(self, "_shuffle_order", None) and len(self._shuffle_order) > 0:
-                shuf_pos = min(curr_shuf_idx, len(self._shuffle_order) - 1) if curr_shuf_idx != -1 else 0
-                self.current_index = self._shuffle_order[shuf_pos]
-            else:
-                self.current_index = min(self.current_index, len(self.queue) - 1)
+            # Provisional: Dart auto-advances the active source (following its
+            # shuffle order) and the op ack reports the authoritative new index,
+            # which _apply_ack reconciles.
+            self.current_index = min(self.current_index, len(self.queue) - 1)
             self._sync_metadata_for_current()
         self.dispatch("on_queue_mutated")
         if self._page:
-            self._arm_queue_gate()
-            self._page.run_task(self._native_remove_queue_item, native_index)
+            ep = self._next_epoch()
+            self._page.run_task(self._native_remove_queue_item, index, ep)
 
-    async def _native_remove_queue_item(self, index: int):
-        """Non-destructive removal via Dart's removeQueueItemAt. Falls back
-        to a full rebuild if the native call fails."""
-        import asyncio
-        if self._native_lock is None:
-            self._native_lock = asyncio.Lock()
-        async with self._native_lock:
-            self._ensure_audio()
-            if not self._audio:
-                return
-            try:
-                await self._audio.remove_queue_item(index)
-            except Exception as exc:
-                logger.warning("ADB_AUDIO: remove_queue_item failed; falling back "
-                               "to set_playlist: %s", exc)
-                await self._push_queue_native_unlocked(
-                    start_index=self.current_index, autoplay=False
-                )
+    async def _native_remove_queue_item(self, index: int, epoch: int):
+        """Non-destructive removal (logical index) via Dart's removeQueueItemAt.
+        Falls back to a full re-push if Dart reports failure."""
+        self._ensure_audio()
+        if not self._audio:
+            return
+        async def send(rid):
+            await self._audio.remove_queue_item(index, epoch=epoch, request_id=rid)
+        await self._run_native_mutation(epoch, send)
 
     def move_queue_item(self, old_index: int, new_index: int):
         if not (0 <= old_index < len(self.queue) and 0 <= new_index < len(self.queue)):
             return
         current_obj = self.queue[self.current_index] if self.queue else None
-        
-        native_old_index = old_index
-        native_new_index = new_index
-        if self._is_shuffle and getattr(self, "_shuffle_order", None):
-            try:
-                native_old_index = self._shuffle_order.index(old_index)
-            except ValueError:
-                pass
-            self._on_track_moved_in_shuffle(old_index, new_index)
-            try:
-                native_new_index = self._shuffle_order.index(new_index)
-            except ValueError:
-                pass
-
         item = self.queue.pop(old_index)
         self.queue.insert(new_index, item)
+        # Track the active track by identity so current_index follows it.
         if current_obj is not None and current_obj in self.queue:
             self.current_index = self.queue.index(current_obj)
         self.dispatch("on_queue_mutated")
         if self._page:
-            self._arm_queue_gate()
-            self._page.run_task(
-                self._native_move_queue_item, native_old_index, native_new_index
-            )
+            ep = self._next_epoch()
+            # Logical old/new indices; reordering is disabled in the UI under
+            # shuffle, so these are sequential positions.
+            self._page.run_task(self._native_move_queue_item, old_index, new_index, ep)
 
-    async def _native_move_queue_item(self, old_index: int, new_index: int):
-        """Non-destructive reorder via Dart's ConcatenatingAudioSource.move.
-        Position is preserved even when the active source is moved."""
-        import asyncio
-        if self._native_lock is None:
-            self._native_lock = asyncio.Lock()
-        async with self._native_lock:
-            self._ensure_audio()
-            if not self._audio:
-                return
-            try:
-                await self._audio.move_queue_item(old_index, new_index)
-            except Exception as exc:
-                logger.warning("ADB_AUDIO: move_queue_item failed; falling back "
-                               "to set_playlist: %s", exc)
-                await self._push_queue_native_unlocked(
-                    start_index=self.current_index, autoplay=False
-                )
+    async def _native_move_queue_item(self, old_index: int, new_index: int, epoch: int):
+        """Non-destructive reorder (logical indices) via Dart's
+        ConcatenatingAudioSource.move. Falls back to a full re-push on failure."""
+        self._ensure_audio()
+        if not self._audio:
+            return
+        async def send(rid):
+            await self._audio.move_queue_item(old_index, new_index, epoch=epoch, request_id=rid)
+        await self._run_native_mutation(epoch, send)
 
     def clear_queue(self):
         self.stop()
@@ -1064,17 +941,9 @@ class AudioEngine:
         # Restore all items (caching avoids UI blocking)
         self.queue = tracks
         self.current_index = min(max(0, index), len(self.queue) - 1)
-        if self._is_shuffle:
-            indices = list(range(len(self.queue)))
-            if 0 <= self.current_index < len(self.queue):
-                indices.remove(self.current_index)
-                random.shuffle(indices)
-                self._shuffle_order = [self.current_index] + indices
-            else:
-                random.shuffle(indices)
-                self._shuffle_order = indices
-        else:
-            self._shuffle_order = []
+        # Dart owns the shuffle order; the restore push applies is_shuffle and
+        # reports fresh shuffle_indices back. Clear any stale cache.
+        self._shuffle_indices = []
         track = tracks[self.current_index]
         path  = track.get("path", "")
         title = (track.get("track_title") or os.path.basename(path)) if path else "Unknown"
@@ -1096,21 +965,23 @@ class AudioEngine:
 
         if path and os.path.exists(path):
             self._restore_position = position
-            # Generous gate on restore; cold-start codec init + source load
-            # on the first track of a new session routinely runs longer than
-            # the standard 1.5s gate. If the gate expires before Dart's
-            # first state event, an interim null/zero queue_index could flip
-            # current_index to the wrong row (and fire the wrong album/artist
-            # into the now-playing UI before the real value arrives).
-            self._arm_queue_gate(5.0)
+            # Bump the epoch SYNCHRONOUSLY before scheduling the restore push.
+            # Cold-start codec init + source load can run for seconds; any
+            # interim Dart state event carries a lower epoch and is now rejected
+            # deterministically (replacing the old generous 5s wall-clock gate),
+            # so a null/zero queue_index can't flip current_index to a wrong row
+            # before the real source is loaded.
+            ep = self._next_epoch()
 
             async def _restore_async():
                 try:
-                    # autoplay=False; we want the previous UI revived, not
-                    # an unsolicited resume. The source still gets prepared
-                    # so the saved-position seek can apply on `ready`, and
-                    # the user's first tap on play resumes from that offset.
-                    await self._load_src(path, autoplay=False)
+                    # autoplay=False; we want the previous UI revived, not an
+                    # unsolicited resume. The source still gets prepared so the
+                    # saved-position seek can apply on `ready`, and the user's
+                    # first tap on play resumes from that offset.
+                    await self._push_queue_native_unlocked(
+                        start_index=self.current_index, autoplay=False, epoch=ep
+                    )
                 except Exception as exc:
                     logger.error("ADB_AUDIO: restore_queue error: %s", exc)
 

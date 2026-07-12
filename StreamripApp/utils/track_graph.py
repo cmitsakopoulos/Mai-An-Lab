@@ -649,7 +649,7 @@ async def build_acoustic_edges(
     scalar_weight: float = 1.5,
     harmonic_weight: float = 1.5,
     cluster_resolution: float = 1.0,
-    local_refine: bool = True,
+    local_refine: bool = False,
     csls_beta: float = 0.0,
     refine_resolution: float | None = None,
 ) -> int:
@@ -670,14 +670,15 @@ async def build_acoustic_edges(
         logger.info("track_graph: acoustic edges skipped (only %d tracks with features)", len(rows))
         return 0
 
-    # ── Pre-Network Metadata Enrichment & Genre Normalization Phase ──────────
-    # Enrich artist country provenance & canonical genres BEFORE unsupervised
-    # PCA graph embedding generation & metadata fusion gates.
-    try:
-        from utils.metadata_enrich import enrich_library
-        await enrich_library(db_manager, with_genres=True)
-    except Exception as exc:
-        logger.debug("Pre-network metadata enrichment skipped: %s", exc)
+    # ── Metadata enrichment is DECOUPLED from the acoustic build ─────────────
+    # The acoustic geometry (timbre + dynamics + harmony) does not depend on
+    # artist country/genre at all — enrichment only feeds the walk's metadata
+    # gate and the NPMI genre model, which is (re)built from whatever enrichment
+    # exists at the end of this function and refreshed again by the background
+    # enrichment task (main._enrich_metadata_async) as provenance lands.
+    # Triggering MusicBrainz here forced a rate-limited (1 req/s) network stall
+    # onto every graph rebuild for no geometric benefit; it now runs off the
+    # hot path.
 
     # ── Feature selection: drop covariance-redundant scalars ──────────────
     # The graph — and the Louvain communities + similarity walk built on it —
@@ -811,6 +812,8 @@ async def build_acoustic_edges(
                 "harmonic_weight": float(harmonic_weight),
                 "harmonic_means": mu_harm.astype(np.float32).tolist(),
                 "harmonic_stds": sd_harm.astype(np.float32).tolist(),
+                "k_neighbors": int(k),
+                "csls_beta": float(csls_beta),
             }
             await db_manager.save_pca_space(
                 mu_cont.astype(np.float32), sd_cont.astype(np.float32),
@@ -1156,6 +1159,99 @@ def _meta_score(a_path: str, b_path: str, meta_map: dict, genre_model: dict) -> 
     return gx + beta * same_cty
 
 
+async def load_live_coordinate_graph(db_manager):
+    """Load all PCA coordinates, cluster IDs, and metadata from SQLite to build
+    a coordinates-only graph representation in RAM for on-the-fly walk traversal.
+    """
+    rows = await db_manager.get_tracks_pca_coords()
+    if not rows:
+        return None
+
+    # Load space projection parameters for K-neighbors and CSLS-beta
+    proj = await db_manager.load_pca_space()
+    k_neighbors = 50
+    csls_beta = 0.0
+    if proj:
+        k_neighbors = proj.get("k_neighbors", 50)
+        csls_beta = proj.get("csls_beta", 0.0)
+
+    paths = [r["path"] for r in rows if r.get("pca_coords")]
+    if not paths:
+        return None
+
+    path_to_idx = {p: i for i, p in enumerate(paths)}
+    X_zr = np.array([r["pca_coords"] for r in rows if r.get("pca_coords")], dtype=np.float32)
+    cluster_map = {r["path"]: r["cluster_id"] for r in rows}
+    
+    # meta_map for genre/country checks
+    meta_map = {r["path"]: r for r in rows}
+
+    def _compute_graph_matrices():
+        N = X_zr.shape[0]
+        k_eff = min(k_neighbors, N - 1)
+        X_zr_sq = np.sum(X_zr ** 2, axis=1)
+
+        # 1. Compute sigmas
+        LOCAL_K = 7
+        chunk = 1024
+        sigmas = np.ones(N, dtype=np.float32)
+        for i in range(0, N, chunk):
+            block = X_zr[i:i + chunk]
+            c = block.shape[0]
+            d2 = X_zr_sq[i:i + c, None] - 2.0 * (block @ X_zr.T) + X_zr_sq[None, :]
+            for j in range(c):
+                d2[j, i + j] = np.inf
+            piv = np.partition(d2, LOCAL_K - 1, axis=1)[:, LOCAL_K - 1]
+            sigmas[i:i + c] = np.sqrt(np.maximum(piv, 0.0))
+        sigmas = np.maximum(sigmas, 1e-3)
+
+        # 2. Compute hubness r(x) if csls_beta > 0
+        r = np.zeros(N, dtype=np.float32)
+        if csls_beta > 0.0:
+            for i in range(0, N, chunk):
+                block = X_zr[i:i + chunk]
+                c = block.shape[0]
+                d2 = X_zr_sq[i:i + c, None] - 2.0 * (block @ X_zr.T) + X_zr_sq[None, :]
+                for j in range(c):
+                    d2[j, i + j] = np.inf
+                A = np.exp(-d2 / (sigmas[i:i + c, None] * sigmas[None, :]))
+                r[i:i + c] = np.sort(A, axis=1)[:, -LOCAL_K:].mean(axis=1)
+
+        # 3. Compute top-K affinity thresholds
+        thresholds = np.zeros(N, dtype=np.float32)
+        for i in range(0, N, chunk):
+            block = X_zr[i:i + chunk]
+            c = block.shape[0]
+            d2 = X_zr_sq[i:i + c, None] - 2.0 * (block @ X_zr.T) + X_zr_sq[None, :]
+            for j in range(c):
+                d2[j, i + j] = np.inf
+            A = np.exp(-d2 / (sigmas[i:i + c, None] * sigmas[None, :]))
+            if csls_beta > 0.0:
+                sel = A - csls_beta * 0.5 * (r[i:i + c, None] + r[None, :])
+            else:
+                sel = A
+            piv_sel = np.partition(sel, N - k_eff, axis=1)[:, N - k_eff]
+            thresholds[i:i + c] = piv_sel
+
+        return sigmas, thresholds, X_zr_sq, r, k_eff, csls_beta
+
+    sigmas, thresholds, X_zr_sq, r, k_eff, csls_beta = await asyncio.to_thread(_compute_graph_matrices)
+
+    return {
+        "X_zr": X_zr,
+        "X_zr_sq": X_zr_sq,
+        "paths": paths,
+        "path_to_idx": path_to_idx,
+        "cluster_map": cluster_map,
+        "meta_map": meta_map,
+        "sigmas": sigmas,
+        "r": r,
+        "thresholds": thresholds,
+        "k_eff": k_eff,
+        "csls_beta": csls_beta,
+    }
+
+
 async def walk(
     db_manager,
     seed_path: str,
@@ -1163,6 +1259,9 @@ async def walk(
     avoid: Optional[set[str]] = None,
     meta_lambda: float = 0.35,
     cluster_lambda: float = 0.5,
+    mmr_lambda: float = 0.0,
+    temperature: float = 0.0,
+    rng_seed: int | None = None,
 ) -> list[str]:
     """Seed-Anchored Smooth Flow trajectory walk over the track graph.
 
@@ -1187,26 +1286,148 @@ async def walk(
     cluster accessors (e.g. the test fakes) or a library without enrichment
     collapses the factors to 1.0 and the walk is the original dual-similarity
     flow.
+
+    Three optional refinements — all off / deterministic by default, so the
+    contract above is unchanged unless a caller opts in:
+      • mmr_lambda>0 adds a Maximal-Marginal-Relevance diversity penalty: a
+        candidate is discounted by its timbre cosine to the tracks already
+        emitted, so the queue stops chaining remixes / alternate mixes / the
+        same song on another release.
+      • temperature>0 samples among the top candidates (scale-invariant
+        score**(1/T) weights) instead of taking the arg-max, so repeated walks
+        from one seed vary rather than returning an identical queue; T->0 is the
+        arg-max. rng_seed makes a stochastic walk reproducible.
+      • neighbour lookups are served from an in-memory cache warmed by ONE
+        batched query (get_neighbors_multi_batch) rather than a DB round-trip
+        per step, when the backend supports it — same result, far less latency.
     """
     visited: set[str] = set(avoid or set())
     visited.add(seed_path)
     path_seq: list[str] = []
 
-    # Prefetch seed's acoustic neighbors for seed-anchor scoring & fallback
-    if hasattr(db_manager, "get_neighbors_multi"):
-        seed_nbrs = await db_manager.get_neighbors_multi(
-            seed_path, (KIND_ACOUSTIC,), k=50
-        )
-    elif hasattr(db_manager, "get_neighbors"):
-        seed_nbrs = await db_manager.get_neighbors(
-            seed_path, k=50, edge_kind=KIND_ACOUSTIC
-        )
+    # Load live graph if coordinates-only mode is active
+    from utils.streamrip_api import get_walk_coordinates_only
+    coordinates_only = get_walk_coordinates_only()
+    coord_graph = None
+    if coordinates_only:
+        try:
+            coord_graph = await load_live_coordinate_graph(db_manager)
+        except Exception as exc:
+            logger.warning("track_graph.walk: failed to load live coordinate graph, falling back to edge table: %s", exc)
+
+    def _get_live_neighbors(path: str, k: int = 40) -> list[dict]:
+        if coord_graph is None:
+            return []
+        src_idx = coord_graph["path_to_idx"].get(path)
+        if src_idx is None:
+            return []
+        X_zr = coord_graph["X_zr"]
+        X_zr_sq = coord_graph["X_zr_sq"]
+        sigmas = coord_graph["sigmas"]
+        thresholds = coord_graph["thresholds"]
+        r = coord_graph["r"]
+        csls_beta = coord_graph["csls_beta"]
+        paths = coord_graph["paths"]
+        d2 = X_zr_sq[src_idx] - 2.0 * (X_zr[src_idx] @ X_zr.T) + X_zr_sq
+        d2[src_idx] = np.inf
+        A = np.exp(-d2 / (sigmas[src_idx] * sigmas))
+        if csls_beta > 0.0:
+            sel = A - csls_beta * 0.5 * (r[src_idx] + r)
+        else:
+            sel = A
+        mutual_mask = (sel >= np.maximum(thresholds[src_idx], thresholds))
+        mutual_mask[src_idx] = False
+        nbr_indices = np.where(mutual_mask)[0]
+        if len(nbr_indices) == 0:
+            return []
+        nbr_affinities = A[nbr_indices]
+        sort_order = np.argsort(-nbr_affinities)
+        sorted_indices = nbr_indices[sort_order]
+        res = []
+        for idx in sorted_indices:
+            p = paths[idx]
+            m = coord_graph["meta_map"].get(p, {})
+            res.append({
+                "path": p,
+                "weight": float(A[idx]),
+                "edge_kind": KIND_ACOUSTIC,
+                "title": m.get("title"),
+                "artist": m.get("artist"),
+                "album": m.get("album"),
+                "cluster_id": coord_graph["cluster_map"].get(p),
+            })
+        return res[:k]
+
+    # ── Neighbour access: one batched prefetch, then an in-memory cache ──────
+    # The walk is greedy (each step depends on the previous choice), but the
+    # early steps almost always land inside the seed's own neighbourhood. We
+    # warm a cache with the seed's neighbours' acoustic neighbours in ONE
+    # batched query and serve per-step lookups from it, collapsing the old
+    # O(length) sequential round-trips to ~2. A cache miss (a step that wandered
+    # past the prefetched horizon) does a single live fetch; a backend without
+    # the batch accessor (the test fakes) just uses live fetches throughout.
+    # Either way the rows — and therefore the walk's output — are identical.
+    nbr_cache: dict[str, list[dict]] = {}
+    _has_batch = hasattr(db_manager, "get_neighbors_multi_batch")
+
+    async def _live_neighbors(path: str) -> list[dict]:
+        if hasattr(db_manager, "get_neighbors_multi"):
+            return await db_manager.get_neighbors_multi(path, (KIND_ACOUSTIC,), k=40)
+        if hasattr(db_manager, "get_neighbors"):
+            return await db_manager.get_neighbors(path, k=40, edge_kind=KIND_ACOUSTIC)
+        return []
+
+    async def _neighbors_of(path: str) -> list[dict]:
+        if coord_graph is not None:
+            return _get_live_neighbors(path, k=40)
+        rows = nbr_cache.get(path)
+        if rows is None:
+            rows = await _live_neighbors(path)
+            nbr_cache[path] = rows
+        return rows
+
+    async def _prefetch(paths: list[str]) -> None:
+        if coord_graph is not None:
+            return
+        missing = [p for p in paths if p not in nbr_cache]
+        if not missing:
+            return
+        if _has_batch:
+            try:
+                batched = await db_manager.get_neighbors_multi_batch(
+                    missing, (KIND_ACOUSTIC,), k=40,
+                )
+                for p in missing:
+                    nbr_cache[p] = batched.get(p, [])
+                return
+            except Exception:
+                pass  # fall through to per-path live fetch
+        for p in missing:
+            nbr_cache[p] = await _live_neighbors(p)
+
+    # Seed's acoustic neighbours (k=50) drive the seed-anchor term and the
+    # dead-end fallback; kept separate from the k=40 step-neighbour cache.
+    if coord_graph is not None:
+        seed_nbrs = _get_live_neighbors(seed_path, k=50)
     else:
-        seed_nbrs = []
+        if hasattr(db_manager, "get_neighbors_multi"):
+            seed_nbrs = await db_manager.get_neighbors_multi(
+                seed_path, (KIND_ACOUSTIC,), k=50
+            )
+        elif hasattr(db_manager, "get_neighbors"):
+            seed_nbrs = await db_manager.get_neighbors(
+                seed_path, k=50, edge_kind=KIND_ACOUSTIC
+            )
+        else:
+            seed_nbrs = []
 
     seed_sim_map: dict[str, float] = {
         n["path"]: float(n.get("weight", 0.5)) for n in seed_nbrs if n.get("path")
     }
+
+    # Warm the step-neighbour cache: the seed itself (step 1's source) and its
+    # neighbours (the likely step-2+ sources) in a single batched round-trip.
+    await _prefetch([seed_path, *seed_sim_map.keys()])
 
     # ── Metadata context (genre-NPMI + country) ──────────────────────────
     # meta_map is filled lazily as candidates are seen; the genre model loads
@@ -1215,6 +1436,8 @@ async def walk(
     meta_active = meta_lambda > 0.0 and hasattr(db_manager, "get_artist_meta_for_paths")
     meta_map: dict[str, dict] = {}
     genre_model: dict = {}
+    if coord_graph is not None:
+        meta_map.update(coord_graph["meta_map"])
     if meta_active and hasattr(db_manager, "get_genre_affinity"):
         try:
             genre_model = await db_manager.get_genre_affinity()
@@ -1233,9 +1456,38 @@ async def walk(
         except Exception:
             meta_active = False
 
+    # ── Diversity context (MMR) ───────────────────────────────────────────
+    # Penalise a candidate that is near-identical (high timbre cosine) to a
+    # track already emitted, so the queue stops chaining remixes / alternate
+    # mixes / the same song on another release. Uses the persisted graph
+    # embeddings; degrades to off when mmr_lambda == 0 or the backend can't
+    # serve embeddings (e.g. the test fakes).
+    mmr_active = mmr_lambda > 0.0 and hasattr(db_manager, "get_embeddings_for_paths")
+    emb_cache: dict[str, np.ndarray] = {}
+    selected_embs: list[np.ndarray] = []
+
+    async def _ensure_emb(paths: list[str]) -> None:
+        nonlocal mmr_active
+        if not mmr_active:
+            return
+        missing = [p for p in paths if p not in emb_cache]
+        if not missing:
+            return
+        try:
+            blobs = await db_manager.get_embeddings_for_paths(missing)
+        except Exception:
+            mmr_active = False
+            return
+        for p in missing:
+            v = _unpack_embedding(blobs.get(p))
+            if v is not None:
+                emb_cache[p] = v
+
     # ── Cluster context: soft penalty for hopping to a different community ──
     cluster_active = cluster_lambda > 0.0 and hasattr(db_manager, "get_track_cluster")
     cluster_map: dict[str, int | None] = {}
+    if coord_graph is not None:
+        cluster_map.update(coord_graph["cluster_map"])
 
     async def _cluster_of(path: str) -> int | None:
         if path not in cluster_map:
@@ -1248,19 +1500,12 @@ async def walk(
 
     await _ensure_meta([seed_path, *seed_sim_map.keys()])
 
+    rng = random.Random(rng_seed) if temperature > 0.0 else None
+    _TEMP_TOP_N = 6
+
     current = seed_path
     for _step in range(length):
-        if hasattr(db_manager, "get_neighbors_multi"):
-            raw_nbrs = await db_manager.get_neighbors_multi(
-                current, (KIND_ACOUSTIC,), k=40
-            )
-        elif hasattr(db_manager, "get_neighbors"):
-            raw_nbrs = await db_manager.get_neighbors(
-                current, k=40, edge_kind=KIND_ACOUSTIC
-            )
-        else:
-            raw_nbrs = []
-
+        raw_nbrs = await _neighbors_of(current)
         candidates = [n for n in raw_nbrs if n.get("path") and n["path"] not in visited]
 
         # Fallback to seed's acoustic neighbors if current node hits a dead end
@@ -1281,10 +1526,12 @@ async def walk(
             cur_cid = await _cluster_of(current)
 
         await _ensure_meta([c["path"] for c in candidates])
+        if mmr_active:
+            await _ensure_emb([c["path"] for c in candidates])
 
-        # Score candidates: acoustic dual-similarity, then metadata + cluster.
-        best_cand = None
-        best_score = -1.0
+        # Score candidates: acoustic dual-similarity, then the metadata,
+        # cluster, and MMR-diversity factors (each multiplicative).
+        scored: list[tuple[float, dict]] = []
         for c in candidates:
             w_curr = max(0.0, float(c.get("weight", 0.5)))
             w_seed = seed_sim_map.get(c["path"], 0.0)
@@ -1297,9 +1544,32 @@ async def walk(
                 cand_cid = cluster_map.get(c["path"])
                 if cand_cid is not None and cand_cid != cur_cid:
                     score *= (1.0 - cluster_lambda)
-            if score > best_score:
-                best_score = score
-                best_cand = c
+            if mmr_active and selected_embs:
+                ev = emb_cache.get(c["path"])
+                if ev is not None:
+                    sim = max(float(ev @ s) for s in selected_embs)
+                    score *= 1.0 - mmr_lambda * min(1.0, max(0.0, sim))
+            scored.append((score, c))
+
+        # Selection: deterministic arg-max by default; when temperature > 0,
+        # sample among the top candidates (scale-invariant score**(1/T) weights)
+        # so repeated walks from one seed vary. T -> 0 reproduces the arg-max.
+        best_cand = None
+        if rng is not None and len(scored) > 1:
+            ranked = sorted(scored, key=lambda t: t[0], reverse=True)
+            top = [(s, c) for s, c in ranked[:_TEMP_TOP_N] if s > 0.0]
+            if len(top) > 1:
+                inv_t = 1.0 / max(temperature, 1e-6)
+                weights = [s ** inv_t for s, _ in top]
+                best_cand = rng.choices([c for _, c in top], weights=weights, k=1)[0]
+            elif top:
+                best_cand = top[0][1]
+        if best_cand is None:
+            best_score = -1.0
+            for score, c in scored:
+                if score > best_score:
+                    best_score = score
+                    best_cand = c
 
         if not best_cand:
             break
@@ -1307,6 +1577,10 @@ async def walk(
         next_path = best_cand["path"]
         path_seq.append(next_path)
         visited.add(next_path)
+        if mmr_active:
+            ev = emb_cache.get(next_path)
+            if ev is not None:
+                selected_embs.append(ev)
         current = next_path
 
     return path_seq

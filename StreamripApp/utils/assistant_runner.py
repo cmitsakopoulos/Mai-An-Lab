@@ -1470,10 +1470,14 @@ class AssistantRunner:
         # keeps it anchored, and the metadata/cluster factors keep it in the
         # seed's genre/community; dead-end steps fall back to seed neighbours.
         try:
+            from utils.streamrip_api import get_walk_params
+            temp, mmr = get_walk_params()
             walk_paths = await track_graph.walk(
                 self.db, seed_path,
                 length=12,
                 avoid=avoid,
+                mmr_lambda=mmr,   # suppress remix / alt-mix chaining
+                temperature=temp,   # vary the queue across repeat requests
             )
         except Exception as exc:
             logger.warning("track_graph.walk failed: %s", exc)

@@ -60,6 +60,13 @@ class AudioServiceControl(Service):
     on_stt_result: Optional[EventHandler] = None
     on_equalizer_bands_result: Optional[EventHandler] = None
     on_custom_action: Optional[EventHandler] = None
+    # Internal-use event: acknowledgement that a serialized queue mutation
+    # (set_playlist / add / remove / move / skip / set_shuffle) has landed on
+    # the Dart side. Payload: {request_id, ok, epoch, current_index, queue_len,
+    # shuffle_indices?, error?}. Correlated back to a pending Future so the
+    # engine can `await` a mutation and read the authoritative resulting state
+    # before issuing the next one.
+    on_op_complete: Optional[EventHandler] = None
 
     # ── Internal readiness gate ───────────────────────────────────────────────
 
@@ -100,6 +107,9 @@ class AudioServiceControl(Service):
         # STT results, keyed by request_id.
         object.__setattr__(self, "_pending_stt", {})
         object.__setattr__(self, "_pending_eq_queries", {})
+        # Pending queue-op acks, keyed by request_id → asyncio.Future resolved
+        # by the on_op_complete event.
+        object.__setattr__(self, "_pending_ops", {})
 
         def internal_on_decode_complete(e):
             try:
@@ -154,6 +164,28 @@ class AudioServiceControl(Service):
         self.on_equalizer_bands_result = lambda e: _resolve_pending(
             "_pending_eq_queries", e
         )
+
+        def internal_on_op_complete(e):
+            # Unlike the perm/decode resolvers, an op ack ALWAYS resolves its
+            # future (even on ok=False) with the full payload — the engine
+            # inspects `ok`/`current_index` itself rather than treating a failed
+            # op as an exception, so a fallback path can react without a
+            # try/except around every await.
+            try:
+                payload = json.loads(getattr(e, "data", "") or "{}")
+            except Exception as ex:
+                _log(f"op_complete: bad payload: {ex}")
+                return
+            req_id = payload.get("request_id")
+            if not req_id:
+                return
+            pending = object.__getattribute__(self, "_pending_ops")
+            fut = pending.pop(req_id, None)
+            if fut is None or fut.done():
+                return
+            fut.set_result(payload)
+
+        self.on_op_complete = internal_on_op_complete
 
         def internal_on_ready(e):
             _log("internal_on_ready FIRED; Dart said ready")
@@ -262,14 +294,63 @@ class AudioServiceControl(Service):
             },
         )
 
-    async def set_playlist(self, items: list, start_index: int = 0):
-        """Replaces the entire playlist with a new list of tracks and starts
-        playback at start_index. Atomic on the Dart side; avoids the race
-        between set_playlist + skip_to_index where the seek could be clobbered
-        by the source-load resetting the player to index 0."""
+    # ── Queue-op handshake helpers ────────────────────────────────────────────
+
+    def register_op(self, request_id: str) -> "asyncio.Future":
+        """Register a pending queue-op ack BEFORE the command is sent, so the
+        Future exists by the time the op_complete event can arrive. Returns the
+        Future; await it via wait_for_op()."""
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future = loop.create_future()
+        pending = object.__getattribute__(self, "_pending_ops")
+        pending[request_id] = fut
+        return fut
+
+    async def wait_for_op(self, request_id: str, timeout: float = 8.0) -> dict[str, Any]:
+        """Await the op_complete ack for a previously-registered request_id.
+        Resolves with the full payload (including on ok=False). On timeout the
+        pending entry is dropped and TimeoutError propagates so the caller can
+        fall back."""
+        pending = object.__getattribute__(self, "_pending_ops")
+        fut = pending.get(request_id)
+        if fut is None:
+            return {}
+        try:
+            return await asyncio.wait_for(fut, timeout=timeout)
+        except asyncio.TimeoutError:
+            pending.pop(request_id, None)
+            raise
+
+    @staticmethod
+    def _with_meta(payload: dict, epoch: Optional[int], request_id: Optional[str]) -> dict:
+        if epoch is not None:
+            payload["epoch"] = epoch
+        if request_id is not None:
+            payload["request_id"] = request_id
+        return payload
+
+    async def set_playlist(
+        self,
+        items: list,
+        start_index: int = 0,
+        autoplay: bool = False,
+        shuffle: Optional[bool] = None,
+        epoch: Optional[int] = None,
+        request_id: Optional[str] = None,
+    ):
+        """Replaces the entire playlist with a new list of tracks (in LOGICAL
+        order — Dart owns any shuffling) and starts playback at start_index.
+        Atomic on the Dart side; avoids the race between set_playlist +
+        skip_to_index where the seek could be clobbered by the source-load
+        resetting the player to index 0. `autoplay` folds the follow-up play()
+        into the same serialized op so it can't race the load. `shuffle` (when
+        given) sets the native shuffle mode atomically with the push."""
         await self._wait_ready()
+        payload = {"items": items, "start_index": start_index, "autoplay": autoplay}
+        if shuffle is not None:
+            payload["shuffle"] = shuffle
         await self._invoke_method(
-            "set_playlist", {"items": items, "start_index": start_index}
+            "set_playlist", self._with_meta(payload, epoch, request_id)
         )
 
     async def add_queue_item(
@@ -281,6 +362,8 @@ class AudioServiceControl(Service):
         album_art: Optional[str] = None,
         duration_ms: Optional[int] = None,
         index: Optional[int] = None,
+        epoch: Optional[int] = None,
+        request_id: Optional[str] = None,
     ):
         """Inserts a track into the queue at the given index (appends if omitted)."""
         await self._wait_ready()
@@ -294,46 +377,104 @@ class AudioServiceControl(Service):
         }
         if index is not None:
             payload["index"] = index
-        await self._invoke_method("add_queue_item", payload)
+        await self._invoke_method(
+            "add_queue_item", self._with_meta(payload, epoch, request_id)
+        )
 
-    async def add_queue_items(self, items: list):
+    async def add_queue_items(
+        self,
+        items: list,
+        epoch: Optional[int] = None,
+        request_id: Optional[str] = None,
+    ):
         """Insert several tracks into the live queue in a single method call.
         Each item is a dict with keys src/title/artist/album_art and an 'index'
-        giving its insertion point (computed in append order by the caller, so
-        shuffle's scattered positions are preserved). Collapses N add_queue_item
-        IPC round-trips into one; the active source is not reloaded. Used by
-        Play Similar block-replenishment."""
+        giving its insertion point (computed in append order by the caller).
+        Collapses N add_queue_item IPC round-trips into one; the active source is
+        not reloaded. Used by Play Similar block-replenishment."""
         await self._wait_ready()
-        await self._invoke_method("add_queue_items", {"items": items})
+        await self._invoke_method(
+            "add_queue_items", self._with_meta({"items": items}, epoch, request_id)
+        )
 
-    async def remove_queue_item(self, index: int):
+    async def remove_queue_item(
+        self,
+        index: int,
+        epoch: Optional[int] = None,
+        request_id: Optional[str] = None,
+    ):
         """Removes the queue item at the given index."""
         await self._wait_ready()
-        await self._invoke_method("remove_queue_item", {"index": index})
+        await self._invoke_method(
+            "remove_queue_item", self._with_meta({"index": index}, epoch, request_id)
+        )
 
-    async def move_queue_item(self, from_index: int, to_index: int):
+    async def move_queue_item(
+        self,
+        from_index: int,
+        to_index: int,
+        epoch: Optional[int] = None,
+        request_id: Optional[str] = None,
+    ):
         """Reorders the queue item at from_index to to_index. In-place on
         the live ConcatenatingAudioSource; the active source is not
         reloaded and playback continues uninterrupted."""
         await self._wait_ready()
         await self._invoke_method(
-            "move_queue_item", {"from_index": from_index, "to_index": to_index}
+            "move_queue_item",
+            self._with_meta(
+                {"from_index": from_index, "to_index": to_index}, epoch, request_id
+            ),
         )
 
-    async def skip_to_next(self):
-        """Skips to the next track in the queue."""
+    async def set_shuffle(
+        self,
+        enabled: bool,
+        epoch: Optional[int] = None,
+        request_id: Optional[str] = None,
+    ):
+        """Enable/disable native shuffle. When enabled, just_audio owns the
+        shuffle order (regenerated anchored at the current item) and reports it
+        back via `shuffle_indices` on state/op events; Python no longer
+        maintains its own permutation."""
         await self._wait_ready()
-        await self._invoke_method("skip_to_next")
+        await self._invoke_method(
+            "set_shuffle", self._with_meta({"enabled": enabled}, epoch, request_id)
+        )
 
-    async def skip_to_previous(self):
-        """Skips to the previous track in the queue."""
+    async def skip_to_next(
+        self, epoch: Optional[int] = None, request_id: Optional[str] = None
+    ):
+        """Skips to the next track in the queue (shuffle-aware on the Dart side)."""
         await self._wait_ready()
-        await self._invoke_method("skip_to_previous")
+        await self._invoke_method(
+            "skip_to_next", self._with_meta({}, epoch, request_id)
+        )
 
-    async def skip_to_index(self, index: int):
-        """Jumps directly to a specific track in the queue."""
+    async def skip_to_previous(
+        self, epoch: Optional[int] = None, request_id: Optional[str] = None
+    ):
+        """Skips to the previous track in the queue (shuffle-aware on the Dart side)."""
         await self._wait_ready()
-        await self._invoke_method("skip_to_index", {"index": index})
+        await self._invoke_method(
+            "skip_to_previous", self._with_meta({}, epoch, request_id)
+        )
+
+    async def skip_to_index(
+        self,
+        index: int,
+        autoplay: bool = True,
+        epoch: Optional[int] = None,
+        request_id: Optional[str] = None,
+    ):
+        """Jumps directly to a specific (logical) track in the queue. The index
+        is the original source-order index; under shuffle just_audio resolves it
+        correctly. `autoplay` resumes playback inside the same serialized op."""
+        await self._wait_ready()
+        await self._invoke_method(
+            "skip_to_index",
+            self._with_meta({"index": index, "autoplay": autoplay}, epoch, request_id),
+        )
 
     async def set_repeat_mode(self, mode: str):
         """Sets the repeat mode: 'none', 'one', or 'all'."""

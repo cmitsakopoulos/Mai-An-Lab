@@ -395,15 +395,27 @@ class SettingsView:
 
         # Play Similar temperature slider
         self._temp_slider = ft.Slider(
-            min=0.01,
-            max=0.20,
-            divisions=19,
+            min=0.0,
+            max=0.8,
+            divisions=80,
             label="{value}",
-            value=0.05,
+            value=0.3,
             active_color=CYAN,
             on_change=self._on_temp_change,
         )
-        self._temp_value_text = ft.Text("0.05", color=TEXT, size=13, weight=ft.FontWeight.W_700)
+        self._temp_value_text = ft.Text("0.30", color=TEXT, size=13, weight=ft.FontWeight.W_700)
+
+        # Play Similar mmr_lambda slider
+        self._mmr_slider = ft.Slider(
+            min=0.0,
+            max=0.4,
+            divisions=40,
+            label="{value}",
+            value=0.15,
+            active_color=CYAN,
+            on_change=self._on_mmr_change,
+        )
+        self._mmr_value_text = ft.Text("0.15", color=TEXT, size=13, weight=ft.FontWeight.W_700)
 
         # DSP Controls
         self._dynamism_switch = ft.Switch(value=False, active_color=CYAN, on_change=self._on_dynamism_change)
@@ -968,11 +980,19 @@ class SettingsView:
                 ),
             ]),
             ft.Divider(color=BORDER, height=40),
-            ft.Text("Play Similar Recommendation Temperature", weight=ft.FontWeight.BOLD, color=CYAN),
-            ft.Text("Controls the random softmax exploration of similarity walks. A lower value keeps transitions tight and genre-consistent, while a higher value adds variety.", color=DIM, size=12),
+            ft.Text("Play Similar / Discovery Settings", weight=ft.FontWeight.BOLD, color=CYAN),
+            ft.Text("Variety (Temperature)", weight=ft.FontWeight.BOLD, color=TEXT, size=14),
+            ft.Text("Controls the random softmax exploration of similarity walks. 0.0 is deterministic (always same transitions), while higher values add variety.", color=DIM, size=12),
             ft.Row([
                 ft.Container(content=self._temp_slider, expand=True),
                 ft.Container(content=self._temp_value_text, margin=ft.Margin.only(right=10)),
+            ], vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            ft.Container(height=5),
+            ft.Text("Avoid Near-Duplicates (MMR)", weight=ft.FontWeight.BOLD, color=TEXT, size=14),
+            ft.Text("Applies a Maximal-Marginal-Relevance penalty to suppress remixes, alternate mixes, or duplicates of already played/queued tracks.", color=DIM, size=12),
+            ft.Row([
+                ft.Container(content=self._mmr_slider, expand=True),
+                ft.Container(content=self._mmr_value_text, margin=ft.Margin.only(right=10)),
             ], vertical_alignment=ft.CrossAxisAlignment.CENTER),
             ft.Divider(color=BORDER, height=40),
             ft.Text("Cache Maintenance", weight=ft.FontWeight.BOLD, color=DIM),
@@ -1380,8 +1400,15 @@ class SettingsView:
             gen = cfg.get("general", {})
             self._startup_page_dropdown.value = gen.get("startup_page", "Library")
             self._default_sort_dropdown.value = gen.get("library_sort", "date")
-            self._temp_slider.value = float(gen.get("play_similar_temperature", 0.05))
+            
+            temp_val = gen.get("walk_temperature")
+            if temp_val is None:
+                temp_val = gen.get("play_similar_temperature", 0.3)
+            self._temp_slider.value = float(temp_val)
             self._temp_value_text.value = f"{self._temp_slider.value:.2f}"
+
+            self._mmr_slider.value = float(gen.get("walk_mmr_lambda", 0.15))
+            self._mmr_value_text.value = f"{self._mmr_slider.value:.2f}"
 
             qobuz = cfg.get("qobuz", {})
             self._qobuz_user_id_field.value = str(qobuz.get("email_or_userid", ""))
@@ -1558,7 +1585,18 @@ class SettingsView:
         from utils.streamrip_api import update_config_params
         update_config_params({
             "general": {
-                "play_similar_temperature": val
+                "walk_temperature": val
+            }
+        })
+
+    def _on_mmr_change(self, e):
+        val = round(self._mmr_slider.value, 2)
+        self._mmr_value_text.value = f"{val:.2f}"
+        self._mmr_value_text.update()
+        from utils.streamrip_api import update_config_params
+        update_config_params({
+            "general": {
+                "walk_mmr_lambda": val
             }
         })
 
