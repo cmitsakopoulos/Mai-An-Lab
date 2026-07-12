@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "flet_audio_service"
-version = "0.2.11"
+version = "0.2.15"
 description = "A Flet extension for background audio playback with Android media notifications."
 authors = [{ name = "Expert Developer" }]
 dependencies = [

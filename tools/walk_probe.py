@@ -372,12 +372,24 @@ async def _run_with_db(db, args):
         print("═" * 72)
         titles = {}
 
+        import hashlib
+        def get_stable_seed(p: str) -> int:
+            return int(hashlib.md5(p.encode('utf-8')).hexdigest(), 16) % (2**31 - 1)
+
+        from utils.streamrip_api import get_walk_params
+        temp, mmr = get_walk_params()
+        rng_seed = get_stable_seed(path)
+
         # A/B the metadata contribution: the shipping walk (meta+cluster on)
         # vs the same walk with those factors off (== pure acoustic flow).
         smooth_meta = await tg.walk(db, path, length=args.length,
-                                    meta_lambda=0.35, cluster_lambda=0.5)
+                                    meta_lambda=0.35, cluster_lambda=0.5,
+                                    mmr_lambda=mmr, temperature=temp,
+                                    rng_seed=rng_seed)
         smooth_aco = await tg.walk(db, path, length=args.length,
-                                   meta_lambda=0.0, cluster_lambda=0.0)
+                                   meta_lambda=0.0, cluster_lambda=0.0,
+                                   mmr_lambda=mmr, temperature=temp,
+                                   rng_seed=rng_seed)
 
         all_paths = list({path, *smooth_meta, *smooth_aco})
         titles = await _titles(db, all_paths)
@@ -408,13 +420,22 @@ async def _run_by_genre(db, args, rng):
         return 1
     ordered = ([b for b in _BUCKET_ORDER if b in buckets]
                + [b for b in buckets if b not in _BUCKET_ORDER])
+    from utils.streamrip_api import get_walk_params
+    temp, mmr = get_walk_params()
+    import hashlib
+    def get_stable_seed(p: str) -> int:
+        return int(hashlib.md5(p.encode('utf-8')).hexdigest(), 16) % (2**31 - 1)
+
     for bucket in ordered:
         seeds = buckets[bucket]
         print("\n" + "#" * 72)
         print(f"#  MEGA-GENRE: {bucket}   ({len(seeds)} seed{'s' if len(seeds) != 1 else ''})")
         print("#" * 72)
         for path, title, artist in seeds:
-            walk = await tg.walk(db, path, length=args.length)  # shipping config
+            rng_seed = get_stable_seed(path)
+            walk = await tg.walk(db, path, length=args.length,
+                                 mmr_lambda=mmr, temperature=temp,
+                                 rng_seed=rng_seed)  # shipping config
             titles = await _titles(db, list({path, *walk}))
             seed_meta = await db.get_artist_meta_for_paths([path])
             sgenres = seed_meta.get(path, {}).get("genres") or frozenset()

@@ -286,8 +286,6 @@ class LibraryView:
         self._net_dims: tuple[int, int, int] = (0, 0, 0)  # (w, h, pad)
         self._net_canvas_obj: ft.Control | None = None    # the cv.Canvas itself
         self._net_pressed: dict | None = None     # node under last tap-down
-        self._net_panning: bool = False           # dragging the whole graph
-        self._net_pan_last: tuple[float, float] = (0.0, 0.0)
         self._net_pulse_overlay: ft.Control | None = None
         self._net_pulse_token: int = 0
         self._net_tooltip_overlay: ft.Control | None = None
@@ -556,7 +554,9 @@ class LibraryView:
         """
         # ── Resolve canvas dimensions from the page ────────────────────────
         avail_w = max(260, (self.page.width or 360) - 24)
-        canvas_h = int(avail_w * (0.85 if mode == 0 else 0.70))
+        avail_h = self.page.height or 640
+        max_canvas_h = max(180, int(avail_h - 280))
+        canvas_h = min(max_canvas_h, int(avail_w * (0.85 if mode == 0 else 0.70)))
         canvas_w = int(avail_w)
         pad = 32                                   # edge padding in px
         self._net_dims = (canvas_w, canvas_h, pad)
@@ -797,60 +797,30 @@ class LibraryView:
             if not nd:
                 _hide_tooltip_now()
                 return
-            # Select node and display in inspector with tactile feedback
+            # Select node, recenter the view toward it, and show it in the
+            # inspector. Recentering replaces free drag-panning: it repositions
+            # the graph ONCE per tap (one shape rebuild) instead of the old
+            # per-pointer-move pan that rebuilt + re-serialised the whole canvas
+            # ~60×/second. Tap a node repeatedly to walk the view across the graph.
             self._net_selected_path = nd["path"]
             self.app.trigger_haptic("network_tap")
-            self._redraw_net_canvas()
+            self._recenter_toward_node(nd)      # repositions nodes + redraws once
             self._update_net_inspector_card()
             async def _hide_later():
                 await asyncio.sleep(1.8)
                 _hide_tooltip_now()
             self.page.run_task(_hide_later)
 
-        def _pan_all(dx, dy):
-            for _nd in self._net_nodes:
-                _nd["px"] += dx
-                _nd["py"] += dy
-            ov = self._net_pulse_overlay
-            if ov is not None and ov.left is not None:
-                ov.left += dx
-                ov.top += dy
-                self.try_update(ov)
-            self._redraw_net_canvas()
-
-        def _on_pan_start(e):
-            lx, ly = _evt_xy(e)
-            self._net_pressed = None
-            self._net_pan_last = (lx, ly)
-            self._net_panning = True
-
-        def _on_pan_update(e):
-            lx, ly = _evt_xy(e)
-            plx, ply = self._net_pan_last
-            dx, dy = lx - plx, ly - ply
-            self._net_pan_last = (lx, ly)
-            _pan_all(dx, dy)
-
-        def _on_pan_end(e):
-            self._net_panning = False
-
-        def _on_scroll(e):
-            sd = getattr(e, "scroll_delta", None)
-            dx = getattr(sd, "x", 0.0) or 0.0 if sd is not None else 0.0
-            dy = getattr(sd, "y", 0.0) or 0.0 if sd is not None else 0.0
-            if dx or dy:
-                _pan_all(-dx, -dy)
-
-        # ── Gesture detector (panning & node tap selection) ───────────────────
+        # ── Gesture detector (node tap selection + recenter) ──────────────────
+        # Drag-panning was removed: it rebuilt the entire shape list and
+        # re-serialised the canvas over the Flet→Flutter bridge on every pointer
+        # move (the network view's main battery/jank cost). Navigation is now
+        # tap-to-recenter, which touches the canvas once per tap. The gesture
+        # wraps the canvas directly so hit-testing is reliable across platforms.
         gesture = ft.GestureDetector(
             content=canvas,
             on_tap_down=_on_tap_down,
             on_tap=_on_tap,
-            on_pan_start=_on_pan_start,
-            on_pan_update=_on_pan_update,
-            on_pan_end=_on_pan_end,
-            on_scroll=_on_scroll,
-            drag_interval=16,
         )
 
         # ── Top Controls Header (Segmented mode switch + Depth chip + Follow)
@@ -952,7 +922,19 @@ class LibraryView:
         )
         self._net_follow_btn = follow_chip
 
-        right_chips = [depth_chip, follow_chip]
+        # Walk Tuning parameters chip
+        tune_icon = ft.Icon(ft.Icons.TUNE_ROUNDED, color=CYAN, size=13)
+        tune_chip = ft.Container(
+            content=tune_icon,
+            bgcolor=apply_opacity(0.85, SURFACE2),
+            border=ft.Border.all(1, apply_opacity(0.22, CYAN)),
+            border_radius=8,
+            padding=ft.Padding.all(5),
+            tooltip="Tune Walk Parameters",
+            on_click=self._show_tuning_popup,
+        )
+
+        right_chips = [depth_chip, follow_chip, tune_chip]
 
         top_controls_overlay = ft.Container(
             content=ft.Row(
@@ -1021,7 +1003,10 @@ class LibraryView:
         )
         self._net_pulse_overlay = pulse_overlay
 
-        # Canvas Stack
+        # Canvas Stack: gesture (wrapping the canvas) at the bottom, fixed
+        # overlays above it. The pulse ring is a direct overlay positioned at the
+        # now-playing node's canvas coords; _recenter_toward_node moves it in
+        # step with the nodes.
         stack_controls: list = [gesture]
         if legend_overlay is not None:
             stack_controls.append(legend_overlay)
@@ -1147,13 +1132,6 @@ class LibraryView:
                 ))
 
         return shapes
-
-    def _redraw_net_canvas(self):
-        """Regenerate canvas shapes in place."""
-        if self._net_canvas_obj is None:
-            return
-        self._net_canvas_obj.shapes = self._emit_net_shapes()
-        self.try_update(self._net_canvas_obj)
 
     def _build_net_inspector_card(self) -> ft.Control:
         """Build the interactive Selected Track Inspector Card & Traversal Action Panel."""
@@ -1318,11 +1296,36 @@ class LibraryView:
             self.try_update(self._net_inspector_card)
 
     def _redraw_net_canvas(self):
-        """Regenerate canvas shapes in place — used during a node drag."""
+        """Regenerate the canvas shape list in place. Only called when geometry
+        actually changes — node selection, walk stepping, tap-recenter — i.e.
+        discrete user actions, never a per-pointer-move loop."""
         if self._net_canvas_obj is None:
             return
         self._net_canvas_obj.shapes = self._emit_net_shapes()
         self.try_update(self._net_canvas_obj)
+
+    def _recenter_toward_node(self, nd: dict, k: float = 0.6):
+        """Shift the whole graph so the tapped node moves a fraction `k` of the
+        way toward the canvas centre, then redraw once. Repeated taps walk the
+        view across the graph without any continuous pan loop; k<1 keeps it a
+        smooth-feeling nudge rather than a jarring jump. The now-playing pulse
+        ring is moved by the same delta so it stays glued to its node."""
+        if nd is None or not self._net_nodes:
+            return
+        canvas_w, canvas_h, _pad = self._net_dims
+        dx = (canvas_w / 2 - nd["px"]) * k
+        dy = (canvas_h / 2 - nd["py"]) * k
+        if abs(dx) < 0.5 and abs(dy) < 0.5:
+            return  # already centred; skip a redundant rebuild
+        for _n in self._net_nodes:
+            _n["px"] += dx
+            _n["py"] += dy
+        ov = self._net_pulse_overlay
+        if ov is not None and ov.left is not None:
+            ov.left += dx
+            ov.top += dy
+            self.try_update(ov)
+        self._redraw_net_canvas()
 
     def _net_set_pulse_node(self, nd: dict | None):
         """Move the now-playing ring onto `nd` (or hide it when None). The
@@ -1428,6 +1431,117 @@ class LibraryView:
                 self._schedule_net_reseed(delay=0.0)  # explicit tap → no debounce
             elif cur:
                 self._net_set_pulse_node(self._net_node_by_path.get(cur))
+
+    def _show_tuning_popup(self, e):
+        from utils.streamrip_api import get_walk_params, update_config_params
+        temp_val, mmr_val = get_walk_params()
+
+        # Labels for display
+        mmr_label = ft.Text(f"Avoid Duplicates (MMR): {mmr_val:.2f}", color=TEXT, size=11, weight=ft.FontWeight.W_700)
+        temp_label = ft.Text(f"Variety (Temperature): {temp_val:.2f}", color=TEXT, size=11, weight=ft.FontWeight.W_700)
+
+        def _get_slider_color(val, max_val):
+            ratio = min(1.0, max(0.0, val / max_val))
+            # Green (rgb(34, 197, 94)) to Red (rgb(239, 68, 68))
+            r = int(34 + (239 - 34) * ratio)
+            g = int(197 + (68 - 197) * ratio)
+            b = int(94 + (68 - 94) * ratio)
+            return f"#{r:02x}{g:02x}{b:02x}"
+
+        dlg_holder = [None]
+
+        # Action handlers
+        def _on_mmr_change(e):
+            val = float(e.control.value)
+            mmr_label.value = f"Avoid Duplicates (MMR): {val:.2f}"
+            c = _get_slider_color(val, 0.4)
+            e.control.active_color = c
+            e.control.thumb_color = c
+            mmr_label.update()
+            e.control.update()
+
+        def _on_mmr_change_end(e):
+            val = float(e.control.value)
+            update_config_params({"general": {"walk_mmr_lambda": val}})
+            self.page.run_task(self.load_library)
+
+        def _on_temp_change(e):
+            val = float(e.control.value)
+            temp_label.value = f"Variety (Temperature): {val:.2f}"
+            c = _get_slider_color(val, 0.8)
+            e.control.active_color = c
+            e.control.thumb_color = c
+            temp_label.update()
+            e.control.update()
+
+        def _on_temp_change_end(e):
+            val = float(e.control.value)
+            update_config_params({"general": {"walk_temperature": val}})
+            self.page.run_task(self.load_library)
+
+        mmr_slider = ft.Slider(
+            min=0.0, max=0.4, value=mmr_val,
+            divisions=40,
+            active_color=_get_slider_color(mmr_val, 0.4),
+            thumb_color=_get_slider_color(mmr_val, 0.4),
+            on_change=_on_mmr_change,
+            on_change_end=_on_mmr_change_end,
+        )
+
+        temp_slider = ft.Slider(
+            min=0.0, max=0.8, value=temp_val,
+            divisions=80,
+            active_color=_get_slider_color(temp_val, 0.8),
+            thumb_color=_get_slider_color(temp_val, 0.8),
+            on_change=_on_temp_change,
+            on_change_end=_on_temp_change_end,
+        )
+
+        def _close_dialog(_e):
+            if dlg_holder[0]:
+                dlg_holder[0].open = False
+                dlg_holder[0].update()
+
+        dlg = ft.AlertDialog(
+            title=ft.Row(
+                [
+                    ft.Icon(ft.Icons.TUNE_ROUNDED, color=CYAN, size=18),
+                    ft.Text("Walk Parameters", size=14, weight=ft.FontWeight.W_800, color=TEXT),
+                ],
+                spacing=8,
+            ),
+            content=ft.Container(
+                content=ft.Column(
+                    [
+                        ft.Text("Fine-tune how walk paths are selected. Changes take effect immediately.", color=DIM, size=10),
+                        ft.Container(height=4),
+                        mmr_label,
+                        mmr_slider,
+                        ft.Text("Higher values penalize similarity to already-played tracks to prevent duplicate tracks and alternate mixes.", color=DIM, size=9),
+                        ft.Container(height=6),
+                        temp_label,
+                        temp_slider,
+                        ft.Text("Higher values introduce random variety in neighbor selections. Low values keep choices deterministic.", color=DIM, size=9),
+                    ],
+                    spacing=2,
+                    tight=True,
+                ),
+                width=260,
+            ),
+            actions=[
+                ft.TextButton(
+                    "Dismiss",
+                    style=ft.ButtonStyle(color=CYAN),
+                    on_click=_close_dialog,
+                )
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+            bgcolor=SURFACE2,
+        )
+        dlg_holder[0] = dlg
+        self.page.overlay.append(dlg)
+        dlg.open = True
+        self.page.update()
 
     async def _run_net_pulse(self, token: int):
         """Pulse the now-playing ring until a newer build supersedes this token.
@@ -2072,10 +2186,14 @@ class LibraryView:
 
                         if current_path:
                             from utils import track_graph as tg
+                            from utils.streamrip_api import get_walk_params
+                            temp, mmr = get_walk_params()
                             walk_paths = await tg.walk(
                                 self.app.db_manager,
                                 current_path,
                                 length=self._net_walk_length,
+                                mmr_lambda=mmr,
+                                temperature=temp,
                             )
 
                         needed_paths = [current_path] if current_path else []
@@ -2100,11 +2218,11 @@ class LibraryView:
                     
                 def finalize_network():
                     self._stats_label.text = stats_text
-                    self._library_list.controls.extend(first_chunk)
                     self._search_spinner.visible = False
                     
                     is_empty = not first_chunk
                     if is_empty:
+                        self._library_list.controls.clear()
                         self._empty_label.visible = True
                         self._empty_label.content.controls[0].name = ft.Icons.HUB_ROUNDED
                         self._empty_label.content.controls[0].color = apply_opacity(0.3, CYAN)
@@ -2112,8 +2230,16 @@ class LibraryView:
                         self._empty_label.content.controls[2].value = "Make sure your tracks are analyzed."
                         self._empty_label.content.controls[3].visible = False
                         self._empty_label.content.controls[4].visible = False
+                        self._animated_list_wrapper.content = self._library_list
+                    else:
+                        # Wrap the canvas control in a non-scrollable Container so it doesn't scroll/intercept gestures
+                        net_container = ft.Container(
+                            content=first_chunk[0],
+                            padding=ft.Padding.only(left=12, right=12, top=4, bottom=20),
+                            expand=True,
+                        )
+                        self._animated_list_wrapper.content = net_container
                     
-                    self._animated_list_wrapper.content = self._library_list
                     self._update_pagination_ui()
                     # NB: no per-control .update() / page.update() here — dispatch
                     # via safe_update so a single coalesced page.update() flushes

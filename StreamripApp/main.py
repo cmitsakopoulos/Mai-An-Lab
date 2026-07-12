@@ -84,6 +84,7 @@ except ImportError:
 from utils.streamrip_api import (
     load_config, update_config_params, download,
     get_config_path, repair_config, get_default_download_path,
+    get_walk_params,
 )
 if sys.platform == "darwin":
     from utils.audio_engine_macos import audio_engine
@@ -465,6 +466,14 @@ class StreamripFletApp:
         # exporting first. Fire-and-forget: failures are logged but never
         # block startup.
         asyncio.create_task(self._auto_export_state_snapshot())
+
+        # Incremental artist-metadata enrichment (MusicBrainz country + genres),
+        # off the hot path. This is the ONLY automatic enrichment trigger now
+        # that build_acoustic_edges no longer blocks on it: the task self-guards
+        # (config opt-out, re-entrancy flag, 3 s settle delay) and refreshes the
+        # NPMI genre model as provenance lands, so the walk's metadata gate stays
+        # current without stalling the graph rebuild on a 1 req/s network cap.
+        asyncio.create_task(self._enrich_metadata_async())
 
         # Prune caches asynchronously to keep disk footprint bounded
         self.page.run_task(self._prune_caches_async)
@@ -1293,11 +1302,14 @@ class StreamripFletApp:
             # Seed-anchored smooth walk: the 0.3·seed term + metadata/cluster
             # penalties keep the queue in the seed's genre/community, replacing
             # the old restart-probability band-aid for two-hop genre drift.
+            temp, mmr = get_walk_params()
             walk_paths = await tg.walk(
                 self.db_manager,
                 path,
                 length=8,
                 avoid=avoid,
+                mmr_lambda=mmr,   # suppress remix / alt-mix chaining
+                temperature=temp,   # vary the queue across repeat requests
             )
 
             # Re-check after the await — user may have toggled off mid-walk
@@ -1337,13 +1349,11 @@ class StreamripFletApp:
                     audio_engine.jarvis_controlled = False
                     audio_engine._sync_metadata_for_current()
                     audio_engine.dispatch("on_queue_mutated")
-                    if hasattr(audio_engine, "_push_queue_native") and audio_engine._page:
-                        if hasattr(audio_engine, "_arm_queue_gate"):
-                            audio_engine._arm_queue_gate()
-                        audio_engine._page.run_task(
-                            audio_engine._push_queue_native,
-                            audio_engine.current_index,
-                            audio_engine.is_playing
+                    if audio_engine._page:
+                        # Epoch-tagged full push (folds shuffle + autoplay); the
+                        # bump is synchronous so in-flight stale events are rejected.
+                        audio_engine._schedule_push(
+                            audio_engine.current_index, audio_engine.is_playing
                         )
                     if hasattr(self, "queue_sheet") and self.queue_sheet and self.queue_sheet._initialized:
                         self.queue_sheet.refresh()
@@ -1375,11 +1385,14 @@ class StreamripFletApp:
             # `recent_played_paths` stays in db_manager for future features.
 
             walk_len = max(count + 4, count * 2)
+            temp, mmr = get_walk_params()
             walk_tracks = await tg.walk(
                 self.db_manager,
                 path,
                 length=walk_len,
                 avoid=avoid,
+                mmr_lambda=mmr,   # suppress remix / alt-mix chaining
+                temperature=temp,   # vary the queue across repeat requests
             )
 
             # Re-check after the await
@@ -1470,14 +1483,32 @@ class StreamripFletApp:
                 finally:
                     self._play_similar_recommendation_in_progress = False
 
+    async def _run_continuation(self, coro):
+        """Wrap a dry-queue continuation so the in-progress flag is always
+        cleared, even on early return / exception."""
+        try:
+            await coro()
+        finally:
+            self._continuation_in_progress = False
+
     def _on_similar_continue(self, _inst, _val=None):
         """Sync callback dispatched by AudioEngine when the manually-initiated
-        Play Similar or Auto-DJ queue runs dry. Bridges into the async continuation coroutine safely."""
-        if self.page:
-            if self.play_similar_mode:
-                self.page.run_task(self._similar_auto_continue_queue)
-            elif getattr(self, "auto_dj_mode", False):
-                self.page.run_task(self._auto_dj_auto_continue_queue)
+        Play Similar or Auto-DJ queue runs dry. Bridges into the async
+        continuation coroutine safely.
+
+        Guarded against double-dispatch: at end-of-queue BOTH next() and the
+        `completed` state event can fire on_similar_continue; a second concurrent
+        continuation would double-append and double-skip the queue."""
+        if not self.page:
+            return
+        if getattr(self, "_continuation_in_progress", False):
+            return
+        if self.play_similar_mode:
+            self._continuation_in_progress = True
+            self.page.run_task(self._run_continuation, self._similar_auto_continue_queue)
+        elif getattr(self, "auto_dj_mode", False):
+            self._continuation_in_progress = True
+            self.page.run_task(self._run_continuation, self._auto_dj_auto_continue_queue)
 
     async def _similar_auto_continue_queue(self):
         """Silently extend the Play Similar queue when it runs dry.
@@ -1509,11 +1540,14 @@ class StreamripFletApp:
         # (see _initiate_play_similar_queue_async for rationale).
 
         try:
+            temp, mmr = get_walk_params()
             walk_paths = await tg.walk(
                 self.db_manager,
                 seed_path,
                 length=8,
                 avoid=avoid,
+                mmr_lambda=mmr,   # suppress remix / alt-mix chaining
+                temperature=temp,   # vary the queue across repeat continuations
             )
         except Exception as exc:
             logger.warning("Play Similar continuation: graph walk failed: %s", exc)
@@ -1556,9 +1590,14 @@ class StreamripFletApp:
 
     def _on_jarvis_continue(self, _inst, _val=None):
         """Sync callback dispatched by AudioEngine when the Jarvis-controlled
-        queue runs dry. Bridges into the async continuation coroutine safely."""
-        if self.page:
-            self.page.run_task(self._jarvis_auto_continue_queue)
+        queue runs dry. Bridges into the async continuation coroutine safely.
+        Shares the same double-dispatch guard as the similar/auto-dj paths."""
+        if not self.page:
+            return
+        if getattr(self, "_continuation_in_progress", False):
+            return
+        self._continuation_in_progress = True
+        self.page.run_task(self._run_continuation, self._jarvis_auto_continue_queue)
 
     async def _jarvis_auto_continue_queue(self):
         """Automatically extend a Jarvis-managed queue with 5 acoustically
@@ -1624,11 +1663,14 @@ class StreamripFletApp:
 
         # ── Acoustic graph walk ───────────────────────────────────────────────
         try:
+            temp, mmr = get_walk_params()
             walk_paths = await tg.walk(
                 self.db_manager,
                 seed_path,
                 length=5,
                 avoid=avoid,
+                mmr_lambda=mmr,   # suppress remix / alt-mix chaining
+                temperature=temp,   # vary the queue across repeat continuations
             )
         except Exception as exc:
             logger.warning("Jarvis continuation: graph walk failed: %s", exc)
@@ -2426,13 +2468,9 @@ class StreamripFletApp:
                 # Force sync visual metadata and notify UI
                 audio_engine._sync_metadata_for_current()
                 audio_engine.dispatch("on_queue_mutated")
-                if hasattr(audio_engine, "_push_queue_native") and audio_engine._page:
-                    if hasattr(audio_engine, "_arm_queue_gate"):
-                        audio_engine._arm_queue_gate()
-                    audio_engine._page.run_task(
-                        audio_engine._push_queue_native,
-                        audio_engine.current_index,
-                        audio_engine.is_playing
+                if audio_engine._page:
+                    audio_engine._schedule_push(
+                        audio_engine.current_index, audio_engine.is_playing
                     )
         
         if hasattr(self, "queue_sheet") and self.queue_sheet and self.queue_sheet._initialized:

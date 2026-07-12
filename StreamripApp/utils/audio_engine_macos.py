@@ -119,6 +119,26 @@ class AudioEngine:
         return None
 
     @property
+    def shuffle_indices(self) -> list[int]:
+        """Compat shim for the shared UI (queue sheet). The Android engine reads
+        this from just_audio; the macOS AVFoundation engine still maintains its
+        own permutation in _shuffle_order, so expose that under the new name."""
+        return getattr(self, "_shuffle_order", [])
+
+    def _schedule_push(self, start_index: int | None = None, autoplay: bool = True):
+        """Compat shim for shared call sites (Play Similar mode transitions) that
+        the Android engine services with an epoch-tagged native playlist push.
+        The macOS engine drives playback per-track from Python, so this just
+        (re)starts the current queue at start_index."""
+        if start_index is None:
+            start_index = self.current_index
+        if autoplay:
+            self.play_track_at(start_index)
+        else:
+            self.current_index = max(0, min(start_index, len(self.queue) - 1)) if self.queue else 0
+            self._sync_metadata_for_current()
+
+    @property
     def is_shuffle(self) -> bool:
         return self._is_shuffle
 

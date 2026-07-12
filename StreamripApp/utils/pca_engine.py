@@ -634,7 +634,7 @@ def plot_pca_report(
 _GENRE_RULES = [
     ("Classical",  ("classical", "classique")),
     ("Hip-Hop",    ("rap", "hip hop", "hip-hop", "hiphop", "trap", "хип", "рэп", "grime", "boom bap", "drill")),
-    ("Electronic", ("électronique", "electronica", "house", "techno", "edm", "trance", "drum & bass", "dnb", "dubstep", "ambient")),
+    ("Electronic", ("électronique", "electronica", "electro", "électro", "house", "techno", "edm", "trance", "drum & bass", "dnb", "dubstep", "ambient")),
     ("Folk/Cntry", ("folk", "country", "blues", "bluegrass", "americana", "laiko", "laika", "laïko", "laïka", "laiki", "λαϊκό", "λαϊκά", "rebetiko", "ρεμπέτικο", "entechno", "έντεχνο", "greek folk", "world", "musiques du monde")),
     ("Soul/R&B",   ("soul", "r&b", "funk", "rnb", "motown", "neo soul")),
     ("Jazz",       ("jazz", "bebop")),

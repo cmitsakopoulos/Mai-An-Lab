@@ -1862,6 +1862,8 @@ class DatabaseManager:
                     "harmonic_weight": float(spec.get("harmonic_weight", 1.5)),
                     "harmonic_means": spec.get("harmonic_means"),
                     "harmonic_stds": spec.get("harmonic_stds"),
+                    "k_neighbors": int(spec.get("k_neighbors", 50)),
+                    "csls_beta": float(spec.get("csls_beta", 0.0)),
                 }
             except Exception as e:
                 logger.error(f"Error decoding PCA space from database: {e}")
@@ -1905,7 +1907,8 @@ class DatabaseManager:
             SELECT pc.track_path AS path, pc.pca_coords, pc.cluster_id, pc.bpm, pc.energy,
                    t.title, t.duration,
                    ar.name  AS artist,
-                   al.title AS album
+                   al.title AS album,
+                   al.genre AS genre
             FROM play_counts pc
             LEFT JOIN tracks  t  ON t.path  = pc.track_path
             LEFT JOIN albums  al ON al.id   = t.album_id

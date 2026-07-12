@@ -252,7 +252,7 @@ class QueueSheet:
                 key=f"q_{i}",
             )
 
-        shuf_order = getattr(audio_engine, "_shuffle_order", None)
+        shuf_order = audio_engine.shuffle_indices
         upcoming = []
         if is_shuffle and shuf_order and len(shuf_order) == len(audio_engine.queue):
             try:
@@ -319,7 +319,7 @@ class QueueSheet:
 
         cur_idx    = audio_engine.current_index
         is_shuffle = bool(audio_engine.is_shuffle)
-        shuf_order = getattr(audio_engine, "_shuffle_order", None)
+        shuf_order = audio_engine.shuffle_indices
         upcoming = []
         if is_shuffle and shuf_order and len(shuf_order) == len(audio_engine.queue):
             try:

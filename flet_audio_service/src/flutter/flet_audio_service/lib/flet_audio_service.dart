@@ -57,6 +57,25 @@ class FletAudioService extends FletService with WidgetsBindingObserver {
   StreamSubscription? _durationSub;
   StreamSubscription? _errorSub;
   StreamSubscription? _customActionSub;
+  // Fires on EVERY currentIndex change (including gapless auto-advance, which
+  // playerStateStream/durationStream miss). This is the authoritative signal
+  // that Python mirrors current_index from; without it Python only learned of
+  // an advance when durationStream happened to emit a different duration.
+  StreamSubscription? _indexSub;
+
+  // ── Queue-generation handshake ────────────────────────────────────────────
+  // Every queue-mutating command from Python carries a monotonically
+  // increasing `epoch`. We adopt it only AFTER the op has actually been applied
+  // (inside _enqueueOp), then stamp it on every emitted event. Python accepts a
+  // mirrored queue_index only when the event's epoch equals the latest epoch it
+  // sent — i.e. Dart has caught up to Python's most recent intent. This
+  // replaces the old wall-clock suppression gate with a deterministic,
+  // timing-independent reconciliation.
+  int _epoch = 0;
+  // Serializes all playlist mutations + skips so a rapid add-then-skip (Play
+  // Similar replenishment) can never interleave against the live
+  // ConcatenatingAudioSource. Each link emits an `op_complete` ack.
+  Future<void> _opChain = Future<void>.value();
 
   // Position throttling: just_audio emits ~5x/sec which is wasted battery on
   // mobile (each emit = IPC → Python → observer dispatch → Flet rebuild).
@@ -172,6 +191,10 @@ class FletAudioService extends FletService with WidgetsBindingObserver {
       case 'set_playlist':
         final rawItems = (a['items'] as List<dynamic>?) ?? [];
         final startIndex = (a['start_index'] as num?)?.toInt() ?? 0;
+        final autoplay = (a['autoplay'] as bool?) ?? false;
+        // Desired shuffle state, applied atomically with the push so the source
+        // and the shuffle flag can never disagree. null = leave as-is.
+        final shuffle = a['shuffle'] as bool?;
         // Items arrive as Map<dynamic, dynamic> from the Flet protocol; we
         // need Map<String, dynamic>. .cast<>() can't bridge that; manually
         // re-key each map.
@@ -181,19 +204,33 @@ class FletAudioService extends FletService with WidgetsBindingObserver {
               : Map<String, dynamic>.from(raw as Map);
           return _mediaItemFromMap(m);
         }).toList();
-        _fireAndReport(_handler?.setPlaylist(items, startIndex));
+        _enqueueOp(a['request_id'] as String?, (a['epoch'] as num?)?.toInt(),
+            () async {
+          if (shuffle != null) {
+            await _handler!._player.setShuffleModeEnabled(shuffle);
+          }
+          // setPlaylist re-shuffles internally when shuffle mode is enabled.
+          await _handler!.setPlaylist(items, startIndex);
+          // CRITICAL: do NOT await play(). just_audio's play() Future does not
+          // complete until playback is paused or the track ends, so awaiting it
+          // here would block this op (and the whole serialized _opChain) for the
+          // entire duration of playback — delaying the epoch adoption + op ack
+          // by seconds and freezing Python's index mirror. Fire-and-forget so
+          // the op completes as soon as the source is loaded.
+          if (autoplay) unawaited(_handler!.play());
+        });
 
       case 'add_queue_item':
         final item = _mediaItemFromMap(a);
         final index = (a['index'] as num?)?.toInt() ??
             (_handler?.queue.value.length ?? 0);
-        _fireAndReport(_handler?.addQueueItemAt(item, index));
+        _enqueueOp(a['request_id'] as String?, (a['epoch'] as num?)?.toInt(),
+            () => _handler!.addQueueItemAt(item, index));
 
       case 'add_queue_items':
         // Batch insert: Python sends the whole block in one call, each item
-        // carrying its own insertion index (computed in append order, which
-        // also reproduces shuffle's scattered positions). Dart performs the N
-        // inserts locally so the IPC cost is one round-trip, not N.
+        // carrying its own insertion index (computed in append order). Dart
+        // performs the N inserts locally so the IPC cost is one round-trip.
         final rawItems = (a['items'] as List<dynamic>?) ?? [];
         final batchItems = <MediaItem>[];
         final batchIndices = <int>[];
@@ -205,26 +242,57 @@ class FletAudioService extends FletService with WidgetsBindingObserver {
           batchIndices.add((m['index'] as num?)?.toInt() ??
               (_handler?.queue.value.length ?? 0));
         }
-        _fireAndReport(_handler?.addQueueItemsAt(batchItems, batchIndices));
+        _enqueueOp(a['request_id'] as String?, (a['epoch'] as num?)?.toInt(),
+            () => _handler!.addQueueItemsAt(batchItems, batchIndices));
 
       case 'remove_queue_item':
         final index = (a['index'] as num?)?.toInt() ?? 0;
-        _fireAndReport(_handler?.removeQueueItemAt(index));
+        _enqueueOp(a['request_id'] as String?, (a['epoch'] as num?)?.toInt(),
+            () => _handler!.removeQueueItemAt(index));
 
       case 'move_queue_item':
         final from = (a['from_index'] as num?)?.toInt() ?? 0;
         final to = (a['to_index'] as num?)?.toInt() ?? 0;
-        _fireAndReport(_handler?.moveQueueItem(from, to));
+        _enqueueOp(a['request_id'] as String?, (a['epoch'] as num?)?.toInt(),
+            () => _handler!.moveQueueItem(from, to));
+
+      case 'set_shuffle':
+        // Ownership of shuffle order moves to just_audio. Enabling regenerates
+        // a fresh order anchored at the current item (shuffle()'s initialIndex
+        // behaviour), so the currently-playing track stays put and the tail is
+        // randomised — matching the previous "[current] + shuffled_rest".
+        final enabled = (a['enabled'] as bool?) ?? false;
+        _enqueueOp(a['request_id'] as String?, (a['epoch'] as num?)?.toInt(),
+            () async {
+          await _handler!._player.setShuffleModeEnabled(enabled);
+          if (enabled) await _handler!._player.shuffle();
+        });
 
       case 'skip_to_next':
-        _fireAndReport(_handler?.skipToNext());
+        _enqueueOp(a['request_id'] as String?, (a['epoch'] as num?)?.toInt(),
+            () async {
+          await _handler!.skipToNext();
+          // Fire-and-forget: awaiting play() blocks until pause/end (see set_playlist).
+          unawaited(_handler!.play());
+        });
 
       case 'skip_to_previous':
-        _fireAndReport(_handler?.skipToPrevious());
+        _enqueueOp(a['request_id'] as String?, (a['epoch'] as num?)?.toInt(),
+            () async {
+          await _handler!.skipToPrevious();
+          // Fire-and-forget: awaiting play() blocks until pause/end (see set_playlist).
+          unawaited(_handler!.play());
+        });
 
       case 'skip_to_index':
         final index = (a['index'] as num?)?.toInt() ?? 0;
-        _fireAndReport(_handler?.skipToQueueItem(index));
+        final autoplay = (a['autoplay'] as bool?) ?? true;
+        _enqueueOp(a['request_id'] as String?, (a['epoch'] as num?)?.toInt(),
+            () async {
+          await _handler!.skipToQueueItem(index);
+          // Fire-and-forget: awaiting play() blocks until pause/end (see set_playlist).
+          if (autoplay) unawaited(_handler!.play());
+        });
 
       case 'set_repeat_mode':
         final mode = a['mode'] as String? ?? 'none';
@@ -655,6 +723,33 @@ class FletAudioService extends FletService with WidgetsBindingObserver {
     }
   }
 
+  /// Build the common state payload (status/processing/index/epoch/shuffle) and
+  /// emit it. `extra` overlays extra keys (e.g. duration_ms). currentIndex can
+  /// transiently be null during seek/buffer; we omit the key entirely rather
+  /// than send `?? 0`, which would confuse Python into thinking the user jumped
+  /// to track 0. Every event carries the current epoch so Python can reject
+  /// index mirrors that predate its latest queue mutation.
+  void _emitState({Map<String, dynamic>? extra}) {
+    final handler = _handler;
+    if (handler == null) return;
+    final player = handler._player;
+    final payload = <String, dynamic>{
+      'status': player.playing ? 'playing' : 'paused',
+      'processing_state': player.processingState.name,
+      'epoch': _epoch,
+    };
+    final currentIdx = player.currentIndex;
+    if (currentIdx != null) payload['queue_index'] = currentIdx;
+    // shuffleIndices maps play-position → original(logical) index. Python uses
+    // it to render "up next" and to compute next/previous targets in shuffle
+    // mode, so it no longer maintains its own permutation.
+    if (player.shuffleModeEnabled) {
+      payload['shuffle_indices'] = player.shuffleIndices;
+    }
+    if (extra != null) payload.addAll(extra);
+    control.triggerEvent("state_change", jsonEncode(payload));
+  }
+
   void _setupListeners() {
     if (_handler == null) return;
 
@@ -663,22 +758,21 @@ class FletAudioService extends FletService with WidgetsBindingObserver {
     _durationSub?.cancel();
     _errorSub?.cancel();
     _customActionSub?.cancel();
+    _indexSub?.cancel();
 
     _customActionSub = _handler!.customActionStream.listen((event) {
       control.triggerEvent("custom_action", jsonEncode(event));
     });
 
+    // Authoritative index mirroring: fires on skip, notification next/previous,
+    // AND gapless auto-advance (the case the other two streams miss).
+    _indexSub = _handler!._player.currentIndexStream.listen((idx) {
+      if (idx == null) return;
+      _emitState();
+    });
+
     _playerStateSub = _handler!._player.playerStateStream.listen((state) {
-      // currentIndex can transiently be null during seek/buffer; emitting `?? 0`
-      // confuses Python into thinking the user moved to track 0. Omit the key
-      // entirely when null so Python keeps its existing index.
-      final currentIdx = _handler!._player.currentIndex;
-      final payload = <String, dynamic>{
-        'status': state.playing ? 'playing' : 'paused',
-        'processing_state': state.processingState.name,
-      };
-      if (currentIdx != null) payload['queue_index'] = currentIdx;
-      control.triggerEvent("state_change", jsonEncode(payload));
+      _emitState();
     });
 
     _positionSub = _handler!._player.positionStream.listen((position) {
@@ -698,14 +792,7 @@ class FletAudioService extends FletService with WidgetsBindingObserver {
 
     _durationSub = _handler!._player.durationStream.listen((duration) {
       if (duration == null) return;
-      final currentIdx = _handler!._player.currentIndex;
-      final payload = <String, dynamic>{
-        'status': _handler!._player.playing ? 'playing' : 'paused',
-        'processing_state': _handler!._player.processingState.name,
-        'duration_ms': duration.inMilliseconds,
-      };
-      if (currentIdx != null) payload['queue_index'] = currentIdx;
-      control.triggerEvent("state_change", jsonEncode(payload));
+      _emitState(extra: {'duration_ms': duration.inMilliseconds});
     });
 
     _errorSub = _handler!._player.playbackEventStream.listen(
@@ -714,6 +801,50 @@ class FletAudioService extends FletService with WidgetsBindingObserver {
         control.triggerEvent("error", e.toString());
       },
     );
+  }
+
+  // ── Serialized queue-op execution + ack ─────────────────────────────────────
+
+  /// Run a queue-mutating op strictly after all previously-submitted ops
+  /// complete, then adopt its epoch and emit an `op_complete` ack. Serialization
+  /// guarantees a rapid add-then-skip can't race against the live playlist;
+  /// the ack lets Python await the landed state (authoritative index + length)
+  /// before issuing the follow-up.
+  void _enqueueOp(String? requestId, int? epoch, Future<void> Function() op) {
+    _opChain = _opChain.then((_) async {
+      try {
+        await op();
+        // Adopt the epoch only after the mutation has landed, so any events
+        // emitted between command-receipt and here still carry the OLD epoch
+        // and are correctly rejected by Python.
+        if (epoch != null) _epoch = epoch;
+        _emitOpComplete(requestId, true, null);
+      } catch (e) {
+        debugPrint("FletAudioService: queue op error → $e");
+        _emitOpComplete(requestId, false, e.toString());
+        control.triggerEvent("error", e.toString());
+      }
+    });
+  }
+
+  void _emitOpComplete(String? requestId, bool ok, String? error) {
+    if (requestId == null) return;
+    final handler = _handler;
+    if (handler == null) return;
+    final player = handler._player;
+    final payload = <String, dynamic>{
+      'request_id': requestId,
+      'ok': ok,
+      'epoch': _epoch,
+      'queue_len': handler.queue.value.length,
+    };
+    final currentIdx = player.currentIndex;
+    if (currentIdx != null) payload['current_index'] = currentIdx;
+    if (player.shuffleModeEnabled) {
+      payload['shuffle_indices'] = player.shuffleIndices;
+    }
+    if (error != null) payload['error'] = error;
+    control.triggerEvent("op_complete", jsonEncode(payload));
   }
 
   Future<void> _requestRuntimePermissions() async {
@@ -796,6 +927,7 @@ class FletAudioService extends FletService with WidgetsBindingObserver {
     _durationSub?.cancel();
     _errorSub?.cancel();
     _customActionSub?.cancel();
+    _indexSub?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
@@ -880,7 +1012,22 @@ class AudioPlayerHandler extends BaseAudioHandler with QueueHandler, SeekHandler
       audioPipeline: AudioPipeline(androidAudioEffects: effects),
     );
 
-    _player.playbackEventStream.map(_transformEvent).pipe(playbackState);
+    // NOTE: `.pipe(playbackState)` opens an addStream on the playbackState
+    // rxdart subject that stays in flight for the handler's entire life. Any
+    // other `.add()` on that subject (ours or audio_service's own broadcast on
+    // stop/skip) then throws "You cannot add items while items are being added
+    // from addStream", which aborts the in-flight queue op → Python sees
+    // ok=false, falls back to a full setAudioSource re-push, and the native
+    // player desyncs from the UI. An explicit guarded listen adds per-event
+    // without ever holding an addStream open.
+    _player.playbackEventStream.map(_transformEvent).listen(
+      (state) {
+        if (!playbackState.isClosed) playbackState.add(state);
+      },
+      onError: (Object e, StackTrace st) {
+        debugPrint("FletAudioService: playbackState transform error → $e");
+      },
+    );
 
     _player.sequenceStateStream.listen((state) {
       if (state == null) return;
@@ -1069,6 +1216,13 @@ class AudioPlayerHandler extends BaseAudioHandler with QueueHandler, SeekHandler
       preload: true,
       initialIndex: clampedStart,
     );
+    // The shuffle-mode flag persists across setAudioSource, but the new source
+    // starts with an identity shuffle order. Re-randomise (anchored at the
+    // start item) so re-pushes while shuffling stay shuffled instead of
+    // silently reverting to sequential play order.
+    if (_player.shuffleModeEnabled) {
+      await _player.shuffle();
+    }
   }
 
   Future<void> addQueueItemAt(MediaItem item, int index) async {
