@@ -14,8 +14,8 @@ rails. Your ear is the real judge.
 It runs two walks from each seed, all same length, so you can see what the
 metadata term buys you:
 
-  • smooth+meta      the shipping walk    (meta_lambda=0.35, cluster_lambda=0.5)
-  • smooth-acoustic  meta/cluster OFF     (== the pure acoustic dual-similarity flow)
+  • smooth+meta      the shipping walk    (metadata pool on, meta_lambda=0.35)
+  • smooth-acoustic  metadata OFF         (== the pure acoustic dual-similarity flow)
 
 Readiness / build
 -----------------
@@ -380,14 +380,14 @@ async def _run_with_db(db, args):
         temp, mmr = get_walk_params()
         rng_seed = get_stable_seed(path)
 
-        # A/B the metadata contribution: the shipping walk (meta+cluster on)
-        # vs the same walk with those factors off (== pure acoustic flow).
+        # A/B the metadata contribution: the shipping walk (metadata pool on)
+        # vs the same walk with metadata off (== pure acoustic flow).
         smooth_meta = await tg.walk(db, path, length=args.length,
-                                    meta_lambda=0.35, cluster_lambda=0.5,
+                                    meta_lambda=0.35,
                                     mmr_lambda=mmr, temperature=temp,
                                     rng_seed=rng_seed)
         smooth_aco = await tg.walk(db, path, length=args.length,
-                                   meta_lambda=0.0, cluster_lambda=0.0,
+                                   meta_lambda=0.0, veto_genre_floor=0.0,
                                    mmr_lambda=mmr, temperature=temp,
                                    rng_seed=rng_seed)
 

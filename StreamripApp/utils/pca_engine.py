@@ -623,10 +623,11 @@ def plot_pca_report(
 #      so they surface with their own colour instead of being swallowed by the
 #      Rock/Pop majority co-tags ("Pop, Rock, Metal" → Metal).
 #   2. Electronic / Classical / Folk-Cntry are kept at their ORIGINAL top
-#      priority: `_resolve_gamma` (walk country bonus) special-cases exactly
-#      those three, so any new bucket that preceded them could silently shift γ.
-#      The niche buckets below (Jazz…Asian-Pop) all sit *after* them, so the
-#      walk's γ is provably unchanged — they only add resolution to display,
+#      priority: the walk's regional-scene test (`track_graph._is_regional`)
+#      special-cases the regional buckets (Folk/Cntry, Latin, Reggae, Asian-Pop),
+#      so a bucket that preceded them could silently change which seeds get the
+#      country pool constraint. The niche buckets below (Jazz…Asian-Pop) all sit
+#      *after* the majority families, so they only add resolution to display,
 #      normalization and the genre diagnostic. Substring collisions are avoided
 #      by ordering: Latin before Reggae ('reggaeton' ⊃ 'reggae'), the niche
 #      block after Soul ('jazz funk' stays Soul via 'funk'), Asian-Pop before

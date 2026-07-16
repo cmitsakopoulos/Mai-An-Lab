@@ -152,13 +152,6 @@ def get_walk_params():
     except Exception:
         return 0.3, 0.15
 
-def get_walk_coordinates_only() -> bool:
-    try:
-        cfg = load_config()
-        return bool(cfg.get("general", {}).get("walk_coordinates_only", False))
-    except Exception:
-        return False
-
 def repair_config():
     ensure_config_exists()
     return True

@@ -14,7 +14,6 @@ os.makedirs(_cfg.APP_DIR, exist_ok=True)
 
 from utils.db_manager import DatabaseManager
 from utils import track_graph as tg
-from utils.streamrip_api import get_config_path, update_config_params
 
 class TestLiveGraphCoordinatesWalk(unittest.IsolatedAsyncioTestCase):
 
@@ -34,7 +33,8 @@ class TestLiveGraphCoordinatesWalk(unittest.IsolatedAsyncioTestCase):
             
         self.db = DatabaseManager(self.db_path)
         await self.db.initialize()
-        
+        tg.invalidate_coord_graph_cache()  # a fresh db may reuse a freed id()
+
         # Explicitly run the cluster_id column migration since play_counts was created during initialize
         conn = await self.db.get_connection()
         await self.db._migrate_clusters(conn)
@@ -78,7 +78,6 @@ class TestLiveGraphCoordinatesWalk(unittest.IsolatedAsyncioTestCase):
             "harmonic_means": [],
             "harmonic_stds": [],
             "k_neighbors": 5,
-            "csls_beta": 0.0
         }
         means = np.zeros(10, dtype=np.float32)
         stds = np.ones(10, dtype=np.float32)
@@ -86,44 +85,28 @@ class TestLiveGraphCoordinatesWalk(unittest.IsolatedAsyncioTestCase):
         eigenvalues = np.ones(10, dtype=np.float32)
         await self.db.save_pca_space(means, stds, V_keep, eigenvalues, spec)
 
-        # Build track_neighbors using the standard _knn_edges algorithm
-        from utils.track_graph import _knn_edges
-        edges, mutual_pairs, N, k_eff, mutual_total = _knn_edges(self.coords, self.paths, k=5, csls_beta=0.0)
-        await self.db.replace_neighbors_bulk(edges, "acoustic")
-
     async def asyncTearDown(self):
         await self.db.close()
         self._cleanup_db_files()
-        update_config_params({"general": {"walk_coordinates_only": False}})
+        tg.invalidate_coord_graph_cache()
 
-    async def test_coordinates_only_walk_identical_to_db_walk(self):
-        # 1. First run walk in default mode (walk_coordinates_only = False)
-        update_config_params({"general": {"walk_coordinates_only": False}})
+    async def test_coordinate_graph_walk_runs_and_is_deterministic(self):
+        # The walk is now always served by the in-RAM coordinate graph (the
+        # walk_coordinates_only toggle is gone). Verify it produces a valid queue
+        # and that the deterministic (temperature=0) walk is reproducible.
         seed = self.paths[0]
-        
-        walk_db = await tg.walk(self.db, seed, length=6, temperature=0.0)
-        
-        # 2. Run walk in coordinates-only mode (walk_coordinates_only = True)
-        update_config_params({"general": {"walk_coordinates_only": True}})
-        
-        walk_live = await tg.walk(self.db, seed, length=6, temperature=0.0)
-        
-        # Assert they are 100% identical
-        self.assertEqual(walk_db, walk_live, "Walk paths do not match between DB-backed and coordinates-only modes!")
-        
-        # Assert structural properties
-        self.assertEqual(len(walk_live), 6)
-        self.assertNotIn(seed, walk_live)
+        walk_a = await tg.walk(self.db, seed, length=6, temperature=0.0)
+        walk_b = await tg.walk(self.db, seed, length=6, temperature=0.0)
+        self.assertEqual(walk_a, walk_b, "Deterministic coordinate-graph walk is not reproducible!")
+        self.assertEqual(len(walk_a), 6)
+        self.assertNotIn(seed, walk_a)
 
-    async def test_coordinates_only_walk_temperature(self):
-        # Verify that temperature works identically or produces variety in coordinates-only mode too
-        update_config_params({"general": {"walk_coordinates_only": True}})
+    async def test_coordinate_graph_walk_temperature(self):
+        # Stochastic walk with a fixed rng_seed must be reproducible.
         seed = self.paths[0]
-        
-        # Walk with temp > 0 using same seed should return same result if seed is locked
         walk_1 = await tg.walk(self.db, seed, length=6, temperature=0.4, rng_seed=42)
         walk_2 = await tg.walk(self.db, seed, length=6, temperature=0.4, rng_seed=42)
-        self.assertEqual(walk_1, walk_2, "Stochastic walks with identical rng_seed and coordinates-only mode differ!")
+        self.assertEqual(walk_1, walk_2, "Stochastic walks with identical rng_seed differ!")
 
 if __name__ == "__main__":
     unittest.main()

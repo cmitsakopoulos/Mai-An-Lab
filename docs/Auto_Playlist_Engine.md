@@ -10,7 +10,7 @@
 
 ## The Hybrid Recommendation Pipeline
 
-The engine bridges low-level digital signal processing (DSP) and high-level relational metadata to construct a sparse, dual-tier directed network of similar tracks:
+The engine bridges low-level digital signal processing (DSP) and high-level relational metadata to project tracks into a continuous vector space and search for similar paths:
 
 ```text
 audio file ──► MediaCodec (Android) ──► mono int16 PCM @ 22050 Hz (120s)
@@ -33,53 +33,45 @@ audio file ──► MediaCodec (Android) ──► mono int16 PCM @ 22050 Hz (1
                                                                                    │          │          │
                                                                                    └──────────┼──────────┘
                                                                                               ▼
-                                                                                   88-D Packed Profile
+                                                                                     68-D Packed Profile
                                                                                               │
-                                                                                     (Drop MFCC Delta)
                                                                                               ▼
-                                                                                     68-D Graph Embedding
-                                                   │
-                                                   ▼
-               68-D Graph Embedding + covariance-surviving scalars
-                                                    │
-                                          ┌─────────┴──────────┐
-                                          ▼                    ▼
-                            Continuous (timbre+dynamics)   Harmonic (cos_h/sin_h/key_mode)
-                            Z-score → ×1.5 scalar boost   Z-score (separate μ/σ)
-                                          │                    │
-                                          ▼                    │
-                            Kaiser-truncated PCA (~20-D)       │
-                                          │                    ▼
-                                           └──── concat ◄── ×1.5 harmonic weight
-                                                    │
-                                                    ▼
-                                            Zr  (~23-D, un-normalised)
-                                                   │
-                                                   ▼
-                             Acoustic Euclidean Self-Tuning Affinity Graph
-                                 (Top K=20 nearest neighbours, mutual-kNN)
-                                                   │
-          Junction Metadata Edges ◄─────────────────┼────────────────► Same-Artist / Album Edges
-       (Album sequence / Recent additions)          │                  (Biased distance weighting)
-                                                    ▼
-                           HYBRID k-NN ADJACENCY NETWORK  +  Louvain communities
-                                                   │
-                                                   ▼
-                 Personalised-PageRank Walker 
-                   (restart · softmax τ · MMR ·    (scalar-percentile targets ·
-                    multi-tier · persistent avoid)  Camelot)
-                                                   │
-                                                   ▼
-                                     Seamless Dynamic Playback Queue
+                                              68-D Packed Profile + covariance-surviving scalars
+                                                                                   │
+                                                                         ┌─────────┴──────────┐
+                                                                         ▼                    ▼
+                                                           Continuous (timbre+dynamics)   Harmonic (cos_h/sin_h/key_mode)
+                                                           Z-score → ×1.5 scalar boost   Z-score (separate μ/σ)
+                                                                         │                    │
+                                                                         └─────────┬──────────┘
+                                                                                   ▼
+                                                                           Zr (~23-D, SVD)
+                                                                                   │
+                                                                                   ▼
+                                                                         Live Coordinate Graph
+                                                                   (Self-Tuning Affinity on-the-fly)
+                                                                                   │
+                                          Metadata Edges ◄─────────────────────────┼────────────────────────► Same-Artist Edges
+                                                                                   │
+                                                                                   ▼
+                                                                         HYBRID COORD GRAPH
+                                                                                   │
+                                                                                   ▼
+                                                                     Personalised-PageRank Walker 
+                                                                       (restart · softmax τ · MMR ·
+                                                                        multi-tier · persistent avoid)
+                                                                                   │
+                                                                                   ▼
+                                                                     Seamless Dynamic Playback Queue
 ```
 
 ---
 
-## 1. Feature Extraction & Vector Space (v4)
+## 1. Feature Extraction & Vector Space (v5)
 
 Acoustic vectors are extracted by a pure-NumPy DSP analyzer (no Librosa, no SciPy; works on every host). The analyser is invoked from the laptop-side offload script (see §7); the on-device fallback exists but is no longer the primary path because library-wide DSP on a phone is impractically slow (10+ s/track vs ~200 ms/track on a laptop).
 
-### The 88-Dimensional Packed Profile and 68-Dimensional Graph Embedding (v4, `FEATURES_VERSION = 4`)
+### The 68-Dimensional Packed Profile and Graph Embedding (v5, `FEATURES_VERSION = 5`)
 
 #### Quick reference; what each feature tells you about a track
 
@@ -97,13 +89,11 @@ Acoustic vectors are extracted by a pure-NumPy DSP analyzer (no Librosa, no SciP
 | `key_mode` | scalar | 1.0 for major (Camelot B-ring), 0.0 for minor (A-ring) | (drives major/minor mode grouping) |
 | `mfcc_mean` | 20 floats | Average **timbre fingerprint**; "what instruments / kind of sound" | (vector; cosine compared track-to-track) |
 | `mfcc_std` | 20 floats | Timbral spread / **dispersion**; variation of timbre over time | (vector; captures timbral variation) |
-| `mfcc_delta` | 20 floats | How fast timbre changes frame-to-frame (dropped for similarity graph) | (vector; captures timbre evolution/speed) |
 | `chroma` | 12 floats | Proportion of each pitch class (C, C#, D, …) | (vector; basis for the K-S key estimate) |
 | `rhythm` | 16 floats | Groove, tempogram components, onset density, and pulse clarity | (vector; distinguishes rhythm styles/speeds) |
 
-The raw scalars get their own DB columns. The 88-D sound profile (`mfcc_mean` + `mfcc_std` + `mfcc_delta` + `chroma` + `rhythm`) is packed as a `float32` LE BLOB in `play_counts.timbre`.
-However, because feature-group ablation tests showed `mfcc_delta` carries no genre signal on its own and dilutes the Euclidean metric, it is dropped from the similarity graph view.
-Thus, the similarity graph consumes a **68-dimensional graph embedding** (`GRAPH_EMBED_DIMS` = 68), which combines:
+The raw scalars get their own DB columns. The 68-D sound profile (`mfcc_mean` + `mfcc_std` + `chroma` + `rhythm`) is packed as a `float32` LE BLOB in `play_counts.timbre`.
+Thus, the similarity graph consumes the **68-dimensional graph embedding** directly (`GRAPH_EMBED_DIMS` = 68), which combines:
 - `mfcc_mean` (20 dimensions)
 - `mfcc_std` (20 dimensions)
 - `chroma` (12 dimensions)
@@ -113,14 +103,13 @@ Together with the 10-dimensional scalar descriptors from the DB columns, this re
 
 #### Component details
 
-1. **88-Dimensional Sound Profile** (packed as one `float32` LE BLOB on `play_counts.timbre`):
+1. **68-Dimensional Sound Profile** (packed as one `float32` LE BLOB on `play_counts.timbre`):
    * **MFCC Mean (20 dimensions)**: Average spectral envelope of the HPSS-harmonic component (cleaner timbre; no kick-drum bleed into the mel cepstrum).
    * **MFCC std (20 dimensions)**: Standard deviation of MFCC coefficients across frames, capturing timbral spread/dispersion over time.
-   * **MFCC Δ-Mean (20 dimensions)**: First-order temporal derivative of MFCC, averaged across frames. Captures *how* timbre evolves (excluded from graph traversal/similarity edges).
    * **Chroma Pitch Profile (12 dimensions)**: Pitch-class profile of the HPSS-harmonic component; the basis for both the harmonic-similarity score and the Krumhansl–Schmuckler key estimate.
    * **Rhythm Profile (16 dimensions)**: Groove descriptors derived from the HPSS-percussive onset envelope (full-band, low-band, and high-band beat-relative tempogram rates, onset density, ratio, and pulse clarity).
 
-2. **10-Dimensional Scalar Descriptors** (assembled during edge building):
+2. **10-Dimensional Scalar Descriptors** (assembled during SVD projection):
    * **log_bpm**: Log2 of the estimated BPM, reflecting multiplicative/octave-based tempo perception.
    * **Beat Strength**: Autocorrelation height at the chosen tempo lag; serves as a confidence/regularity score in `[0, 1]`.
    * **Energy (RMS)**: dB-mapped loudness in `[0, 1]`.
@@ -144,10 +133,10 @@ Implementation is in `StreamripApp/utils/dsp.py` (`_hpss`, `_median_filter_axis`
 
 ## 2. Graph Construction Mechanics
 
-The backend [DatabaseManager](file:///Users/chrismitsacopoulos/Desktop/Mai-An-Lab/StreamripApp/utils/db_manager.py) and [track_graph.py](file:///Users/chrismitsacopoulos/Desktop/Mai-An-Lab/StreamripApp/utils/track_graph.py) build a sparse $k$-NN database table (`track_neighbors`) split into two distinct tiers.
+The backend [DatabaseManager](file:///Users/chrismitsacopoulos/Desktop/Mai-An-Lab/StreamripApp/utils/db_manager.py) and [track_graph.py](file:///Users/chrismitsacopoulos/Desktop/Mai-An-Lab/StreamripApp/utils/track_graph.py) build high-dimensional coordinates and relational metadata connections.
 
-### A. The Acoustic Similarity Tier (`edge_kind = 'acoustic'`)
-The engine loads every track with a current-version feature BLOB and assembles a feature row from the 68-D graph embedding block plus the scalar descriptors that survive covariance cleaving.
+### A. The Live Acoustic Similarity Graph
+Instead of writing and reading precomputed similarity edges from SQLite, similarity is resolved *live in RAM* from coordinates. The engine loads all projected coordinates from `play_counts.pca_coords` and the projection params from `pca_space` to assemble a coordinates-only graph in memory.
 
 * **Covariance cleaving (centrality).** A Pearson-correlation pass over the continuous raw scalars (`bpm`, `brightness`, `energy`, `rolloff`, `beat_strength`, `spectral_flatness`, `spectral_contrast`) removes redundant ones: within any group correlating at $|r| \ge 0.70$, the feature with the highest mean $|r|$ to the group — its best representative — is kept and the rest dropped. The harmonic coords `cos_h`/`sin_h`/`key_mode` are structural and always kept (they are late-fused after PCA — see below). The surviving scalars are appended to the 68-D graph embedding block (≈75-D on a typical library).
 
@@ -162,37 +151,23 @@ The engine loads every track with a current-version feature BLOB and assembles a
   2. A thin SVD reduces **only the continuous block** to the components with eigenvalue $> 1$ (Kaiser; floored at 3), giving $Z_{r,\text{cont}}$ (typically ~20-D to 30-D). $Z_{r,\text{cont}}$ is kept **un-normalised**: Euclidean distance here preserves magnitude — how far a track sits from the library's "average" — which is real perceptual signal.
   3. The raw z-scored harmonic coordinates are multiplied by `harmonic_weight = 1.5` and **concatenated** back onto $Z_{r,\text{cont}}$, producing the final unified coordinate space $Z_r$ (typically ~23-D to 33-D).
 
-  This guarantees that Euclidean distance in $Z_r$ matches perfect-fifth compatibility on the Camelot clock with 100% fidelity, while PCA still denoises the high-dimensional timbre and dynamics axes. The projection ($\mu_{\text{cont}}$, $\sigma_{\text{cont}}$, $\mu_{\text{harm}}$, $\sigma_{\text{harm}}$, surviving-feature list, $V_{\text{keep}}$, `harmonic_weight`) and every track's $Z_r$ coordinates are persisted in `pca_space` / `play_counts.pca_coords`; this single geometry drives the walk and clustering.
+  This guarantees that Euclidean distance in $Z_r$ matches perfect-fifth compatibility on the Camelot clock with 100% fidelity, while PCA still denoises the high-dimensional timbre and dynamics axes. The projection ($\mu_{\text{cont}}$, $\sigma_{\text{cont}}$, $\mu_{\text{harm}}$, $\sigma_{\text{harm}}$, surviving-feature list, $V_{\text{keep}}$, `harmonic_weight`) and every track's $Z_r$ coordinates are persisted in `pca_space` / `play_counts.pca_coords`; this single geometry drives the live similarity walker.
 
-* **Euclidean k-NN ($K=20$)**: each track's 20 nearest neighbours in $Z_r$ are found by squared-Euclidean distance, computed in 256-row blocks (`argpartition` is $O(N)$ per row; the K-slice is then ordered with a $O(K \log K)$ sort).
+* **Live Self-tuning affinity (Zelnik-Manor)**: at walk time, distances are computed live. For any track, Euclidean distances to other tracks are converted to affinities $a_{ij} = \exp\!\big(-d(i,j)^2 / (\sigma_i \sigma_j)\big) \in (0,1]$, where $\sigma_i$ is $i$'s distance to its 7th-nearest neighbour.
 
-* **Self-tuning affinity (Zelnik-Manor)**: each distance becomes an affinity $a_{ij} = \exp\!\big(-d(i,j)^2 / (\sigma_i \sigma_j)\big) \in (0,1]$, where $\sigma_i$ is $i$'s distance to its 7th-nearest neighbour. The local $\sigma$ adapts the kernel to each track's neighbourhood density, so a sparse outlier and a dense-cluster member get comparable affinities.
-
-* **Mutual-kNN Pruning**; fighting popularity bias. An edge $(i \to j)$ is kept **iff $j$ is in $i$'s top-K AND $i$ is in $j$'s top-K**:
+* **Live Mutual-kNN Filtering**: an edge $(i \to j)$ is kept only if $j$ is in $i$'s top-K and $i$ is in $j$'s top-K ($K$ defined in `pca_space` feature spec, typically 40 or 50):
   $$E_{\text{mutual}} = \{(i,j) : j \in \text{topK}(i) \;\land\; i \in \text{topK}(j)\}$$
-  A hub track — say a generic acoustic-guitar track — is geometrically close to many others and appears in *everyone's* top-K, but its own top-K points back into one dense cluster. The intersection keeps only symmetric edges, flattening that over-representation without removing the geometric signal. The self-tuning affinity is symmetric in $i,j$, so the pruned graph is undirected.
+  The self-tuning affinity is symmetric, and a small tolerance (`1e-5`) is added during comparison to prevent float32 floating-point roundoff from breaking symmetry.
 
 ### B. The Metadata Co-Occurrence Tier
 When acoustic data is missing or needs to be augmented, the engine falls back to relational metadata connections:
-* **Same-Album Edges (`edge_kind = 'album'`)**: Connects all tracks belonging to the same album. The weight scales inversely with their track distance in the tracklist to preserve natural listening transitions:
-  $$w = \frac{1.0}{1.0 + 0.1 \times (\text{distance} - 1)}$$
 * **Same-Artist Edges (`edge_kind = 'artist'`)**: Links tracks from the same artist (capped at $K=30$ per track to prevent prolific artists from flooding the table), sorted and biased toward newer releases (`added_date DESC`).
-
-### C. Louvain Community Detection
-During the graph rebuild, the engine partitions the library into acoustic communities by **Louvain modularity optimisation** on the mutual-kNN affinity graph from §2.A — the same weighted graph the walker traverses, so communities and similarity share one geometry.
-
-1. **Substrate**:
-   The undirected, self-tuning-affinity-weighted mutual-kNN edges are the input; clustering operates on the graph topology, not on coordinates.
-2. **Algorithm**:
-   A pure-NumPy/Python Louvain (Blondel et al. 2008) greedily moves each node to the neighbouring community that most increases modularity, then contracts every community into a super-node and repeats on the smaller graph. The number of communities emerges from the topology — there is no `k` to choose — and a `resolution` knob (default 1.0) trades community count against size. No native dependencies, so it runs on-device.
-3. **Output**:
-   Each track's `cluster_id` is persisted in the `play_counts` table; tracks with no mutual neighbours form singleton communities. The walker consumes `cluster_id` as a soft cross-community penalty (§3.6).
 
 ---
 
 ## 3. Stateful Graph Traversal (Personalised-PageRank Walker)
 
-The voice assistant runs a **personalised-PageRank-flavoured random walk** with five behavioural levers: anchoring (restart), exploration (softmax temperature), diversity (MMR), tier-aware pooling, and negative-centroid avoidance. When a user says *"play more like this"*, the walker traverses the graph from the current track's seed.
+The voice assistant runs a **personalised-PageRank-flavoured random walk** with four behavioural levers: anchoring (restart), exploration (softmax temperature), diversity (MMR), and negative-centroid avoidance. When a user says *"play more like this"*, the walker traverses the graph from the current track's seed.
 
 Each step does three things: **gather candidates → score them → sample one**. The subsections below cover each of these in turn.
 
@@ -202,25 +177,20 @@ Each step pools acoustic + artist neighbours into one candidate set, then attach
 
 $$\text{effective\_weight}(c) = \text{raw\_weight}(c) \times \mu_{\text{tier}(c)}$$
 
-with $\mu_{\text{acoustic}} = 1.0$, $\mu_{\text{artist}} = 0.4$, $\mu_{\text{album}} = 0.2$. An acoustic neighbour at affinity 0.9 has effective weight 0.9; an artist neighbour at raw weight 1.0 has effective weight 0.4. The walker therefore prefers acoustic edges by default but artist edges catch it when acoustic edges are absent; including mid-walk, not just at the seed.
+with $\mu_{\text{acoustic}} = 1.0$ and $\mu_{\text{artist}} = 0.4$. An acoustic neighbour at affinity 0.9 has effective weight 0.9; an artist neighbour at raw weight 1.0 has effective weight 0.4. The walker therefore prefers acoustic edges by default but artist edges catch it when acoustic edges are absent; including mid-walk, not just at the seed.
 
-When the same track appears in two tiers (e.g. an acoustic neighbour that's also same-artist), the merge keeps the **maximum effective weight** so the stronger signal wins and the candidate appears exactly once in the pool.
+When the same track appears in both tiers (e.g. an acoustic neighbour that's also same-artist), the merge keeps the **maximum effective weight** so the stronger signal wins and the candidate appears exactly once in the pool.
 
 ### 3.2 Score; composite logit
 
-The per-candidate logit is a composite of edge affinity, metadata fusion, diversity, negative feedback, and community constraint penalties computed before the softmax:
+The per-candidate logit is a composite of edge affinity, metadata fusion, diversity, and negative feedback penalties computed before the softmax:
 
-$$\text{logit}_c = \Big( \big( w_c \cdot \mu_{\text{tier}(c)} \cdot (1 + \lambda_{\text{meta}} \cdot S_{\text{meta}}) \big) - \lambda_{\text{MMR\_eff}} \cdot \max_{v \in \text{visited}} \cos(e_c, e_v) - \lambda_{\text{neg}} \cdot \max_{r \in \text{rejected}} \cos(e_c, e_r) \Big) \cdot \mathbf{penalty}_{\text{comm}}$$
+$$\text{logit}_c = \Big( w_c \cdot \mu_{\text{tier}(c)} \cdot (1 + \lambda_{\text{meta}} \cdot S_{\text{meta}}) \Big) - \lambda_{\text{MMR\_eff}} \cdot \max_{v \in \text{visited}} \cos(e_c, e_v) - \lambda_{\text{neg}} \cdot \max_{r \in \text{rejected}} \cos(e_c, e_r)$$
 
-where the community constraint scales the entire logit:
-
-$$\mathbf{penalty}_{\text{comm}} = \begin{cases} 1.0 & \text{if } \text{community}_c = \text{community}_{\text{current}} \text{ or either is None} \\ 1 - \lambda_{\text{comm}} & \text{if } \text{community}_c \neq \text{community}_{\text{current}} \end{cases}$$
-
-Here, $\lambda_{\text{comm}}$ corresponds to the parameter `cluster_lambda` in the walker signature (default 0.5), which penalizes transitions into different Louvain modularity communities.
+Here, $\lambda_{\text{MMR\_eff}}$ decays over steps:
 
 | Term | Default | Purpose |
 |---|---|---|
-| $\lambda_{\text{comm}}$ | 0.5 | Multiplicative penalty on candidates in a different Louvain community from the current track, biasing the walk toward the current sonic neighbourhood |
 | $\lambda_{\text{MMR}}$ | 0.15 | Penalises candidates close in timbre to already-visited nodes; decays as $\lambda_{\text{MMR}}/(1+\text{step})$ so later steps stay anchored to the seed |
 | $\lambda_{\text{neg}}$ | 0.6 | Penalises candidates close in timbre to session-rejected tracks (skips/dislikes) |
 
@@ -246,26 +216,16 @@ $$P_{\text{stationary}}(v) = \alpha \cdot \mathbb{1}[v = \text{teleport}] + (1-\
 
 That $\alpha$ fraction is the **anchor**. Without it, the walker's distance from the seed grows roughly linearly with step count and you end up far afield; a "play similar" sequence ten steps in would have basically forgotten the seed. With it, the walker effectively averages over "where do I get to in $1/\alpha \approx 6.6$ steps before being yanked back?"; and the resulting playlist concentrates around the seed's true neighbourhood regardless of length.
 
-### 3.5 Persistent avoidance and batched prefetch
+### 3.5 Persistent avoidance and live neighbors
 
 * **Persistent avoidance set**: the `avoid` set passed into `walk()` unions the assistant's in-memory recent list with the on-disk `playback_history` table (7-day window). Tracks the user heard yesterday don't reappear today, even across app restarts. See §4.4 for the table schema.
 
-* **Batched 2-hop prefetch**: `walk()` issues **one** query at the start that materialises the seed's 1-hop neighbours and then the 1-hop neighbours of every 1-hop neighbour (the 2-hop horizon). The walker then steps entirely in memory through that subgraph. Length-12 walks cost one DB round-trip plus the small fan-out queries, instead of twelve sequential awaits.
+* **Live Neighbors Lookup**: neighbors and affinities are computed live. At the start of the walk, the walker initializes the active catalog coordinates from `play_counts`. At each step, candidates are found by computing Zelnik-Manor local scaling affinities on-the-fly, avoiding database lookups during traversal.
 
-### 3.6 Louvain Community Walker Constraint
-
-To keep walks within cohesive sonic boundaries and stop them drifting across major genre divisions, the walker applies a soft community penalty.
-At each step, candidates in a different Louvain community (§2.C) from the current track have their effective weights multiplied by $(1 - \lambda_{\text{comm}})$ (implemented via `cluster_lambda` in the signature):
-
-$$\text{effective\_weight} \leftarrow \text{effective\_weight} \times (1 - \lambda_{\text{comm}})$$
-
-By default, $\lambda_{\text{comm}} = 0.5$ (halving the weight). If either the candidate or the current track lacks a `cluster_id` (e.g. a singleton community, or before the first graph build), no penalty is applied. This biases the walk to explore the local community while keeping bridge tracks open for transitions.
-
-### 3.7 The walker in pseudocode
+### 3.6 The walker in pseudocode
 
 ```text
-fn walk(seed, length, kinds, weights, α, λ_mmr, λ_neg, τ, avoid, teleport, community_map, λ_comm):
-    horizon       = prefetch_two_hop(seed, kinds)     # one SQL round-trip
+fn walk(seed, length, kinds, weights, α, λ_mmr, λ_neg, τ, avoid, teleport):
     visited       = avoid ∪ {seed}
     visited_embs  = [embedding(seed)] if available else []
     neg_embs      = [embedding(r) for r in session_rejected]
@@ -280,7 +240,7 @@ fn walk(seed, length, kinds, weights, α, λ_mmr, λ_neg, τ, avoid, teleport, c
             current = teleport
 
         # 3.1: gather
-        candidates = horizon[current]
+        candidates = get_live_neighbors(current, kinds)
         candidates = merge_tiers(candidates, weights, exclude=visited)
         if candidates is empty:
             if current ≠ teleport: current = teleport; continue
@@ -302,13 +262,6 @@ fn walk(seed, length, kinds, weights, α, λ_mmr, λ_neg, τ, avoid, teleport, c
             for i, c in enumerate(candidates):
                 logits[i] -= λ_neg * max(cos(emb(c), r) for r in neg_embs)
 
-        # 3.6: Louvain community constraint applied to final logit
-        curr_comm = community_map.get(current)
-        for i, c in enumerate(candidates):
-            c_comm = community_map.get(c.path)
-            if curr_comm is not None and c_comm is not None and c_comm != curr_comm:
-                logits[i] *= (1 - λ_comm)
-
         # 3.3: flat-temperature softmax over per-node z-standardised logits
         probs  = softmax(zstandardise(logits) / τ)
         chosen = sample(candidates, probs)
@@ -322,7 +275,8 @@ fn walk(seed, length, kinds, weights, α, λ_mmr, λ_neg, τ, avoid, teleport, c
     return output
 ```
 
-The reference implementation is in [track_graph.walk()](file:///Users/chrismitsacopoulos/Desktop/Mai-An-Lab/StreamripApp/utils/track_graph.py); the function signature exposes every knob (`restart_prob`, `diversity_lambda`, `negative_lambda`, `temperature`, `cluster_lambda`, `edge_kind_weights`, `teleport_path`, …) so different intents can re-tune the walker without touching the algorithm. A hypothetical *play discovery* intent would use $\tau = 0.2$, $\alpha = 0.05$, $\lambda = 0.5$; same code path, different point in the trade-off space.
+The reference implementation is in [track_graph.walk()](file:///Users/chrismitsacopoulos/Desktop/Mai-An-Lab/StreamripApp/utils/track_graph.py); the function signature exposes every knob (`restart_prob`, `diversity_lambda`, `negative_lambda`, `temperature`, `edge_kind_weights`, `teleport_path`, …) so different intents can re-tune the walker without touching the algorithm. A hypothetical *play discovery* intent would use $\tau = 0.2$, $\alpha = 0.05$, $\lambda = 0.5$; same code path, different point in the trade-off space.
+
 
 ---
 
@@ -368,15 +322,15 @@ Walking through a concrete request makes the moving parts visible. Suppose the u
 
 ### 6.1 The walker fires
 
-1. **Prefetch**: `track_graph.walk()` issues one query for the seed's 1-hop neighbours (acoustic + artist) and then 1-hop queries for each of those, materialising the 2-hop horizon in memory.
-2. **Step 1; gather**. Three candidates among the seed's neighbours (after multi-tier merge):
+1. **Live Graph**: `track_graph.walk()` initializes the coordinate graph in memory on startup.
+2. **Step 1; gather**. Three candidates among the seed's neighbors (after multi-tier merge):
    - **Another Marconi Union track**; acoustic edge, affinity 0.93 → effective weight 0.93.
    - **"Avril 14th" by Aphex Twin**; acoustic edge, affinity 0.91 → effective weight 0.91 (timbre-twin: solo piano, similar MFCC).
    - **Random electronica track**; only an artist edge, raw 1.0 → effective $1.0 \times 0.4 = 0.40$.
 3. **Step 1; score**. The effective weights $[0.93, 0.91, 0.40]$ are z-standardised per node and divided by the flat temperature $\tau = 0.04$, then softmaxed. The two acoustic twins sit far above the lone artist edge, so they split almost all the probability between them while the artist candidate is effectively excluded.
 4. **Step 1; sample**: pick the Marconi Union track. Append to walk; add its embedding to `visited_embs`.
 5. **Step 2; restart roll**: $\alpha = 0.15$ doesn't fire (we rolled 0.42). Step from the Marconi Union track.
-6. **Step 2; MMR kicks in**. Another Marconi Union track (Track 3 from the same album) is the next acoustic-twin, ~0.95 affinity to the seed — but it's also ~0.95 cosine to *the just-added* Marconi Union track in the timbre sub-space. The MMR penalty subtracts $\lambda \cdot 0.95 = 0.15 \cdot 0.95 \approx 0.14$ from its logit, nudging it below Aphex Twin's "Avril 14th" (similarly slow piano, in a different community), so softmax now favours Avril.
+6. **Step 2; MMR kicks in**. Another Marconi Union track (Track 3 from the same album) is the next acoustic-twin, ~0.95 affinity to the seed — but it's also ~0.95 cosine to *the just-added* Marconi Union track in the timbre sub-space. The MMR penalty subtracts $\lambda \cdot 0.95 = 0.15 \cdot 0.95 \approx 0.14$ from its logit, nudging it below Aphex Twin's "Avril 14th" (similarly slow piano), so softmax now favours Avril.
 7. **Step 3; restart fires**. Roll 0.08 < $\alpha$ → teleport back to the seed. Score from the seed's neighbours again, but Marconi Union Track 1 and "Avril 14th" are in `visited` (filtered out) AND their embeddings still apply MMR pressure on whatever else surfaces.
 
 Repeat for 12 steps. The walk explores the seed's neighbourhood without drifting into unrelated genres (restart), without producing 12 Marconi Union tracks in a row (MMR), and without re-recommending anything the user heard yesterday (persistent avoid set).
@@ -430,7 +384,7 @@ For each tracks-needing-features bundle:
 
 1. **Inspect**: opens the bundle ZIP, queries `library.db` for paths whose `features_version` is absent or stale.
 2. **Chunked ADB transfer**: groups missing paths into chunks (default 100), writes each chunk's list to `/sdcard/.dsp_offload_pull_list.txt`, then streams the chunk through a single `adb exec-out tar -cf - -T <list>` pipe into a local `tar -xf -`. Paying the ~50–200 ms ADB handshake once per chunk instead of once per file is the dominant speed win; for 1100 small files this saves several minutes of pure overhead before any bytes have moved.
-3. **Parallel decode + extract** per chunk: `ffmpeg` decodes each cached file to a 120 s mono PCM clip; numpy runs the full v3 pipeline (HPSS, MFCC + deltas, chroma, scalars). A `ThreadPoolExecutor` overlaps `ffmpeg` subprocesses with numpy work because both release the GIL.
+3. **Parallel decode + extract** per chunk: `ffmpeg` decodes each cached file to a 120 s mono PCM clip; numpy runs the full v5 pipeline (HPSS, MFCC, chroma, scalars). A `ThreadPoolExecutor` overlaps `ffmpeg` subprocesses with numpy work because both release the GIL.
 4. **Batched DB write per chunk**: a single `BEGIN/COMMIT` transaction upserts the entire chunk's features. Orders of magnitude faster than per-track commits; the chunk boundary is also a safe checkpoint; if the script is killed mid-run, all *finished* chunks survive in the bundle DB and the next run picks up cleanly from the audio cache.
 5. **Repackage**: writes `<bundle>.analysed.zip` (or `--in-place` to overwrite). The repackager preserves any file in the original bundle the script didn't touch (`config.toml`, `recent_searches.json`, future manifest extensions).
 
@@ -475,7 +429,7 @@ The unified coordinate space $Z_r$ (§2.A) is the engine's single projection. `b
 
 ### 8.2 On-Device Mathematical Truth Report
 
-After every graph rebuild (`build_acoustic_edges`), the engine calls `pca_engine.plot_pca_report(rows, output_dir)` to generate five PNG figures:
+After every graph rebuild (`build_acoustic_edges`), the engine can be configured to generate four PNG figures using `pca_engine.plot_pca_report(rows, output_dir)`:
 
 | File | Content |
 |---|---|
@@ -483,13 +437,12 @@ After every graph rebuild (`build_acoustic_edges`), the engine calls `pca_engine
 | `pca_scatter_full.png` | PC1 vs. PC2 biplot scatter coloured by energy; eigenvector arrows for all 8 features |
 | `covariance_heatmap_pruned.png` | Correlation heatmap of the pruned active-feature subset |
 | `pca_scatter_pruned.png` | Biplot scatter after cleaving, using the second-pass SVD loadings |
-| `pca_scatter_clusters.png` | PC1 vs. PC2 scatter plot coloured by Louvain community ID, featuring shaded convex hull contours (`alpha=0.08`), diamond centroid markers, and dotted grid lines |
 
 Files are written to `<library_folder>/pca_report/` — the path the user has set under **Settings → Library folder** — making them immediately accessible through any file browser on the device. If no library folder is configured (abnormal; PCA requires scanned tracks), the fallback path is `APP_DIR/pca_report/`.
 
 The report function uses `matplotlib.use("Agg")` (headless, no display required on Android) and guards both `matplotlib` and `seaborn` imports with `try/except ImportError`, so the entire visualization pipeline is a graceful no-op on environments where those packages are absent. The projection and analysis pipelines are not affected.
 
-The identical figure logic also runs in the standalone desktop analysis tool `tools/pca_analysis.py`, which automatically discovers the most recent `.analysed.zip` in `tools/analyzed_states/` and produces the same five figures from the extracted `library.db`.
+The identical figure logic also runs in the standalone desktop analysis tool `tools/pca_analysis.py`, which automatically discovers the most recent `.analysed.zip` in `tools/analyzed_states/` and produces the same four figures from the extracted `library.db`.
 
 ---
 
