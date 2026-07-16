@@ -405,14 +405,14 @@ The catalog database (SQLite) manages records across the following tables:
 | `tracks` | The primary music index. | `id`, `album_id`, `title`, `track_num`, `duration`, `path`, `format`, `added_date`, `bitrate`, `bpm`, `energy`, `brightness` |
 | `playlists` | User-defined and imported collections. | `id`, `name`, `created`, `color` |
 | `playlist_tracks` | Junction table for playlist membership. | `playlist_id`, `track_path`, `order_index` |
-| `play_counts` | Extended sound profile, feature space, and play history. | `track_path`, `count`, `last_played`, `bpm`, `energy`, `brightness`, `rolloff`, `beat_strength`, `spectral_flatness`, `spectral_contrast`, `key_index`, `timbre` (52D BLOB), `features_version`, `cluster_id` |
+| `play_counts` | Extended sound profile, feature space, and play history. | `track_path`, `count`, `last_played`, `bpm`, `energy`, `brightness`, `rolloff`, `beat_strength`, `spectral_flatness`, `spectral_contrast`, `key_index`, `timbre` (68D BLOB), `features_version` |
 | `track_neighbors` | Sparse adjacency table representing the $k$-NN acoustic/metadata graph. | `track_path`, `neighbor_path`, `weight`, `edge_kind` |
 | `pca_space` | Persists the active PCA projection produced by the double-pass SVD engine. | `id` (always 1), `means` (8×float32 BLOB), `stds` (8×float32 BLOB), `projection` (8×3 float32 BLOB), `eigenvalues` (8×float32 BLOB) |
 | `artist_enrichment` | Caches external MusicBrainz provenance (country/area) and community genre tags. | `artist_name` (PK), `mbid`, `country`, `area`, `genres` (JSON list), `source`, `score`, `status`, `fetched_at` |
 | `genre_affinity` | Pre-computed NPMI genre$\times$genre similarity model for random walk metadata gates. | `id` (always 1), `model` (JSON dict `"a|b": npmi`), `updated_at` |
 
 > [!NOTE]
-> **Sound Profile BLOB Layout (v3)**: The high-dimensional feature profile is packed as a single 52-float, little-endian binary BLOB inside the `play_counts.timbre` column (208 bytes total) to keep database size minimal and query speeds fast. The BLOB contains the 20D MFCC Mean, 20D MFCC First-Order Derivative (Delta Mean), and 12D Chroma Pitch Profile. The `features_version` column acts as a schema version, letting the engine dynamically invalidate and re-analyze features if extraction logic evolves.
+> **Sound Profile BLOB Layout (v5)**: The high-dimensional feature profile is packed as a single 68-float, little-endian binary BLOB inside the `play_counts.timbre` column (272 bytes total) to keep database size minimal and query speeds fast. The BLOB contains the 20D MFCC Mean, 20D MFCC std (timbral dispersion), 12D Chroma Pitch Profile, and 16D Rhythm Profile. The `features_version` column acts as a schema version, letting the engine dynamically invalidate and re-analyze features if extraction logic evolves.
 
 ### 6.2 Relational Design & Triggers
 - **Composition over Inheritance**: Entities are represented using strict Composition (*Part-Of* relationships) rather than inheritance to avoid complex sparse tables. Artists compose Albums, which compose Tracks, bound via foreign keys with `ON DELETE CASCADE` constraints.

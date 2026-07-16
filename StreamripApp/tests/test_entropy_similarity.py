@@ -8,7 +8,7 @@ import numpy as np
 sys.path.insert(0, os.getcwd())
 
 from utils.db_manager import DatabaseManager
-from utils.dsp import FEATURES_VERSION, unpack_embedding_groups
+from utils.dsp import FEATURES_VERSION
 from utils import track_graph as tg
 
 # 1. Main Async Simulation Task

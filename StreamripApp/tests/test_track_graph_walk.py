@@ -162,39 +162,15 @@ class TestWalkGracefulDegradation(unittest.TestCase):
         db = NoMetaDB()
         db.add_edge("SEED", "A", 0.95)
         db.add_edge("A", "C", 0.90)
-        # meta_lambda/cluster_lambda > 0 but the backend can't serve them:
-        # the factors must collapse to 1.0 and the walk still flows.
-        out = _run(tg.walk(db, "SEED", length=2, meta_lambda=0.5, cluster_lambda=0.5))
+        # meta_lambda > 0 but the backend can't serve enrichment: the metadata
+        # pool must collapse to a no-op and the walk still flows.
+        out = _run(tg.walk(db, "SEED", length=2, meta_lambda=0.5))
         self.assertEqual(out, ["A", "C"])
 
     def test_empty_enrichment_is_a_noop(self):
         # FakeDB has the accessors but no enrichment rows → metadata factor 1.0.
         out = _run(tg.walk(_chain_db(), "SEED", length=4, meta_lambda=2.0))
         self.assertEqual(out, ["A", "B", "C", "D"])
-
-
-class TestWalkClusterPenalty(unittest.TestCase):
-    def _db(self):
-        # SEED→A(1.0); A→C(0.90, same cluster) / D(0.95, different cluster).
-        db = FakeDB()
-        db.add_edge("SEED", "A", 1.0)
-        db.add_edge("A", "C", 0.90)
-        db.add_edge("A", "D", 0.95)
-        db.clusters.update({"SEED": 0, "A": 0, "C": 0, "D": 1})
-        return db
-
-    def test_penalty_keeps_walk_in_community(self):
-        # D has higher raw affinity but leaves A's community; with a strong
-        # penalty C (same community) must win.
-        out = _run(tg.walk(self._db(), "SEED", length=2, cluster_lambda=0.9,
-                           meta_lambda=0.0))
-        self.assertEqual(out, ["A", "C"])
-
-    def test_no_penalty_lets_higher_affinity_win(self):
-        # cluster_lambda=0 → D's higher raw affinity wins.
-        out = _run(tg.walk(self._db(), "SEED", length=2, cluster_lambda=0.0,
-                           meta_lambda=0.0))
-        self.assertEqual(out, ["A", "D"])
 
 
 class TestWalkMetadataFactor(unittest.TestCase):
@@ -210,22 +186,141 @@ class TestWalkMetadataFactor(unittest.TestCase):
         return db
 
     def test_metadata_overtakes_higher_affinity_foreign_track(self):
-        out = _run(tg.walk(self._db(), "SEED", length=1, meta_lambda=2.0,
-                           cluster_lambda=0.0))
+        out = _run(tg.walk(self._db(), "SEED", length=1, meta_lambda=2.0))
         self.assertEqual(out[0], "G")
 
     def test_metadata_off_lets_raw_affinity_win(self):
-        out = _run(tg.walk(self._db(), "SEED", length=1, meta_lambda=0.0,
-                           cluster_lambda=0.0))
+        out = _run(tg.walk(self._db(), "SEED", length=1, meta_lambda=0.0))
         self.assertEqual(out[0], "F")
 
     def test_same_artist_is_not_boosted(self):
         # G is genre-match but SAME artist as seed → meta_score returns 0, so it
         # gets no boost and the higher-affinity F wins even with metadata on.
+        # F is made same-genre as the seed here so the genre veto (which would
+        # otherwise remove a foreign F) is not what decides this — the point is
+        # purely that the same-artist G earns no metadata bonus.
         db = self._db()
-        db.add_meta("G", "S", "US", ["hiphop"])  # same artist as SEED
-        out = _run(tg.walk(db, "SEED", length=1, meta_lambda=2.0, cluster_lambda=0.0))
+        db.add_meta("G", "S", "US", ["hiphop"])   # same artist as SEED
+        db.add_meta("F", "Eff", "US", ["hiphop"])  # genre-compatible, so not vetoed
+        out = _run(tg.walk(db, "SEED", length=1, meta_lambda=2.0))
         self.assertEqual(out[0], "F")
+
+
+class TestWalkGenreVeto(unittest.TestCase):
+    def _db(self):
+        # SEED (hiphop). Two neighbours: N (nearer, genre-FOREIGN) and
+        # G (farther, same genre). The old soft nudge let the nearer foreign
+        # track win; the hard veto must forbid N outright.
+        db = FakeDB()
+        db.add_edge("SEED", "N", 0.95)   # nearest, but foreign genre
+        db.add_edge("SEED", "G", 0.70)   # farther, same genre
+        db.add_meta("SEED", "S",  "US", ["hiphop"])
+        db.add_meta("N",    "Enn", "GR", ["laiko"])   # genre-foreign to seed
+        db.add_meta("G",    "Gee", "US", ["hiphop"])  # same genre as seed
+        return db
+
+    def test_foreign_neighbour_is_vetoed(self):
+        # Even though N is the nearest acoustic neighbour, it is genre-foreign to
+        # the seed, so it must be vetoed and the same-genre G chosen instead.
+        out = _run(tg.walk(self._db(), "SEED", length=1, meta_lambda=0.35))
+        self.assertEqual(out[0], "G")
+
+    def test_veto_disabled_lets_foreign_win(self):
+        # veto_genre_floor=0 restores the pre-veto behaviour: N's raw affinity
+        # wins despite the genre gap.
+        out = _run(tg.walk(self._db(), "SEED", length=1, meta_lambda=0.0,
+                           veto_genre_floor=0.0))
+        self.assertEqual(out[0], "N")
+
+    def test_veto_truncates_rather_than_stepping_foreign(self):
+        # If the only reachable neighbour is genre-foreign, the walk must emit
+        # NOTHING rather than admit it — the guarantee is "never play a foreign
+        # track", not "always fill the queue". (Lowering veto_genre_floor is the
+        # escape valve; see test_veto_disabled_lets_foreign_win.)
+        db = FakeDB()
+        db.add_edge("SEED", "N", 0.95)
+        db.add_meta("SEED", "S",   "US", ["hiphop"])
+        db.add_meta("N",    "Enn", "GR", ["laiko"])
+        out = _run(tg.walk(db, "SEED", length=1, meta_lambda=0.35))
+        self.assertEqual(out, [])
+
+    def test_reanchors_to_seed_pool_instead_of_stepping_foreign(self):
+        # SEED→A (in-genre) → A's only other neighbour F is foreign. Rather than
+        # step SEED→A→F, the walk must RE-ANCHOR: from A it falls back to the
+        # seed's own in-pool neighbour B and continues in-genre.
+        db = FakeDB()
+        db.add_edge("SEED", "A", 0.95)
+        db.add_edge("SEED", "B", 0.80)   # seed's in-genre neighbour (re-anchor target)
+        db.add_edge("A", "F", 0.95)      # A's only onward hop is foreign
+        db.add_meta("SEED", "S",   "US", ["hiphop"])
+        db.add_meta("A",    "Aay", "US", ["hiphop"])
+        db.add_meta("B",    "Bee", "US", ["hiphop"])
+        db.add_meta("F",    "Eff", "GR", ["laiko"])   # foreign to seed
+        out = _run(tg.walk(db, "SEED", length=3, meta_lambda=0.35))
+        self.assertNotIn("F", out)
+        self.assertEqual(out[:2], ["A", "B"])
+
+
+class TestWalkRegionalCountryPool(unittest.TestCase):
+    """For a regional-scene seed (laiko/Latin/Reggae/Asian-Pop), a foreign
+    country is itself foreign — the lever that keeps a Greek-laiko seed from
+    drifting into acoustically-near foreign pop whose coherent same-country
+    continuation happens to be untagged."""
+
+    def test_regional_seed_vetoes_foreign_country_even_when_genre_matches(self):
+        # SEED is laiko/GR (regional). N is the nearest neighbour and even shares
+        # the 'laiko' tag, but it is GB → the country boundary vetoes it. G is a
+        # farther GR track with NO genre tags — kept, because same-country and no
+        # genre evidence to judge — so the queue stays Greek.
+        db = FakeDB()
+        db.add_edge("SEED", "N", 0.95)   # nearest, laiko but GB
+        db.add_edge("SEED", "G", 0.70)   # farther, GR, untagged
+        db.add_meta("SEED", "S",   "GR", ["laiko"])
+        db.add_meta("N",    "Enn", "GB", ["laiko"])
+        db.add_meta("G",    "Gee", "GR", [])
+        out = _run(tg.walk(db, "SEED", length=1, meta_lambda=0.35))
+        self.assertEqual(out[0], "G")
+
+    def test_nonregional_seed_does_not_veto_foreign_country(self):
+        # SEED is hiphop/US (NOT regional). N is hiphop/GB — same genre, foreign
+        # country — must NOT be country-vetoed, so its higher affinity wins.
+        db = FakeDB()
+        db.add_edge("SEED", "N", 0.95)
+        db.add_edge("SEED", "G", 0.70)
+        db.add_meta("SEED", "S",   "US", ["hiphop"])
+        db.add_meta("N",    "Enn", "GB", ["hiphop"])
+        db.add_meta("G",    "Gee", "US", ["hiphop"])
+        out = _run(tg.walk(db, "SEED", length=1, meta_lambda=0.35))
+        self.assertEqual(out[0], "N")
+
+
+class TestWalkGenreFlowGradient(unittest.TestCase):
+    """genre_flow_lambda rewards NPMI genre continuity to the CURRENT track, so
+    within an already-in-genre pool the walk prefers a smooth subgenre trajectory
+    over the merely-nearest acoustic neighbour. Off (0.0) by default."""
+
+    def _db(self):
+        # SEED(rap) → A(rap,drill). From A: X(rap,drill) is a touch farther but
+        # shares A's 'drill'; Y(rap,trap) is nearer but only shares 'rap'. Both
+        # are in-pool (same mega-genre as the seed).
+        db = FakeDB()
+        db.add_edge("SEED", "A", 0.95)
+        db.add_edge("A", "X", 0.70)
+        db.add_edge("A", "Y", 0.75)
+        db.add_meta("SEED", "S",   "US", ["rap"])
+        db.add_meta("A",    "Aay", "US", ["rap", "drill"])
+        db.add_meta("X",    "Ex",  "US", ["rap", "drill"])
+        db.add_meta("Y",    "Why", "US", ["rap", "trap"])
+        return db
+
+    def test_off_by_default_nearer_acoustic_wins(self):
+        out = _run(tg.walk(self._db(), "SEED", length=2, meta_lambda=0.35))
+        self.assertEqual(out, ["A", "Y"])
+
+    def test_gradient_prefers_subgenre_continuity_to_current(self):
+        out = _run(tg.walk(self._db(), "SEED", length=2, meta_lambda=0.35,
+                           genre_flow_lambda=1.0))
+        self.assertEqual(out, ["A", "X"])
 
 
 if __name__ == "__main__":

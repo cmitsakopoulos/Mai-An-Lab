@@ -45,7 +45,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
-import os
 from typing import Optional
 
 import numpy as np
@@ -57,9 +56,41 @@ from utils.dsp import (
     unpack_graph_embedding,
 )
 from utils.harmonic import key_index_to_camelot
-from utils.config import APP_DIR
 
 logger = logging.getLogger(__name__)
+
+# ── Coordinate-graph cache ───────────────────────────────────────────────────
+# The walk's similarity oracle is the coordinate graph (persisted Zr coords +
+# self-tuning σ/threshold matrices). Building it does three O(N²) passes
+# (load_live_coordinate_graph); without a cache that ran on *every* walk() call
+# — i.e. every Play-Similar press recomputed global bandwidths for the whole
+# library. We cache it for the process lifetime, keyed on the db_manager
+# identity, and invalidate whenever build_acoustic_edges rewrites the geometry.
+_COORD_GRAPH_CACHE: dict = {"key": None, "graph": None}
+
+
+def invalidate_coord_graph_cache() -> None:
+    """Drop the cached coordinate graph. Called after any rebuild that changes
+    the persisted Zr coords / clusters, so the next walk reloads fresh."""
+    _COORD_GRAPH_CACHE["key"] = None
+    _COORD_GRAPH_CACHE["graph"] = None
+
+
+async def _coord_graph_cached(db_manager):
+    """`load_live_coordinate_graph` with a process-lifetime cache. Keyed on the
+    db_manager identity so two live DBs (e.g. across tests) never share a graph;
+    build_acoustic_edges invalidates on rebuild. Returns None (and does not
+    cache) when the backend can't serve coordinates — the caller falls back to
+    the edge table."""
+    key = id(db_manager)
+    if _COORD_GRAPH_CACHE["key"] == key and _COORD_GRAPH_CACHE["graph"] is not None:
+        return _COORD_GRAPH_CACHE["graph"]
+    graph = await load_live_coordinate_graph(db_manager)
+    if graph is not None:
+        _COORD_GRAPH_CACHE["key"] = key
+        _COORD_GRAPH_CACHE["graph"] = graph
+    return graph
+
 
 # Top-K acoustic neighbours stored per track. 20 is enough for both 'most
 # similar' lookups and short random walks; bigger K eats DB rows without
@@ -77,203 +108,6 @@ KIND_ALBUM = "album"
 
 
 # ── Builders ─────────────────────────────────────────────────────────────────
-
-
-def _kmeans(
-    X: np.ndarray,
-    k: int,
-    max_iter: int = 50,
-    n_restarts: int = 5,
-) -> np.ndarray:
-    """k-means clustering with k-means++ init. Returns labels (N,)."""
-    N, D = X.shape
-    best_labels = np.zeros(N, dtype=np.int32)
-    best_inertia = np.inf
-    rng = np.random.RandomState(42)
-
-    # Pre-calculate squared norms of X for BLAS-accelerated Lloyd iterations
-    X_sq = np.sum(X ** 2, axis=1, keepdims=True)
-
-    for _ in range(n_restarts):
-        # Optimized k-means++ initialisation
-        centres = np.empty((k, D), dtype=np.float64)
-        centres[0] = X[rng.choice(N)]
-        min_dists = np.sum((X - centres[0]) ** 2, axis=1)
-        for c in range(1, k):
-            probs = min_dists / (min_dists.sum() + 1e-12)
-            centres[c] = X[rng.choice(N, p=probs)]
-            new_dists = np.sum((X - centres[c]) ** 2, axis=1)
-            min_dists = np.minimum(min_dists, new_dists)
-
-        # Lloyd iterations
-        labels = np.zeros(N, dtype=np.int32)
-        for _ in range(max_iter):
-            # Assignment using BLAS dot-product distance calculation:
-            # ||X - centres||^2 = X_sq - 2*X*centres^T + centres_sq
-            centres_sq = np.sum(centres ** 2, axis=1, keepdims=True).T
-            dists = X_sq - 2.0 * np.dot(X, centres.T) + centres_sq
-            new_labels = np.argmin(dists, axis=1).astype(np.int32)
-            if np.array_equal(new_labels, labels):
-                labels = new_labels
-                break
-            labels = new_labels
-            # Update
-            for c in range(k):
-                members = X[labels == c]
-                if len(members) > 0:
-                    centres[c] = members.mean(axis=0)
-
-        inertia = 0.0
-        for c in range(k):
-            members = X[labels == c]
-            if len(members) > 0:
-                inertia += float(np.sum((members - centres[c]) ** 2))
-        if inertia < best_inertia:
-            best_inertia = inertia
-            best_labels = labels.copy()
-
-    return best_labels
-
-
-def _louvain_local_move(
-    n: int,
-    edges: list[tuple[int, int, float]],
-    self_w: np.ndarray,
-    resolution: float,
-    rng: random.Random,
-    max_passes: int,
-) -> tuple[np.ndarray, int]:
-    """One Louvain level: greedily move nodes to maximise modularity.
-
-    Returns (community-per-node, total moves made). `self_w[i]` is i's
-    self-loop weight (intra-community weight folded in from a prior
-    aggregation level; zero at the first level).
-    """
-    adj: list[dict[int, float]] = [dict() for _ in range(n)]
-    for (u, v, w) in edges:
-        adj[u][v] = adj[u].get(v, 0.0) + w
-        adj[v][u] = adj[v].get(u, 0.0) + w
-
-    # degree k_i = incident edge weight + 2× self-loop weight
-    k = np.array(
-        [sum(adj[i].values()) + 2.0 * float(self_w[i]) for i in range(n)],
-        dtype=np.float64,
-    )
-    m2 = float(k.sum())  # = 2m
-    if m2 <= 0.0:
-        return np.arange(n, dtype=np.int64), 0
-
-    comm = np.arange(n, dtype=np.int64)
-    comm_tot = k.copy()  # Σ_tot: total degree per community
-    order = list(range(n))
-    total_moves = 0
-
-    for _pass in range(max_passes):
-        rng.shuffle(order)
-        moved_this_pass = 0
-        for i in order:
-            ci = int(comm[i])
-            ki = k[i]
-            # tentatively remove i from its community
-            comm_tot[ci] -= ki
-            # summed weight from i into each neighbouring community
-            nbr_w: dict[int, float] = {}
-            for j, w in adj[i].items():
-                cj = int(comm[j])
-                nbr_w[cj] = nbr_w.get(cj, 0.0) + w
-            # gain of joining C ≈ w(i,C) - γ·Σ_tot[C]·k_i/2m. Constant terms are
-            # identical across C, so this comparison is exact for ranking.
-            best_c = ci
-            best_gain = nbr_w.get(ci, 0.0) - resolution * comm_tot[ci] * ki / m2
-            for cj, wic in nbr_w.items():
-                if cj == ci:
-                    continue
-                gain = wic - resolution * comm_tot[cj] * ki / m2
-                if gain > best_gain:
-                    best_gain = gain
-                    best_c = cj
-            comm_tot[best_c] += ki
-            comm[i] = best_c
-            if best_c != ci:
-                moved_this_pass += 1
-        total_moves += moved_this_pass
-        if moved_this_pass == 0:
-            break
-
-    return comm, total_moves
-
-
-def _louvain(
-    n: int,
-    edges: list[tuple[int, int, float]],
-    resolution: float = 1.0,
-    seed: int = 42,
-    max_levels: int = 20,
-    max_passes: int = 100,
-) -> np.ndarray:
-    """Louvain modularity community detection on a weighted undirected graph.
-
-    Parameters
-    ----------
-    n : number of nodes (0..n-1).
-    edges : undirected weighted edges (u, v, w) with u != v; duplicate /
-        reversed pairs are summed. The graph need not be connected.
-    resolution : γ in the modularity. >1 → more, smaller communities; <1 →
-        fewer, larger. 1.0 is standard modularity.
-
-    Returns
-    -------
-    np.ndarray (n,) int32 : contiguous community label (0..C-1) per node.
-        Isolated nodes (no edges) come back as their own singleton community.
-
-    Pure NumPy/Python (no SciPy/sklearn/igraph) so it runs on-device. Blondel
-    et al. (2008): (1) greedily move nodes to the neighbouring community that
-    most increases modularity until no move helps; (2) contract each community
-    into a super-node (intra-community weight becomes a self-loop) and recurse
-    on the smaller graph. Converges in a handful of levels at kNN scale.
-    """
-    rng = random.Random(seed)
-
-    cur_n = n
-    cur_self = np.zeros(cur_n, dtype=np.float64)
-    cur_edges = [(int(u), int(v), float(w)) for (u, v, w) in edges if u != v]
-    labels = np.arange(n, dtype=np.int64)  # original node -> current super-node
-
-    for _level in range(max_levels):
-        comm, moved = _louvain_local_move(
-            cur_n, cur_edges, cur_self, resolution, rng, max_passes,
-        )
-        # Relabel communities to contiguous 0..c-1.
-        uniq = sorted(set(int(c) for c in comm))
-        remap = {c: i for i, c in enumerate(uniq)}
-        comm = np.array([remap[int(c)] for c in comm], dtype=np.int64)
-        c = len(uniq)
-
-        labels = comm[labels]  # map original nodes through this partition
-
-        if c == cur_n or moved == 0:
-            break  # no contraction possible / nothing moved → converged
-
-        # Contract communities into super-nodes for the next level.
-        new_self = np.zeros(c, dtype=np.float64)
-        for i in range(cur_n):
-            new_self[comm[i]] += cur_self[i]
-        edge_acc: dict[tuple[int, int], float] = {}
-        for (u, v, w) in cur_edges:
-            cu, cv = int(comm[u]), int(comm[v])
-            if cu == cv:
-                new_self[cu] += w
-            else:
-                key = (cu, cv) if cu < cv else (cv, cu)
-                edge_acc[key] = edge_acc.get(key, 0.0) + w
-        cur_edges = [(a, b, w) for (a, b), w in edge_acc.items()]
-        cur_self = new_self
-        cur_n = c
-
-    uniq = sorted(set(int(x) for x in labels))
-    remap = {c: i for i, c in enumerate(uniq)}
-    return np.array([remap[int(x)] for x in labels], dtype=np.int32)
-
 
 # ── Builders ─────────────────────────────────────────────────────────────────
 
@@ -337,310 +171,6 @@ def _feature_vector(row: dict, timbre: np.ndarray, surviving: list[str]) -> np.n
     sc = _all_scalars(row)
     scalars = np.array([sc[s] for s in surviving], dtype=np.float32)
     return np.concatenate([timbre.astype(np.float32), scalars])
-
-
-def project_to_zr(row: dict, proj: dict) -> Optional[np.ndarray]:
-    """Project one track row into the persisted graph Zr space.
-
-    `proj` is the dict from `db_manager.load_pca_space()`: means/stds (D_cont,),
-    projection (D_cont, k), and the feature spec (surviving scalars,
-    scalar_weight, embed_dims, harmonic metadata). Returns None when the track
-    lacks a usable timbre BLOB or the projection is absent/mismatched.
-
-    Late Fusion: the harmonic columns (cos_h, sin_h, key_mode) are excluded
-    from the PCA projection and concatenated back onto Zr using their own
-    persisted z-score stats + harmonic_weight. This preserves the rigid
-    Camelot wheel geometry that SVD would otherwise rotate.
-    """
-    if not proj or proj.get("projection") is None or proj.get("surviving") is None:
-        return None
-    v = unpack_graph_embedding(row.get("timbre"))
-    if v is None or v.shape[0] != GRAPH_EMBED_DIMS:
-        return None
-
-    surviving = proj["surviving"]
-    embed_dims = int(proj.get("embed_dims", GRAPH_EMBED_DIMS))
-    scalar_weight = float(proj.get("scalar_weight", 1.0))
-    harmonic_names = set(proj.get("harmonic_names") or [])
-    harmonic_weight = float(proj.get("harmonic_weight", 1.5))
-
-    x = _feature_vector(row, v, surviving)
-
-    # ── Late-fusion split ────────────────────────────────────────────────
-    if harmonic_names:
-        # Determine which columns in x are harmonic (offset by embed_dims).
-        harm_cols = []
-        cont_cols = []
-        for i, s in enumerate(surviving):
-            col = embed_dims + i
-            if s in harmonic_names:
-                harm_cols.append(col)
-            else:
-                cont_cols.append(col)
-        # Timbre columns are always continuous.
-        cont_cols = list(range(embed_dims)) + cont_cols
-
-        x_cont = x[cont_cols]
-        x_harm = x[harm_cols]
-
-        # z-score continuous part with persisted stats.
-        means = np.asarray(proj["means"], dtype=np.float32)
-        stds = np.asarray(proj["stds"], dtype=np.float32)
-        if x_cont.shape[0] != means.shape[0]:
-            return None
-        z_cont = (x_cont - means) / stds
-        # Boost non-timbre continuous scalars.
-        if scalar_weight != 1.0:
-            z_cont[embed_dims:] *= scalar_weight
-
-        # z-score harmonic part with its own persisted stats.
-        h_means = np.asarray(proj.get("harmonic_means", np.zeros(len(harm_cols))), dtype=np.float32)
-        h_stds = np.asarray(proj.get("harmonic_stds", np.ones(len(harm_cols))), dtype=np.float32)
-        z_harm = ((x_harm - h_means) / h_stds) * harmonic_weight
-
-        # Project continuous part, concatenate harmonics.
-        zr_cont = z_cont @ np.asarray(proj["projection"], dtype=np.float32)
-        return np.concatenate([zr_cont, z_harm]).astype(np.float32)
-    else:
-        # Legacy path (pre-late-fusion projection): project the full vector.
-        means = np.asarray(proj["means"], dtype=np.float32)
-        stds = np.asarray(proj["stds"], dtype=np.float32)
-        if x.shape[0] != means.shape[0]:
-            return None
-        z = (x - means) / stds
-        z[embed_dims:] *= scalar_weight
-        return (z @ np.asarray(proj["projection"], dtype=np.float32)).astype(np.float32)
-
-
-def _local_refine_edges(
-    paths: list[str],
-    Z_cont: np.ndarray,
-    Z_harm: np.ndarray,
-    cluster_labels: np.ndarray,
-    k: int,
-    harmonic_weight: float,
-    min_size: int = 12,
-) -> tuple[list[tuple[str, str, float]], int]:
-    """Re-embed each Louvain community in its OWN local PCA and recompute the
-    intra-community acoustic edges with locally-informative axes.
-
-    Why (suggestion 3): the global SVD's principal axes are owned by whatever
-    genre dominates the library, so a minority-genre community is embedded on
-    axes fit to a *different* genre's variance and its internal structure
-    collapses (the majority-class / batch effect the genre diagnostic
-    surfaced). Re-z-scoring and re-PCA'ing *within* the community gives that
-    neighbourhood a metric fit to its own variance — the bioinformatics
-    "subcluster with cluster-specific HVGs" move.
-
-    Returns (intra_edges, n_refined_communities). The caller keeps the global
-    cross-community edges and replaces only the intra-community ones. The
-    persisted global Zr geometry is left untouched so project_to_zr is unaffected.
-    """
-    intra_edges: list[tuple[str, str, float]] = []
-    refined = 0
-    for cid in np.unique(cluster_labels):
-        members = np.where(cluster_labels == cid)[0]
-        m = int(members.size)
-        if m < min_size:
-            continue  # too small for a meaningful local geometry
-
-        # Local z-score of the continuous block (re-centre/scale within community).
-        sub = Z_cont[members]
-        mu = sub.mean(axis=0)
-        sd = sub.std(axis=0)
-        sd = np.where(sd < 1e-8, 1.0, sd)
-        subz = (sub - mu) / sd
-
-        # Local PCA (Kaiser λ>1, ≥3 comps) — community-specific principal axes.
-        if subz.shape[1] >= 4 and m > 4:
-            _u, _s, _vt = np.linalg.svd(subz, full_matrices=False)
-            ev = (_s ** 2) / float(m - 1)
-            kk = max(3, min(int((ev > 1.0).sum()), _vt.shape[0]))
-            subr = (subz @ _vt[:kk].T).astype(np.float32)
-        else:
-            subr = subz.astype(np.float32)
-
-        # Local harmonic late-fusion (re-z-scored within the community).
-        h = Z_harm[members]
-        hmu = h.mean(axis=0)
-        hsd = h.std(axis=0)
-        hsd = np.where(hsd < 1e-8, 1.0, hsd)
-        subr = np.concatenate(
-            [subr, ((h - hmu) / hsd).astype(np.float32) * harmonic_weight], axis=1,
-        )
-
-        # Local kNN + self-tuning σ + strict mutual-kNN — same recipe as the
-        # global build, restricted to the community subgraph.
-        kk = min(k, m - 1)
-        if kk < 1:
-            continue
-        sq = np.sum(subr ** 2, axis=1)
-        d2 = sq[:, None] - 2.0 * (subr @ subr.T) + sq[None, :]
-        np.fill_diagonal(d2, np.inf)
-        cand: list[list[tuple[int, float]]] = []
-        for i in range(m):
-            idx = np.argpartition(d2[i], kk)[:kk]
-            idx = idx[np.argsort(d2[i, idx])]
-            cand.append([(int(j), max(0.0, float(d2[i, j]))) for j in idx])
-        LOCAL_K = 7
-        sig = np.ones(m, dtype=np.float32)
-        for i in range(m):
-            if cand[i]:
-                piv = cand[i][min(LOCAL_K - 1, len(cand[i]) - 1)][1]
-                sig[i] = float(np.sqrt(max(0.0, piv)))
-        sig = np.maximum(sig, 1e-3)
-        nbr = [{j for j, _ in cand[i]} for i in range(m)]
-        for i in range(m):
-            for j, d2v in cand[i]:
-                if i not in nbr[j]:
-                    continue
-                aff = float(np.exp(-d2v / (sig[i] * float(sig[j]))))
-                intra_edges.append((paths[int(members[i])], paths[int(members[j])], aff))
-        refined += 1
-    return intra_edges, refined
-
-
-def _knn_edges(
-    Zr: np.ndarray,
-    paths: list[str],
-    k: int,
-    csls_beta: float,
-) -> tuple[list[tuple[str, str, float]], list[tuple[int, int, float]], int, int, int]:
-    """Self-tuning-affinity kNN + strict mutual-kNN pruning over the persisted
-    Zr geometry.
-
-    Pure numpy/Python (no DB) so `build_acoustic_edges` can run it via
-    asyncio.to_thread off the event loop — the big `@` products release the GIL
-    and the chunked passes never freeze the UI's tiny neighbour queries.
-    Returns (edges, mutual_pairs, N, k_eff, mutual_total).
-    """
-    N = Zr.shape[0]
-    k_eff = min(k, N - 1)
-    Zr_sq = np.sum(Zr ** 2, axis=1)  # row squared-norms for distance expansion
-
-    # ── Pass 1: self-tuning bandwidth σ_i (Zelnik-Manor) ──────────────────
-    # σ_i = distance to i's LOCAL_K-th nearest neighbour. σ is a *distance*
-    # scale, independent of how candidates are later ranked, so it's computed
-    # up front over full rows. Chunked so we never materialise the full N×N
-    # matrix. ||a-b||² = ||a||² - 2a·b + ||b||².
-    LOCAL_K = 7
-    chunk = 256
-    sigmas = np.ones(N, dtype=np.float32)
-    for i in range(0, N, chunk):
-        block = Zr[i:i + chunk]              # (C, D)
-        c = block.shape[0]
-        d2 = Zr_sq[i:i + c, None] - 2.0 * (block @ Zr.T) + Zr_sq[None, :]
-        for j in range(c):
-            d2[j, i + j] = np.inf            # mask self
-        # LOCAL_K-th smallest squared distance per row → σ = its sqrt.
-        piv = np.partition(d2, LOCAL_K - 1, axis=1)[:, LOCAL_K - 1]
-        sigmas[i:i + c] = np.sqrt(np.maximum(piv, 0.0))
-    # Floor σ so a near-duplicate pivot (d ≈ 0) doesn't blow up the kernel.
-    sigmas = np.maximum(sigmas, 1e-3)
-
-    # After σ (Pass 1): per-node hubness r(x) = mean of x's top-LOCAL_K affinities.
-    r = np.zeros(N, dtype=np.float32)
-    if csls_beta > 0.0:
-        for i in range(0, N, chunk):
-            block = Zr[i:i + chunk]
-            c = block.shape[0]
-            d2 = Zr_sq[i:i + c, None] - 2.0 * (block @ Zr.T) + Zr_sq[None, :]
-            for j in range(c):
-                d2[j, i + j] = np.inf
-            A = np.exp(-d2 / (sigmas[i:i + c, None] * sigmas[None, :]))
-            r[i:i + c] = np.sort(A, axis=1)[:, -LOCAL_K:].mean(axis=1)
-
-    # ── Pass 2: candidate neighbourhoods by self-tuning AFFINITY ──────────
-    # affinity(i,j) = exp(-d(i,j)² / (σ_i·σ_j)). We select each track's top-K by
-    # *affinity*, not by raw Euclidean distance. Gating on distance and only
-    # then applying the kernel as an edge weight (the previous behaviour) threw
-    # the kernel's hub mitigation away at the membership stage: the σ_j term
-    # divides a candidate's distance by *its own* neighbourhood scale, so a
-    # sparse-region neighbour — typically a minority-genre track — outranks an
-    # equidistant majority "hub". A per-class retrieval audit
-    # (tools/projection_diagnostic.py) showed affinity selection recovers
-    # minority structure the distance gate discarded (e.g. Classical kNN purity
-    # 0.21 → 0.33; global purity 0.631 → 0.640) at no majority cost. The
-    # affinity computed here is reused directly as the edge weight, so there is
-    # no separate rescale pass.
-    candidates: list[list[tuple[int, float]]] = [[] for _ in range(N)]
-    for i in range(0, N, chunk):
-        block = Zr[i:i + chunk]              # (C, D)
-        c = block.shape[0]
-        d2 = Zr_sq[i:i + c, None] - 2.0 * (block @ Zr.T) + Zr_sq[None, :]
-        for j in range(c):
-            d2[j, i + j] = np.inf            # self → affinity 0, never selected
-        A = np.exp(-d2 / (sigmas[i:i + c, None] * sigmas[None, :]))
-        if csls_beta > 0.0:
-            sel = A - csls_beta * 0.5 * (r[i:i + c, None] + r[None, :])
-        else:
-            sel = A
-        # Largest-K affinities per row. argpartition on -sel is O(N); order slice.
-        topk_unsorted = np.argpartition(-sel, k_eff, axis=1)[:, :k_eff]
-        for j in range(c):
-            idx = topk_unsorted[j]
-            ordered = idx[np.argsort(-sel[j, idx])]
-            candidates[i + j] = [(int(nb), float(A[j, nb])) for nb in ordered]
-
-    # Mutual-kNN pruning: keep edge (i → j) iff j ∈ topK(i) AND i ∈ topK(j).
-    # Strict mutual-kNN flattens hub over-representation. The surviving edges
-    # are symmetric (the self-tuning affinity is symmetric in i,j), so we also
-    # collect them as undirected (i<j) pairs to feed Louvain below.
-    neighbour_set = [{nb for nb, _ in cands} for cands in candidates]
-    edges: list[tuple[str, str, float]] = []
-    mutual_pairs: list[tuple[int, int, float]] = []
-    mutual_total = 0
-    for src_idx, cands in enumerate(candidates):
-        src = paths[src_idx]
-        for nb_idx, weight in cands:
-            if src_idx not in neighbour_set[nb_idx]:
-                continue
-            mutual_total += 1
-            edges.append((src, paths[nb_idx], weight))
-            if src_idx < nb_idx:
-                mutual_pairs.append((src_idx, nb_idx, weight))
-
-    return edges, mutual_pairs, N, k_eff, mutual_total
-
-
-def _render_pca_report(
-    rows: list[dict],
-    paths: list[str],
-    Zr: np.ndarray,
-    cluster_labels: np.ndarray,
-) -> None:
-    """Regenerate the on-device PCA / genre "mathematical truth" report.
-
-    matplotlib figure rendering plus disk I/O — strictly CPU/IO-bound, so the
-    async builder runs it via asyncio.to_thread (matplotlib uses the headless
-    'Agg' backend, safe off the main thread). Caller swallows failures.
-    """
-    from utils.pca_engine import plot_pca_report, plot_genre_report
-    from utils.streamrip_api import load_config
-
-    cfg = load_config()
-    library_folder = (cfg.get("downloads") or {}).get("folder") or ""
-    library_folder = str(library_folder).strip()
-
-    if library_folder and os.path.isdir(library_folder):
-        report_dir = os.path.join(library_folder, "pca_report")
-    else:
-        report_dir = os.path.join(APP_DIR, "pca_report")
-
-    saved = plot_pca_report(rows, report_dir, cluster_labels=cluster_labels)
-    # Genre-coloured view of the REAL Zr geometry (aligned to paths).
-    path_to_genre = {r["path"]: r.get("genre") for r in rows}
-    genres_aligned = [path_to_genre.get(p) for p in paths]
-    saved += plot_genre_report(
-        paths, Zr, genres_aligned, report_dir, cluster_labels=cluster_labels,
-    )
-    if saved:
-        logger.info(
-            "track_graph: PCA cluster report updated in %s  (%d figures)",
-            report_dir, len(saved),
-        )
-
-
 async def build_acoustic_edges(
     db_manager,
     k: int = DEFAULT_K_ACOUSTIC,
@@ -648,10 +178,6 @@ async def build_acoustic_edges(
     z_score: bool = True,
     scalar_weight: float = 1.5,
     harmonic_weight: float = 1.5,
-    cluster_resolution: float = 1.0,
-    local_refine: bool = False,
-    csls_beta: float = 0.0,
-    refine_resolution: float | None = None,
 ) -> int:
     """Recompute the acoustic tier of the graph from scratch.
 
@@ -666,8 +192,7 @@ async def build_acoustic_edges(
     """
     rows = await db_manager.get_tracks_with_features(features_version)
     if len(rows) < 2:
-        await db_manager.replace_neighbors_bulk([], KIND_ACOUSTIC)
-        logger.info("track_graph: acoustic edges skipped (only %d tracks with features)", len(rows))
+        logger.info("track_graph: acoustic projection skipped (only %d tracks with features)", len(rows))
         return 0
 
     # ── Metadata enrichment is DECOUPLED from the acoustic build ─────────────
@@ -712,7 +237,6 @@ async def build_acoustic_edges(
         vectors.append(_feature_vector(r, v, surviving))
 
     if len(vectors) < 2:
-        await db_manager.replace_neighbors_bulk([], KIND_ACOUSTIC)
         return 0
 
     X = np.stack(vectors, axis=0)  # (N, EMBED_DIMS + len(surviving))
@@ -813,7 +337,6 @@ async def build_acoustic_edges(
                 "harmonic_means": mu_harm.astype(np.float32).tolist(),
                 "harmonic_stds": sd_harm.astype(np.float32).tolist(),
                 "k_neighbors": int(k),
-                "csls_beta": float(csls_beta),
             }
             await db_manager.save_pca_space(
                 mu_cont.astype(np.float32), sd_cont.astype(np.float32),
@@ -829,104 +352,6 @@ async def build_acoustic_edges(
         except Exception as exc:
             logger.warning("track_graph: persisting Zr geometry failed: %s", exc)
 
-    # Self-tuning-affinity kNN + strict mutual-kNN pruning. Offloaded: the
-    # chunked N×N distance passes are the second-heaviest part of the build.
-    edges, mutual_pairs, N, k_eff, mutual_total = await asyncio.to_thread(
-        _knn_edges, Zr, paths, k, csls_beta,
-    )
-
-    await db_manager.replace_neighbors_bulk(edges, KIND_ACOUSTIC)
-    logger.info(
-        "track_graph: wrote %d acoustic edges across %d tracks (k=%d, mutual=%d)",
-        len(edges), N, k_eff, mutual_total,
-    )
-
-    # ── Community detection (Louvain) on the affinity graph ───────────────
-    # Replaces K-Means: the mutual-kNN affinity graph is the natural substrate
-    # for clustering, and modularity optimisation discovers the number of
-    # communities from the topology instead of guessing k. Labels persist in
-    # play_counts.cluster_id and are consumed by walk() as a soft cross-cluster
-    # penalty and by the PCA cluster report.
-    if N >= 6:
-        try:
-            cluster_labels = await asyncio.to_thread(
-                _louvain, N, mutual_pairs, cluster_resolution,
-            )
-            n_comm = int(len(np.unique(cluster_labels)))
-
-            pairs = [(paths[i], int(cluster_labels[i])) for i in range(N)]
-            await db_manager.save_track_clusters(pairs)
-
-            # Log the largest communities for diagnostics (singletons elided).
-            unique, counts = np.unique(cluster_labels, return_counts=True)
-            order = np.argsort(-counts)
-            size_str = ", ".join(
-                f"C{int(unique[o])}={int(counts[o])}" for o in order[:15]
-            )
-            logger.info(
-                "track_graph: Louvain (resolution=%.2f) found %d communities "
-                "across %d tracks; top sizes: %s",
-                cluster_resolution, n_comm, N, size_str,
-            )
-
-            # ── Local per-community re-embedding (suggestion 3) ──────────────
-            # Replace intra-community acoustic edges with ones computed under a
-            # community-local PCA/metric; keep the global cross-community edges.
-            # cluster_id stays from the global Louvain above (no re-clustering)
-            # so the refinement basis is fixed and non-circular.
-            if local_refine:
-                try:
-                    if refine_resolution is not None:
-                        refine_labels = await asyncio.to_thread(
-                            _louvain, N, mutual_pairs, refine_resolution,
-                        )
-                        logger.info("track_graph: ran second Louvain (resolution=%.2f) to seed refine partition", refine_resolution)
-                    else:
-                        refine_labels = cluster_labels
-                    intra, n_ref = await asyncio.to_thread(
-                        _local_refine_edges,
-                        paths, Z_cont, Z_harm, refine_labels, k_eff, harmonic_weight,
-                    )
-                    cl = {paths[i]: int(cluster_labels[i]) for i in range(N)}
-                    cross = [e for e in edges if cl.get(e[0]) != cl.get(e[1])]
-                    refined_edges = cross + intra
-                    await db_manager.replace_neighbors_bulk(refined_edges, KIND_ACOUSTIC)
-                    edges = refined_edges
-                    logger.info(
-                        "track_graph: local re-embedding refined %d communities → "
-                        "%d intra + %d cross = %d acoustic edges",
-                        n_ref, len(intra), len(cross), len(edges),
-                    )
-                except Exception as ref_err:
-                    logger.warning(
-                        "track_graph: local re-embedding failed (%s); "
-                        "keeping global acoustic edges", ref_err,
-                    )
-
-            # ── Generate/update on-device mathematical truth report ──────────
-            # matplotlib + disk I/O — offloaded so figure rendering never
-            # blocks the event loop.
-            try:
-                await asyncio.to_thread(
-                    _render_pca_report, rows, paths, Zr, cluster_labels,
-                )
-            except Exception as plot_err:
-                logger.warning(
-                    "track_graph: PCA visual report after edge build skipped: %s",
-                    plot_err,
-                )
-
-        except Exception as exc:
-            logger.warning(
-                "track_graph: Louvain clustering failed (%s); "
-                "walk will proceed without cluster constraint.",
-                exc,
-            )
-    else:
-        logger.info(
-            "track_graph: skipping community detection (N=%d < 6)", N,
-        )
-
     # ── Genre-similarity model (NPMI 'genre-BLOSUM') ───────────────────────
     # Precompute + persist from the artist enrichment cache so the walk's
     # metadata gate loads it instead of rebuilding it each session. Non-fatal:
@@ -936,7 +361,11 @@ async def build_acoustic_edges(
     except Exception as gerr:
         logger.warning("track_graph: genre affinity build skipped (%s)", gerr)
 
-    return len(edges)
+    # The persisted Zr coords / clusters just changed, so any cached coordinate
+    # graph the walk is holding is stale — force the next walk to reload it.
+    invalidate_coord_graph_cache()
+
+    return Zr.shape[0]
 
 
 async def build_genre_affinity(db_manager) -> int:
@@ -965,40 +394,11 @@ async def build_metadata_edges(
     db_manager,
     k: int = DEFAULT_K_METADATA,
 ) -> tuple[int, int]:
-    """Recompute the metadata tier. Two passes: same-artist and same-album.
+    """Recompute the metadata tier. Same-artist pass.
 
     Returns (artist_edge_count, album_edge_count).
     """
     conn = await db_manager.get_connection()
-
-    # Same-album: every other track in the album becomes a neighbour. Order by
-    # track_num so the natural album sequence wins as the tie-breaker.
-    album_edges: list[tuple[str, str, float]] = []
-    sql_alb = '''
-        SELECT al.id AS album_id, t.path, t.track_num
-        FROM tracks t
-        JOIN albums al ON al.id = t.album_id
-        ORDER BY al.id, t.track_num NULLS LAST, t.path
-    '''
-    async with conn.execute(sql_alb) as cursor:
-        rows = await cursor.fetchall()
-
-    by_album: dict[int, list[str]] = {}
-    for r in rows:
-        by_album.setdefault(r["album_id"], []).append(r["path"])
-    for paths in by_album.values():
-        if len(paths) < 2:
-            continue
-        for i, src in enumerate(paths):
-            for j, dst in enumerate(paths):
-                if src == dst:
-                    continue
-                # Closer in the album → higher weight; clamp so weight stays in (0, 1].
-                dist = abs(i - j)
-                w = 1.0 / (1.0 + 0.1 * (dist - 1))
-                album_edges.append((src, dst, float(w)))
-
-    await db_manager.replace_neighbors_bulk(album_edges, KIND_ALBUM)
 
     # Same-artist: any other track by the same artist. Cap per-source to k
     # so a prolific artist doesn't write thousands of rows for one source.
@@ -1031,10 +431,10 @@ async def build_metadata_edges(
     await db_manager.replace_neighbors_bulk(artist_edges, KIND_ARTIST)
 
     logger.info(
-        "track_graph: wrote %d artist + %d album metadata edges",
-        len(artist_edges), len(album_edges),
+        "track_graph: wrote %d artist + 0 album metadata edges",
+        len(artist_edges),
     )
-    return len(artist_edges), len(album_edges)
+    return len(artist_edges), 0
 
 
 # ── Traversal primitives ─────────────────────────────────────────────────────
@@ -1054,24 +454,6 @@ async def neighbors(
     """
     return await db_manager.get_neighbors(track_path, k=k, edge_kind=edge_kind)
 
-
-# Default per-tier weights applied on top of the raw edge weight before the
-# softmax. Acoustic affinity is the self-tuning kernel value ∈ (0, 1];
-# artist/album edges store a flat 1.0 indicator. With acoustic at 10× the
-# metadata tiers (post-batch-D z-scoring, the ratio is what matters, not the
-# absolute scale), even a low-affinity acoustic neighbour (≈ 0.18) outranks
-# any artist/album candidate. That demotes metadata to a tiebreaker used
-# when acoustic neighbours are exhausted, instead of letting prolific
-# artists trap the walker on a same-artist orbit. Album is lower still
-# because its edges fan out O(N²) within an album and would otherwise
-# saturate the candidate pool.
-_DEFAULT_EDGE_KIND_WEIGHTS: dict[str, float] = {
-    KIND_ACOUSTIC: 10.0,
-    KIND_ARTIST:   0.4,
-    KIND_ALBUM:    0.2,
-}
-
-
 def _unpack_embedding(blob: bytes | None) -> Optional[np.ndarray]:
     """Unpack a timbre BLOB to an L2-normalised float32 vector suitable for
     cosine on the graph timbre sub-space (mfcc mean/std + chroma + rhythm; delta
@@ -1087,58 +469,40 @@ def _unpack_embedding(blob: bytes | None) -> Optional[np.ndarray]:
     return (v / n).astype(np.float32)
 
 
-# ── Country-bonus γ tiers (see `_resolve_gamma`) ─────────────────────────────
-# γ scales how much a shared artist-country reinforces genre similarity in
-# `_meta_score`. Two opposing intuitions decide the tier of a genre bucket:
-#   • REGIONAL scenes travel with a country/language, so co-nationality is a
-#     STRONG extra cue → boost γ. Folk/laiko was the sole original member; Latin,
-#     Reggae and Asian-Pop have the same shape (salsa↔Latin America, dancehall↔
-#     Jamaica, K/J/C-pop↔their nation).
-#   • BORDERLESS genres are international scenes where nationality says little
-#     → damp γ so provenance doesn't over-count.
-# Borderless is contagious and wins ties: if either track carries a borderless
-# genre we damp regardless of co-tags (preserves the original precedence).
-# Everything else (Hip-Hop, Rock, Pop, Metal, Soul, Jazz, Gospel, Disco,
-# Soundtrack, Other) stays neutral — candidates for future tiering.
-_GAMMA_REGIONAL = frozenset({"Folk/Cntry", "Latin", "Reggae", "Asian-Pop"})
-_GAMMA_BORDERLESS = frozenset({"Electronic", "Classical"})
-_GAMMA_DAMP, _GAMMA_NEUTRAL, _GAMMA_BOOST = 0.05, 0.15, 0.30
+# ── Regional scenes (the ONE genre-taxonomy fact the walk still needs) ────────
+# A regional scene travels with a country/language, so for a seed in one of
+# these buckets a foreign country IS foreign — even a moderate cross-country
+# genre overlap (laiko↔dance-pop via NPMI) is the wrong continuation, and the
+# right one (another same-country track) is often *untagged*, so genre-set
+# similarity can't rank it. `_pool_foreign` therefore treats country as a HARD
+# pool constraint for regional seeds. Everything else (Hip-Hop, Rock, Pop,
+# Metal, Electronic, Jazz, …) is a borderless/international scene where
+# nationality says little, so country there is only the soft ordering bonus in
+# `_meta_score`.
+_REGIONAL_SCENES = frozenset({"Folk/Cntry", "Latin", "Reggae", "Asian-Pop"})
+# Flat weight of a shared artist-country in the `_meta_score` ordering bonus.
+# One constant (was a 3-tier γ keyed on genre_bucket): the regional/borderless
+# distinction now lives entirely in the pool constraint, not the score.
+_COUNTRY_W = 0.15
 
 
-def _resolve_gamma(genres_a, genres_b) -> float:
-    """Country-bonus scale γ for `_meta_score`. Damped where nationality is a
-    weak similarity cue (borderless genres) and boosted where it's strong
-    (regional scenes that travel with a country/language)."""
+def _is_regional(genres) -> bool:
+    """True iff any of a seed's genres falls in a regional-scene bucket."""
+    if not genres:
+        return False
     from utils.pca_engine import genre_bucket
-    all_genres = (genres_a or set()) | (genres_b or set())
-    if not all_genres:
-        return _GAMMA_NEUTRAL
-    buckets = {genre_bucket(g) for g in all_genres}
-    if buckets & _GAMMA_BORDERLESS:
-        return _GAMMA_DAMP
-    if buckets & _GAMMA_REGIONAL:
-        return _GAMMA_BOOST
-    return _GAMMA_NEUTRAL
+    return any(genre_bucket(g) in _REGIONAL_SCENES for g in genres)
 
 
 def _meta_score(a_path: str, b_path: str, meta_map: dict, genre_model: dict) -> float:
     """Metadata affinity between two tracks: soft genre-set similarity (NPMI
-    'genre-BLOSUM') plus an ADDITIVE shared-country term.
+    'genre-BLOSUM') plus a flat ADDITIVE shared-country bonus  gx + _COUNTRY_W·same_cty.
 
-    Two independent provenance signals, summed:  gx + β·same_country.
-      • gx  — soft genre-set similarity (NPMI), in [0, ~1].
-      • β   — the tiered country weight from `_resolve_gamma` (0.30 for regional
-              scenes that travel with a nation, 0.05 for borderless genres,
-              0.15 otherwise).
     Additive (not the old gx·(1+β·same_cty)) so shared provenance contributes
-    EVEN WHEN genre overlap is thin — the multiplicative form zeroed the country
-    signal whenever gx≈0, which is exactly the same-country-but-different-subgenre
-    case where nationality is the only cue left (e.g. two GB drill/grime artists
-    whose NPMI genre sets barely overlap).
-
-    Returns 0 when either track lacks enrichment, or when they're the same
-    artist (that coherence is already carried by the artist edge tier). Used by
-    `walk` to fold provenance/genre proximity into the acoustic score.
+    EVEN WHEN genre overlap is thin. Returns 0 when either track lacks
+    enrichment, or when they're the same artist (that coherence is already
+    carried by the artist edge tier). Used by `walk` to fold provenance/genre
+    proximity into the acoustic ordering.
     """
     from utils.genre_similarity import soft_set_sim
     ma = meta_map.get(a_path)
@@ -1154,9 +518,70 @@ def _meta_score(a_path: str, b_path: str, meta_map: dict, genre_model: dict) -> 
     ga = ma.get("genres") or frozenset()
     gb = mb.get("genres") or frozenset()
     gx = soft_set_sim(ga, gb, genre_model)
+    return gx + _COUNTRY_W * same_cty
 
-    beta = _resolve_gamma(ga, gb)
-    return gx + beta * same_cty
+
+def _genre_flow(a_path: str, b_path: str, meta_map: dict, genre_model: dict) -> float:
+    """NPMI soft-set genre similarity between two tracks, genre-only (no country,
+    no same-artist zeroing). Powers the within-pool *genre-continuity* gradient:
+    the walk's `_meta_score` bonus is anchored to the SEED, so it rewards genre
+    closeness to where you started; this is anchored to the CURRENT track, so it
+    rewards a smooth step-to-step genre trajectory *inside* the pool (grime →
+    grime → grime before broadening to trap), never changing pool membership.
+    Orthogonal to the acoustic flow term by design — it carries the tag signal
+    the timbre metric can't see. Returns 0 when either track lacks tags."""
+    from utils.genre_similarity import soft_set_sim
+    ma = meta_map.get(a_path)
+    mb = meta_map.get(b_path)
+    if not ma or not mb:
+        return 0.0
+    ga = ma.get("genres") or frozenset()
+    gb = mb.get("genres") or frozenset()
+    if not ga or not gb:
+        return 0.0
+    return soft_set_sim(ga, gb, genre_model)
+
+
+def _pool_foreign(
+    seed_path: str, cand_path: str, meta_map: dict, genre_model: dict, floor: float,
+) -> bool:
+    """Pool membership test: True iff `cand` is *known* to be foreign to the
+    seed and must be excluded from the walk's candidate pool outright — a strong
+    timbre bridge must never carry the queue across this boundary.
+
+    Two evidence-gated boundaries, either one foreign-marks the candidate:
+      • GENRE — both carry genre tokens and their NPMI soft-set similarity is
+        below `floor` (the Carti→laiko timbre-bridge across an obvious genre gap).
+      • COUNTRY (regional scenes only) — the SEED is a regional scene
+        (`_is_regional`) and both tracks carry a country and the countries
+        differ. For laiko/Latin/Reggae/Asian-Pop, cross-country IS the genre
+        jump, and it catches the case genre can't: the right same-country
+        continuation is frequently untagged, so only country separates it from
+        an acoustically-near foreign-pop track.
+
+    Conservative: fires only on positive evidence (both sides tagged on the
+    relevant field, same artist exempt). Missing enrichment → not foreign, so an
+    unenriched library degrades to the pure acoustic flow rather than an empty
+    queue."""
+    if floor <= 0.0:
+        return False
+    from utils.genre_similarity import soft_set_sim
+    ms = meta_map.get(seed_path)
+    mc = meta_map.get(cand_path)
+    if not ms or not mc:
+        return False
+    if ms.get("artist") and ms.get("artist") == mc.get("artist"):
+        return False  # same artist is never foreign
+    gs = ms.get("genres") or frozenset()
+    gc = mc.get("genres") or frozenset()
+    # Genre boundary (needs tags on both sides).
+    if gs and gc and soft_set_sim(gs, gc, genre_model) < floor:
+        return True
+    # Country boundary for regional seeds (needs a country on both sides).
+    cs, cc = ms.get("country"), mc.get("country")
+    if cs and cc and cs != cc and _is_regional(gs):
+        return True
+    return False
 
 
 async def load_live_coordinate_graph(db_manager):
@@ -1167,22 +592,19 @@ async def load_live_coordinate_graph(db_manager):
     if not rows:
         return None
 
-    # Load space projection parameters for K-neighbors and CSLS-beta
+    # Load space projection parameters for K-neighbors.
     proj = await db_manager.load_pca_space()
     k_neighbors = 50
-    csls_beta = 0.0
     if proj:
         k_neighbors = proj.get("k_neighbors", 50)
-        csls_beta = proj.get("csls_beta", 0.0)
 
-    paths = [r["path"] for r in rows if r.get("pca_coords")]
+    paths = [r["path"] for r in rows if r.get("pca_coords") is not None]
     if not paths:
         return None
 
     path_to_idx = {p: i for i, p in enumerate(paths)}
-    X_zr = np.array([r["pca_coords"] for r in rows if r.get("pca_coords")], dtype=np.float32)
-    cluster_map = {r["path"]: r["cluster_id"] for r in rows}
-    
+    X_zr = np.array([r["pca_coords"] for r in rows if r.get("pca_coords") is not None], dtype=np.float32)
+
     # meta_map for genre/country checks
     meta_map = {r["path"]: r for r in rows}
 
@@ -1205,19 +627,7 @@ async def load_live_coordinate_graph(db_manager):
             sigmas[i:i + c] = np.sqrt(np.maximum(piv, 0.0))
         sigmas = np.maximum(sigmas, 1e-3)
 
-        # 2. Compute hubness r(x) if csls_beta > 0
-        r = np.zeros(N, dtype=np.float32)
-        if csls_beta > 0.0:
-            for i in range(0, N, chunk):
-                block = X_zr[i:i + chunk]
-                c = block.shape[0]
-                d2 = X_zr_sq[i:i + c, None] - 2.0 * (block @ X_zr.T) + X_zr_sq[None, :]
-                for j in range(c):
-                    d2[j, i + j] = np.inf
-                A = np.exp(-d2 / (sigmas[i:i + c, None] * sigmas[None, :]))
-                r[i:i + c] = np.sort(A, axis=1)[:, -LOCAL_K:].mean(axis=1)
-
-        # 3. Compute top-K affinity thresholds
+        # 2. Compute top-K affinity thresholds (for mutual-kNN membership).
         thresholds = np.zeros(N, dtype=np.float32)
         for i in range(0, N, chunk):
             block = X_zr[i:i + chunk]
@@ -1226,29 +636,22 @@ async def load_live_coordinate_graph(db_manager):
             for j in range(c):
                 d2[j, i + j] = np.inf
             A = np.exp(-d2 / (sigmas[i:i + c, None] * sigmas[None, :]))
-            if csls_beta > 0.0:
-                sel = A - csls_beta * 0.5 * (r[i:i + c, None] + r[None, :])
-            else:
-                sel = A
-            piv_sel = np.partition(sel, N - k_eff, axis=1)[:, N - k_eff]
+            piv_sel = np.partition(A, N - k_eff, axis=1)[:, N - k_eff]
             thresholds[i:i + c] = piv_sel
 
-        return sigmas, thresholds, X_zr_sq, r, k_eff, csls_beta
+        return sigmas, thresholds, X_zr_sq, k_eff
 
-    sigmas, thresholds, X_zr_sq, r, k_eff, csls_beta = await asyncio.to_thread(_compute_graph_matrices)
+    sigmas, thresholds, X_zr_sq, k_eff = await asyncio.to_thread(_compute_graph_matrices)
 
     return {
         "X_zr": X_zr,
         "X_zr_sq": X_zr_sq,
         "paths": paths,
         "path_to_idx": path_to_idx,
-        "cluster_map": cluster_map,
         "meta_map": meta_map,
         "sigmas": sigmas,
-        "r": r,
         "thresholds": thresholds,
         "k_eff": k_eff,
-        "csls_beta": csls_beta,
     }
 
 
@@ -1258,37 +661,48 @@ async def walk(
     length: int = 10,
     avoid: Optional[set[str]] = None,
     meta_lambda: float = 0.35,
-    cluster_lambda: float = 0.5,
+    genre_flow_lambda: float = 0.0,
     mmr_lambda: float = 0.0,
     temperature: float = 0.0,
     rng_seed: int | None = None,
+    veto_genre_floor: float = 0.06,
 ) -> list[str]:
-    """Seed-Anchored Smooth Flow trajectory walk over the track graph.
+    """Seed-anchored trajectory walk over the track graph.
 
-    This is *the* walk: a deterministic, seed-anchored trajectory over the
-    acoustic graph, shaped by the metadata (genre/country) and community terms.
-    The stochastic Personalised-PageRank walker was removed — smooth+meta is the
-    single queue builder, so the enrichment we compute is actually used.
+    This is *the* walk. The candidate POOL is defined by metadata and only then
+    ORDERED by acoustics — the inversion that replaced a stack of acoustic
+    correction terms (cross-cluster penalty, multiplicative genre nudge) with one
+    membership rule:
 
-    At each step i -> C, candidates are unvisited acoustic neighbours scored by
+        pool(Seed)  = unvisited acoustic neighbours of T_i that are NOT
+                      `_pool_foreign` to the Seed (genre boundary, or country
+                      boundary for regional scenes)
+        Score(C)    = 0.7·Sim(T_i, C) + 0.3·Sim(Seed, C)   # acoustic (dual)
+                    + meta_lambda·meta(Seed, C)            # genre/country bonus (seed-anchored)
+                    + genre_flow_lambda·gx(T_i, C)         # genre continuity (current-anchored)
 
-        Score(C) = (0.7·Sim(T_i, C) + 0.3·Sim(Seed, C))         # acoustic
-                   · (1 + meta_lambda·meta(T_i, C))             # genre/country
-                   · (1 - cluster_lambda   if C leaves T_i's community)
+    Why a metadata pool instead of acoustic corrections: a timbre bridge puts a
+    laiko ballad next to a trap track (same acoustic neighbourhood, even the same
+    Louvain community), so no acoustic penalty can be trusted to stop the jump —
+    only the tags reveal it. `_pool_foreign` is that categorical gate, and for a
+    regional-scene seed it also treats a foreign country as foreign (the coherent
+    same-country continuation is often untagged, so genre similarity alone can't
+    rank it above an acoustically-near foreign-pop track). Within the pool the
+    acoustics do what they're good at: order by proximity, anchored to the seed
+    for both the flow term Sim(T_i,·) and the tether Sim(Seed,·).
 
-    The dual acoustic term keeps step-to-step coherence anchored to the seed;
-    the metadata factor (see `_meta_score`) and the soft cross-community penalty
-    fold in the provenance/genre signal, so the queue is genuinely acoustic +
-    metadata rather than acoustic-only. Selection is deterministic greedy — no
-    teleport, no MMR.
+    Everything degrades gracefully: with no coordinate graph the anchor falls
+    back to the stored top-K; with no enrichment nothing is `_pool_foreign` and
+    the meta term is 0 (evidence-gated), so the walk is the pure acoustic
+    dual-similarity flow — exactly what the test fakes exercise.
 
-    Both metadata terms degrade gracefully: a backend without the enrichment /
-    cluster accessors (e.g. the test fakes) or a library without enrichment
-    collapses the factors to 1.0 and the walk is the original dual-similarity
-    flow.
-
-    Three optional refinements — all off / deterministic by default, so the
-    contract above is unchanged unless a caller opts in:
+    Optional refinements — all off / deterministic by default, so the contract
+    above is unchanged unless a caller opts in:
+      • genre_flow_lambda>0 rewards NPMI genre continuity to the CURRENT track
+        (`_genre_flow`), so the queue prefers a smooth step-to-step genre
+        trajectory *inside* the pool (grime → grime → grime before broadening to
+        trap) instead of subgenre pinball. Never changes pool membership — the
+        veto still fences the genre; this only shapes the path within it.
       • mmr_lambda>0 adds a Maximal-Marginal-Relevance diversity penalty: a
         candidate is discounted by its timbre cosine to the tracks already
         emitted, so the queue stops chaining remixes / alternate mixes / the
@@ -1297,23 +711,22 @@ async def walk(
         score**(1/T) weights) instead of taking the arg-max, so repeated walks
         from one seed vary rather than returning an identical queue; T->0 is the
         arg-max. rng_seed makes a stochastic walk reproducible.
-      • neighbour lookups are served from an in-memory cache warmed by ONE
-        batched query (get_neighbors_multi_batch) rather than a DB round-trip
-        per step, when the backend supports it — same result, far less latency.
     """
     visited: set[str] = set(avoid or set())
     visited.add(seed_path)
     path_seq: list[str] = []
 
-    # Load live graph if coordinates-only mode is active
-    from utils.streamrip_api import get_walk_coordinates_only
-    coordinates_only = get_walk_coordinates_only()
+    # The coordinate graph is the walk's similarity oracle: it lets us compute
+    # the seed-anchor affinity for ANY candidate (not just the seed's stored
+    # top-K), which is what keeps the queue tethered to the seed. It's cached
+    # across walks (build invalidates it). A backend without coordinates (the
+    # test fakes, or a library that hasn't been built) returns None and the walk
+    # falls back to the persisted edge table + the top-K seed_sim_map.
     coord_graph = None
-    if coordinates_only:
-        try:
-            coord_graph = await load_live_coordinate_graph(db_manager)
-        except Exception as exc:
-            logger.warning("track_graph.walk: failed to load live coordinate graph, falling back to edge table: %s", exc)
+    try:
+        coord_graph = await _coord_graph_cached(db_manager)
+    except Exception as exc:
+        logger.warning("track_graph.walk: no coordinate graph, using edge table: %s", exc)
 
     def _get_live_neighbors(path: str, k: int = 40) -> list[dict]:
         if coord_graph is None:
@@ -1325,17 +738,11 @@ async def walk(
         X_zr_sq = coord_graph["X_zr_sq"]
         sigmas = coord_graph["sigmas"]
         thresholds = coord_graph["thresholds"]
-        r = coord_graph["r"]
-        csls_beta = coord_graph["csls_beta"]
         paths = coord_graph["paths"]
         d2 = X_zr_sq[src_idx] - 2.0 * (X_zr[src_idx] @ X_zr.T) + X_zr_sq
         d2[src_idx] = np.inf
         A = np.exp(-d2 / (sigmas[src_idx] * sigmas))
-        if csls_beta > 0.0:
-            sel = A - csls_beta * 0.5 * (r[src_idx] + r)
-        else:
-            sel = A
-        mutual_mask = (sel >= np.maximum(thresholds[src_idx], thresholds))
+        mutual_mask = (A >= np.maximum(thresholds[src_idx], thresholds) - 1e-5)
         mutual_mask[src_idx] = False
         nbr_indices = np.where(mutual_mask)[0]
         if len(nbr_indices) == 0:
@@ -1354,7 +761,6 @@ async def walk(
                 "title": m.get("title"),
                 "artist": m.get("artist"),
                 "album": m.get("album"),
-                "cluster_id": coord_graph["cluster_map"].get(p),
             })
         return res[:k]
 
@@ -1367,57 +773,26 @@ async def walk(
     # past the prefetched horizon) does a single live fetch; a backend without
     # the batch accessor (the test fakes) just uses live fetches throughout.
     # Either way the rows — and therefore the walk's output — are identical.
-    nbr_cache: dict[str, list[dict]] = {}
-    _has_batch = hasattr(db_manager, "get_neighbors_multi_batch")
-
-    async def _live_neighbors(path: str) -> list[dict]:
+    async def _neighbors_of(path: str) -> list[dict]:
+        if coord_graph is not None:
+            return _get_live_neighbors(path, k=40)
+        # Test-support fallback when coord_graph is None:
         if hasattr(db_manager, "get_neighbors_multi"):
             return await db_manager.get_neighbors_multi(path, (KIND_ACOUSTIC,), k=40)
         if hasattr(db_manager, "get_neighbors"):
             return await db_manager.get_neighbors(path, k=40, edge_kind=KIND_ACOUSTIC)
         return []
 
-    async def _neighbors_of(path: str) -> list[dict]:
-        if coord_graph is not None:
-            return _get_live_neighbors(path, k=40)
-        rows = nbr_cache.get(path)
-        if rows is None:
-            rows = await _live_neighbors(path)
-            nbr_cache[path] = rows
-        return rows
-
-    async def _prefetch(paths: list[str]) -> None:
-        if coord_graph is not None:
-            return
-        missing = [p for p in paths if p not in nbr_cache]
-        if not missing:
-            return
-        if _has_batch:
-            try:
-                batched = await db_manager.get_neighbors_multi_batch(
-                    missing, (KIND_ACOUSTIC,), k=40,
-                )
-                for p in missing:
-                    nbr_cache[p] = batched.get(p, [])
-                return
-            except Exception:
-                pass  # fall through to per-path live fetch
-        for p in missing:
-            nbr_cache[p] = await _live_neighbors(p)
-
     # Seed's acoustic neighbours (k=50) drive the seed-anchor term and the
-    # dead-end fallback; kept separate from the k=40 step-neighbour cache.
+    # dead-end fallback.
     if coord_graph is not None:
         seed_nbrs = _get_live_neighbors(seed_path, k=50)
     else:
+        # Test-support fallback when coord_graph is None:
         if hasattr(db_manager, "get_neighbors_multi"):
-            seed_nbrs = await db_manager.get_neighbors_multi(
-                seed_path, (KIND_ACOUSTIC,), k=50
-            )
+            seed_nbrs = await db_manager.get_neighbors_multi(seed_path, (KIND_ACOUSTIC,), k=50)
         elif hasattr(db_manager, "get_neighbors"):
-            seed_nbrs = await db_manager.get_neighbors(
-                seed_path, k=50, edge_kind=KIND_ACOUSTIC
-            )
+            seed_nbrs = await db_manager.get_neighbors(seed_path, k=50, edge_kind=KIND_ACOUSTIC)
         else:
             seed_nbrs = []
 
@@ -1425,9 +800,28 @@ async def walk(
         n["path"]: float(n.get("weight", 0.5)) for n in seed_nbrs if n.get("path")
     }
 
-    # Warm the step-neighbour cache: the seed itself (step 1's source) and its
-    # neighbours (the likely step-2+ sources) in a single batched round-trip.
-    await _prefetch([seed_path, *seed_sim_map.keys()])
+    # ── Seed-anchor affinity for ANY candidate (not just the seed's top-K) ────
+    # The fix for anchor evaporation: the old walk read the 0.3·seed term from
+    # seed_sim_map, which only held the seed's top-50 neighbours and defaulted to
+    # 0.0 beyond them — so the moment the greedy walk stepped outside that
+    # neighbourhood the anchor silently vanished and the queue drifted off-seed.
+    # With the coordinate graph we compute the self-tuning affinity
+    # exp(-d²/(σ_seed·σ_c)) against the seed for every candidate, so the tether
+    # never dies. Falls back to the top-K seed_sim_map with no coord graph.
+    _seed_idx = coord_graph["path_to_idx"].get(seed_path) if coord_graph else None
+    _seed_d2 = None
+    if coord_graph is not None and _seed_idx is not None:
+        _X = coord_graph["X_zr"]
+        _Xsq = coord_graph["X_zr_sq"]
+        _seed_d2 = _Xsq[_seed_idx] - 2.0 * (_X[_seed_idx] @ _X.T) + _Xsq
+
+    def _seed_affinity(path: str) -> float:
+        if _seed_d2 is not None:
+            j = coord_graph["path_to_idx"].get(path)
+            if j is not None:
+                sig = coord_graph["sigmas"]
+                return float(np.exp(-_seed_d2[j] / (sig[_seed_idx] * sig[j])))
+        return seed_sim_map.get(path, 0.0)
 
     # ── Metadata context (genre-NPMI + country) ──────────────────────────
     # meta_map is filled lazily as candidates are seen; the genre model loads
@@ -1436,8 +830,12 @@ async def walk(
     meta_active = meta_lambda > 0.0 and hasattr(db_manager, "get_artist_meta_for_paths")
     meta_map: dict[str, dict] = {}
     genre_model: dict = {}
-    if coord_graph is not None:
-        meta_map.update(coord_graph["meta_map"])
+    # NB: meta_map is filled ONLY from get_artist_meta_for_paths (the
+    # {artist, country, genres} shape _meta_score/the veto need). We do NOT seed
+    # it from coord_graph["meta_map"] — those rows carry album-level display
+    # fields, not enrichment genres/country, and pre-seeding them made
+    # _ensure_meta treat every path as "already present" and skip the real
+    # enrichment fetch, silently killing the metadata gate in coordinate mode.
     if meta_active and hasattr(db_manager, "get_genre_affinity"):
         try:
             genre_model = await db_manager.get_genre_affinity()
@@ -1483,21 +881,6 @@ async def walk(
             if v is not None:
                 emb_cache[p] = v
 
-    # ── Cluster context: soft penalty for hopping to a different community ──
-    cluster_active = cluster_lambda > 0.0 and hasattr(db_manager, "get_track_cluster")
-    cluster_map: dict[str, int | None] = {}
-    if coord_graph is not None:
-        cluster_map.update(coord_graph["cluster_map"])
-
-    async def _cluster_of(path: str) -> int | None:
-        if path not in cluster_map:
-            try:
-                cid = await db_manager.get_track_cluster(path)
-            except Exception:
-                cid = None
-            cluster_map[path] = int(cid) if cid is not None else None
-        return cluster_map[path]
-
     await _ensure_meta([seed_path, *seed_sim_map.keys()])
 
     rng = random.Random(rng_seed) if temperature > 0.0 else None
@@ -1515,35 +898,58 @@ async def walk(
         if not candidates:
             break
 
-        # Cache candidate cluster ids carried on the neighbour rows (no extra
-        # query) and resolve the current node's cluster once per step.
-        cur_cid: int | None = None
-        if cluster_active:
-            for c in candidates:
-                if c["path"] not in cluster_map:
-                    cid = c.get("cluster_id")
-                    cluster_map[c["path"]] = int(cid) if cid is not None else None
-            cur_cid = await _cluster_of(current)
-
         await _ensure_meta([c["path"] for c in candidates])
+
+        # ── Metadata pool (anchored to the seed) ──────────────────────────────
+        # Restrict the pool to candidates that are NOT `_pool_foreign` to the
+        # seed: a strong timbre bridge can never carry the queue across a genre
+        # boundary (Carti→laiko), nor — for a regional-scene seed — across a
+        # country boundary. Evidence-gated, so unenriched candidates survive.
+        if meta_active and veto_genre_floor > 0.0:
+            kept = [
+                c for c in candidates
+                if not _pool_foreign(
+                    seed_path, c["path"], meta_map, genre_model, veto_genre_floor,
+                )
+            ]
+            if not kept:
+                # Every neighbour of `current` is foreign to the seed. Do NOT
+                # admit a foreign track (the old behaviour silently broke the
+                # guarantee). RE-ANCHOR to the seed's own unvisited, in-pool
+                # neighbours and continue from the seed's vicinity instead. Their
+                # meta is already loaded (see the _ensure_meta on seed_sim_map).
+                kept = [
+                    n for n in seed_nbrs
+                    if n.get("path") and n["path"] not in visited
+                    and not _pool_foreign(
+                        seed_path, n["path"], meta_map, genre_model, veto_genre_floor,
+                    )
+                ]
+            if not kept:
+                # Nothing in-genre is reachable anywhere — end the queue rather
+                # than step foreign. Lowering veto_genre_floor is the escape
+                # valve for callers who prefer length over strict purity.
+                break
+            candidates = kept
+
         if mmr_active:
             await _ensure_emb([c["path"] for c in candidates])
 
-        # Score candidates: acoustic dual-similarity, then the metadata,
-        # cluster, and MMR-diversity factors (each multiplicative).
+        # Order the pool: additive acoustic-dual + seed-anchored metadata bonus
+        # + (opt) current-anchored genre-continuity, then the MMR-diversity haircut.
         scored: list[tuple[float, dict]] = []
         for c in candidates:
             w_curr = max(0.0, float(c.get("weight", 0.5)))
-            w_seed = seed_sim_map.get(c["path"], 0.0)
+            w_seed = _seed_affinity(c["path"])
             score = 0.7 * w_curr + 0.3 * w_seed
             if meta_active:
-                score *= 1.0 + meta_lambda * _meta_score(
-                    current, c["path"], meta_map, genre_model,
+                score += meta_lambda * _meta_score(
+                    seed_path, c["path"], meta_map, genre_model,
                 )
-            if cluster_active and cur_cid is not None:
-                cand_cid = cluster_map.get(c["path"])
-                if cand_cid is not None and cand_cid != cur_cid:
-                    score *= (1.0 - cluster_lambda)
+                if genre_flow_lambda > 0.0:
+                    score += genre_flow_lambda * _genre_flow(
+                        current, c["path"], meta_map, genre_model,
+                    )
             if mmr_active and selected_embs:
                 ev = emb_cache.get(c["path"])
                 if ev is not None:

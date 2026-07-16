@@ -94,7 +94,10 @@ def _trace(msg: str) -> None:
 #     `timbre` BLOB — NO play_counts schema change — but the BLOB length grows
 #     (52→88 floats) so v3 blobs are rejected by length and every track must be
 #     re-analysed. No backwards-compat read path.
-FEATURES_VERSION = 4
+# v5: drop mfcc_delta from sound-profile storage (timbre BLOB = 68 floats).
+#     In-place migration of existing databases, no raw file re-analysis needed.
+#     The graph similarity no longer needs to drop delta on load.
+FEATURES_VERSION = 5
 
 # Frame parameters. n_fft=2048 / hop=512 at 22050 Hz → ~93 ms windows hopping
 # every ~23 ms (~43 frames/sec). These are the conventional defaults from
@@ -127,15 +130,14 @@ RHYTHM_DIMS = (len(_TEMPOGRAM_MULTS_FULL)
 # window is negligible (extra ~700 ms/track on laptop CPU) and stabilises
 # every statistic noticeably.
 MAX_SECONDS = 120
-# Total length of the packed sound-profile BLOB. v4 layout (88 floats):
+# Total length of the packed sound-profile BLOB. v5 layout (68 floats):
 #   [ 0:20)  mfcc_mean
-#   [20:40)  mfcc_std    (NEW v4 — within-track timbral dispersion)
-#   [40:60)  mfcc_delta
-#   [60:72)  chroma
-#   [72:88)  rhythm      (NEW v4 — see RHYTHM_DIMS above)
+#   [20:40)  mfcc_std    (timbral dispersion)
+#   [40:52)  chroma
+#   [52:68)  rhythm      (see RHYTHM_DIMS above)
 # Stored as float32 little-endian; one BLOB so adding a new descriptor only
 # requires touching FEATURES_VERSION + the embedding layout.
-EMBED_DIMS = N_MFCC + N_MFCC + N_MFCC + N_CHROMA + RHYTHM_DIMS
+EMBED_DIMS = N_MFCC + N_MFCC + N_CHROMA + RHYTHM_DIMS
 TARGET_SAMPLE_RATE = 22050  # must match the Kotlin decoder's TARGET_SAMPLE_RATE
 
 
@@ -158,23 +160,21 @@ class Features:
     key_index: int             # 0..11 = C..B major, 12..23 = C..B minor
     mfcc_mean: np.ndarray      # (N_MFCC,) mean MFCC over HPSS-harmonic content
     mfcc_std: np.ndarray       # (N_MFCC,) per-coeff MFCC std (timbral spread)
-    mfcc_delta: np.ndarray     # (N_MFCC,) mean MFCC first derivative (Δ)
     chroma: np.ndarray         # (N_CHROMA,) mean pitch-class profile (HPSS-harmonic)
     rhythm: np.ndarray         # (RHYTHM_DIMS,) groove descriptors (see RHYTHM_DIMS)
 
     def timbre_blob(self) -> bytes:
-        """Pack the v4 sound profile into a single float32 LE BLOB.
+        """Pack the v5 sound profile into a single float32 LE BLOB.
 
-        v4 layout (88 × 4 = 352 bytes):
+        v5 layout (68 × 4 = 272 bytes):
             [ 0:20)  mfcc_mean
             [20:40)  mfcc_std
-            [40:60)  mfcc_delta
-            [60:72)  chroma
-            [72:88)  rhythm
+            [40:52)  chroma
+            [52:68)  rhythm
         """
         return (
             np.concatenate([
-                self.mfcc_mean, self.mfcc_std, self.mfcc_delta,
+                self.mfcc_mean, self.mfcc_std,
                 self.chroma, self.rhythm,
             ])
             .astype("<f4")
@@ -186,8 +186,7 @@ def unpack_timbre(blob: bytes | None) -> np.ndarray | None:
     """Inverse of Features.timbre_blob. Returns None for missing/malformed.
 
     Returns the full EMBED_DIMS vector. Callers that need the individual
-    groups can use `unpack_embedding_groups`. The single-vector form is what
-    the auto_playlist KNN selector consumes; it slices internally.
+    groups can use `unpack_embedding_groups`.
     """
     if not blob or len(blob) != EMBED_DIMS * 4:
         return None
@@ -195,41 +194,31 @@ def unpack_timbre(blob: bytes | None) -> np.ndarray | None:
 
 
 def unpack_embedding_groups(blob: bytes | None):
-    """Returns (mfcc_mean, mfcc_std, mfcc_delta, chroma, rhythm) or None for
-    missing/malformed, sliced from the v4 layout."""
+    """Returns (mfcc_mean, mfcc_std, chroma, rhythm) or None for
+    missing/malformed, sliced from the v5 layout."""
     v = unpack_timbre(blob)
     if v is None:
         return None
     o_std   = N_MFCC
-    o_delta = 2 * N_MFCC
-    o_chrom = 3 * N_MFCC
-    o_rhy   = 3 * N_MFCC + N_CHROMA
+    o_chrom = 2 * N_MFCC
+    o_rhy   = 2 * N_MFCC + N_CHROMA
     return (
         v[0:o_std],            # mfcc_mean
-        v[o_std:o_delta],      # mfcc_std
-        v[o_delta:o_chrom],    # mfcc_delta
+        v[o_std:o_chrom],      # mfcc_std
         v[o_chrom:o_rhy],      # chroma
         v[o_rhy:],             # rhythm
     )
 
 
-# Dimensionality of the timbre vector the *similarity graph* consumes: the full
-# BLOB minus the mfcc_delta block. A feature-group ablation (kNN genre-purity vs
-# a label-permutation null) found mfcc_delta carries no genre signal on its own
-# (it sits at the null) and only dilutes the Euclidean metric, so the graph
-# excludes it. The BLOB still stores delta (no extra version bump) — only the
-# graph view drops it. mfcc_mean + mfcc_std + chroma + rhythm = 68.
-GRAPH_EMBED_DIMS = N_MFCC + N_MFCC + N_CHROMA + RHYTHM_DIMS
+# Dimensionality of the timbre vector the *similarity graph* consumes.
+GRAPH_EMBED_DIMS = EMBED_DIMS
 
 
 def unpack_graph_embedding(blob: bytes | None) -> np.ndarray | None:
-    """The timbre vector the graph uses: the v4 BLOB with the mfcc_delta block
-    removed. Returns a GRAPH_EMBED_DIMS-length float32 vector, or None for a
+    """The timbre vector the graph uses: the v5 BLOB directly.
+    Returns a GRAPH_EMBED_DIMS-length float32 vector, or None for a
     missing/malformed/old-version BLOB (length-checked via `unpack_timbre`)."""
-    v = unpack_timbre(blob)
-    if v is None:
-        return None
-    return np.delete(v, np.s_[2 * N_MFCC:3 * N_MFCC])
+    return unpack_timbre(blob)
 
 
 # ─── Decoder dispatch ──────────────────────────────────────────────────────
@@ -685,33 +674,6 @@ def _mfcc_per_frame(mag: np.ndarray, sr: int) -> np.ndarray:
     return mfcc_full[:, 1:].astype(np.float32)  # drop coeff 0
 
 
-def _mfcc_delta(mfcc: np.ndarray, width: int = 9) -> np.ndarray:
-    """First-order temporal derivative of an MFCC matrix (per coefficient).
-
-    Standard formula (Sahidullah 2012 / HTK convention):
-        Δ[t] = Σ n·(x[t+n] − x[t−n])  /  2·Σ n²       for n in 1..N
-
-    where N = width//2 (half-window). Implemented as a centred weighted sum
-    via a sliding-window view along the time axis. Padded with edge
-    replication so the result has the same shape as the input.
-
-    Captures *how* timbre evolves frame-to-frame — strictly more informative
-    than raw std (which can't distinguish a smooth drift from rapid
-    oscillation between two stable timbres).
-    """
-    if mfcc.shape[0] < width:
-        return np.zeros_like(mfcc)
-    N = width // 2
-    weights = np.arange(-N, N + 1, dtype=np.float32)
-    norm = 2.0 * float((weights[weights > 0] ** 2).sum())
-    pad = ((N, N), (0, 0))
-    padded = np.pad(mfcc, pad, mode="edge")
-    # sliding_window_view along axis 0 appends a trailing axis of length=width.
-    windows = np.lib.stride_tricks.sliding_window_view(padded, window_shape=width, axis=0)
-    # windows shape: (n_frames, n_coeffs, width). Weight along the last axis.
-    return (windows * weights).sum(axis=-1).astype(np.float32) / norm
-
-
 # ─── HPSS (harmonic / percussive separation) ───────────────────────────────
 
 # Median-filter kernel sizes (Fitzgerald 2010). The standard librosa
@@ -889,8 +851,6 @@ def extract_features_from_pcm(pcm_path: str, sr: int) -> Features:
     mfcc = _mfcc_per_frame(H_mag, sr)
     mfcc_mean = mfcc.mean(axis=0).astype(np.float32)
     mfcc_std = mfcc.std(axis=0).astype(np.float32)            # v4: timbral spread
-    mfcc_delta_frames = _mfcc_delta(mfcc, width=9)
-    mfcc_delta_mean = mfcc_delta_frames.mean(axis=0).astype(np.float32)
     t7 = time.perf_counter()
 
     _trace(
@@ -910,7 +870,6 @@ def extract_features_from_pcm(pcm_path: str, sr: int) -> Features:
         key_index=key_idx,
         mfcc_mean=mfcc_mean,
         mfcc_std=mfcc_std,
-        mfcc_delta=mfcc_delta_mean,
         chroma=chroma,
         rhythm=rhythm,
     )

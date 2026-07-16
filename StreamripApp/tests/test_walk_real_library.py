@@ -7,10 +7,11 @@ term is meant to stop than any synthetic graph. This test runs the shipping
 walk over such an image and asserts:
 
   • structural invariants hold across many random seeds (seed excluded, no dupes,
-    avoid respected, length bounded, every hop is a real acoustic edge);
-  • the metadata/cluster factors do their job in aggregate — smooth+meta makes
-    NO MORE cross-community jumps than the acoustic-only walk, and strictly
-    fewer on at least some seeds.
+    avoid respected, length bounded, every hop is a real coordinate-graph
+    neighbour);
+  • the metadata pool does its job in aggregate — smooth+meta is at least as
+    genre-cohesive as the acoustic-only walk, and strictly more cohesive on at
+    least some seeds.
 
 It needs a *built* image (acoustic edges + clusters + enrichment). Point it with
 
@@ -50,22 +51,39 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-async def _acoustic_edge(db, a, b) -> bool:
-    conn = await db.get_connection()
-    async with conn.execute(
-        "SELECT 1 FROM track_neighbors "
-        "WHERE track_path=? AND neighbor_path=? AND edge_kind='acoustic'",
-        (a, b),
-    ) as cur:
-        return (await cur.fetchone()) is not None
+async def _genre_cohesion(db, seed, seq):
+    """Mean NPMI soft-set-sim of each track in `seq` vs the seed's genres, over
+    the pairs where both sides carry genre tokens. Returns (mean_sim, n_scored).
+    This is the walk's real quality target under the metadata-pool design —
+    genre coherence, not timbral-cluster stickiness."""
+    from utils.genre_similarity import soft_set_sim
+    model = await db.get_genre_affinity()
+    meta = await db.get_artist_meta_for_paths([seed] + list(seq))
+    sg = (meta.get(seed) or {}).get("genres") or frozenset()
+    sims = [
+        soft_set_sim(sg, gc, model)
+        for p in seq
+        for gc in [(meta.get(p) or {}).get("genres") or frozenset()]
+        if sg and gc
+    ]
+    return (sum(sims) / len(sims) if sims else 0.0), len(sims)
 
 
-async def _cluster_switches(db, seq) -> int:
-    cl = [await db.get_track_cluster(p) for p in seq]
-    return sum(
-        1 for a, b in zip(cl, cl[1:])
-        if a is not None and b is not None and a != b
-    )
+def _coord_neighbor(graph, a, b) -> bool:
+    """True iff `b` is a genuine mutual-kNN neighbour of `a` in the coordinate
+    graph the walk actually traverses (affinity ≥ both self-tuning thresholds).
+    This replaces the old persisted-edge-table check: the coordinate graph — not
+    track_neighbors — is the walk's live similarity oracle."""
+    import numpy as np
+    ia = graph["path_to_idx"].get(a)
+    ib = graph["path_to_idx"].get(b)
+    if ia is None or ib is None:
+        return False
+    X, Xsq = graph["X_zr"], graph["X_zr_sq"]
+    sig, thr = graph["sigmas"], graph["thresholds"]
+    d2 = float(Xsq[ia] - 2.0 * (X[ia] @ X[ib]) + Xsq[ib])
+    A = float(np.exp(-d2 / (sig[ia] * sig[ib])))
+    return A >= max(float(thr[ia]), float(thr[ib]))
 
 
 async def _has_acoustic_edges(db) -> bool:
@@ -116,18 +134,22 @@ class TestWalkOnRealLibrary(unittest.TestCase):
 
     def test_structural_invariants_hold_across_seeds(self):
         async def _check():
+            graph = await tg.load_live_coordinate_graph(self.db)
+            self.assertIsNotNone(graph, "built image has no coordinate graph")
             for seed in self.seeds:
                 out = await tg.walk(self.db, seed, length=WALK_LEN)
                 self.assertNotIn(seed, out, f"seed leaked into its own walk: {seed}")
                 self.assertEqual(len(out), len(set(out)), f"duplicate in walk from {seed}")
                 self.assertLessEqual(len(out), WALK_LEN)
-                # every consecutive pair must be a genuine acoustic edge (or a
-                # seed-neighbour fallback hop) — never a fabricated jump.
+                # Every consecutive pair must be a genuine coordinate-graph
+                # neighbour of the current track (or a seed-neighbour fallback
+                # hop) — never a fabricated jump. The coordinate graph, not the
+                # persisted edge table, is the walk's live oracle.
                 prev = seed
                 for p in out:
-                    ok = await _acoustic_edge(self.db, prev, p) or \
-                         await _acoustic_edge(self.db, seed, p)
-                    self.assertTrue(ok, f"non-edge hop {prev}->{p} (seed {seed})")
+                    ok = _coord_neighbor(graph, prev, p) or \
+                         _coord_neighbor(graph, seed, p)
+                    self.assertTrue(ok, f"non-neighbour hop {prev}->{p} (seed {seed})")
                     prev = p
         _run(_check())
 
@@ -141,41 +163,48 @@ class TestWalkOnRealLibrary(unittest.TestCase):
             self.assertNotIn(seed, second)
         _run(_check())
 
-    def test_metadata_reduces_cross_community_drift(self):
+    def test_metadata_improves_genre_cohesion(self):
+        # Under the metadata-pool design the walk's target is GENRE coherence,
+        # not timbral-cluster stickiness (the pool deliberately spans Louvain
+        # clusters — a Greek queue jumps between laiko ballads and Greek trap).
+        # So we measure mean NPMI genre-similarity-to-seed: the metadata walk
+        # must be at least as genre-cohesive as the pure-acoustic walk in
+        # aggregate, and strictly more cohesive on a meaningful share of seeds.
         async def _check():
-            meta_switches = 0
-            acoustic_switches = 0
+            meta_coh_sum = 0.0
+            aco_coh_sum = 0.0
             strictly_better = 0
             nonempty = 0
             for seed in self.seeds:
                 meta = await tg.walk(self.db, seed, length=WALK_LEN)  # defaults on
                 aco = await tg.walk(self.db, seed, length=WALK_LEN,
-                                    meta_lambda=0.0, cluster_lambda=0.0)
+                                    meta_lambda=0.0, veto_genre_floor=0.0)
                 if not meta and not aco:
                     continue
                 nonempty += 1
-                ms = await _cluster_switches(self.db, [seed] + meta)
-                as_ = await _cluster_switches(self.db, [seed] + aco)
-                meta_switches += ms
-                acoustic_switches += as_
-                if ms < as_:
+                m_coh, _ = await _genre_cohesion(self.db, seed, meta)
+                a_coh, _ = await _genre_cohesion(self.db, seed, aco)
+                meta_coh_sum += m_coh
+                aco_coh_sum += a_coh
+                if m_coh > a_coh + 1e-9:
                     strictly_better += 1
 
             self.assertGreater(nonempty, 0, "no non-empty walks — image not built?")
-            # Aggregate: metadata must not INCREASE community drift, and should
-            # cut it on a meaningful share of seeds.
-            self.assertLessEqual(
-                meta_switches, acoustic_switches,
-                f"metadata increased drift: {meta_switches} > {acoustic_switches}",
+            # Aggregate: metadata must not REDUCE genre cohesion, and should
+            # raise it on a meaningful share of seeds.
+            self.assertGreaterEqual(
+                meta_coh_sum, aco_coh_sum - 1e-6,
+                f"metadata reduced genre cohesion: {meta_coh_sum:.3f} < {aco_coh_sum:.3f}",
             )
             self.assertGreater(
                 strictly_better, 0,
-                "metadata never reduced drift on any seed — factor not firing? "
-                f"(meta={meta_switches}, acoustic={acoustic_switches})",
+                "metadata never improved genre cohesion on any seed — pool not "
+                f"firing? (meta={meta_coh_sum:.3f}, acoustic={aco_coh_sum:.3f})",
             )
             # Surface the numbers when run with -s.
-            print(f"\n[real-library] seeds={nonempty}  cross-community switches: "
-                  f"smooth+meta={meta_switches}  acoustic-only={acoustic_switches}  "
+            print(f"\n[real-library] seeds={nonempty}  mean genre-cohesion: "
+                  f"smooth+meta={meta_coh_sum / nonempty:.3f}  "
+                  f"acoustic-only={aco_coh_sum / nonempty:.3f}  "
                   f"strictly-better-seeds={strictly_better}/{nonempty}")
         _run(_check())
 

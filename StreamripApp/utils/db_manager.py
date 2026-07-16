@@ -1808,7 +1808,8 @@ class DatabaseManager:
         `V_keep` is the (D, k) projection matrix (Zr = z @ V_keep); its shape is
         recovered on load from `len(means)`. `feature_spec` carries the surviving
         scalar list + scalar_weight + embed_dims needed to project new tracks
-        identically (see track_graph.project_to_zr)."""
+        identically.
+        """
         import numpy as np
         means_bytes = means.astype(np.float32).tobytes()
         stds_bytes = stds.astype(np.float32).tobytes()
@@ -1863,7 +1864,6 @@ class DatabaseManager:
                     "harmonic_means": spec.get("harmonic_means"),
                     "harmonic_stds": spec.get("harmonic_stds"),
                     "k_neighbors": int(spec.get("k_neighbors", 50)),
-                    "csls_beta": float(spec.get("csls_beta", 0.0)),
                 }
             except Exception as e:
                 logger.error(f"Error decoding PCA space from database: {e}")
