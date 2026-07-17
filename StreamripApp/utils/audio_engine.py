@@ -831,6 +831,31 @@ class AudioEngine:
             ep = self._next_epoch()
             self._page.run_task(self._native_add_queue_items, native_items, ep)
 
+    def queue_after_current(self, tracks: list[dict], after_index: int | None = None):
+        """Insert a block of tracks right AFTER the current track (or after
+        `after_index`) in one batched op, NON-destructively: the live source is
+        NOT reloaded, so the current track keeps playing (no cut). The tail of the
+        queue (e.g. the rest of the library) is preserved below the block, and
+        current_index is unchanged (every insert lands after it). Order is kept.
+        Used by Auto-play to maintain a rolling 'up next' similar buffer without
+        disturbing playback or the queue tail."""
+        if not tracks:
+            return
+        if not self.queue:
+            self.set_queue(tracks)
+            return
+        base = self.current_index if after_index is None else after_index
+        start = min(max(int(base) + 1, 0), len(self.queue))
+        native_items: list[tuple[dict, int]] = []
+        for offset, track in enumerate(tracks):
+            insert_at = start + offset
+            self.queue.insert(insert_at, track)
+            native_items.append((track, insert_at))
+        self.dispatch("on_queue_mutated")
+        if self._page:
+            ep = self._next_epoch()
+            self._page.run_task(self._native_add_queue_items, native_items, ep)
+
     async def _native_add_queue_items(self, items: list[tuple[dict, int]], epoch: int):
         """Batch sibling of _native_add_queue_item: insert the whole block into
         the live ConcatenatingAudioSource in ONE serialized Dart call. Indices
