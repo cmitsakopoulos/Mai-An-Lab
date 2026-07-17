@@ -32,6 +32,7 @@ echo "Starting incremental Flet build..."
 pkill -9 java || true
 
 # Execute Flet build (incremental, reuse existing gradle & build caches)
+export SERIOUS_PYTHON_VERSION=3.12
 flet build apk -v --yes
 
 # Reinstall the APK, preserving user data and application state

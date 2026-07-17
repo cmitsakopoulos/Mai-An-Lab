@@ -1658,14 +1658,15 @@ class SettingsView:
         path_text  = ft.Text("", color=DIM, size=10, italic=True)
         dir_list   = ft.Column(tight=True, spacing=0, scroll=ft.ScrollMode.AUTO)
 
-        def _close():
+        def _close(do_update=True):
             if bs_holder[0]:
                 bs_holder[0].open = False
                 bs_holder[0].update()
-                self.page.update()
+                if do_update and self.page:
+                    self.page.update()
 
         def _confirm(path):
-            _close()
+            _close(do_update=False)
             self._handle_folder_picked(path, target)
 
         def _render(directory):
@@ -1847,7 +1848,6 @@ class SettingsView:
 
         label = "Download" if target == "download" else "Library"
         self.app.show_snackbar(f"{label} folder set: {path}")
-        self.app.page.update()
 
     def _build_audio_dsp_group(self):
         # Trigger background load of equalizer parameters

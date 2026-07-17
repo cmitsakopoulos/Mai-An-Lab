@@ -10,6 +10,18 @@ animations, and functional details from the original.
 """
 import os
 import sys
+import time
+
+def debug_log(msg):
+    try:
+        log_dir = "/sdcard/Download"
+        os.makedirs(log_dir, exist_ok=True)
+        with open(os.path.join(log_dir, "mai_an_lab_debug.txt"), "a") as f:
+            f.write(f"{time.time()} - {msg}\n")
+    except Exception as e:
+        pass
+
+debug_log("main.py started")
 
 # FIX: Avoid SELinux denial for 'max_map_count' on Android 11+
 # This must be set before the Python interpreter fully initializes native allocators.
@@ -18,19 +30,28 @@ os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
 sys.dont_write_bytecode = True
 
 import pathlib
+debug_log("importing get_app_dir")
 from utils.filepath_utils import get_app_dir, get_temp_artwork_dir
 
 # CRITICAL: SET THESE BEFORE ANY OTHER IMPORTS
 DATA_DIR = get_app_dir()
-os.environ["HOME"] = DATA_DIR
-os.environ["XDG_CONFIG_HOME"] = DATA_DIR
-os.environ["XDG_CACHE_HOME"] = os.path.join(DATA_DIR, ".cache")
-os.makedirs(os.environ["XDG_CACHE_HOME"], exist_ok=True)
-
-# MONKEYPATCH pathlib.Path.home to prevent it from returning '/data' on Android
-def _hijacked_home(cls):
-    return pathlib.Path(DATA_DIR)
-pathlib.Path.home = classmethod(_hijacked_home)
+debug_log(f"DATA_DIR: {DATA_DIR}")
+try:
+    os.environ["HOME"] = DATA_DIR
+    os.environ["XDG_CONFIG_HOME"] = DATA_DIR
+    os.environ["XDG_CACHE_HOME"] = os.path.join(DATA_DIR, ".cache")
+    debug_log(f"creating directory: {os.environ['XDG_CACHE_HOME']}")
+    os.makedirs(os.environ["XDG_CACHE_HOME"], exist_ok=True)
+    debug_log("directory created, patching pathlib.Path.home")
+    
+    # MONKEYPATCH pathlib.Path.home to prevent it from returning '/data' on Android
+    def _hijacked_home(cls):
+        return pathlib.Path(DATA_DIR)
+    pathlib.Path.home = classmethod(_hijacked_home)
+    debug_log("pathlib.Path.home patched")
+except Exception as e:
+    import traceback
+    debug_log(f"CRITICAL EXCEPTION in startup block: {e}\n{traceback.format_exc()}")
 
 
 import time
@@ -73,6 +94,7 @@ def get_asset_path(path: str) -> str:
 
 
 
+debug_log("importing flet and flet_audio")
 import flet as ft
 # Hard import required for flet build to include the audioplayers flutter plugin in the APK
 import flet_audio
@@ -81,16 +103,20 @@ try:
 except ImportError:
     AudioContext = AudioContextConfig = AudioContextConfigFocus = None
 
+debug_log("importing streamrip_api")
 from utils.streamrip_api import (
     load_config, update_config_params, download,
     get_config_path, repair_config, get_default_download_path,
     get_walk_params,
 )
+
+debug_log("importing audio_engine")
 if sys.platform == "darwin":
     from utils.audio_engine_macos import audio_engine
 else:
     from utils.audio_engine import audio_engine
 
+debug_log("audio_engine imported successfully")
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -126,11 +152,13 @@ def _apply_accent(color: str) -> None:
         mod = sys.modules.get(mod_name)
         if mod is not None and hasattr(mod, "CYAN"):
             mod.CYAN = color
+debug_log("importing ui.widgets")
 from ui.widgets import (
     _ARTWORK_CACHE, fmt_time, src_color, strip_markup, NotificationSystem,
     AnimatedEntry, ScaleButton, OnyxButton, GlassCard, MenuTextItem, AppSearchBar,
     SourceSegment, SettingsHeader, HubSettingItem, AccordionCard, SkeletonRow
 )
+debug_log("importing ui views and player components")
 from ui.views.search import SearchView
 from ui.views.library import LibraryView
 from ui.views.settings import SettingsView
@@ -140,8 +168,10 @@ from ui.player.now_playing import NowPlayingSheet
 from ui.player.queue_sheet import QueueSheet
 from ui.player.quality_selector import QualitySelectorSheet
 from ui.player.dialogs import PlaylistEditorDialog, MetadataEditorDialog
+debug_log("importing queue_controller and error_boundary")
 from utils.queue_controller import QueueController
 from utils.error_boundary import ErrorBoundary
+debug_log("all main.py imports completed successfully")
 
 # ─── Main App Coordinator ──────────────────────────────────────────────────────
 class StreamripFletApp:
@@ -3267,6 +3297,7 @@ class StreamripFletApp:
 
 # ─── Entry point ───────────────────────────────────────────────────────────────
 async def main(page: ft.Page):
+    debug_log("main function entered")
     page.title = "Mai An Lab"
     
     # Force phone aspect ratio on macOS / desktop
@@ -3283,13 +3314,16 @@ async def main(page: ft.Page):
     # Configure audio to allow mixing with other apps' sounds (Fixes concurrency)
     if AudioContext:
         try:
+            debug_log("setting audio context")
             audio_context = AudioContext(
                 android=AudioContextConfig(
                     focus=AudioContextConfigFocus.MIX_WITH_OTHERS
                 )
             )
             await page.set_audio_context(audio_context)
+            debug_log("audio context set successfully")
         except Exception as e:
+            debug_log(f"Failed to set audio context: {e}")
             logger.warning(f"Failed to set audio context: {e}")
     
     # Configure custom fonts
@@ -3311,15 +3345,63 @@ async def main(page: ft.Page):
         )
     
     try:
+        debug_log("creating StreamripFletApp instance")
         app = StreamripFletApp(page)
+        debug_log("initializing StreamripFletApp")
         await app.initialize()
+        debug_log("StreamripFletApp initialized successfully")
         page.on_disconnect = lambda _e: app.on_disconnect()
     except Exception as e:
         import traceback
+        debug_log(f"exception in main: {e}\n{traceback.format_exc()}")
         page.add(ft.Text(f"Startup crash: {e}", color="red", size=14, selectable=True))
         page.add(ft.Text(traceback.format_exc(), color="white", size=10, selectable=True))
         page.update()
 
 
 if __name__ == "__main__":
-    ft.run(main, assets_dir="assets")
+    import os
+
+    # Diagnostic logging — do NOT modify FLET_SERVER_UDS_PATH; it must stay
+    # relative so that Python and Dart resolve it from the same CWD.
+    uds_path = os.getenv("FLET_SERVER_UDS_PATH", "")
+    cwd = os.getcwd()
+    debug_log(f"CWD: {cwd}")
+    debug_log(f"FLET_SERVER_UDS_PATH (raw): {uds_path}")
+    debug_log(f"Resolved UDS path: {os.path.join(cwd, uds_path)}")
+
+    # Check if a stale socket file exists and report
+    resolved = os.path.join(cwd, uds_path)
+    if os.path.exists(resolved):
+        debug_log(f"WARNING: stale socket file exists at {resolved}, Flet will remove it")
+
+    # List CWD contents for diagnostics
+    try:
+        cwd_files = os.listdir(cwd)
+        debug_log(f"CWD files: {cwd_files}")
+    except Exception as e:
+        debug_log(f"CWD listing error: {e}")
+
+    # Background thread: monitor the UDS socket file creation
+    def socket_monitor():
+        import time
+        waited = 0
+        while waited < 30:
+            if os.path.exists(resolved):
+                debug_log(f"Socket file {resolved} appeared after {waited}s")
+                break
+            time.sleep(0.5)
+            waited += 0.5
+        else:
+            debug_log(f"Socket file {resolved} did NOT appear after 30s — Flet server may have failed")
+
+    import threading
+    threading.Thread(target=socket_monitor, daemon=True).start()
+
+    debug_log(f"__main__ block: calling ft.run")
+    try:
+        ft.run(main, assets_dir="assets")
+    except Exception as run_err:
+        import traceback
+        debug_log(f"ft.run crashed: {run_err}\n{traceback.format_exc()}")
+

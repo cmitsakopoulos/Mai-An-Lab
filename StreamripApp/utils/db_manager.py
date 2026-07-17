@@ -64,6 +64,7 @@ class DatabaseManager:
             await self._migrate_clusters(self._conn)
             await self._migrate_enrichment(self._conn)
             await self._migrate_album_genre_bucket(self._conn)
+            await self._migrate_features_v4_to_v5(self._conn)
         return self._conn
 
     async def get_total_tracks(self) -> int:
@@ -2056,6 +2057,57 @@ class DatabaseManager:
             )
         ''')
         await conn.commit()
+
+    async def _migrate_features_v4_to_v5(self, conn):
+        """
+        Migrates feature_cache and play_counts timbre blobs from v4 (88 floats)
+        to v5 (68 floats) by dropping the 20-dim mfcc_delta block at indices [40:60).
+        """
+        import numpy as np
+        N_MFCC = 20
+        # 1. Migrate play_counts table
+        try:
+            cursor = await conn.execute(
+                "SELECT track_path, timbre FROM play_counts WHERE timbre IS NOT NULL AND features_version = 4"
+            )
+            rows = await cursor.fetchall()
+            n = 0
+            for path, blob in rows:
+                if blob and len(blob) == 88 * 4:  # v4 blob length (352 bytes)
+                    v = np.frombuffer(blob, dtype="<f4")
+                    v5 = np.delete(v, np.s_[2 * N_MFCC:3 * N_MFCC]).astype("<f4").tobytes()
+                    await conn.execute(
+                        "UPDATE play_counts SET timbre = ?, features_version = 5 WHERE track_path = ?",
+                        (v5, path)
+                    )
+                    n += 1
+            if n > 0:
+                await conn.commit()
+                logger.info(f"DatabaseManager: Migrated {n} tracks in play_counts to features_version = 5")
+        except Exception as e:
+            logger.error(f"Failed to migrate play_counts to v5: {e}")
+
+        # 2. Migrate feature_cache table
+        try:
+            cursor = await conn.execute(
+                "SELECT track_path, timbre FROM feature_cache WHERE timbre IS NOT NULL AND features_version = 4"
+            )
+            rows = await cursor.fetchall()
+            n = 0
+            for path, blob in rows:
+                if blob and len(blob) == 88 * 4:  # v4 blob length (352 bytes)
+                    v = np.frombuffer(blob, dtype="<f4")
+                    v5 = np.delete(v, np.s_[2 * N_MFCC:3 * N_MFCC]).astype("<f4").tobytes()
+                    await conn.execute(
+                        "UPDATE feature_cache SET timbre = ?, features_version = 5 WHERE track_path = ?",
+                        (v5, path)
+                    )
+                    n += 1
+            if n > 0:
+                await conn.commit()
+                logger.info(f"DatabaseManager: Migrated {n} tracks in feature_cache to features_version = 5")
+        except Exception as e:
+            logger.error(f"Failed to migrate feature_cache to v5: {e}")
 
     async def get_artist_enrichment(self, name: str) -> dict | None:
         """Lock-free read of one artist's cached enrichment, or None if absent.

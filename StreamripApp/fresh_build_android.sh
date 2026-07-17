@@ -77,6 +77,7 @@ echo "Wiping previous build directory: $(pwd)/build"
 rm -rf build .gradle
 
 # Execute Flet build
+export SERIOUS_PYTHON_VERSION=3.12
 flet build apk --clear-cache -v --yes
 
 # Uninstall existing app from connected device to avoid signature mismatches
