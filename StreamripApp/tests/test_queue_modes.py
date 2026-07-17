@@ -296,59 +296,44 @@ class TestQueueModes(unittest.TestCase):
         self.assertEqual(len(audio_engine.queue), 3)
         self.assertEqual(audio_engine.current_index, 0)
 
-        # 2. Toggle Play Similar ON
+        # 2. Toggle Play Similar ON — NON-DESTRUCTIVE: the queue is neither saved
+        # nor replaced. Similars get inserted after the current song; the library
+        # stays queued below, so there is nothing to restore on toggle-off.
         self.app.set_play_similar_mode(True)
         self.assertTrue(self.app.play_similar_mode)
-        
-        # Verify regular queue was backed up in memory and written to disk
-        self.assertEqual(len(self.app.play_similar_saved_queue), 3)
-        self.assertFalse(self.app.play_similar_saved_shuffle)
-        
-        reg_state = self.app._load_queue_from_file("queue_regular.json")
-        self.assertIsNotNone(reg_state)
-        self.assertEqual(len(reg_state["queue"]), 3)
+        self.assertEqual(len(audio_engine.queue), 3)          # untouched
+        self.assertIsNone(getattr(self.app, "play_similar_saved_queue", None))
 
-        # 3. Simulate walks appending tracks by manually mutating the queue (representing walk completion)
-        audio_engine.queue = list(audio_engine.queue) + [{"path": "/music/walk1.mp3", "title": "Walk 1", "artist": "Artist W", "album": "Walk Album"}]
-        audio_engine.current_index = 3 # Move to walk track
-        
-        # 4. Save queue state (session termination simulation)
+        # 3. Simulate the walk inserting a buffer track after current
+        audio_engine.queue = list(audio_engine.queue) + [{"path": "/music/walk1.mp3", "title": "Walk 1", "artist": "Artist W", "album": "Walk Album", "_autoplay": True}]
+        audio_engine.current_index = 3 # advanced into the buffer
+
+        # 4. Save queue state (session termination simulation) — the REAL queue
+        # (buffer + library) is the single source of truth for recovery now.
         self.app._save_queue_state()
-        
-        # Verify state.json contains similar queue AND backup regular queue metadata
         with open(os.path.join(main.DATA_DIR, "queue_state.json")) as f:
             saved_state = json.load(f)
         self.assertEqual(len(saved_state["queue"]), 4)
         self.assertEqual(saved_state["current_index"], 3)
-        self.assertIsNotNone(saved_state["play_similar_saved_queue"])
-        self.assertFalse(saved_state["play_similar_saved_shuffle"])
 
-        # 5. Clear memory state & simulate full session restoration
-        self.app.play_similar_saved_queue = None
-        self.app.play_similar_saved_index = None
-        self.app.play_similar_saved_shuffle = False
-        
-        # Mock the async restore method's environment and run it
+        # 5. Simulate full session restoration from that snapshot
         self.app.is_restoring_session = False
         self.app._read_queue_state = main.StreamripFletApp._read_queue_state.__get__(self.app, main.StreamripFletApp)
         self.app._restore_queue_state_async = main.StreamripFletApp._restore_queue_state_async.__get__(self.app, main.StreamripFletApp)
         run_async(self.app._restore_queue_state_async())
 
-        # Verify restoration successfully loaded the similar queue AND restored backup memory states
+        # Recovery restores the real queue directly — no separate saved-queue.
         self.assertEqual(len(audio_engine.queue), 4)
         self.assertEqual(audio_engine.current_index, 3)
         self.assertTrue(self.app.play_similar_mode)
-        self.assertEqual(len(self.app.play_similar_saved_queue), 3)
-        self.assertFalse(self.app.play_similar_saved_shuffle)
 
-        # 6. Toggle Play Similar OFF
+        # 6. Toggle Play Similar OFF — nothing to restore; the queue is untouched
+        # (the library tail just continues below the current track).
         self.app.set_play_similar_mode(False)
         self.assertFalse(self.app.play_similar_mode)
-        
-        # Verify the regular queue was restored behind the active track, and UI was synced
-        self.assertEqual(audio_engine.queue[0]["path"], "/music/walk1.mp3")
-        self.assertEqual(audio_engine.current_index, 0)
-        self.assertEqual(len(audio_engine.queue), 4) # walk1.mp3 + 3 original tracks
+        self.assertEqual(len(audio_engine.queue), 4)
+        self.assertEqual(audio_engine.current_index, 3)
+        self.assertEqual(audio_engine.queue[3]["path"], "/music/walk1.mp3")
         self.app.now_playing.update_play_similar.assert_called_with(False)
         self.app.mini_player.update_play_similar.assert_called_with(False)
 
@@ -357,44 +342,33 @@ class TestQueueModes(unittest.TestCase):
         run_async(self.app._play_track_core("/music/song1.mp3"))
         self.assertEqual(len(audio_engine.queue), 3)
 
-        # 2. Toggle Play Similar ON
+        # 2. Toggle Play Similar ON (non-destructive: queue is NOT saved/replaced)
         self.app.set_play_similar_mode(True)
         self.assertTrue(self.app.play_similar_mode)
-        self.assertEqual(len(self.app.play_similar_saved_queue), 3)
+        self.assertIsNone(getattr(self.app, "play_similar_saved_queue", None))
 
         # 3. Simulate playing a completely new track (e.g. from an album click)
-        # Mock database manager to return a new album of 2 tracks when resolved
         new_album_tracks = [
             {"path": "/music/album1.mp3", "title": "Album Track 1", "artist": "Artist X", "album": "Album X"},
             {"path": "/music/album2.mp3", "title": "Album Track 2", "artist": "Artist X", "album": "Album X"},
         ]
         self.app.library_view._tracks_cache = new_album_tracks
         self.app.library_view._tracks_cache_key = ("tracks", "", "date") # force matches general cache key
-        
+
         # Trigger play for the first track of the new album
         run_async(self.app._play_track_core("/music/album1.mp3"))
 
-        # 4. Verify Play Similar mode remains active, but context is updated
+        # 4. Play Similar stays active; the FULL clicked context becomes the queue
+        # (non-destructive — no truncation to just the clicked track, no backup).
         self.assertTrue(self.app.play_similar_mode)
-        
-        # The active queue should only contain the clicked track at this stage (awaiting walk injection)
-        self.assertEqual(len(audio_engine.queue), 1)
+        self.assertEqual(len(audio_engine.queue), 2)
         self.assertEqual(audio_engine.queue[0]["path"], "/music/album1.mp3")
+        self.assertEqual(audio_engine.current_index, 0)
+        self.assertIsNone(getattr(self.app, "play_similar_saved_queue", None))
 
-        # The new album context must be backed up to memory and partition cache
-        self.assertEqual(len(self.app.play_similar_saved_queue), 2)
-        self.assertEqual(self.app.play_similar_saved_index, 0)
-        
-        reg_state = self.app._load_queue_from_file("queue_regular.json")
-        self.assertIsNotNone(reg_state)
-        self.assertEqual(len(reg_state["queue"]), 2)
-        self.assertEqual(reg_state["queue"][0]["path"], "/music/album1.mp3")
-
-        # 5. Toggle Play Similar OFF
+        # 5. Toggle Play Similar OFF — nothing to restore; the queue is untouched.
         self.app.set_play_similar_mode(False)
         self.assertFalse(self.app.play_similar_mode)
-
-        # The new album context should be restored sequentially behind the currently playing track
         self.assertEqual(len(audio_engine.queue), 2)
         self.assertEqual(audio_engine.queue[0]["path"], "/music/album1.mp3")
         self.assertEqual(audio_engine.queue[1]["path"], "/music/album2.mp3")
@@ -449,30 +423,33 @@ class TestQueueModes(unittest.TestCase):
         
         self.app.play_similar_mode = True
         
-        # Scenario 1: Upcoming count is 4 -> no replenishment triggered
+        # Scenario 1: auto-play BUFFER of 4 (the _autoplay run after current) ->
+        # no replenishment. Only _autoplay-tagged tracks count as the buffer; the
+        # current track and any library tail do not.
         audio_engine.queue = [
             {"path": "/music/song1.mp3"},
-            {"path": "/music/song2.mp3"},
-            {"path": "/music/song3.mp3"},
-            {"path": "/music/song4.mp3"},
-            {"path": "/music/song5.mp3"},
+            {"path": "/music/song2.mp3", "_autoplay": True},
+            {"path": "/music/song3.mp3", "_autoplay": True},
+            {"path": "/music/song4.mp3", "_autoplay": True},
+            {"path": "/music/song5.mp3", "_autoplay": True},
         ]
         audio_engine.current_index = 0
         audio_engine.current_path = "/music/song1.mp3"
-        
+
         self.app._replenish_similar_queue_if_needed()
         self.app._recommend_similar_async.assert_not_called()
-        
-        # Scenario 2: Upcoming count is 3 (< 4) -> replenishment triggered
+
+        # Scenario 2: buffer of 3 (< 4) -> replenish 5 more, seeded from the LAST
+        # buffered track so the walk continues from the end of the buffer.
         audio_engine.queue = [
             {"path": "/music/song1.mp3"},
-            {"path": "/music/song2.mp3"},
-            {"path": "/music/song3.mp3"},
-            {"path": "/music/song4.mp3"},
+            {"path": "/music/song2.mp3", "_autoplay": True},
+            {"path": "/music/song3.mp3", "_autoplay": True},
+            {"path": "/music/song4.mp3", "_autoplay": True},
         ]
         audio_engine.current_index = 0
         audio_engine.current_path = "/music/song1.mp3"
-        
+
         self.app._play_similar_recommendation_in_progress = False
         self.app._replenish_similar_queue_if_needed()
         self.app._recommend_similar_async.assert_called_once_with("/music/song4.mp3", 5, 0)
@@ -708,15 +685,13 @@ class TestQueueModes(unittest.TestCase):
         self.assertEqual(audio_engine.current_index, 1)
         self.assertFalse(self.app.play_similar_mode)
 
-        # Operation 2: Toggle Play Similar Mode ON
+        # Operation 2: Toggle Play Similar Mode ON (non-destructive — no backup)
         self.app.set_play_similar_mode(True)
         self.assertTrue(self.app.play_similar_mode)
-        self.assertEqual(len(self.app.play_similar_saved_queue), 3)
 
         # CRASH 2
         crash_and_restart()
         self.assertTrue(self.app.play_similar_mode)
-        self.assertEqual(len(self.app.play_similar_saved_queue), 3)
 
         # Operation 3: Skip to next song while in Similar Mode (simulating walk continuation)
         audio_engine.queue = list(audio_engine.queue) + [{"path": "/music/walk1.mp3", "title": "Walk 1", "artist": "Artist W", "album": "Walk Album"}]

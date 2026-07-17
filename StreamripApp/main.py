@@ -955,6 +955,7 @@ class StreamripFletApp:
                     content=self._swipe_content,
                     expand=True,
                 ),
+                self.mini_player.build_autoplay_pill(),
                 self.mini_player.build(),
                 self._nav,
             ],
@@ -1364,30 +1365,25 @@ class StreamripFletApp:
                     # Final race check before mutating queue
                     if gen != self._play_similar_gen or not self.play_similar_mode:
                         return
-                    cur_idx = audio_engine.current_index
-                    if 0 <= cur_idx < len(audio_engine.queue):
-                        new_q = list(audio_engine.queue[:cur_idx + 1])
-                        existing_paths = {t.get("path") for t in new_q if t.get("path")}
-                        for et in engine_tracks:
-                            if et.get("path") not in existing_paths:
-                                new_q.append(et)
-                        audio_engine.queue = new_q
-                    else:
-                        audio_engine.queue = engine_tracks
-                        audio_engine.current_index = 0
-                    
-                    audio_engine.jarvis_controlled = False
-                    audio_engine._sync_metadata_for_current()
-                    audio_engine.dispatch("on_queue_mutated")
-                    if audio_engine._page:
-                        # Epoch-tagged full push (folds shuffle + autoplay); the
-                        # bump is synchronous so in-flight stale events are rejected.
-                        audio_engine._schedule_push(
-                            audio_engine.current_index, audio_engine.is_playing
-                        )
-                    if hasattr(self, "queue_sheet") and self.queue_sheet and self.queue_sheet._initialized:
-                        self.queue_sheet.refresh()
-                    logger.info("Play Similar: Successfully appended %d similar tracks to the queue.", len(engine_tracks))
+                    # NON-DESTRUCTIVE: drop the similar block in right AFTER the
+                    # current track via the native insert — the current source is
+                    # NOT reloaded, so playback is never cut. The queue tail (e.g.
+                    # the rest of the library) is preserved below the block. Dedup
+                    # only against the current track + this block; NOT the tail, or
+                    # nothing from the library could ever be recommended.
+                    seen = {audio_engine.current_path}
+                    block = []
+                    for et in engine_tracks:
+                        p = et.get("path")
+                        if p and p not in seen:
+                            et["_autoplay"] = True
+                            block.append(et)
+                            seen.add(p)
+                    if block:
+                        audio_engine.queue_after_current(block)
+                        if hasattr(self, "queue_sheet") and self.queue_sheet and self.queue_sheet._initialized:
+                            self.queue_sheet.refresh()
+                        logger.info("Auto-play: inserted %d similar tracks after the current song.", len(block))
         except Exception as exc:
             logger.exception("Play Similar: Failed to initiate similar queue: %s", exc)
 
@@ -1404,9 +1400,15 @@ class StreamripFletApp:
             if gen != self._play_similar_gen or not self.play_similar_mode:
                 return
 
-            # Build avoid set from queued paths + session rejects + current
-            avoid = {t["path"] for t in audio_engine.queue if t.get("path")}
+            # Avoid the current track + tracks already in the auto-play buffer +
+            # session rejects — NOT the whole queue. The queue holds the entire
+            # library tail; avoiding all of it would leave the walk with zero
+            # candidates. Library tracks MUST stay eligible (they're what gets
+            # promoted into the buffer).
+            avoid = {t["path"] for t in audio_engine.queue if t.get("_autoplay") and t.get("path")}
             avoid.add(path)
+            if audio_engine.current_path:
+                avoid.add(audio_engine.current_path)
             avoid.update(self._session_bad_paths)
             # Play Similar leans purely on graph topology + DSP similarity +
             # metadata. The 7-day recent-played window is deliberately kept
@@ -1430,10 +1432,13 @@ class StreamripFletApp:
                 return
 
             if walk_tracks:
-                queue_paths = {t["path"] for t in audio_engine.queue if t.get("path")}
+                # Dedup against the current track + the existing buffer only.
+                queued = {t["path"] for t in audio_engine.queue if t.get("_autoplay") and t.get("path")}
+                if audio_engine.current_path:
+                    queued.add(audio_engine.current_path)
                 batch: list[dict] = []
                 for wt in walk_tracks:
-                    if wt not in queue_paths:
+                    if wt not in queued:
                         row = await self.db_manager.get_track_full(wt)
                         if row:
                             if gen != self._play_similar_gen or not self.play_similar_mode:
@@ -1445,39 +1450,61 @@ class StreamripFletApp:
                                 "album_title": row.get("album")  or row.get("album_title")  or "Unknown Album",
                                 "duration":    row.get("duration", 0.0) or 0.0,
                                 "image_url":   row.get("image_url", "") or "",
+                                "_autoplay":   True,
                             }
                             batch.append(track_dict)
-                            queue_paths.add(wt)
+                            queued.add(wt)
                             if len(batch) >= count:
                                 break
-                # Single batched append: one on_queue_mutated dispatch (one
-                # queue-sheet rebuild + one coalesced save) and one native task,
-                # instead of `count` of each per replenish.
+                # Insert right AFTER the existing auto-play buffer (keeps ordering,
+                # stays ahead of the library tail) via the non-destructive native
+                # insert — no source reload, no playback cut.
                 if batch and gen == self._play_similar_gen and self.play_similar_mode:
-                    audio_engine.queue_extend(batch)
-                    logger.info("Play Similar: Appended %d recommended tracks to queue.", len(batch))
+                    # Insert after the LAST buffered track anywhere ahead of
+                    # current (robust to a manual "Play Next" splitting the run;
+                    # that untagged track stays put and plays before the buffer).
+                    ci = audio_engine.current_index
+                    q = audio_engine.queue
+                    after = ci
+                    for idx in range(ci + 1, len(q)):
+                        if q[idx].get("_autoplay"):
+                            after = idx
+                    audio_engine.queue_after_current(batch, after_index=after)
+                    logger.info("Auto-play: queued %d more similar tracks (buffer refill).", len(batch))
         except Exception as exc:
             logger.exception("Play Similar: Failed to generate dynamic recommendations: %s", exc)
         finally:
             self._play_similar_recommendation_in_progress = False
 
     def _replenish_similar_queue_if_needed(self):
-        """Proactively replenish the Play Similar queue to maintain an 8-song buffer ahead of the currently playing track."""
+        """Keep an ~8-track auto-play buffer of similar songs queued right after
+        the current track. The buffer is the RUN of _autoplay-tagged tracks after
+        current; the library tail below it is ignored (and preserved), so a full
+        library queue no longer masks an empty buffer."""
         if not self.play_similar_mode or getattr(self, "is_restoring_session", False):
             return
         if getattr(self, "_play_similar_recommendation_in_progress", False):
             return
-        upcoming_count = len(audio_engine.queue) - 1 - audio_engine.current_index
-        if upcoming_count < 4:
-            needed = 8 - upcoming_count
-            path = None
-            if audio_engine.queue:
-                path = audio_engine.queue[-1].get("path")
-            if not path:
-                path = audio_engine.current_path
-            if path:
+        q = audio_engine.queue
+        ci = audio_engine.current_index
+        # Count EVERY _autoplay track ahead of current — do NOT stop at the first
+        # non-buffer track: a manual "Play Next" inserts an untagged track at
+        # current+1, which just plays before the similars and must not be read as
+        # an empty buffer.
+        buffer = 0
+        last_buf_path = None
+        for t in q[ci + 1:]:
+            if t.get("_autoplay"):
+                buffer += 1
+                last_buf_path = t.get("path") or last_buf_path
+        if buffer < 4:
+            needed = 8 - buffer
+            # Continue the walk from the end of the buffer (or the current track
+            # when the buffer is empty).
+            seed = last_buf_path or audio_engine.current_path
+            if seed:
                 self._play_similar_recommendation_in_progress = True
-                self.page.run_task(self._recommend_similar_async, path, needed, self._play_similar_gen)
+                self.page.run_task(self._recommend_similar_async, seed, needed, self._play_similar_gen)
 
     async def _force_replenish_similar_queue(self):
         """Force replenish / extend the queue using the graph walk, waking up in the background."""
@@ -2332,22 +2359,11 @@ class StreamripFletApp:
 
         if self.play_similar_mode:
             target_track = tracks[target_idx]
-            
-            # 1. Update pre-similar backup queues in memory
-            self.play_similar_saved_queue = list(tracks)
-            self.play_similar_saved_index = target_idx
-            
-            # 2. Partition Cache: Write this new context queue to disk immediately
-            if getattr(self, "play_similar_saved_shuffle", False):
-                self._schedule_partition_save("queue_shuffle.json", tracks, target_idx, 0.0, 0.0)
-            else:
-                self._schedule_partition_save("queue_regular.json", tracks, target_idx, 0.0, 0.0)
-            
-            # 3. Set active queue to just the clicked track and start play
+            # NON-DESTRUCTIVE: play the tapped song within the FULL library queue
+            # (starting a chosen song is expected), then insert similar tracks
+            # right after it. No queue wipe, no saved-queue bookkeeping.
             audio_engine.jarvis_controlled = False
-            audio_engine.set_queue([target_track], start_index=0)
-            
-            # 4. Trigger new similarity walk starting from this track path
+            audio_engine.set_queue(tracks, start_index=target_idx)
             self._play_similar_gen += 1
             audio_engine.play_similar_seed_path = target_track.get("path") or ""
             self.page.run_task(self._initiate_play_similar_queue_async, target_track.get("path"), self._play_similar_gen)
@@ -2397,112 +2413,32 @@ class StreamripFletApp:
         
         verb = "Enabled" if enabled else "Disabled"
         self.show_snackbar(
-            f"Play Similar: {verb}",
-            icon=ft.Icons.LINK_ROUNDED if enabled else ft.Icons.LINK_OFF_ROUNDED
+            f"Auto-play: {verb}",
+            icon=ft.Icons.ALL_INCLUSIVE_ROUNDED if enabled else ft.Icons.LINK_OFF_ROUNDED,
         )
-        
+
         if enabled:
-            # 1. Mutual exclusivity: turn off shuffle, but remember if it was ON
-            was_shuffle = bool(audio_engine.is_shuffle)
-            self.play_similar_saved_shuffle = was_shuffle
-            if was_shuffle:
+            # NON-DESTRUCTIVE model: no save / replace / restore of the queue.
+            # Similar tracks are inserted right after the current song (see
+            # _initiate_play_similar_queue_async) and the library tail is left in
+            # place, so turning Auto-play off later needs no restore — the library
+            # simply resumes below the buffer. Shuffle must be off, though:
+            # similars play in walk order right after the current track, which
+            # Dart's shuffle order would otherwise scatter.
+            if audio_engine.is_shuffle:
                 audio_engine.is_shuffle = False
                 self.now_playing.update_shuffle(False)
                 self._save_pref("is_shuffle", False)
-            
-            # 2. Save original queue before modifying it
-            self.play_similar_saved_queue = list(audio_engine.queue)
-            self.play_similar_saved_index = audio_engine.current_index
-            
-            # Save it to appropriate partition file immediately for session recovery
-            if was_shuffle:
-                self._schedule_partition_save("queue_shuffle.json", self.play_similar_saved_queue, self.play_similar_saved_index, audio_engine.position, audio_engine.duration)
-            else:
-                self._schedule_partition_save("queue_regular.json", self.play_similar_saved_queue, self.play_similar_saved_index, audio_engine.position, audio_engine.duration)
-            
-            # 3. Initiate similar tracks walk starting from currently playing song
             path = audio_engine.current_path
             audio_engine.play_similar_seed_path = path or ""
             if path:
                 self.page.run_task(self._initiate_play_similar_queue_async, path, gen)
         else:
-            # Save the current similar queue to its partitioned file
-            self._schedule_partition_save("queue_similar.json", audio_engine.queue, audio_engine.current_index, audio_engine.position, audio_engine.duration)
-
-            # 1. Clear seed path so stale replenishment hooks don't fire
+            # Nothing to restore — the library was never removed; it resumes
+            # below the current similar buffer once that plays out. Just stop
+            # replenishing (the gen bump above already cancels in-flight fills).
             audio_engine.play_similar_seed_path = ""
 
-            # 2. Restore original queue if saved
-            saved_q = getattr(self, "play_similar_saved_queue", None)
-            saved_idx = getattr(self, "play_similar_saved_index", 0)
-            saved_shuf = getattr(self, "play_similar_saved_shuffle", False)
-            
-            # Fallback to files if memory variables are empty
-            if not saved_q:
-                if saved_shuf:
-                    state = self._load_queue_from_file("queue_shuffle.json")
-                else:
-                    state = self._load_queue_from_file("queue_regular.json")
-                if state:
-                    saved_q = state.get("queue", [])
-                    saved_idx = state.get("current_index", 0)
-            
-            if saved_q:
-                cur_path = audio_engine.current_path
-                orig_idx = -1
-                if cur_path:
-                    for idx, t in enumerate(saved_q):
-                        if t.get("path") == cur_path:
-                            orig_idx = idx
-                            break
-                
-                if orig_idx != -1:
-                    # Current track exists in the original queue — splice:
-                    # keep the live queue up to the current track, then
-                    # append the remainder of the saved queue after it.
-                    new_q = list(audio_engine.queue[:audio_engine.current_index + 1])
-                    new_q.extend(saved_q[orig_idx + 1:])
-                    audio_engine.queue = new_q
-                    audio_engine.current_index = audio_engine.current_index  # unchanged
-                else:
-                    # Current track was injected by the walk and is not in
-                    # the saved queue. Keep playing it, but restore the
-                    # original queue behind it by inserting it at position 0.
-                    cur_track = None
-                    ci = audio_engine.current_index
-                    if 0 <= ci < len(audio_engine.queue):
-                        cur_track = audio_engine.queue[ci]
-                    if cur_track:
-                        new_q = [cur_track] + list(saved_q)
-                        audio_engine.queue = new_q
-                        audio_engine.current_index = 0
-                    else:
-                        audio_engine.queue = list(saved_q)
-                        audio_engine.current_index = max(0, min(int(saved_idx or 0), len(saved_q) - 1))
-                
-                # Restore shuffle state if it was shuffle before
-                if saved_shuf or transitioning_to_shuffle:
-                    audio_engine.is_shuffle = True
-                    self.now_playing.update_shuffle(True)
-                    self._save_pref("is_shuffle", True)
-                else:
-                    audio_engine.is_shuffle = False
-                    self.now_playing.update_shuffle(False)
-                    self._save_pref("is_shuffle", False)
-                
-                # Clear saved queue to avoid memory leaks
-                self.play_similar_saved_queue = None
-                self.play_similar_saved_index = None
-                self.play_similar_saved_shuffle = False
-                
-                # Force sync visual metadata and notify UI
-                audio_engine._sync_metadata_for_current()
-                audio_engine.dispatch("on_queue_mutated")
-                if audio_engine._page:
-                    audio_engine._schedule_push(
-                        audio_engine.current_index, audio_engine.is_playing
-                    )
-        
         if hasattr(self, "queue_sheet") and self.queue_sheet and self.queue_sheet._initialized:
             self.safe_update(self.queue_sheet.refresh)
 
