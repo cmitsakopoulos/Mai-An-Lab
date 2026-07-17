@@ -294,7 +294,11 @@ class LibraryView:
         self._net_k_neighbors: int = 24             # neighborhood depth (12, 24, 36, 48)
         self._net_walk_length: int = 10             # walk path length (5, 10, 15, 20)
         self._net_canvas: ft.Control | None = None
-        self._net_inspector_card: ft.Control | None = None
+        self._net_track_panel: ft.Control | None = None
+        self._net_list_view: ft.ListView | None = None
+        self._net_viewer: ft.Control | None = None  # InteractiveViewer (native pan/zoom)
+        self._net_graph_collapsed = False           # graph hidden → list takes the pane
+        self._net_collapse_icon: ft.Icon | None = None
         # Live-tracking of the playing node. When ON, the graph recenters on the
         # active track once it falls off-screen (maps-style); the pulse always
         # follows it in place while it's a visible node. OFF lets the user
@@ -555,8 +559,13 @@ class LibraryView:
         # ── Resolve canvas dimensions from the page ────────────────────────
         avail_w = max(260, (self.page.width or 360) - 24)
         avail_h = self.page.height or 640
-        max_canvas_h = max(180, int(avail_h - 280))
-        canvas_h = min(max_canvas_h, int(avail_w * (0.85 if mode == 0 else 0.70)))
+        # Split layout: the graph takes the upper portion of the pane; the
+        # ordered track list fills (and scrolls) the rest. avail_h is the FULL
+        # screen, but graph+list live in a wrapper that's much shorter (search
+        # bar, tabs, pagination, bottom nav, mini-player all sit outside it), so
+        # keep the graph modest and hard-capped — the collapse toggle gives the
+        # list the whole pane when the user wants to browse.
+        canvas_h = max(150, min(int(avail_h * 0.32), 280))
         canvas_w = int(avail_w)
         pad = 32                                   # edge padding in px
         self._net_dims = (canvas_w, canvas_h, pad)
@@ -572,10 +581,11 @@ class LibraryView:
             return s[:n] + "…" if len(s) > n else s
 
         def _mk_node(rx, ry, *, is_seed, base_radius, label, genre,
-                     play_count, path, title, artist, album=None):
+                     play_count, path, title, artist, album=None, duration=None):
             return {
                 "rx": rx, "ry": ry, "path": path,
                 "title": title, "artist": artist, "album": album or "",
+                "duration": duration,
                 "genre": genre,
                 "color": _genre_color(genre),
                 "radius": _node_radius(base_radius, play_count),
@@ -603,6 +613,7 @@ class LibraryView:
                     path=seed_row["path"], title=seed_title,
                     artist=seed_row.get("artist") or "Unknown",
                     album=seed_row.get("album"),
+                    duration=seed_row.get("duration"),
                 ))
                 for idx, n in enumerate(neighbors_list):
                     n_path = n.get("path")
@@ -615,6 +626,7 @@ class LibraryView:
                         n_album = n_row.get("album") or n.get("album")
                         n_genre = n_row.get("genre")
                         n_pc = n_row.get("play_count")
+                        n_dur = n_row.get("duration")
                     else:
                         theta = 2 * math.pi * idx / max(1, len(neighbors_list))
                         nc = [sc[0] + 0.8 * math.cos(theta), sc[1] + 0.8 * math.sin(theta)]
@@ -623,11 +635,13 @@ class LibraryView:
                         n_album = n.get("album")
                         n_genre = None
                         n_pc = 0
+                        n_dur = None
                     raw_nodes.append(_mk_node(
                         nc[0], nc[1], is_seed=False, base_radius=8.5,
                         label="",  # neighbour labels off for graph clarity
                         genre=n_genre, play_count=n_pc,
                         path=n_path, title=n_title, artist=n_artist, album=n_album,
+                        duration=n_dur,
                     ))
                     raw_edges.append({"src": seed_row["path"], "dst": n_path, "weight": float(n_weight)})
 
@@ -658,6 +672,7 @@ class LibraryView:
                     title=wr.get("title") or f"Step {idx}",
                     artist=wr.get("artist") or "Unknown",
                     album=wr.get("album"),
+                    duration=wr.get("duration"),
                 ))
             for i in range(len(walk_rows_ordered) - 1):
                 alpha_w = max(0.35, 0.85 - i / max(1, len(walk_rows_ordered)) * 0.5)
@@ -673,6 +688,7 @@ class LibraryView:
             self._net_edges = []
             self._net_canvas_obj = None
             self._net_pulse_overlay = None
+            self._net_list_view = None
             return ft.Container(
                 content=ft.Column(
                     [
@@ -688,16 +704,27 @@ class LibraryView:
             )
 
         # ── Normalise raw coords → canvas pixel coords ─────────────────────
-        xs = [n["rx"] for n in raw_nodes]
-        ys = [n["ry"] for n in raw_nodes]
-        min_x, max_x = min(xs), max(xs)
-        min_y, max_y = min(ys), max(ys)
-        range_x = max_x - min_x or 1.0
-        range_y = max_y - min_y or 1.0
+        # Focal-centred, UNIFORM scale: the focal node (the now-playing track if
+        # it's on the graph, else the seed) maps to the canvas centre, and ONE
+        # scale is applied to both axes so acoustic distances stay faithful
+        # (circles stay circular) and the graph opens centred on "you are here".
+        # Uniform + centred keeps every node within a centred square inside the
+        # canvas (no clipping); off-centre detail is reached via pan/zoom.
+        focal = (
+            next((n for n in raw_nodes if n.get("is_now_playing")), None)
+            or next((n for n in raw_nodes if n.get("is_seed")), None)
+            or raw_nodes[0]
+        )
+        fcx, fcy = focal["rx"], focal["ry"]
+        half_span = max(
+            max((abs(n["rx"] - fcx) for n in raw_nodes), default=1.0),
+            max((abs(n["ry"] - fcy) for n in raw_nodes), default=1.0),
+        ) or 1.0
+        scale = (min(canvas_w, canvas_h) / 2 - pad) / half_span
 
         def to_px(rx, ry):
-            px = pad + (rx - min_x) / range_x * (canvas_w - 2 * pad)
-            py = pad + (ry - min_y) / range_y * (canvas_h - 2 * pad)
+            px = canvas_w / 2 + (rx - fcx) * scale
+            py = canvas_h / 2 + (ry - fcy) * scale
             return px, py
 
         self._net_nodes = []
@@ -708,6 +735,7 @@ class LibraryView:
                 "px": px, "py": py,
                 "path": n["path"], "title": n["title"], "artist": n["artist"],
                 "album": n.get("album", ""),
+                "duration": n.get("duration"),
                 "color": n["color"], "radius": n["radius"],
                 "is_seed": n["is_seed"], "is_now_playing": n["is_now_playing"],
                 "genre": n["genre"], "label": n.get("label", ""),
@@ -771,11 +799,14 @@ class LibraryView:
             return getattr(e, "local_x", 0.0) or 0.0, getattr(e, "local_y", 0.0) or 0.0
 
         def _show_tooltip(nd, lx, ly, subtitle=None):
+            # Anchored to a FIXED spot (bottom-left of the graph), not the tap
+            # point: the graph pans/zooms inside the InteractiveViewer, so a
+            # child-space (lx, ly) no longer maps onto this fixed overlay.
             self._net_tooltip_title.value = nd["title"]
             self._net_tooltip_artist.value = subtitle if subtitle is not None else nd["artist"]
             tooltip_container.visible = True
-            tooltip_container.left = min(lx + 10, canvas_w - 140)
-            tooltip_container.top = max(ly - 42, 4)
+            tooltip_container.left = 8
+            tooltip_container.top = max(8, canvas_h - 52)
             self.try_update(tooltip_container)
 
         def _hide_tooltip_now():
@@ -784,39 +815,38 @@ class LibraryView:
                 self.try_update(tooltip_container)
 
         def _on_tap_down(e):
+            # Only record what was pressed here — showing the tooltip on tap-DOWN
+            # would flash it at the start of a pan gesture. The tooltip is shown
+            # on tap COMPLETION (a pan cancels on_tap), so pans stay clean.
             lx, ly = _evt_xy(e)
-            nd = _find_node_at(lx, ly)
-            self._net_pressed = nd
-            if nd:
-                _show_tooltip(nd, lx, ly)
-            else:
-                _hide_tooltip_now()
+            self._net_pressed = _find_node_at(lx, ly)
 
         def _on_tap(e=None):
             nd = self._net_pressed
             if not nd:
                 _hide_tooltip_now()
                 return
-            # Select node, recenter the view toward it, and show it in the
-            # inspector. Recentering replaces free drag-panning: it repositions
-            # the graph ONCE per tap (one shape rebuild) instead of the old
-            # per-pointer-move pan that rebuilt + re-serialised the whole canvas
-            # ~60×/second. Tap a node repeatedly to walk the view across the graph.
+            # Tap = SELECT (paint the selection halo on the canvas + highlight the
+            # row in the list). Navigation is the InteractiveViewer's native
+            # pan/zoom now, so nodes no longer move; a single one-shot redraw
+            # repaints the halo — no per-frame shape re-serialisation.
             self._net_selected_path = nd["path"]
             self.app.trigger_haptic("network_tap")
-            self._recenter_toward_node(nd)      # repositions nodes + redraws once
-            self._update_net_inspector_card()
+            _show_tooltip(nd, 0, 0)
+            self._redraw_net_canvas()           # repaint selection halo (one-shot)
+            self._refresh_net_list_selection()  # highlight the tapped node's row
             async def _hide_later():
                 await asyncio.sleep(1.8)
                 _hide_tooltip_now()
             self.page.run_task(_hide_later)
 
-        # ── Gesture detector (node tap selection + recenter) ──────────────────
-        # Drag-panning was removed: it rebuilt the entire shape list and
-        # re-serialised the canvas over the Flet→Flutter bridge on every pointer
-        # move (the network view's main battery/jank cost). Navigation is now
-        # tap-to-recenter, which touches the canvas once per tap. The gesture
-        # wraps the canvas directly so hit-testing is reliable across platforms.
+        # ── Gesture detector (node tap SELECTION only) ────────────────────────
+        # Panning/zooming is handled natively by the enclosing InteractiveViewer
+        # (a GPU transform — no per-frame Python, no bridge traffic), so this
+        # detector only does tap-to-select. A tap fires with local coords in the
+        # canvas's own (untransformed) space, so hit-testing against node px/py
+        # stays correct at any pan/zoom. Drags are claimed by the viewer, so they
+        # cancel on_tap and don't misfire a selection.
         gesture = ft.GestureDetector(
             content=canvas,
             on_tap_down=_on_tap_down,
@@ -934,7 +964,19 @@ class LibraryView:
             on_click=self._show_tuning_popup,
         )
 
-        right_chips = [depth_chip, follow_chip, tune_chip]
+        # Fit-to-view: snap the InteractiveViewer's pan/zoom back to the seed-
+        # centred default. Native reset() — no rebuild, no DB, no bridge churn.
+        fit_chip = ft.Container(
+            content=ft.Icon(ft.Icons.FILTER_CENTER_FOCUS_ROUNDED, color=CYAN, size=13),
+            bgcolor=apply_opacity(0.85, SURFACE2),
+            border=ft.Border.all(1, apply_opacity(0.22, CYAN)),
+            border_radius=8,
+            padding=ft.Padding.all(5),
+            tooltip="Reset view (fit & centre)",
+            on_click=self._reset_net_view,
+        )
+
+        right_chips = [depth_chip, follow_chip, tune_chip, fit_chip]
 
         top_controls_overlay = ft.Container(
             content=ft.Row(
@@ -1003,15 +1045,35 @@ class LibraryView:
         )
         self._net_pulse_overlay = pulse_overlay
 
-        # Canvas Stack: gesture (wrapping the canvas) at the bottom, fixed
-        # overlays above it. The pulse ring is a direct overlay positioned at the
-        # now-playing node's canvas coords; _recenter_toward_node moves it in
-        # step with the nodes.
-        stack_controls: list = [gesture]
+        # The graph (canvas + now-playing pulse ring) lives inside an
+        # InteractiveViewer so pan/zoom is a NATIVE Flutter GPU transform — zero
+        # per-frame Python work and zero bridge traffic, unlike the old drag-pan
+        # that re-serialised the whole shape list ~60×/s (its battery/jank cost).
+        # The pulse ring sits in the transformed child so it stays glued to its
+        # node while panning/zooming. Fixed chrome (mode tabs, legend, tap
+        # tooltip) stays OUTSIDE the viewer so it doesn't move.
+        graph_stack = ft.Stack(
+            controls=[gesture, pulse_overlay],
+            width=canvas_w,
+            height=canvas_h,
+        )
+        graph_viewer = ft.InteractiveViewer(
+            content=graph_stack,
+            pan_enabled=True,
+            scale_enabled=True,
+            min_scale=0.8,
+            max_scale=4.0,
+            boundary_margin=ft.Margin.all(160),   # allow panning past the edges
+            clip_behavior=ft.ClipBehavior.HARD_EDGE,
+            width=canvas_w,
+            height=canvas_h,
+        )
+        self._net_viewer = graph_viewer
+
+        stack_controls: list = [graph_viewer]
         if legend_overlay is not None:
             stack_controls.append(legend_overlay)
         stack_controls.append(top_controls_overlay)
-        stack_controls.append(pulse_overlay)
         stack_controls.append(tooltip_container)
 
         stack = ft.Stack(
@@ -1030,25 +1092,30 @@ class LibraryView:
             margin=ft.Margin.symmetric(horizontal=4, vertical=4),
             alignment=ft.Alignment(0, 0),
         )
+        # Honour the collapse toggle across rebuilds (depth change, reseed, etc.)
+        canvas_container.visible = not self._net_graph_collapsed
         self._net_canvas = canvas_container
 
-        # ── Build Track Inspector Card ─────────────────────────────────────
-        inspector_card = self._build_net_inspector_card()
-        self._net_inspector_card = inspector_card
+        # ── Build ordered track-list panel ─────────────────────────────────
+        track_panel = self._build_net_track_list()
+        self._net_track_panel = track_panel
 
         # Start pulse animation token
         self._net_pulse_token += 1
         if self._net_pulse_overlay is not None:
             self.page.run_task(self._run_net_pulse, self._net_pulse_token)
 
-        # Return combined layout: Canvas + Inspector Action Card
+        # Split layout: graph on top (fixed height), ordered track list below
+        # (expands + scrolls). track_panel is itself an expanding Column whose
+        # last child is the ListView, so keep it a DIRECT child here — no
+        # expand-Container wrapper (that unbounds the list; see _build_net_track_list).
         return ft.Column(
             [
                 canvas_container,
-                inspector_card,
+                track_panel,
             ],
-            spacing=8,
-            tight=True,
+            spacing=6,
+            expand=True,
         )
 
     def _emit_net_shapes(self) -> list:
@@ -1118,214 +1185,377 @@ class LibraryView:
             shapes.append(cv.Circle(px, py, r, paint=ft.Paint(color=col, style=ft.PaintingStyle.FILL)))
 
             if nd["label"]:
-                # Text with dark pill backdrop for crisp readability
+                # Caption pill above the node. Canvas text can't be measured, so
+                # size the pill from a GENEROUS per-char estimate (over-estimating
+                # only pads the pill; under-estimating spills the text past it —
+                # the old bug) and hard-cap the label so it never runs off-node.
                 lbl_str = str(nd["label"])
-                lw = len(lbl_str) * 6
+                if len(lbl_str) > 12:
+                    lbl_str = lbl_str[:12] + "…"
+                pill_w = len(lbl_str) * 6.6 + 10
+                pill_x = px - pill_w / 2
                 shapes.append(cv.Rect(
-                    px - lw / 2 - 3, py - r - 16, lw + 6, 13, border_radius=3,
-                    paint=ft.Paint(color=apply_opacity(0.75, SURFACE2), style=ft.PaintingStyle.FILL),
+                    pill_x, py - r - 17, pill_w, 14, border_radius=4,
+                    paint=ft.Paint(color=apply_opacity(0.82, SURFACE2), style=ft.PaintingStyle.FILL),
                 ))
                 shapes.append(cv.Text(
-                    px - lw / 2, py - r - 15, lbl_str,
+                    pill_x + 5, py - r - 15.5, lbl_str,
                     style=ft.TextStyle(size=8.5, weight=ft.FontWeight.W_700, color="#FFFFFF"),
-                    max_width=120,
+                    max_width=pill_w,
                 ))
 
         return shapes
 
-    def _build_net_inspector_card(self) -> ft.Control:
-        """Build the interactive Selected Track Inspector Card & Traversal Action Panel."""
-        sel_node = self._net_node_by_path.get(self._net_selected_path) if self._net_selected_path else None
-        if not sel_node and self._net_nodes:
-            sel_node = self._net_nodes[0]
-            self._net_selected_path = sel_node["path"]
+    # ── Ordered track-list panel (split layout, replaces single-node card) ────
+    def _node_to_track(self, nd: dict) -> dict:
+        """Map a network node into the engine's queue-track schema
+        (path + track_title/artist_name/album_title), carrying duration so the
+        slider shows the right length before Dart's decoder reports back."""
+        path = nd.get("path") or ""
+        return {
+            "path":        path,
+            "track_title": nd.get("title") or os.path.basename(path) or "Unknown",
+            "artist_name": nd.get("artist") or "Unknown Artist",
+            "album_title": nd.get("album") or "Unknown Album",
+            "genre":       nd.get("genre"),
+            "duration":    nd.get("duration"),
+        }
 
-        if not sel_node:
-            return ft.Container()
+    def _enqueue_network_tracks(self, tracks: list[dict], replace: bool) -> int:
+        """Enqueue an ORDERED block of network tracks. replace=True makes the
+        sequence the new queue and plays it IN ORDER — a walk/neighbour chain is
+        an intentional ordering, so shuffle is forced off first (otherwise Dart
+        would scramble the very sequence the graph shows). replace=False appends
+        the block in one batched op via queue_extend, respecting current shuffle."""
+        tracks = [t for t in tracks if t.get("path")]
+        if not tracks:
+            return 0
+        if replace:
+            if audio_engine.is_shuffle:
+                # Set the flag directly (skips a redundant Dart set_shuffle op);
+                # the set_queue push below re-declares shuffle=False anyway.
+                audio_engine._is_shuffle = False
+                try:
+                    self.app.now_playing.update_shuffle(False)
+                except Exception:
+                    pass
+                try:
+                    self.app._save_pref("is_shuffle", False)
+                except Exception:
+                    pass
+            # A live Similar/Auto-DJ session would otherwise append over the walk.
+            if getattr(self.app, "play_similar_mode", False):
+                self.app.play_similar_mode = False
+            audio_engine.play_similar_seed_path = ""
+            audio_engine.jarvis_controlled = False
+            audio_engine.set_queue(tracks, start_index=0)
+        else:
+            audio_engine.queue_extend(tracks)
+        return len(tracks)
 
-        title = sel_node.get("title") or "Unknown Track"
-        artist = sel_node.get("artist") or "Unknown Artist"
-        album = sel_node.get("album") or ""
-        genre = sel_node.get("genre") or "Unknown Genre"
-        color = sel_node.get("color") or CYAN
-        play_count = sel_node.get("play_count") or 0
+    def _build_net_track_list(self) -> ft.Control:
+        """Panel beneath the graph: a header with batch Play/Add over a
+        scrollable, ordered list of the walk steps (or neighbourhood). Each row
+        focuses its node on the graph and offers a one-tap add; long-press opens
+        reseed / start-walk-here / play-from-here."""
+        nodes = self._net_nodes
+        is_walk = (self._net_mode == 1)
+        title_txt = "The Walk" if is_walk else "Neighbourhood"
+        count = len(nodes)
 
-        # Action handlers
-        def _play_selected(_e):
-            self.app.trigger_haptic("network_tap")
-            self.page.run_task(self.app.play_track, sel_node["path"], ("library", None))
-
-        def _queue_selected(_e):
-            self.app.trigger_haptic("swipe_queue")
-            meta = {
-                "track_path": sel_node["path"],
-                "track_title": title,
-                "artist_name": artist,
-                "album_name": album,
-                "genre": genre,
-            }
-            audio_engine.queue_next(meta)
-            self.app.show_snackbar(f"'{title}' queued next", icon=ft.Icons.QUEUE_PLAY_NEXT_ROUNDED, color=CYAN)
-
-        def _reseed_local(_e):
-            self.app.trigger_haptic("network_reseed")
-            self._network_seed_path = sel_node["path"]
-            self.page.run_task(self.load_library)
-
-        def _start_walk_here(_e):
+        def _play_all(_e):
             self.app.trigger_haptic("network_walk")
-            self._network_seed_path = sel_node["path"]
-            self.selected_network_index = 1
-            self.page.run_task(self.load_library)
+            n = self._enqueue_network_tracks([self._node_to_track(nd) for nd in nodes], replace=True)
+            if n:
+                self.app.show_snackbar(f"Playing {title_txt.lower()} · {n} tracks",
+                                       icon=ft.Icons.PLAY_ARROW_ROUNDED, color=CYAN)
 
-        # Step navigation for Walk mode
-        step_controls = []
-        if self._net_mode == 1 and len(self._net_nodes) > 1:
-            current_idx = next((i for i, n in enumerate(self._net_nodes) if n["path"] == sel_node["path"]), 0)
+        def _add_all(_e):
+            self.app.trigger_haptic("swipe_queue")
+            n = self._enqueue_network_tracks([self._node_to_track(nd) for nd in nodes], replace=False)
+            if n:
+                self.app.show_snackbar(f"Added {n} tracks to queue",
+                                       icon=ft.Icons.PLAYLIST_ADD_ROUNDED, color=CYAN)
 
-            def _step_prev(_e):
-                self.app.trigger_haptic("network_walk")
-                prev_idx = (current_idx - 1) % len(self._net_nodes)
-                self._net_selected_path = self._net_nodes[prev_idx]["path"]
-                self._redraw_net_canvas()
-                self._update_net_inspector_card()
-
-            def _step_next(_e):
-                self.app.trigger_haptic("network_walk")
-                next_idx = (current_idx + 1) % len(self._net_nodes)
-                self._net_selected_path = self._net_nodes[next_idx]["path"]
-                self._redraw_net_canvas()
-                self._update_net_inspector_card()
-
-            step_controls = [
-                ft.IconButton(icon=ft.Icons.SKIP_PREVIOUS_ROUNDED, icon_color=CYAN, icon_size=18, tooltip="Step Previous in Walk", on_click=_step_prev),
-                ft.Text(f"{current_idx + 1}/{len(self._net_nodes)}", size=11, weight=ft.FontWeight.W_700, color=CYAN),
-                ft.IconButton(icon=ft.Icons.SKIP_NEXT_ROUNDED, icon_color=CYAN, icon_size=18, tooltip="Step Next in Walk", on_click=_step_next),
-            ]
-
-        def _btn(label: str, icon_name, on_click, is_primary=False):
-            return ft.Button(
+        def _batch_btn(label, icon_name, on_click, primary=False):
+            return ft.Container(
                 content=ft.Row(
                     [
-                        ft.Icon(icon_name, size=13, color=TEXT if is_primary else CYAN),
-                        ft.Text(label, size=10, weight=ft.FontWeight.W_700, color=TEXT if is_primary else CYAN),
+                        ft.Icon(icon_name, size=14, color=BG if primary else CYAN),
+                        ft.Text(label, size=11, weight=ft.FontWeight.W_800, color=BG if primary else CYAN),
                     ],
-                    spacing=4,
-                    tight=True,
+                    spacing=5, tight=True,
                 ),
-                style=ft.ButtonStyle(
-                    bgcolor=apply_opacity(0.85, CYAN) if is_primary else apply_opacity(0.12, CYAN),
-                    shape=ft.RoundedRectangleBorder(radius=8),
-                    padding=ft.Padding.symmetric(horizontal=10, vertical=6),
-                ),
+                bgcolor=CYAN if primary else apply_opacity(0.14, CYAN),
+                border=None if primary else ft.Border.all(1, apply_opacity(0.35, CYAN)),
+                border_radius=9,
+                padding=ft.Padding.symmetric(horizontal=13, vertical=7),
                 on_click=on_click,
             )
 
-        action_buttons = [
-            _btn("Play", ft.Icons.PLAY_ARROW_ROUNDED, _play_selected, is_primary=True),
-            _btn("Play Next", ft.Icons.QUEUE_PLAY_NEXT_ROUNDED, _queue_selected),
-            _btn("Reseed", ft.Icons.CENTER_FOCUS_WEAK_ROUNDED, _reseed_local),
-            _btn("Walk", ft.Icons.SHUFFLE_ROUNDED, _start_walk_here),
-        ]
+        # Collapse/expand toggle: the chevron points at what a tap will reveal —
+        # UP brings the graph back (it lives above), DOWN focuses the list (below).
+        self._net_collapse_icon = ft.Icon(
+            ft.Icons.KEYBOARD_ARROW_UP_ROUNDED if self._net_graph_collapsed
+            else ft.Icons.KEYBOARD_ARROW_DOWN_ROUNDED,
+            color=CYAN, size=22,
+        )
+        collapse_btn = ft.Container(
+            content=self._net_collapse_icon,
+            tooltip="Show graph" if self._net_graph_collapsed else "Hide graph — focus list",
+            on_click=self._toggle_net_graph_focus,
+            padding=ft.Padding.all(2),
+            border_radius=8,
+        )
 
-        header_controls = [
-            ft.Container(
-                content=ft.Icon(ft.Icons.MUSIC_NOTE_ROUNDED, color=color, size=18),
-                width=34, height=34, border_radius=8,
-                bgcolor=apply_opacity(0.20, color),
-                alignment=ft.Alignment(0, 0),
-            ),
-            ft.Column(
+        header = ft.Container(
+            content=ft.Row(
                 [
-                    ft.Text(title, color=TEXT, size=12, weight=ft.FontWeight.W_700, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
                     ft.Row(
                         [
-                            ft.Text(artist, color=DIM, size=10, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
-                            ft.Text("•", color=DIM, size=9),
-                            ft.Container(
-                                content=ft.Text(genre, color=color, size=9, weight=ft.FontWeight.W_600),
-                                bgcolor=apply_opacity(0.15, color),
-                                border_radius=4,
-                                padding=ft.Padding.symmetric(horizontal=5, vertical=1.5),
+                            collapse_btn,
+                            ft.Column(
+                                [
+                                    ft.Text(title_txt.upper(), size=11, weight=ft.FontWeight.W_800, color=CYAN),
+                                    ft.Text(f"{count} track{'s' if count != 1 else ''}",
+                                            size=9, color=DIM),
+                                ],
+                                spacing=0, tight=True,
                             ),
                         ],
-                        spacing=4,
-                        tight=True,
+                        spacing=4, tight=True,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
+                    ft.Row(
+                        [
+                            _batch_btn("Play", ft.Icons.PLAY_ARROW_ROUNDED, _play_all, primary=True),
+                            _batch_btn("Add", ft.Icons.PLAYLIST_ADD_ROUNDED, _add_all),
+                        ],
+                        spacing=6, tight=True,
                     ),
                 ],
-                spacing=1,
-                expand=True,
+                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
             ),
-        ]
-        if step_controls:
-            header_controls.append(ft.Row(step_controls, spacing=2, tight=True))
+            padding=ft.Padding.only(left=4, right=6, top=6, bottom=8),
+        )
 
-        card_content = ft.Column(
+        self._net_list_view = ft.ListView(
+            controls=[self._build_net_list_row(i, nd, is_walk) for i, nd in enumerate(nodes)],
+            spacing=4,
+            expand=True,
+            padding=ft.Padding.only(left=4, right=4, bottom=12),
+        )
+
+        # NB: the ListView must be a DIRECT child of an expanding Column so it
+        # gets a tightly-bounded height — wrapping it in an expand Container
+        # leaves it effectively unbounded (blank subtree + no scroll).
+        return ft.Column(
+            [header, self._net_list_view],
+            spacing=2,
+            expand=True,
+        )
+
+    def _build_net_list_row(self, i: int, nd: dict, is_walk: bool) -> ft.Control:
+        path = nd.get("path") or ""
+        title = nd.get("title") or os.path.basename(path) or "Unknown"
+        artist = nd.get("artist") or "Unknown Artist"
+        color = nd.get("color") or CYAN
+        is_sel = (path == self._net_selected_path)
+        is_now = bool(path) and (path == (audio_engine.current_path or ""))
+        is_seed = bool(nd.get("is_seed"))
+        lead_txt = str(i) if is_walk else ("◆" if is_seed else "")
+
+        def _focus(_e):
+            # Highlight the node on the graph (halo) + this row. Panning to it is
+            # the user's job via the InteractiveViewer; we don't move nodes.
+            self.app.trigger_haptic("network_tap")
+            self._net_selected_path = path
+            self._redraw_net_canvas()
+            self._refresh_net_list_selection()
+
+        def _add_one(_e):
+            self.app.trigger_haptic("swipe_queue")
+            audio_engine.queue_last(self._node_to_track(nd))
+            self.app.show_snackbar(f"'{title}' added to queue",
+                                   icon=ft.Icons.PLAYLIST_ADD_ROUNDED, color=CYAN)
+
+        lead = ft.Container(
+            content=ft.Text(lead_txt, size=10, weight=ft.FontWeight.W_800,
+                            color=CYAN if (is_sel or is_now) else DIM),
+            width=20, alignment=ft.Alignment(0, 0),
+        )
+        dot = ft.Container(width=9, height=9, border_radius=5, bgcolor=color)
+        text_col = ft.Column(
             [
-                # Header row: Artwork pill, track metadata, and step controls
-                ft.Row(
-                    header_controls,
-                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                ),
-                # Action buttons row
-                ft.Row(
-                    action_buttons,
-                    spacing=6,
-                    alignment=ft.MainAxisAlignment.START,
-                    wrap=True,
-                ),
+                ft.Text(title, size=12.5,
+                        weight=ft.FontWeight.W_700 if (is_sel or is_now) else ft.FontWeight.W_500,
+                        color=CYAN if is_now else TEXT, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+                ft.Text(artist, size=10, color=DIM, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
             ],
-            spacing=8,
-            tight=True,
+            spacing=1, expand=True, tight=True,
+        )
+        trailing = (
+            ft.Icon(ft.Icons.GRAPHIC_EQ_ROUNDED, size=16, color=CYAN) if is_now
+            else ft.IconButton(
+                icon=ft.Icons.ADD_ROUNDED, icon_size=18, icon_color=CYAN,
+                tooltip="Add to queue", on_click=_add_one,
+                style=ft.ButtonStyle(padding=ft.Padding.all(2)),
+            )
         )
 
-        return ft.Container(
-            content=card_content,
-            bgcolor=apply_opacity(0.85, SURFACE),
-            border=ft.Border.all(1, apply_opacity(0.18, CYAN)),
-            border_radius=12,
-            padding=10,
-            margin=ft.Margin.symmetric(horizontal=4, vertical=2),
+        row = ft.Container(
+            content=ft.Row([lead, dot, text_col, trailing], spacing=8,
+                           vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            bgcolor=(apply_opacity(0.14, CYAN) if is_sel
+                     else apply_opacity(0.07, CYAN) if is_now else SURFACE),
+            border=ft.Border.all(1, apply_opacity(0.4, CYAN) if is_sel
+                                 else apply_opacity(0.16, CYAN) if is_now else BORDER),
+            border_radius=10,
+            padding=ft.Padding.only(left=6, right=2, top=5, bottom=5),
+            on_click=_focus,
+        )
+        return ft.GestureDetector(
+            content=row,
+            key=f"netrow_{i}",
+            on_long_press_start=lambda e: self._net_row_context_menu(i, nd),
         )
 
-    def _update_net_inspector_card(self):
-        """Rebuild inspector card in place on node selection change."""
-        if self._net_inspector_card is not None:
-            new_card = self._build_net_inspector_card()
-            self._net_inspector_card.content = new_card.content
-            self.try_update(self._net_inspector_card)
+    def _refresh_net_list_selection(self):
+        """Rebuild the track-list rows to reflect a new selection / now-playing
+        row. Cheap: the list is bounded by walk length / neighbour density
+        (≤48 rows), so a full rebuild is well under a frame."""
+        if self._net_list_view is None:
+            return
+        is_walk = (self._net_mode == 1)
+        self._net_list_view.controls = [
+            self._build_net_list_row(i, nd, is_walk) for i, nd in enumerate(self._net_nodes)
+        ]
+        self.try_update(self._net_list_view)
+
+    def _net_row_context_menu(self, index: int, nd: dict):
+        """Long-press menu for a track row: reseed the graph here, start a walk
+        here, play the sequence from this point on, or add to a playlist."""
+        self.app.trigger_haptic("long_press")
+        path = nd.get("path") or ""
+        title = nd.get("title") or "this track"
+        meta = self._node_to_track(nd)
+        bs_holder = [None]
+
+        def _close():
+            if bs_holder[0]:
+                bs_holder[0].open = False
+                bs_holder[0].update()
+                self.page.update()
+
+        def _play_from_here(_e):
+            _close()
+            self.app.trigger_haptic("network_walk")
+            tail = [self._node_to_track(n) for n in self._net_nodes[index:]]
+            n = self._enqueue_network_tracks(tail, replace=True)
+            if n:
+                self.app.show_snackbar(f"Playing {n} tracks from '{title}'",
+                                       icon=ft.Icons.PLAY_ARROW_ROUNDED, color=CYAN)
+
+        def _reseed(_e):
+            _close()
+            self.app.trigger_haptic("network_reseed")
+            self._network_seed_path = path
+            self.page.run_task(self.load_library)
+
+        def _walk_here(_e):
+            _close()
+            self.app.trigger_haptic("network_walk")
+            self._network_seed_path = path
+            self.selected_network_index = 1
+            self.page.run_task(self.load_library)
+
+        def _add_to_playlist(_e):
+            self.page.run_task(self._open_add_to_playlist_sheet, meta, bs_holder[0])
+
+        bs = ft.BottomSheet(
+            content=ft.Container(
+                content=ft.Column(
+                    [
+                        ft.Text(title, color=CYAN, weight=ft.FontWeight.W_800, size=14,
+                                max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+                        ft.Divider(color=BORDER),
+                        ft.ListTile(
+                            leading=ft.Icon(ft.Icons.PLAY_ARROW_ROUNDED, color=CYAN),
+                            title=ft.Text("Play from here", color=TEXT),
+                            on_click=_play_from_here,
+                        ),
+                        ft.ListTile(
+                            leading=ft.Icon(ft.Icons.CENTER_FOCUS_WEAK_ROUNDED, color=CYAN),
+                            title=ft.Text("Reseed graph here", color=TEXT),
+                            on_click=_reseed,
+                        ),
+                        ft.ListTile(
+                            leading=ft.Icon(ft.Icons.SHUFFLE_ROUNDED, color=CYAN),
+                            title=ft.Text("Start a walk here", color=TEXT),
+                            on_click=_walk_here,
+                        ),
+                        ft.ListTile(
+                            leading=ft.Icon(ft.Icons.PLAYLIST_ADD_ROUNDED, color=LIB_PLAYLIST_COLOR),
+                            title=ft.Text("Add to Playlist", color=TEXT),
+                            on_click=_add_to_playlist,
+                        ),
+                    ],
+                    tight=True,
+                    spacing=0,
+                ),
+                bgcolor=SURFACE,
+                padding=16,
+            ),
+            bgcolor=SURFACE,
+        )
+        bs_holder[0] = bs
+        self.page.overlay.append(bs)
+        bs.open = True
+        self.page.update()
 
     def _redraw_net_canvas(self):
         """Regenerate the canvas shape list in place. Only called when geometry
-        actually changes — node selection, walk stepping, tap-recenter — i.e.
-        discrete user actions, never a per-pointer-move loop."""
+        actually changes — node selection, walk stepping — i.e. discrete user
+        actions, never a per-pointer-move loop."""
         if self._net_canvas_obj is None:
             return
         self._net_canvas_obj.shapes = self._emit_net_shapes()
         self.try_update(self._net_canvas_obj)
 
-    def _recenter_toward_node(self, nd: dict, k: float = 0.6):
-        """Shift the whole graph so the tapped node moves a fraction `k` of the
-        way toward the canvas centre, then redraw once. Repeated taps walk the
-        view across the graph without any continuous pan loop; k<1 keeps it a
-        smooth-feeling nudge rather than a jarring jump. The now-playing pulse
-        ring is moved by the same delta so it stays glued to its node."""
-        if nd is None or not self._net_nodes:
+    def _reset_net_view(self, _e=None):
+        """Snap the graph's pan/zoom back to the seed-centred fit via the
+        InteractiveViewer's native reset() — no rebuild, no DB, no bridge churn."""
+        self.app.trigger_haptic("network_tap")
+        viewer = self._net_viewer
+        if viewer is None:
             return
-        canvas_w, canvas_h, _pad = self._net_dims
-        dx = (canvas_w / 2 - nd["px"]) * k
-        dy = (canvas_h / 2 - nd["py"]) * k
-        if abs(dx) < 0.5 and abs(dy) < 0.5:
-            return  # already centred; skip a redundant rebuild
-        for _n in self._net_nodes:
-            _n["px"] += dx
-            _n["py"] += dy
-        ov = self._net_pulse_overlay
-        if ov is not None and ov.left is not None:
-            ov.left += dx
-            ov.top += dy
-            self.try_update(ov)
-        self._redraw_net_canvas()
+        try:
+            viewer.reset()
+        except Exception as exc:
+            logger.debug("net view reset failed: %s", exc)
+
+    def _toggle_net_graph_focus(self, _e=None):
+        """Collapse/expand the graph so the track list can take the whole pane.
+        Just flips the canvas's visibility — the list Column's expand child then
+        fills the freed space. No rebuild, no DB, no graph re-layout; the state
+        persists across rebuilds via _net_graph_collapsed."""
+        self.app.trigger_haptic("network_tap")
+        self._net_graph_collapsed = not self._net_graph_collapsed
+        collapsed = self._net_graph_collapsed
+        if self._net_canvas is not None:
+            self._net_canvas.visible = not collapsed
+        if self._net_collapse_icon is not None:
+            self._net_collapse_icon.name = (
+                ft.Icons.KEYBOARD_ARROW_UP_ROUNDED if collapsed
+                else ft.Icons.KEYBOARD_ARROW_DOWN_ROUNDED
+            )
+            self._net_collapse_icon.tooltip = (
+                "Show graph" if collapsed else "Hide graph — focus list"
+            )
+        # Re-render the whole network subtree so the canvas drop and the list's
+        # re-expansion both flush in one coalesced update.
+        self.try_update(self._animated_list_wrapper)
 
     def _net_set_pulse_node(self, nd: dict | None):
         """Move the now-playing ring onto `nd` (or hide it when None). The
@@ -1373,6 +1603,7 @@ class LibraryView:
         if new is not None:
             new["is_now_playing"] = True
             self._net_set_pulse_node(new)
+            self._refresh_net_list_selection()  # move the ♫ marker to the live row
             return
 
         # The active track isn't on the current graph.
@@ -2205,6 +2436,9 @@ class LibraryView:
                         pca_rows = []
 
                     stats_text = f"{len(pca_rows)} TRACKS"
+                    
+                    self._tracks_cache = pca_rows
+                    self._tracks_cache_key = ("network", self.search_query, self.sort_mode)
 
                     interactive_canvas = self._build_interactive_network_canvas(
                         pca_rows, self.selected_network_index,
@@ -2232,13 +2466,13 @@ class LibraryView:
                         self._empty_label.content.controls[4].visible = False
                         self._animated_list_wrapper.content = self._library_list
                     else:
-                        # Wrap the canvas control in a non-scrollable Container so it doesn't scroll/intercept gestures
-                        net_container = ft.Container(
-                            content=first_chunk[0],
-                            padding=ft.Padding.only(left=12, right=12, top=4, bottom=20),
-                            expand=True,
-                        )
-                        self._animated_list_wrapper.content = net_container
+                        # Assign the split-layout Column (graph + scrolling list)
+                        # DIRECTLY as the wrapper's content — the same relationship
+                        # the normal library ListView uses, which reliably gives the
+                        # inner ListView a bounded height. An intermediate padded
+                        # expand-Container here left the list unbounded, which blanks
+                        # the whole pane (no graph, no scroll).
+                        self._animated_list_wrapper.content = first_chunk[0]
                     
                     self._update_pagination_ui()
                     # NB: no per-control .update() / page.update() here — dispatch
