@@ -1305,7 +1305,7 @@ class DatabaseManager:
                    ar.name  AS artist,
                    al.title AS album
             FROM play_counts pc
-            LEFT JOIN tracks  t  ON t.path       = pc.track_path
+            INNER JOIN tracks  t  ON t.path       = pc.track_path
             LEFT JOIN albums  al ON al.id         = t.album_id
             LEFT JOIN artists ar ON ar.id         = al.artist_id
             WHERE pc.count >= ?
@@ -1382,7 +1382,7 @@ class DatabaseManager:
                    al.title AS album,
                    al.genre AS genre
             FROM play_counts pc
-            LEFT JOIN tracks  t  ON t.path  = pc.track_path
+            INNER JOIN tracks  t  ON t.path  = pc.track_path
             LEFT JOIN albums  al ON al.id   = t.album_id
             LEFT JOIN artists ar ON ar.id   = al.artist_id
             WHERE pc.timbre IS NOT NULL
@@ -1911,7 +1911,7 @@ class DatabaseManager:
                    al.title AS album,
                    al.genre AS genre
             FROM play_counts pc
-            LEFT JOIN tracks  t  ON t.path  = pc.track_path
+            INNER JOIN tracks  t  ON t.path  = pc.track_path
             LEFT JOIN albums  al ON al.id   = t.album_id
             LEFT JOIN artists ar ON ar.id   = al.artist_id
             WHERE pc.pca_coords IS NOT NULL
@@ -1944,7 +1944,7 @@ class DatabaseManager:
                    al.title AS album,
                    al.genre AS genre
             FROM play_counts pc
-            LEFT JOIN tracks  t  ON t.path  = pc.track_path
+            INNER JOIN tracks  t  ON t.path  = pc.track_path
             LEFT JOIN albums  al ON al.id   = t.album_id
             LEFT JOIN artists ar ON ar.id   = al.artist_id
             WHERE pc.track_path IN ({placeholders})
@@ -1960,11 +1960,15 @@ class DatabaseManager:
                     row_dict["pca_coords"] = None
                 results.append(row_dict)
             return results
-
     async def has_pca_coords(self) -> bool:
         """Fast existence check — no blob deserialization."""
         conn = await self.get_connection()
-        sql = "SELECT 1 FROM play_counts WHERE pca_coords IS NOT NULL LIMIT 1"
+        sql = """
+            SELECT 1 
+            FROM play_counts pc
+            INNER JOIN tracks t ON t.path = pc.track_path
+            WHERE pc.pca_coords IS NOT NULL LIMIT 1
+        """
         async with conn.execute(sql) as cursor:
             return (await cursor.fetchone()) is not None
 

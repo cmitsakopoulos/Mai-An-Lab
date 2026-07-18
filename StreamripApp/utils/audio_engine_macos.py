@@ -80,7 +80,6 @@ class AudioEngine:
 
         self.queue: list[dict] = []
         self.current_index: int = 0
-        self.jarvis_controlled = False
         self.play_similar_seed_path = ""
         self._db_manager = None
 
@@ -814,9 +813,7 @@ class AudioEngine:
                         self._page.run_task(self.play_current)
                     return
                 else:
-                    if getattr(self, "jarvis_controlled", False):
-                        self.dispatch("on_jarvis_continue")
-                    elif getattr(self, "play_similar_seed_path", ""):
+                    if getattr(self, "play_similar_seed_path", ""):
                         self.dispatch("on_similar_continue")
                     else:
                         self.stop()
@@ -831,9 +828,7 @@ class AudioEngine:
                 if self._page:
                     self._page.run_task(self.play_current)
             else:
-                if getattr(self, "jarvis_controlled", False):
-                    self.dispatch("on_jarvis_continue")
-                elif getattr(self, "play_similar_seed_path", ""):
+                if getattr(self, "play_similar_seed_path", ""):
                     self.dispatch("on_similar_continue")
                 else:
                     self.stop()
@@ -898,6 +893,54 @@ class AudioEngine:
                 self.queue.append(track)
                 if self._is_shuffle:
                     self._on_track_added_to_shuffle(len(self.queue) - 1, play_next=False)
+            self.dispatch("on_queue_mutated")
+
+    def queue_after_current(self, tracks: list[dict], after_index: int | None = None):
+        """Insert a block of tracks right AFTER the current track (or after
+        `after_index`), preserving their order, in one dispatch.
+
+        Parity with the Android engine so callers (auto-play's rolling buffer,
+        the network pane's Play/Next) are engine-agnostic — its absence here is
+        why those paths raised AttributeError on macOS. There's no native
+        playlist to mirror on this backend, so this is Python-side state only:
+        playback is untouched and current_index never moves (every insert lands
+        after it)."""
+        with self._lock:
+            if not tracks:
+                return
+            if not self.queue:
+                self.set_queue(tracks)
+                return
+            base = self.current_index if after_index is None else after_index
+            start = min(max(int(base) + 1, 0), len(self.queue))
+            prev_pos = None
+            for offset, track in enumerate(tracks):
+                insert_at = start + offset
+                self.queue.insert(insert_at, track)
+                if not self._is_shuffle:
+                    continue
+                if not self._shuffle_order:
+                    self._shuffle_order = list(range(len(self.queue)))
+                    continue
+                # Shift every logical index at or past the insertion point.
+                self._shuffle_order = [
+                    (x + 1 if x >= insert_at else x) for x in self._shuffle_order
+                ]
+                # Place the block contiguously and IN ORDER after the current
+                # track. Note _on_track_added_to_shuffle(play_next=True) can't be
+                # reused per-track here: it puts each new track immediately after
+                # current, so a block inserted in a loop comes out REVERSED
+                # (w1, w2 → w2, w1). Each track after the first must instead
+                # follow the one before it.
+                if prev_pos is None:
+                    try:
+                        pos = self._shuffle_order.index(self.current_index) + 1
+                    except ValueError:
+                        pos = len(self._shuffle_order)
+                else:
+                    pos = prev_pos + 1
+                self._shuffle_order.insert(pos, insert_at)
+                prev_pos = pos
             self.dispatch("on_queue_mutated")
 
     def play_track_at(self, index: int):
@@ -980,7 +1023,6 @@ class AudioEngine:
 
     def stop(self):
         with self._lock:
-            self.jarvis_controlled = False
             self._stop_playback()
             self.current_index = 0
             self._set("is_playing",     False)

@@ -122,7 +122,6 @@ class SemanticIntentClassifier:
             "mute": 2.8,
             "unmute": 2.8,
             "shuffle": 2.6,
-            "download": 2.8,
             "playlist": 1.8,
             "queue": 1.5,
             
@@ -160,15 +159,7 @@ class SemanticIntentClassifier:
                 "tack this onto the queue", "pile this behind the current song",
                 "put this in queue", "throw this on the queue"
             ],
-            "playlist_create": [
-                "create a new playlist", "make a new playlist", "generate a blank playlist",
-                "build an empty playlist", "start a blank playlist", "make a playlist",
-                "create playlist", "new playlist", "add a playlist"
-            ],
-            "playlist_auto": [
-                "create a smart mood playlist", "make a chill playlist", "build an upbeat playlist",
-                "generate a moody playlist"
-            ],
+
             "skip": [
                 "skip this song", "play the next track", "go to the next song", "next please",
                 "fast forward", "go forward", "next song please", "skip this banger"
@@ -226,7 +217,7 @@ class SemanticIntentClassifier:
             
             # Fast spelling correction check for short crucial command words
             if len(clean_word) >= 3:
-                for target in ["skip", "pause", "resume", "mute", "unmute", "queue", "playlist", "download"]:
+                for target in ["skip", "pause", "resume", "mute", "unmute", "queue", "playlist"]:
                     if levenshtein_distance(clean_word, target) == 1:
                         clean_word = target
                         break
@@ -313,14 +304,6 @@ class SemanticIntentClassifier:
                 if clean.endswith(suffix):
                     clean = clean[:-len(suffix)].strip()
             return clean if clean else None
-            
-        elif intent in ("playlist_create", "playlist_auto"):
-            for verb in ("create a new playlist called", "create a playlist called", "create a playlist named",
-                         "make a playlist called", "make a playlist named", "create a new playlist",
-                         "make a new playlist", "generate a playlist", "create a", "make a", "build a"):
-                if clean.startswith(verb):
-                    clean = clean[len(verb):].strip()
-            clean = clean.strip("\"'")
-            return clean if clean else None
+
             
         return None

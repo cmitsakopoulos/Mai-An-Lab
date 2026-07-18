@@ -656,6 +656,8 @@ class SettingsView:
 
     def _show_hub(self):
         """Displays the main settings menu (the 'hub')."""
+        if getattr(self, "_enrichment_wizard_pane", None) and self._enrichment_wizard_pane.step == 5:
+            self._enrichment_wizard_pane = None
         self._apply_visuals_btn.visible = False
         self._scroll_column.controls = [
             ft.Text("Settings", size=32, weight=ft.FontWeight.W_900, color=TEXT),
@@ -796,9 +798,14 @@ class SettingsView:
             ),
             ft.Row([
                 ft.TextButton(
-                    "Build DSP Features",
-                    icon=ft.Icons.GRAPHIC_EQ_ROUNDED,
+                    "Commence/Continue DSP Compute",
+                    icon=ft.Icons.PLAY_ARROW_ROUNDED,
                     on_click=self._on_compute_dsp_click,
+                ),
+                ft.TextButton(
+                    "Recompute All DSP Features",
+                    icon=ft.Icons.REPLAY_ROUNDED,
+                    on_click=self._on_recompute_all_dsp_click,
                 ),
                 ft.TextButton(
                     "Recompute PCA",
@@ -1063,7 +1070,8 @@ class SettingsView:
 
     async def _do_compute_dsp(self):
         from utils import track_graph as tg
-        if audio_engine.audio_service is None:
+        import sys
+        if hasattr(sys, "getandroidapilevel") and audio_engine.audio_service is None:
             self.app.show_snackbar(
                 "Audio service not ready — native analyser unavailable.",
                 color="#FF4444",
@@ -1113,6 +1121,70 @@ class SettingsView:
             color=CYAN,
         )
 
+    def _on_recompute_all_dsp_click(self, _e):
+        self.page.run_task(self._do_recompute_all_dsp)
+
+    async def _do_recompute_all_dsp(self):
+        from utils import track_graph as tg
+        import sys
+        if hasattr(sys, "getandroidapilevel") and audio_engine.audio_service is None:
+            self.app.show_snackbar(
+                "Audio service not ready — native analyser unavailable.",
+                color="#FF4444",
+            )
+            return
+
+        self.app.show_snackbar(
+            "Purging acoustic features and starting full DSP re-analysis...",
+            icon=ft.Icons.REPLAY_ROUNDED,
+        )
+
+        try:
+            await self.app.clear_dsp_features()
+        except Exception as exc:
+            logger.exception("Advanced: clear_dsp_features failed: %s", exc)
+            self.app.show_snackbar(f"DSP clear failed: {exc}", color="#FF4444")
+            return
+
+        try:
+            missing = await self.app.db_manager.get_tracks_missing_features(tg.FEATURES_VERSION)
+        except Exception as exc:
+            logger.exception("Advanced: missing-feature query failed: %s", exc)
+            self.app.show_snackbar(f"DSP query failed: {exc}", color="#FF4444")
+            return
+
+        if missing:
+            self.app.show_snackbar(
+                f"Recomputing features for {len(missing)} tracks — this can take a while.",
+                icon=ft.Icons.GRAPHIC_EQ_ROUNDED,
+            )
+            try:
+                await tg.bulk_analyze_library(
+                    self.app.db_manager,
+                    audio_engine.audio_service,
+                )
+            except Exception as exc:
+                logger.exception("Advanced: bulk_analyze_library failed: %s", exc)
+                self.app.show_snackbar(f"DSP analysis failed: {exc}", color="#FF4444")
+                return
+
+        try:
+            await tg.build_metadata_edges(self.app.db_manager)
+            await tg.build_acoustic_edges(self.app.db_manager)
+        except Exception as exc:
+            logger.exception("Advanced: graph/PCA rebuild failed: %s", exc)
+            self.app.show_snackbar(f"Graph rebuild failed: {exc}", color="#FF4444")
+            return
+
+        if hasattr(self.app, "library_view") and self.app.library_view:
+            self.app.library_view._cached_unanalysed = None
+
+        self.app.show_snackbar(
+            "DSP features, edges, and PCA space recomputed.",
+            icon=ft.Icons.CHECK_CIRCLE,
+            color=CYAN,
+        )
+
     def _on_recompute_pca_click(self, _e):
         self.page.run_task(self._do_recompute_pca)
 
@@ -1139,8 +1211,9 @@ class SettingsView:
 
     def _on_launch_enrichment_wizard_click(self, _e=None):
         from ui.player.enrichment_wizard import MetadataEnrichmentWizardPane
-        pane = MetadataEnrichmentWizardPane(self.app, on_back=lambda: self._show_hub())
-        self._show_sub_page("Enrich Metadata", pane)
+        if not getattr(self, "_enrichment_wizard_pane", None):
+            self._enrichment_wizard_pane = MetadataEnrichmentWizardPane(self.app, on_back=lambda: self._show_hub())
+        self._show_sub_page("Enrich Metadata", self._enrichment_wizard_pane)
 
     # ── State bundle (export/import) ────────────────────────────────────────
     def _on_export_state_click(self, _e):

@@ -38,7 +38,6 @@ INTENT_QUEUE_ADD      = "queue_add"       # add X to queue
 INTENT_QUEUE_NEXT     = "queue_next"      # play X next (insert after current)
 INTENT_PLAY_SIMILAR   = "play_similar"    # play more like current track
 INTENT_PLAY_MORE_BY   = "play_more_by"    # more by current artist
-INTENT_DOWNLOAD       = "download"        # download X
 INTENT_SKIP           = "skip"            # next track
 INTENT_PREV           = "prev"            # previous track
 INTENT_PAUSE          = "pause"
@@ -48,12 +47,8 @@ INTENT_CLEAR_QUEUE    = "clear_queue"
 INTENT_MUTE           = "mute"
 INTENT_UNMUTE         = "unmute"
 INTENT_SHUFFLE        = "shuffle"
-INTENT_NOW_PLAYING    = "now_playing"     # what's playing
 INTENT_PLAY_RANDOM    = "play_random"     # play a random song and shuffle
 INTENT_RESCAN_DSP     = "rescan_dsp"      # run analyser for missing tracks
-INTENT_PLAYLIST_CREATE = "playlist_create"  # create playlist X (empty)
-INTENT_PLAYLIST_ADD    = "playlist_add"     # add track X to playlist Y
-INTENT_PLAYLIST_PLAY   = "playlist_play"    # play playlist X
 INTENT_AFFIRMATIVE    = "affirmative"     # yes / yeah / do it (confirmation)
 INTENT_NEGATIVE       = "negative"        # no / later / not now (cancel pending)
 INTENT_NAME_ENTITY    = "name_entity"     # call it X / name it X
@@ -117,7 +112,6 @@ def _build_patterns() -> list[tuple[str, re.Pattern]]:
             re.I
         )),
         (INTENT_HELP,         re.compile(r"^\s*(?:help|what can you do|commands?|what can i say|show help|info)\s*\??\s*$", re.I)),
-        (INTENT_NOW_PLAYING,  re.compile(r"^\s*(?:what(?:'s| is)\s+(?:this|playing|on)|now\s+playing|current\s+(?:song|track))\s*\??\s*$", re.I)),
         (INTENT_SKIP,         re.compile(r"^\s*(?:skip|next|fwd|forward|next\s+track|next\s+song)\s*$", re.I)),
         (INTENT_PREV,         re.compile(r"^\s*(?:previous|prev|back|last|previous\s+track|previous\s+song)\s*$", re.I)),
         (INTENT_PAUSE,        re.compile(r"^\s*(?:pause|hold|wait)\s*$", re.I)),
@@ -164,32 +158,7 @@ def _build_patterns() -> list[tuple[str, re.Pattern]]:
             re.I,
         )),
 
-        # ── Playlist ops ────────────────────────────────────────────────────────
-        (INTENT_PLAYLIST_CREATE, re.compile(
-            r"^\s*(?:create|make|generate|build)\s+(?:a\s+)?(?:brand\s+new\s+|new\s+)?playlist"
-            r"(?:\s+(?:called|named|titled))?\s+(?P<q>.+?)\s*$",
-            re.I,
-        )),
-        (INTENT_PLAYLIST_CREATE, re.compile(
-            r"^\s*(?:create|make|generate|build)\s+(?:a\s+)?(?:brand\s+new\s+|new\s+)?playlist\s*$",
-            re.I,
-        )),
-        (INTENT_PLAYLIST_ADD, re.compile(
-            r"^\s*(?:add|put|queue|enqueue)\s+(?:this|the\s+current)\s*(?:song|track)?\s+(?:to|in)\s+(?:playlist\s+)?(?P<playlist>.+?)\s*$",
-            re.I,
-        )),
-        (INTENT_PLAYLIST_ADD, re.compile(
-            r"^\s*(?:add|put|queue|enqueue)\s+(?P<track>.+?)\s+(?:to|in)\s+(?:playlist\s+)?(?P<playlist>.+?)\s*$",
-            re.I,
-        )),
-        (INTENT_PLAYLIST_PLAY, re.compile(
-            r"^\s*(?:play|load|start)\s+(?:my\s+)?playlist\s+(?P<q>.+?)\s*$",
-            re.I,
-        )),
-        (INTENT_PLAYLIST_PLAY, re.compile(
-            r"^\s*(?:play|load|start)\s+(?P<q>.+?)\s+playlist\s*$",
-            re.I,
-        )),
+
 
         # ── Queue ops with query ────────────────────────────────────────────────
         (INTENT_QUEUE_NEXT, re.compile(
@@ -198,11 +167,6 @@ def _build_patterns() -> list[tuple[str, re.Pattern]]:
         (INTENT_QUEUE_ADD, re.compile(
             r"^\s*(?:add|queue|enqueue|put)\s+(?P<q>.+?)(?:\s+(?:to|in)\s+(?:the\s+)?queue)?\s*$",
             re.I,
-        )),
-
-        # ── Download ────────────────────────────────────────────────────────────
-        (INTENT_DOWNLOAD, re.compile(
-            r"^\s*(?:download|get|grab|fetch|save)\s+(?P<q>.+?)\s*$", re.I
         )),
 
         # ── Play X (catch-all for non-trivial 'play ...' phrasings) ────────────
@@ -413,7 +377,6 @@ __all__ = [
     "INTENT_QUEUE_NEXT",
     "INTENT_PLAY_SIMILAR",
     "INTENT_PLAY_MORE_BY",
-    "INTENT_DOWNLOAD",
     "INTENT_SKIP",
     "INTENT_PREV",
     "INTENT_PAUSE",
@@ -423,12 +386,8 @@ __all__ = [
     "INTENT_MUTE",
     "INTENT_UNMUTE",
     "INTENT_SHUFFLE",
-    "INTENT_NOW_PLAYING",
     "INTENT_PLAY_RANDOM",
     "INTENT_RESCAN_DSP",
-    "INTENT_PLAYLIST_CREATE",
-    "INTENT_PLAYLIST_ADD",
-    "INTENT_PLAYLIST_PLAY",
     "INTENT_AFFIRMATIVE",
     "INTENT_NEGATIVE",
     "INTENT_NAME_ENTITY",

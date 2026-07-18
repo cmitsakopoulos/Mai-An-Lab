@@ -1389,7 +1389,6 @@ class SearchView:
                     }
                     
                     # Play the stream via audio engine
-                    audio_engine.jarvis_controlled = False
                     audio_engine.set_queue([meta], start_index=0)
                     
                     # Monitor streaming playback for start success or error failure
@@ -1476,7 +1475,6 @@ class SearchView:
                         data["preview_state"] = "playing"
                         icon_ctrl.content = ft.Icon(ft.Icons.STOP_CIRCLE_OUTLINED, color=CYAN, size=20)
                         container_ctrl.shadow = ft.BoxShadow(blur_radius=8, color=apply_opacity(0.15, CYAN))
-                        audio_engine.jarvis_controlled = False
                         audio_engine.set_queue([meta], start_index=0)
                         self.app.show_snackbar(f"Playing preview (downloaded): {title}")
                         icon_ctrl.update()
