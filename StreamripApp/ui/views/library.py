@@ -53,6 +53,14 @@ def _canon_genre(genre) -> str:
     return "".join(ch for ch in str(genre).lower() if ch.isalnum())
 
 
+# Source-supplied values that mean "no genre", not a genre. Kept in sync with
+# db_manager.fix_and_normalize_track_genres' _PLACEHOLDER.
+_PLACEHOLDER_TAGS = frozenset({
+    "", "various", "various artists", "misc", "unknown", "other",
+    "divers", "musique diverse", "special purpose artist", "autre",
+})
+
+
 # Semantic synonyms for tags that pca_engine.genre_bucket's coarse rules don't
 # cover, keyed by canonical token (alnum-lower) → (group_key, display_label).
 # Spelling/spacing variants are already unified by _canon_genre, so we only need
@@ -114,26 +122,44 @@ _GENRE_ALIASES: dict[str, tuple[str, str]] = {
 def _genre_group(genre) -> tuple[str, str]:
     """(grouping_key, display_label) for a genre tag. Known families collapse via
     pca_engine.genre_bucket so 'Hip-Hop' / 'hip hop' / 'rap' / 'trap' share one
-    key, colour and legend row. Multi-genre tags map via their primary segment."""
+    key, colour and legend row.
+
+    Multi-genre tags are resolved by RULE PRIORITY over the whole string, never
+    by which segment the source happened to list first. Sources emit the same
+    semantic set in any order — the real library carries 'Rock, Pop' (64 albums)
+    and 'Pop, Rock' (55) as well as six orderings of {Rock, Metal, Pop} — and the
+    old 'split, take segment [0]' rule sent those identical sets to DIFFERENT
+    groups ('Rock, Pop' → Rock/Alt but 'Pop, Rock' → Pop). Deferring to
+    genre_bucket on the full string makes grouping order-invariant, and its
+    rare-genre-first priority keeps a minority family (Metal inside
+    'Pop, Rock, Metal') from being swallowed by the Rock/Pop majority."""
     from utils.pca_engine import genre_bucket
     import re
     if not genre:
         return "", ""
 
     raw_str = str(genre).strip()
-    primary = re.split(r'[/,;&+]', raw_str)[0].strip()
-
-    norm_primary = " ".join(primary.split())
-    bucket_primary = genre_bucket(norm_primary)
-    if bucket_primary not in ("Unknown", "Other"):
-        return bucket_primary, bucket_primary
-
+    # Source placeholders carry no genre information. 'Divers' is Qobuz's French
+    # locale filler and was surfacing as a literal 'divers' heading next to the
+    # artist's real family; treat these as untagged so the album groups by
+    # whatever else it has rather than inventing a bucket.
+    if raw_str.lower() in _PLACEHOLDER_TAGS:
+        return "", ""
     norm_full = " ".join(raw_str.split())
     bucket_full = genre_bucket(norm_full)
     if bucket_full not in ("Unknown", "Other"):
         return bucket_full, bucket_full
 
-    canon = _canon_genre(primary) or _canon_genre(raw_str)
+    # Unrecognised as a whole — fall back to per-segment alias resolution, which
+    # covers niche tags the coarse rules don't model ('Trip-Hop', 'Laiko').
+    segments = [s.strip() for s in re.split(r'[/,;&+]', raw_str) if s.strip()]
+    for seg in segments:
+        canon = _canon_genre(seg)
+        alias = _GENRE_ALIASES.get(canon) if canon else None
+        if alias is not None:
+            return alias
+
+    canon = _canon_genre(segments[0] if segments else "") or _canon_genre(raw_str)
     if not canon:
         return "", ""
 

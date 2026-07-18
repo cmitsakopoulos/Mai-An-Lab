@@ -186,6 +186,9 @@ class SemanticIntentClassifier:
                 "what are your features", "how do i use jarvis", "what can you do for me today",
                 "show help options", "explain your commands", "what are your skills",
                 "show me commands", "help me jarvis"
+            ],
+            "play_the_usual": [
+                "play the usual", "queue up the usual", "play my usual", "queue my usual songs"
             ]
         }
         

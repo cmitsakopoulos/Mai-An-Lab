@@ -210,6 +210,19 @@ class StreamripFletApp:
         self._play_similar_recommendation_in_progress: bool = False
 
         # ── Session-scoped negative centroid ─────────────────────────────
+        # DORMANT BY DESIGN — collected, not consumed. Keep it that way unless
+        # you are deliberately reviving the taste model.
+        #
+        # `_record_play_event_safe` still fills these on every track transition,
+        # but nothing reads them: the trip-wire and the Jarvis continuation that
+        # used them were removed in the Jarvis debloat (8ddff64). That was a
+        # deliberate simplification — a slim, debuggable walk beat a taste model
+        # that was hard to reason about — and the capture is retained so the
+        # signal is there if we choose to wire it back up.
+        #
+        # So this is NOT a bug to "fix" by hunting down the missing consumer.
+        # The cost is three small in-memory deques per session.
+        #
         # Transient signal that powers the "this chain went bad" guardrail
         # on top of the global taste model. None of this is persisted —
         # the goal is to react inside one listening session, then reset.
@@ -760,6 +773,33 @@ class StreamripFletApp:
         if sys.platform == "darwin":
             return
         self.page.run_task(self._trigger_haptic_async, action)
+
+    def play_success_notification(self):
+        """Trigger vibration and play the success sound notification."""
+        self.trigger_haptic("vibrate")
+        if sys.platform == "darwin":
+            try:
+                import subprocess
+                # Use macOS built-in system sound for native offline playback
+                sound_path = "/System/Library/Sounds/Glass.aiff"
+                if os.path.exists(sound_path):
+                    subprocess.Popen(["afplay", sound_path])
+                else:
+                    logger.warning(f"System sound not found at: {sound_path}")
+            except Exception as e:
+                logger.warning("Failed to play success sound on macOS: %s", e)
+        else:
+            # Android native notification sound via Pyjnius
+            try:
+                from jnius import autoclass
+                ActivityThread = autoclass("android.app.ActivityThread")
+                context = ActivityThread.currentApplication().getApplicationContext()
+                RingtoneManager = autoclass("android.media.RingtoneManager")
+                Uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+                ringtone = RingtoneManager.getRingtone(context, Uri)
+                ringtone.play()
+            except Exception as e:
+                logger.warning("Failed to play Android native notification sound: %s", e)
 
     async def _trigger_haptic_async(self, action: str):
         """Async implementation of haptic feedback triggering."""

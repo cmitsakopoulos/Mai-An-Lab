@@ -872,6 +872,7 @@ class AssistantRunner:
         "queue_next":     1.0,
         "play_similar":   1.0,
         "play_more_by":   1.0,
+        "play_the_usual": 1.0,
         # passive / informational
         "search_artist":  0.5,
         "search_track":   0.5,
@@ -1691,6 +1692,40 @@ class AssistantRunner:
             displayed=phrase,
         )
 
+    async def _handle_play_the_usual(self, _intent: ai.Intent) -> AssistantResponse:
+        try:
+            tracks = await self.db.get_most_played(limit=20)
+        except Exception:
+            tracks = []
+
+        if not tracks:
+            return AssistantResponse(
+                spoken="I don't have enough play history to know what your usual is, sir.",
+                displayed="No play history found — play count data is empty.",
+                success=False,
+            )
+
+        track = random.choice(tracks)
+        engine_track = _to_engine_track(track)
+        self.engine.set_queue([engine_track], start_index=0)
+        self._remember(engine_track["path"])
+
+        title = track.get("title") or "Unknown Song"
+        artist = track.get("artist") or "Unknown Artist"
+        album = track.get("album") or track.get("album_title") or ""
+        duration = track.get("duration") or 0.0
+        album_str = f" from the album '{album}'" if album else ""
+        duration_str = ""
+        if duration > 0:
+            m, s = divmod(int(duration), 60)
+            duration_str = f" ({m}m {s}s)" if m > 0 else f" ({s}s)"
+
+        return AssistantResponse(
+            spoken=f"Very good, sir. Queuing up {title} by {artist}{album_str}{duration_str}, one of your favorites.",
+            displayed=f"Playing the usual: **{title}** — {artist}{album_str}{duration_str}",
+            deferred_play=True,
+        )
+
     async def _handle_unknown(self, intent: ai.Intent) -> AssistantResponse:
         # Last-resort fallback: treat the whole utterance as a library search.
         text = (intent.raw or "").strip()
@@ -1743,6 +1778,7 @@ AssistantRunner._INTENT_DISPATCH = {
     ai.INTENT_MUTE:          AssistantRunner._handle_mute,
     ai.INTENT_UNMUTE:        AssistantRunner._handle_unmute,
     ai.INTENT_RESCAN_DSP:    AssistantRunner._handle_rescan_dsp,
+    ai.INTENT_PLAY_THE_USUAL: AssistantRunner._handle_play_the_usual,
     ai.INTENT_GREET:           AssistantRunner._handle_greet,
     ai.INTENT_HELP:          AssistantRunner._handle_help,
     ai.INTENT_UNKNOWN:       AssistantRunner._handle_unknown,

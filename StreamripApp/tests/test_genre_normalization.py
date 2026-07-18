@@ -38,7 +38,7 @@ class TestGenreNormalization(unittest.TestCase):
         _run(self.db.close())
         os.unlink(self.tmp.name)
 
-    async def _seed(self, artist, album_genre, genres):
+    async def _seed(self, artist, album_genre, genres, status="ok"):
         conn = await self.db.get_connection()
         aid = await self.db._get_or_create_artist(conn, artist)
         await conn.execute(
@@ -46,7 +46,33 @@ class TestGenreNormalization(unittest.TestCase):
             (aid, f"{artist} LP", album_genre),
         )
         await conn.commit()
-        await self.db.upsert_artist_enrichment(artist, genres=genres, status="ok")
+        await self.db.upsert_artist_enrichment(artist, genres=genres, status=status)
+
+    async def _seed_discography(self, artist, album_genres, genres=None, status="ok"):
+        """Seed one artist with several albums, each carrying its own source tag."""
+        conn = await self.db.get_connection()
+        aid = await self.db._get_or_create_artist(conn, artist)
+        for i, g in enumerate(album_genres):
+            await conn.execute(
+                "INSERT INTO albums (artist_id, title, genre) VALUES (?, ?, ?)",
+                (aid, f"{artist} LP{i}", g),
+            )
+        await conn.commit()
+        if genres is not None:
+            await self.db.upsert_artist_enrichment(artist, genres=genres, status=status)
+
+    async def _albums(self, artist):
+        conn = await self.db.get_connection()
+        async with conn.execute(
+            "SELECT al.title, al.genre, al.genre_bucket FROM albums al "
+            "JOIN artists ar ON ar.id = al.artist_id WHERE ar.name = ? "
+            "ORDER BY al.title",
+            (artist,),
+        ) as cur:
+            return await cur.fetchall()
+
+    def _buckets(self, rows):
+        return [set((r[2] or "").split(",")) - {""} for r in rows]
 
     async def _album(self, artist):
         conn = await self.db.get_connection()
@@ -98,6 +124,85 @@ class TestGenreNormalization(unittest.TestCase):
             g, b = await self._album("NoConsensusA")
             self.assertEqual(g, "Hip-Hop")              # kept: no family to trust
             self.assertEqual(b, "Hip-Hop")
+
+        _run(scenario())
+
+    def test_omission_is_noise_addition_is_signal(self):
+        """Slipknot's `Iowa` is tagged bare 'Rock' while the rest of the
+        discography is 'Nu Metal' — the source dropped a tag, the record didn't
+        change. Gojira's `Fortitude` ('Pop, Rock') sits beside four albums
+        tagged '{Metal, Pop, Rock}'. Both must recover the missing family from
+        the artist consensus, while an album that genuinely ADDS a family keeps
+        it."""
+
+        async def scenario():
+            await self._seed_discography("Slipknot", [
+                "Nu Metal", "Nu Metal", "Nu Metal", "Nu Metal", "Rock",
+            ])
+            await self._seed_discography("Gojira", [
+                "Rock, Metal, Pop", "Pop, Metal, Rock", "Metal, Rock, Pop",
+                "Metal, Pop, Rock", "Pop, Rock",
+            ])
+            # An album that ADDS a family the artist doesn't otherwise carry.
+            await self._seed_discography("Experimentalist", [
+                "Metal", "Metal", "Metal", "Jazz, Electronic",
+            ])
+            await self.db.fix_and_normalize_track_genres()
+
+            rows = await self._albums("Slipknot")
+            for r in rows:
+                self.assertIn("Metal", (r[2] or ""),
+                              f"{r[0]} lost Metal: bucket={r[2]}")
+            # No album is fenced off into a disjoint family.
+            bks = self._buckets(rows)
+            for i in range(len(bks)):
+                for j in range(i + 1, len(bks)):
+                    self.assertTrue(bks[i] & bks[j])
+
+            rows = await self._albums("Gojira")
+            for r in rows:
+                self.assertIn("Metal", (r[2] or ""),
+                              f"{r[0]} lost Metal: bucket={r[2]}")
+
+            rows = await self._albums("Experimentalist")
+            odd = [r for r in rows if "Jazz" in (r[1] or "")][0]
+            self.assertIn("Jazz", odd[2], "an added family must be preserved")
+            self.assertIn("Electronic", odd[2])
+            self.assertIn("Metal", odd[2], "and the core family still applies")
+
+        _run(scenario())
+
+    def test_placeholder_and_untagged_albums_inherit_the_artist(self):
+        """'Divers' is Qobuz's French placeholder; it was mistaken for a real
+        genre and split Greek rappers into a phantom 'Other' family. An artist
+        with a single tagged album must still fill its untagged siblings."""
+
+        async def scenario():
+            await self._seed_discography("Daima", ["Rap", "Divers", "Divers"])
+            await self._seed_discography("Sparse", ["Rap", None, ""])
+            await self.db.fix_and_normalize_track_genres()
+
+            for artist in ("Daima", "Sparse"):
+                rows = await self._albums(artist)
+                for r in rows:
+                    self.assertEqual(
+                        set((r[2] or "").split(",")) - {""}, {"Hip-Hop"},
+                        f"{artist}/{r[0]} bucket={r[2]}")
+
+        _run(scenario())
+
+    def test_lowconfidence_enrichment_never_rewrites_the_display(self):
+        """A Greek rapper resolved to a Japanese j-core act. The old code
+        re-derived the display tag from that row, overwriting a correct 'Hip-Hop'
+        source tag with 'J-Core'."""
+
+        async def scenario():
+            await self._seed("GreekRapper", "Hip-Hop",
+                             _tags(("j-core", 1)), status="lowconfidence")
+            await self.db.fix_and_normalize_track_genres()
+            g, b = await self._album("GreekRapper")
+            self.assertEqual(g, "Hip-Hop", "untrusted match must not rewrite display")
+            self.assertIn("Hip-Hop", b or "")
 
         _run(scenario())
 
