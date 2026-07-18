@@ -2402,34 +2402,63 @@ class DatabaseManager:
 
     async def fix_and_normalize_track_genres(self) -> dict:
         """Back-fill album genres from API artist metadata — NON-DESTRUCTIVELY —
-        and maintain the coarse `genre_bucket` alongside the specific `genre`.
+        and maintain the multi-label `genre_bucket` alongside the specific
+        `genre`.
 
         Two columns per album:
           • `genre`        — the human DISPLAY tag. A genuinely specific existing
             tag is KEPT (a 'Trap' / 'Boom Bap' is never flattened to 'Hip-Hop').
-            A value that is empty, a placeholder ('Various'/'Unknown'), or itself
-            just a coarse bucket label (an artifact of the OLD collapsing
-            normalization) is re-derived to the artist's top MusicBrainz tag —
-            so prior collapses are gently undone ('Hip-Hop' → 'Grime').
-          • `genre_bucket` — the coarse family (pca_engine.genre_bucket) for
-            grouping/colour/legend, from the weighted API-tag vote, else the
-            bucket of the display tag.
+            A value that is empty, a placeholder ('Various'/'Divers'/'Unknown'),
+            or itself just a coarse bucket label (an artifact of the OLD
+            collapsing normalization) is re-derived to the artist's top
+            MusicBrainz tag — so prior collapses are gently undone
+            ('Hip-Hop' → 'Grime').
+          • `genre_bucket` — the album's coarse families as a comma-joined,
+            sorted MULTI-LABEL set ('Metal,Pop,Rock/Alt'), not one winner.
 
-        This supersedes the old behaviour, which overwrote `genre` with the coarse
-        bucket and destroyed sub-genre nuance. NB the walk reads NEITHER column
-        (it uses artist_enrichment.genres directly), so this is display-only.
+        ── Why multi-label + an artist consensus ────────────────────────────────
+        Source tags are comma-lists ('Rock, Metal, Pop') and the old code forced
+        them through `genre_bucket`'s first-match-wins collapse, which is decided
+        by the RULE priority order rather than by the music. Measured on the real
+        library, that made 21% of multi-album artists straddle two families for
+        no musical reason — Slipknot's `Iowa` (tagged bare 'Rock') landed in
+        Rock/Alt while the rest of the discography landed in Metal, and Gojira's
+        `Fortitude` ('Pop, Rock') split off from four albums tagged
+        '{Metal, Pop, Rock}'. The source simply omitted a tag; nothing about the
+        record changed.
 
-        Returns {'scanned', 'genre_rederived', 'bucket_updated'}.
+        So the rule here is **omission is noise, addition is signal**:
+
+            core(artist) = tokens carried by at least half the artist's tagged
+                           albums (min 2 attesting) — their stable identity
+            album_final  = core(artist) ∪ tokens(this album)
+
+        An album that DROPS a family recovers it from the core (Iowa regains
+        Metal). An album that ADDS one keeps it, because extra evidence is
+        trustworthy in a way that a missing tag is not — which is precisely the
+        genuine case worth preserving, a metal artist's album that really does
+        carry a Jazz or Electronic tag.
+
+        MusicBrainz artist tags are used ONLY as the fallback for albums (and
+        artists) with no source tag at all, and only from a `status='ok'` row: a
+        'lowconfidence' row can be an outright wrong entity (a Greek rapper
+        resolved to a Japanese j-core act), and letting one re-derive the display
+        overwrites correct source data with fiction.
+
+        NB the walk reads NEITHER column (it uses artist_enrichment.genres
+        directly), so this is display/grouping only.
+
+        Returns {'scanned', 'genre_rederived', 'bucket_updated', 'consensus_repaired'}.
         """
         from utils.pca_engine import (
-            genre_bucket, genre_display_label, GENRE_BUCKET_LABELS,
+            genre_bucket, genre_tokens, genre_display_label, GENRE_BUCKET_LABELS,
         )
         conn = await self.get_connection()
 
         sql = (
             "SELECT al.id AS album_id, al.genre AS current_genre, "
             "al.genre_bucket AS current_bucket, ar.name AS artist_name, "
-            "e.genres AS api_genres "
+            "e.genres AS api_genres, e.status AS api_status "
             "FROM albums al "
             "JOIN artists ar ON ar.id = al.artist_id "
             "LEFT JOIN artist_enrichment e ON e.artist_name = ar.name"
@@ -2437,24 +2466,91 @@ class DatabaseManager:
         async with conn.execute(sql) as cursor:
             rows = await cursor.fetchall()
 
-        # Display values we treat as carrying no more information than the bucket
-        # column will — safe to re-derive to a finer tag.
-        _PLACEHOLDER = {"", "various", "various artists", "misc", "unknown", "other"}
+        # Display values that carry no more information than the bucket column
+        # will — safe to re-derive to a finer tag. 'divers' is Qobuz's French
+        # locale placeholder and was previously mistaken for a real genre, so it
+        # survived normalization forever and split artists into a phantom
+        # 'Other' family.
+        _PLACEHOLDER = {
+            "", "various", "various artists", "misc", "unknown", "other",
+            "divers", "musique diverse", "special purpose artist", "autre",
+        }
 
-        from collections import Counter
-        genre_updates: list[tuple[str, int]] = []   # (display_tag, album_id)
-        bucket_updates: list[tuple[str, int]] = []   # (bucket, album_id)
+        def _is_placeholder(tag: str) -> bool:
+            return tag.strip().lower() in _PLACEHOLDER
+
+        def _real_tokens(tag: str) -> set:
+            """Coarse families of a source tag, minus the non-informative
+            sentinels. Empty set for a placeholder / unrecognised tag."""
+            if not tag or _is_placeholder(tag):
+                return set()
+            return {t for t in genre_tokens(tag) if t not in ("Unknown", "Other")}
+
+        from collections import Counter, defaultdict
+
+        # ── Pass 1: per-artist token vote over that artist's own source tags ──
+        by_artist: dict = defaultdict(list)
+        for row in rows:
+            by_artist[row["artist_name"]].append(row)
+
+        # Two DIFFERENT artist-level summaries, for two different jobs:
+        #   core  — repairs an album that HAS tags but omitted a family. This
+        #           overrides what the source said, so it must be well attested:
+        #           half the tagged albums, and never on a single album's word.
+        #   union — fills an album with NO usable tag at all. Nothing is being
+        #           overridden here (absence of a tag is absence of information),
+        #           so any family the artist demonstrably carries beats leaving
+        #           the album unclassified. Without this, an artist whose only
+        #           tagged album is a lone 'Rap' leaves every 'Divers' sibling
+        #           stranded at NULL.
+        core_by_artist: dict = {}
+        union_by_artist: dict = {}
+        mb_by_artist: dict = {}
+        for artist, arows in by_artist.items():
+            album_tokens = [
+                _real_tokens(r["current_genre"] or "") for r in arows
+            ]
+            album_tokens = [t for t in album_tokens if t]
+            votes: Counter = Counter()
+            for toks in album_tokens:
+                votes.update(toks)
+            n = len(album_tokens)
+            threshold = max(2, (n + 1) // 2) if n else 0
+            core_by_artist[artist] = {
+                t for t, c in votes.items() if c >= threshold
+            }
+            union_by_artist[artist] = set(votes)
+
+            # MusicBrainz artist tags — fallback only, and only when trusted.
+            mb_toks: set = set()
+            first = arows[0]
+            if (first["api_status"] or "") == "ok" and first["api_genres"]:
+                try:
+                    for g in json.loads(first["api_genres"]):
+                        if isinstance(g, dict) and g.get("name"):
+                            mb_toks |= _real_tokens(g["name"])
+                except Exception:
+                    pass
+            mb_by_artist[artist] = mb_toks
+
+        genre_updates: list[tuple[str, int]] = []    # (display_tag, album_id)
+        bucket_updates: list[tuple[str, int]] = []   # (bucket_csv, album_id)
+        consensus_repaired = 0
 
         for row in rows:
             album_id = row["album_id"]
+            artist = row["artist_name"]
             curr_genre = (row["current_genre"] or "").strip()
             curr_bucket = (row["current_bucket"] or "").strip()
+            api_status = (row["api_status"] or "")
             api_genres_raw = row["api_genres"]
 
             # Parse API tags → weighted bucket votes + tags sorted by count desc.
+            # ONLY from a trusted row; a lowconfidence match must never rewrite
+            # the display.
             bucket_votes: Counter = Counter()
             tags_by_count: list[str] = []
-            if api_genres_raw:
+            if api_genres_raw and api_status == "ok":
                 try:
                     parsed = json.loads(api_genres_raw)
                     if isinstance(parsed, list):
@@ -2484,7 +2580,7 @@ class DatabaseManager:
             # buckets to Other ≠ consensus → rejected; 'grime' buckets to the
             # Hip-Hop consensus → accepted as 'Grime').
             rederivable = (
-                curr_genre.lower() in _PLACEHOLDER
+                _is_placeholder(curr_genre)
                 or curr_genre in GENRE_BUCKET_LABELS
             )
             display = curr_genre
@@ -2496,18 +2592,35 @@ class DatabaseManager:
                     )
                     if rep:
                         display = rep.title()
-                elif curr_genre.lower() in _PLACEHOLDER and tags_by_count:
+                elif _is_placeholder(curr_genre) and tags_by_count:
                     # No family consensus and nothing to keep — surface the raw
                     # top tag rather than leave an empty/placeholder.
                     display = genre_display_label(tags_by_count[0])
             if display != curr_genre:
                 genre_updates.append((display, album_id))
 
-            # ── BUCKET: weighted API consensus, else the bucket of the display tag.
-            new_bucket = api_consensus
-            if not new_bucket and display:
-                b = genre_bucket(display)
-                new_bucket = b if b not in ("Unknown", "Other") else None
+            # ── BUCKET: multi-label, repaired against the artist consensus ────
+            own = _real_tokens(curr_genre) or _real_tokens(display)
+            if own:
+                # Tagged album: repair omissions from the well-attested core,
+                # keep any family the album adds on its own.
+                final = own | core_by_artist.get(artist, set())
+            else:
+                # Untagged / placeholder album: inherit whatever the artist
+                # demonstrably is, then trusted MusicBrainz, then the display tag.
+                final = set(union_by_artist.get(artist) or set())
+                if not final:
+                    final = set(mb_by_artist.get(artist) or set())
+                if not final and api_consensus:
+                    final = {api_consensus}
+                if not final and display:
+                    b = genre_bucket(display)
+                    if b not in ("Unknown", "Other"):
+                        final = {b}
+            if own and final > own:
+                consensus_repaired += 1
+
+            new_bucket = ",".join(sorted(final)) if final else None
             if new_bucket and new_bucket != curr_bucket:
                 bucket_updates.append((new_bucket, album_id))
 
@@ -2528,6 +2641,7 @@ class DatabaseManager:
             "scanned": len(rows),
             "genre_rederived": len(genre_updates),
             "bucket_updated": len(bucket_updates),
+            "consensus_repaired": consensus_repaired,
         }
         logger.info("fix_and_normalize_track_genres: %s", summary)
         return summary

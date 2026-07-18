@@ -297,12 +297,18 @@ class TestWalkRegionalCountryPool(unittest.TestCase):
 class TestWalkGenreFlowGradient(unittest.TestCase):
     """genre_flow_lambda rewards NPMI genre continuity to the CURRENT track, so
     within an already-in-genre pool the walk prefers a smooth subgenre trajectory
-    over the merely-nearest acoustic neighbour. Off (0.0) by default."""
+    over the merely-nearest acoustic neighbour.
+
+    ON by default at tg.DEFAULT_GENRE_FLOW. It used to default to 0.0; it was
+    turned on when genre similarity was removed from `_meta_score`, which left
+    ordering inside a broad pool with nothing but timbre and let a Depeche Mode
+    seed drift into modern EDM."""
 
     def _db(self):
         # SEED(rap) → A(rap,drill). From A: X(rap,drill) is a touch farther but
         # shares A's 'drill'; Y(rap,trap) is nearer but only shares 'rap'. Both
-        # are in-pool (same mega-genre as the seed).
+        # are in-pool (same mega-genre as the seed). Distinct artists throughout,
+        # so the same-act zeroing in `_genre_flow` isn't what decides this.
         db = FakeDB()
         db.add_edge("SEED", "A", 0.95)
         db.add_edge("A", "X", 0.70)
@@ -313,14 +319,38 @@ class TestWalkGenreFlowGradient(unittest.TestCase):
         db.add_meta("Y",    "Why", "US", ["rap", "trap"])
         return db
 
-    def test_off_by_default_nearer_acoustic_wins(self):
+    def test_on_by_default_subgenre_continuity_wins(self):
         out = _run(tg.walk(self._db(), "SEED", length=2, meta_lambda=0.35))
+        self.assertEqual(out, ["A", "X"])
+
+    def test_explicitly_disabled_nearer_acoustic_wins(self):
+        out = _run(tg.walk(self._db(), "SEED", length=2, meta_lambda=0.35,
+                           genre_flow_lambda=0.0))
         self.assertEqual(out, ["A", "Y"])
 
     def test_gradient_prefers_subgenre_continuity_to_current(self):
         out = _run(tg.walk(self._db(), "SEED", length=2, meta_lambda=0.35,
                            genre_flow_lambda=1.0))
         self.assertEqual(out, ["A", "X"])
+
+    def test_same_act_scores_zero_so_the_walk_cannot_lock_onto_one_artist(self):
+        """Two tracks by one artist carry identical tags, so gx = 1.0 — the
+        maximum bonus. Anchored to the current track that is a feedback loop:
+        step onto an artist and their catalogue outscores everything. Measured,
+        it returned eight consecutive Twin Tribes tracks from a The Cure seed."""
+        db = FakeDB()
+        db.add_edge("SEED", "A", 0.95)
+        # From A: SAME-ARTIST sibling A2 is acoustically farther than the
+        # different-artist Z, so only a genre bonus could promote it.
+        db.add_edge("A", "A2", 0.60)
+        db.add_edge("A", "Z", 0.80)
+        db.add_meta("SEED", "S",   "US", ["rap"])
+        db.add_meta("A",    "Aay", "US", ["rap", "drill"])
+        db.add_meta("A2",   "Aay", "US", ["rap", "drill"])   # same act as A
+        db.add_meta("Z",    "Zed", "US", ["rap", "trap"])
+        out = _run(tg.walk(db, "SEED", length=2, meta_lambda=0.35,
+                           genre_flow_lambda=1.0))
+        self.assertEqual(out, ["A", "Z"], "same-act must not win on genre flow")
 
 
 if __name__ == "__main__":

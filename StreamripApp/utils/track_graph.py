@@ -21,14 +21,20 @@ something similar' to a seed-anchored trajectory walk over the acoustic graph
 continuous proximity the assistant needs instead of discrete buckets.
 
 The walk (`walk`, "Seed-Anchored Smooth Flow"):
-  • deterministic greedy trajectory — at each step pick the unvisited acoustic
-    neighbour maximising 0.7·Sim(current) + 0.3·Sim(seed), so the queue flows
-    forward while staying anchored to the seed (no random teleports);
-  • a multiplicative metadata factor (genre-NPMI + shared-country, `_meta_score`)
-    and a soft cross-community penalty, so the trajectory stays inside the seed's
-    genre/community instead of riding a timbre bridge into a foreign one;
-  • graceful degradation — with no enrichment / cluster labels the factors
-    collapse to 1.0 and it's the pure acoustic dual-similarity flow.
+  • METADATA DEFINES THE POOL, ACOUSTICS ORDER IT. `_pool_foreign` decides
+    membership from the tags (genre boundary, plus a country boundary for
+    regional seeds); everything inside the pool is then ranked by proximity;
+  • deterministic greedy trajectory — at each step pick the unvisited in-pool
+    acoustic neighbour maximising 0.7·Sim(current) + 0.3·Sim(seed), so the queue
+    flows forward while staying anchored to the seed (no random teleports);
+  • a small additive shared-country bonus (`_meta_score`) as a tiebreaker
+    between tracks the acoustics rate equally. Genre similarity deliberately
+    does NOT appear in the score — it already decided pool membership, and
+    spending it twice let a tag resemblance outrank a closer-sounding track;
+  • graceful degradation — with no enrichment nothing is foreign and the bonus
+    is 0, so it collapses to the pure acoustic dual-similarity flow. That is the
+    intended behaviour for an untagged library, not a fallback: with no
+    metadata, DSP proximity is the whole signal.
 
 (A stochastic Personalised-PageRank walker previously lived here; it was removed
 in favour of this single, metadata-aware walker.)
@@ -470,16 +476,44 @@ def _unpack_embedding(blob: bytes | None) -> Optional[np.ndarray]:
 
 
 # ── Regional scenes (the ONE genre-taxonomy fact the walk still needs) ────────
-# A regional scene travels with a country/language, so for a seed in one of
-# these buckets a foreign country IS foreign — even a moderate cross-country
-# genre overlap (laiko↔dance-pop via NPMI) is the wrong continuation, and the
-# right one (another same-country track) is often *untagged*, so genre-set
-# similarity can't rank it. `_pool_foreign` therefore treats country as a HARD
-# pool constraint for regional seeds. Everything else (Hip-Hop, Rock, Pop,
-# Metal, Electronic, Jazz, …) is a borderless/international scene where
-# nationality says little, so country there is only the soft ordering bonus in
-# `_meta_score`.
-_REGIONAL_SCENES = frozenset({"Folk/Cntry", "Latin", "Reggae", "Asian-Pop"})
+# A regional scene travels with a country/language, so for such a seed a foreign
+# country IS foreign — even a moderate cross-country genre overlap (laiko↔
+# dance-pop via NPMI) is the wrong continuation, and the right one (another
+# same-country track) is often *untagged*, so genre-set similarity can't rank it.
+# `_pool_foreign` therefore treats country as a HARD pool constraint for regional
+# seeds. Everything else (Hip-Hop, Rock, Pop, Metal, Electronic, Jazz, …) is a
+# borderless/international scene where nationality says little, so country there
+# is only the soft ordering bonus in `_meta_score`.
+#
+# The membership test is per-TAG (`genre_taxonomy.is_regional_tag`), not per
+# coarse bucket: Folk/Cntry holds laiko/rebetiko (regional) AND blues, country,
+# americana, folk-rock (borderless), so gating on the whole bucket fenced Western
+# roots artists apart by nationality — Fleetwood Mac against essentially the
+# whole library, 4.9% of all enriched pairs in the audit.
+
+# Weight of the step-to-step genre-continuity term (`_genre_flow`) in the walk's
+# ordering. Deliberately a CONSTANT rather than a config key: unlike temperature
+# and mmr_lambda it is not a taste dial, it is a correction for a specific defect
+# — with metadata removed from `_meta_score`, ordering inside a broad pool had
+# nothing but timbre to go on, and a Depeche Mode seed drifted from The Smiths
+# into Pitbull and Calvin Harris because modern EDM shares its production
+# signature. Exposing it would invite tuning a value that has one right answer.
+#
+# 0.30 chosen by sweep over 15 seeds (0.15 / 0.30 / 0.45), scored on distinct
+# artists, longest same-artist run, and share of the queue sharing a coarse
+# family with the seed:
+#     off    artists 6.5   run 1.7   on-genre  82%
+#     0.15   artists 6.3   run 1.2   on-genre  92%
+#     0.30   artists 6.5   run 1.1   on-genre  97%   <-- peak, diversity intact
+#     0.45   artists 5.7   run 1.1   on-genre  97%   (diversity starts to go)
+#
+# KNOWN COST: within a dominant genre whose tags are generic, tag-similarity is
+# uninformative and displaces the acoustically precise pick — a Playboi Carti
+# seed loses its rage cluster (Yeat, Lil Uzi Vert) to tag-generic mainstream rap
+# (Gang Starr, Pop Smoke). Hip-Hop is the majority of this library, so that is a
+# real and recurring cost, accepted because the aggregate is clearly better.
+DEFAULT_GENRE_FLOW = 0.30
+
 # Flat weight of a shared artist-country in the `_meta_score` ordering bonus.
 # One constant (was a 3-tier γ keyed on genre_bucket): the regional/borderless
 # distinction now lives entirely in the pool constraint, not the score.
@@ -487,53 +521,138 @@ _COUNTRY_W = 0.15
 
 
 def _is_regional(genres) -> bool:
-    """True iff any of a seed's genres falls in a regional-scene bucket."""
+    """True iff a seed's genre profile is DOMINATED by a scene tied to a
+    language/country — i.e. at least half its tags are regional.
+
+    Dominance, not presence. Presence alone over-fires on borderless artists who
+    happen to carry one regional-flavoured tag, and because this gates a HARD
+    cross-country pool constraint, one stray tag was enough to fence an artist
+    from the entire rest of the library by nationality: AJ Tracey (a UK rapper
+    tagged cloud rap / grime / hip hop / UK drill / *dancehall*) was fenced from
+    other UK rappers on the strength of that single dancehall tag.
+
+    The threshold is calibrated on the real enrichment, where the split is
+    unusually clean — genuinely regional acts sit at 0.50-1.00 (Vasilis Karras
+    laiko+rebetiko 0.67, Giorgos Mazonakis 0.50) and borderless ones at 0.12-0.25
+    (Santana latinrock 0.12, Pitbull latinpop 0.12, AJ Tracey dancehall 0.20).
+    A majority rule lands in the gap.
+
+    Note the two failure directions are NOT symmetric, which is why a majority
+    (rather than a lower bar) is right: a false positive fences a track out of
+    the queue on nationality alone, while a false negative merely falls back to
+    the genre test, which still catches a genuine scene jump (Carti -> laiko is
+    fenced on genre similarity 0.000, never needing this rule)."""
     if not genres:
         return False
-    from utils.pca_engine import genre_bucket
-    return any(genre_bucket(g) in _REGIONAL_SCENES for g in genres)
+    from utils.genre_taxonomy import is_regional_tag
+    regional = sum(1 for g in genres if is_regional_tag(g))
+    return regional * 2 >= len(genres)
 
 
-def _meta_score(a_path: str, b_path: str, meta_map: dict, genre_model: dict) -> float:
-    """Metadata affinity between two tracks: soft genre-set similarity (NPMI
-    'genre-BLOSUM') plus a flat ADDITIVE shared-country bonus  gx + _COUNTRY_W·same_cty.
+# Cache of credit-string → member-key frozenset. The walk asks the same-act
+# question once per candidate per step, and decomposition is pure string work.
+_CREDIT_KEY_CACHE: dict[str, frozenset] = {}
 
-    Additive (not the old gx·(1+β·same_cty)) so shared provenance contributes
-    EVEN WHEN genre overlap is thin. Returns 0 when either track lacks
-    enrichment, or when they're the same artist (that coherence is already
-    carried by the artist edge tier). Used by `walk` to fold provenance/genre
-    proximity into the acoustic ordering.
+
+def _same_act(a_name, b_name) -> bool:
+    """True iff two artist CREDIT STRINGS name (at least partly) the same
+    performer.
+
+    Raw string equality is not enough: streaming sources credit the same artist
+    as '21 Savage', '21 Savage & Metro Boomin' and
+    'Travis Scott/Metro Boomin/21 Savage', each of which becomes its own
+    `artists` row with its own enrichment. Under string equality the walk's
+    same-artist guards silently never fired for those rows, so an artist's own
+    collab track could be scored as a stranger — and, when its enrichment
+    resolved to the wrong entity, vetoed out of that artist's own queue.
+
+    Membership overlap fixes it in the safe direction: the guards it feeds
+    (`_meta_score` zeroing, `_pool_foreign` exemption) only ever ADMIT a track or
+    decline to bonus it, so a false positive costs one loosely-related track
+    while a false negative fences out a genuine one."""
+    if not a_name or not b_name:
+        return False
+    if a_name == b_name:
+        return True
+    from utils.metadata_enrich import credit_keys
+    ka = _CREDIT_KEY_CACHE.get(a_name)
+    if ka is None:
+        ka = credit_keys(a_name)
+        _CREDIT_KEY_CACHE[a_name] = ka
+    kb = _CREDIT_KEY_CACHE.get(b_name)
+    if kb is None:
+        kb = credit_keys(b_name)
+        _CREDIT_KEY_CACHE[b_name] = kb
+    return bool(ka & kb)
+
+
+def _meta_score(a_path: str, b_path: str, meta_map: dict) -> float:
+    """Seed-anchored provenance bonus: a flat _COUNTRY_W for a shared artist
+    country, and nothing else. Returns 0 when either track lacks enrichment, or
+    when they're the same act (that coherence is already carried by the artist
+    edge tier).
+
+    ── Why genre similarity is NOT in here ──────────────────────────────────
+    It used to return `gx + _COUNTRY_W·same_cty`, where gx is the same NPMI
+    soft-set similarity that `_pool_foreign` uses to decide pool MEMBERSHIP. So
+    one signal did two jobs: it admitted the candidate, then re-scored its rank.
+    The division of labour this walk is built on is metadata defines the pool,
+    acoustics order it — gx in the score quietly broke that, letting a tag
+    resemblance outrank a genuinely closer-sounding track that was already in
+    the pool on the same evidence.
+
+    The family backstop made it worse rather than better: `soft_set_sim` now
+    floors same-family pairs at FAMILY_FLOOR, so gx is pinned to a constant for
+    a large share of in-pool pairs. As an ordering term it had become mostly
+    noise around a flat value while still outweighing the country signal.
+
+    Country stays because it is genuinely orthogonal — it is not what the pool
+    gate tested (except for regional seeds, where it is a hard constraint rather
+    than a score), and shared provenance is a real tiebreaker between two tracks
+    the acoustics rate equally.
+
+    Step-to-step genre continuity is still available deliberately, via
+    `_genre_flow` under `genre_flow_lambda` — that one is anchored to the
+    CURRENT track rather than the seed, so it shapes the trajectory instead of
+    re-litigating admission.
     """
+    ma = meta_map.get(a_path)
+    mb = meta_map.get(b_path)
+    if not ma or not mb:
+        return 0.0
+    if _same_act(ma.get("artist"), mb.get("artist")):
+        return 0.0  # same-artist coherence already carried by the artist edge tier
+
+    ca, cb = ma.get("country"), mb.get("country")
+    return _COUNTRY_W if (ca and cb and ca == cb) else 0.0
+
+
+def _genre_flow(a_path: str, b_path: str, meta_map: dict, genre_model: dict) -> float:
+    """NPMI soft-set genre similarity between two tracks, anchored to the CURRENT
+    track rather than the seed. Powers the within-pool *genre-continuity*
+    gradient: it rewards a smooth step-to-step genre trajectory inside the pool
+    (grime → grime → grime before broadening to trap) and never changes pool
+    membership. Orthogonal to the acoustic flow term by design — it carries the
+    tag signal the timbre metric can't see.
+
+    Returns 0 for the SAME ACT, which is not a nicety but the thing that makes
+    this term usable at all. Two tracks by one artist carry identical tags, so
+    gx = 1.0 — the maximum possible bonus. Anchored to the current track, that is
+    a positive feedback loop: the instant the walk steps onto an artist, that
+    artist's whole catalogue outscores every alternative and the queue locks on.
+    Measured over 15 seeds at lambda 0.30 it collapsed the queue to 3.4 distinct
+    artists with runs of 4.2 (a The Cure seed returned eight consecutive Twin
+    Tribes tracks; a Nipsey Hussle seed, six A$AP Rocky). Zeroing same-act keeps
+    the genre signal and drops the artist lock-in: 6.5 distinct artists, longest
+    run 1.1 — better than with the term switched off entirely.
+
+    Returns 0 when either track lacks tags."""
     from utils.genre_similarity import soft_set_sim
     ma = meta_map.get(a_path)
     mb = meta_map.get(b_path)
     if not ma or not mb:
         return 0.0
-    aa, ab = ma.get("artist"), mb.get("artist")
-    if aa and aa == ab:
-        return 0.0  # same-artist coherence already carried by the artist edge tier
-
-    ca, cb = ma.get("country"), mb.get("country")
-    same_cty = 1.0 if (ca and ca == cb) else 0.0
-    ga = ma.get("genres") or frozenset()
-    gb = mb.get("genres") or frozenset()
-    gx = soft_set_sim(ga, gb, genre_model)
-    return gx + _COUNTRY_W * same_cty
-
-
-def _genre_flow(a_path: str, b_path: str, meta_map: dict, genre_model: dict) -> float:
-    """NPMI soft-set genre similarity between two tracks, genre-only (no country,
-    no same-artist zeroing). Powers the within-pool *genre-continuity* gradient:
-    the walk's `_meta_score` bonus is anchored to the SEED, so it rewards genre
-    closeness to where you started; this is anchored to the CURRENT track, so it
-    rewards a smooth step-to-step genre trajectory *inside* the pool (grime →
-    grime → grime before broadening to trap), never changing pool membership.
-    Orthogonal to the acoustic flow term by design — it carries the tag signal
-    the timbre metric can't see. Returns 0 when either track lacks tags."""
-    from utils.genre_similarity import soft_set_sim
-    ma = meta_map.get(a_path)
-    mb = meta_map.get(b_path)
-    if not ma or not mb:
+    if _same_act(ma.get("artist"), mb.get("artist")):
         return 0.0
     ga = ma.get("genres") or frozenset()
     gb = mb.get("genres") or frozenset()
@@ -570,7 +689,7 @@ def _pool_foreign(
     mc = meta_map.get(cand_path)
     if not ms or not mc:
         return False
-    if ms.get("artist") and ms.get("artist") == mc.get("artist"):
+    if _same_act(ms.get("artist"), mc.get("artist")):
         return False  # same artist is never foreign
     gs = ms.get("genres") or frozenset()
     gc = mc.get("genres") or frozenset()
@@ -661,7 +780,7 @@ async def walk(
     length: int = 10,
     avoid: Optional[set[str]] = None,
     meta_lambda: float = 0.35,
-    genre_flow_lambda: float = 0.0,
+    genre_flow_lambda: float = DEFAULT_GENRE_FLOW,
     mmr_lambda: float = 0.0,
     temperature: float = 0.0,
     rng_seed: int | None = None,
@@ -678,8 +797,12 @@ async def walk(
                       `_pool_foreign` to the Seed (genre boundary, or country
                       boundary for regional scenes)
         Score(C)    = 0.7·Sim(T_i, C) + 0.3·Sim(Seed, C)   # acoustic (dual)
-                    + meta_lambda·meta(Seed, C)            # genre/country bonus (seed-anchored)
+                    + meta_lambda·meta(Seed, C)            # shared-country tiebreak
                     + genre_flow_lambda·gx(T_i, C)         # genre continuity (current-anchored)
+
+    Note what is NOT in Score: the genre similarity that `_pool_foreign` used to
+    admit C. Membership and rank are separate jobs; gx did both until it was
+    removed from `_meta_score` (see that docstring).
 
     Why a metadata pool instead of acoustic corrections: a timbre bridge puts a
     laiko ballad next to a trap track (same acoustic neighbourhood, even the same
@@ -698,11 +821,13 @@ async def walk(
 
     Optional refinements — all off / deterministic by default, so the contract
     above is unchanged unless a caller opts in:
-      • genre_flow_lambda>0 rewards NPMI genre continuity to the CURRENT track
+      • genre_flow_lambda rewards NPMI genre continuity to the CURRENT track
         (`_genre_flow`), so the queue prefers a smooth step-to-step genre
         trajectory *inside* the pool (grime → grime → grime before broadening to
         trap) instead of subgenre pinball. Never changes pool membership — the
-        veto still fences the genre; this only shapes the path within it.
+        veto still fences the genre; this only shapes the path within it. ON by
+        default at DEFAULT_GENRE_FLOW (see that constant for the sweep and the
+        known cost); pass 0.0 to disable.
       • mmr_lambda>0 adds a Maximal-Marginal-Relevance diversity penalty: a
         candidate is discounted by its timbre cosine to the tracks already
         emitted, so the queue stops chaining remixes / alternate mixes / the
@@ -944,7 +1069,7 @@ async def walk(
             score = 0.7 * w_curr + 0.3 * w_seed
             if meta_active:
                 score += meta_lambda * _meta_score(
-                    seed_path, c["path"], meta_map, genre_model,
+                    seed_path, c["path"], meta_map,
                 )
                 if genre_flow_lambda > 0.0:
                     score += genre_flow_lambda * _genre_flow(

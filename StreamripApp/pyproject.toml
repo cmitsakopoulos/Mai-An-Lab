@@ -16,11 +16,25 @@ dependencies = [
     "certifi",
     "numpy",
     "tinytag",
-    "seaborn",
-    "matplotlib",
+    "pillow",
     "flet_audio_service @ file:///Users/chrismitsacopoulos/Desktop/Mai-An-Lab/flet_audio_service"
 ]
 requires-python = "==3.12.*"
+
+# Desktop-only diagnostics. matplotlib + seaborn are used ONLY by
+# pca_engine.plot_pca_report / plot_genre_report and tools/pca_analysis.py —
+# there is no call site anywhere in main.py / ui/, and both functions are
+# ImportError-guarded and degrade to a text report. Shipping them cost ~53 MB of
+# the APK's ~72 MB site-packages payload (matplotlib 17.1, fontTools 4.8,
+# seaborn 1.1, mpl_toolkits 0.8 — plus pandas 27.4, pulled in by seaborn and
+# never imported by a single line of this project).
+#
+# Install for local analysis with:  pip install -e ".[diagnostics]"
+[project.optional-dependencies]
+diagnostics = [
+    "seaborn",
+    "matplotlib",
+]
 
 [tool.setuptools]
 py-modules = ["main"]
@@ -54,7 +68,17 @@ exclude = [
     ".git",
     ".DS_Store",
     "__pycache__",
-    "*.pyc"
+    "*.pyc",
+    # `.flet` is the DESKTOP run's storage dir. It was shipping 5.4 MB of local
+    # dev state into assets/app.zip — a 946 KB library.db, a 4.1 MB
+    # un-checkpointed SQLite WAL, cached album art. The device never reads it
+    # (runtime storage resolves from $FLET_APP_STORAGE_DATA, not this relative
+    # path), so it was pure payload.
+    ".flet",
+    ".pytest_cache",
+    "build",
+    # Desktop analysis scripts; nothing under main.py / ui/ / utils/ imports them.
+    "tools",
 ]
 
 

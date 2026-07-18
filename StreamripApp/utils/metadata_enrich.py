@@ -71,6 +71,64 @@ def _name_close(a: str, b: str) -> bool:
             return True
         if inter >= min(len(ta), len(tb)) and abs(len(ta) - len(tb)) <= 1:
             return True
+    return False
+
+
+# Separators that join several credited artists into one string. Streaming
+# sources emit these freely ('Travis Scott/Metro Boomin/21 Savage',
+# '163Margs, Digga D', 'Russ Millions, YV, BUNI'), and each distinct string
+# becomes its own `artists` row with its own MusicBrainz lookup.
+_CREDIT_SEPARATORS = (
+    "/", ",", "&", " x ", " X ", " vs ", " vs. ", " feat ", " feat. ",
+    " ft ", " ft. ", " featuring ", " with ", " + ", " · ",
+)
+
+
+def split_artist_credits(name: str) -> list[str]:
+    """Decompose a multi-artist credit string into its member names.
+
+    Returns [] when the string carries no separator (the overwhelmingly common
+    single-artist case), so callers can cheaply test "is this a collab credit?".
+
+    IMPORTANT — this is only ever a FALLBACK, used after a whole-string lookup
+    has already failed to match a real entity. Bands whose names contain
+    separators ('Earth, Wind & Fire', 'Crosby, Stills & Nash') resolve on the
+    whole string and therefore never reach decomposition."""
+    raw = (name or "").strip()
+    if not raw:
+        return []
+    parts = [raw]
+    for sep in _CREDIT_SEPARATORS:
+        nxt: list[str] = []
+        for p in parts:
+            nxt.extend(p.split(sep))
+        parts = nxt
+    members = []
+    seen = set()
+    for p in parts:
+        p = p.strip(" \t-–—")
+        if len(p) < 2:
+            continue
+        key = _norm_name(p)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        members.append(p)
+    return members if len(members) > 1 else []
+
+
+def credit_keys(name: str) -> frozenset:
+    """Normalised member keys for an artist credit string — {whole string} for a
+    solo artist, {member, member, …} for a collab. Two credit strings that share
+    a key name the same performer, which is what the walk's same-artist guards
+    need instead of raw string equality ('21 Savage' vs
+    '21 Savage & Metro Boomin')."""
+    members = split_artist_credits(name)
+    if not members:
+        k = _norm_name(name)
+        return frozenset({k}) if k else frozenset()
+    return frozenset(_norm_name(m) for m in members if _norm_name(m))
+
 
 def _extract_genres(obj: dict, top: int = 8) -> list[dict]:
     """Genre/tag list from an artist object → [{'name', 'count'}], count-desc.
@@ -200,6 +258,15 @@ def _extract_country(obj: dict) -> str | None:
     return None
 
 
+def _copy_result(res: dict) -> dict:
+    """Copy of a lookup result that shares no mutable state with the original.
+    Only `genres` is mutable, so a shallow dict copy plus a fresh genre list is
+    enough — and it keeps the memo immune to a caller editing what it got back."""
+    out = dict(res)
+    out["genres"] = [dict(g) for g in (res.get("genres") or [])]
+    return out
+
+
 class MusicBrainzClient:
     """Rate-limited MusicBrainz lookups over a shared aiohttp session."""
 
@@ -212,6 +279,12 @@ class MusicBrainzClient:
         self.min_interval = min_interval
         self._last = 0.0
         self._lock = asyncio.Lock()  # serialise + throttle all requests
+        # Per-pass memo of resolved artists. Credit decomposition re-resolves
+        # each member, and members recur heavily across a library ('21 Savage'
+        # appears in four different credit strings here) — without this, one
+        # enrichment pass re-pays the full 5-tier cascade at 1.1 s/request for
+        # every repeat. Bounded by the artist count of a single pass.
+        self._artist_memo: dict = {}
 
     async def _get(self, path: str, params: dict, retries: int = 3):
         """Throttled GET → (json|None, http_status). Honours 503 with backoff."""
@@ -247,7 +320,24 @@ class MusicBrainzClient:
 
         Returns a dict with keys: status ('ok'|'lowconfidence'|'notfound'|
         'error'), mbid, country, area, genres (list), score (0-100). Never
-        raises — failures come back as status='error'/'notfound'."""
+        raises — failures come back as status='error'/'notfound'.
+
+        Memoised per client (i.e. per enrichment pass); 'error' results are not
+        cached so a transient network failure is still retried."""
+        raw_name = (name or "").strip()
+        memo_key = (raw_name.lower(), bool(with_genres))
+        cached = self._artist_memo.get(memo_key)
+        if cached is not None:
+            return _copy_result(cached)
+        result = await self._lookup_artist_uncached(raw_name, with_genres=with_genres)
+        if result.get("status") != "error":
+            self._artist_memo[memo_key] = _copy_result(result)
+        return result
+
+    async def _lookup_artist_uncached(
+        self, name: str, *, with_genres: bool = False,
+    ) -> dict:
+        """The real resolution cascade. See `lookup_artist` for the contract."""
         empty = {"status": "notfound", "mbid": None, "country": None,
                  "area": None, "genres": [], "score": 0}
         raw_name = (name or "").strip()
@@ -299,6 +389,22 @@ class MusicBrainzClient:
             if weak is None:
                 weak = next((a for a in arts if not _looks_like_junk(a)), None)
 
+        # ── No genuine match: try DECOMPOSING a multi-artist credit ───────────
+        # 'Travis Scott/Metro Boomin/21 Savage' matches no single MB entity, so
+        # the old code fell back to the top non-junk hit — which resolved to an
+        # unrelated GB drum-and-bass act. Its fabricated genres then went on to
+        # drive a *hard* pool veto in the walk, fencing 21 Savage's own track out
+        # of a 21 Savage queue. Resolving the members and unioning their genres
+        # gives the credit the provenance it actually has.
+        if not matched:
+            members = split_artist_credits(raw_name)
+            if members:
+                merged = await self._lookup_credit_members(
+                    members, with_genres=with_genres,
+                )
+                if merged is not None:
+                    return merged
+
         if best is None:
             best = weak
         if best is None:
@@ -310,15 +416,29 @@ class MusicBrainzClient:
         except (TypeError, ValueError):
             score = 0
         mbid = best.get("id")
+
+        # ── A weak fallback contributes NO provenance ─────────────────────────
+        # `matched` False means no tier produced a genuine name/alias match and
+        # this is merely the top non-junk search hit. Downstream, genres are not
+        # a soft hint: `track_graph._pool_foreign` turns them into a categorical
+        # boundary, so a WRONG genre set is strictly worse than no genre set
+        # (an untagged track is evidence-gated out of the veto and simply
+        # degrades to the acoustic flow). Same for country, which gates the
+        # regional-scene pool constraint. Keep the mbid/score as a breadcrumb for
+        # the resolution wizard, but publish no provenance.
+        if not matched:
+            return {
+                "status": "lowconfidence", "mbid": mbid,
+                "country": None, "area": None, "genres": [], "score": score,
+            }
+
         country = _extract_country(best)
         area = (best.get("area") or {}).get("name")
         genres = _extract_genres(best)
 
-        # 'ok' requires a genuine name/alias match (not a weak fallback) AND a
-        # high MB score; a weak-fallback guess is always 'lowconfidence'.
-        ok = matched and score >= 90
+        # 'ok' requires a genuine name/alias match AND a high MB score.
         result = {
-            "status": "ok" if ok else "lowconfidence",
+            "status": "ok" if score >= 90 else "lowconfidence",
             "mbid": mbid, "country": country, "area": area,
             "genres": genres, "score": score,
         }
@@ -335,6 +455,55 @@ class MusicBrainzClient:
                 result["country"] = _extract_country(gdata) or result["country"]
                 result["area"] = result["area"] or (gdata.get("area") or {}).get("name")
         return result
+
+    async def _lookup_credit_members(
+        self, members: list[str], *, with_genres: bool = False,
+    ) -> dict | None:
+        """Resolve each member of a multi-artist credit and fuse the results.
+
+        Genres are unioned (summing tag counts, so a genre both members carry
+        outranks one either carries alone); country is taken only when the
+        resolved members AGREE, since a cross-border collab has no single
+        provenance and guessing one would mis-fire the regional-scene pool rule.
+
+        Returns None when no member resolves, so the caller can fall through to
+        its own handling. Status is 'ok' only if every member matched genuinely —
+        a partially-resolved credit stays 'lowconfidence' and so remains eligible
+        for a later re-sync."""
+        genre_counts: Counter = Counter()
+        countries: list[str] = []
+        mbids: list[str] = []
+        resolved = 0
+        for m in members[:4]:   # cap the fan-out; credits beyond 4 are noise
+            sub = await self.lookup_artist(m, with_genres=with_genres)
+            if sub.get("status") not in ("ok", "lowconfidence"):
+                continue
+            if not sub.get("genres") and not sub.get("country"):
+                continue
+            resolved += 1
+            for g in sub.get("genres") or []:
+                nm = (g or {}).get("name")
+                if nm:
+                    genre_counts[nm] += max(int(g.get("count", 1) or 1), 1)
+            if sub.get("country"):
+                countries.append(sub["country"])
+            if sub.get("mbid"):
+                mbids.append(sub["mbid"])
+
+        if not resolved:
+            return None
+
+        country = countries[0] if countries and len(set(countries)) == 1 else None
+        return {
+            "status": "ok" if resolved == len(members[:4]) else "lowconfidence",
+            "mbid": mbids[0] if mbids else None,
+            "country": country,
+            "area": None,
+            "genres": [
+                {"name": n, "count": c} for n, c in genre_counts.most_common(8)
+            ],
+            "score": 100 if resolved == len(members[:4]) else 50,
+        }
 
     async def search_candidates(self, name: str, limit: int = 10) -> list[dict]:
         """Perform a direct MusicBrainz search and return candidate dicts."""

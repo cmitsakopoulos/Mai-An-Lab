@@ -180,8 +180,10 @@ class QueueController:
             chip = self.current_job.get("chip")
             if chip: chip.bgcolor = "#4CAF50" # Green
             
-            self._ui(lambda: self.app.search_view.update_progress(
-                "Finished", 100, "Download completed successfully!"))
+            self._ui(lambda: (
+                self.app.search_view.update_progress("Finished", 100, "Download completed successfully!"),
+                self.app.play_success_notification()
+            ))
 
             # Automatically trigger library scan ~1s after download completes to import the new song
             if hasattr(self.app, "library_view") and self.app.library_view:

@@ -48,6 +48,7 @@ INTENT_MUTE           = "mute"
 INTENT_UNMUTE         = "unmute"
 INTENT_SHUFFLE        = "shuffle"
 INTENT_PLAY_RANDOM    = "play_random"     # play a random song and shuffle
+INTENT_PLAY_THE_USUAL = "play_the_usual"    # play a track from most played
 INTENT_RESCAN_DSP     = "rescan_dsp"      # run analyser for missing tracks
 INTENT_AFFIRMATIVE    = "affirmative"     # yes / yeah / do it (confirmation)
 INTENT_NEGATIVE       = "negative"        # no / later / not now (cancel pending)
@@ -155,6 +156,10 @@ def _build_patterns() -> list[tuple[str, re.Pattern]]:
             r"(?:something|anything)\s+(?:else|different|new)"
             r"|another(?:\s+(?:one|song|track|tune))?"
             r")\s*$",
+            re.I,
+        )),
+        (INTENT_PLAY_THE_USUAL, re.compile(
+            r"^\s*(?:play|queue\s+up|give\s+me)\s+(?:the|my)\s+usual\s*$",
             re.I,
         )),
 
@@ -387,6 +392,7 @@ __all__ = [
     "INTENT_UNMUTE",
     "INTENT_SHUFFLE",
     "INTENT_PLAY_RANDOM",
+    "INTENT_PLAY_THE_USUAL",
     "INTENT_RESCAN_DSP",
     "INTENT_AFFIRMATIVE",
     "INTENT_NEGATIVE",

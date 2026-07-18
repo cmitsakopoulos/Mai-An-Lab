@@ -393,17 +393,19 @@ class SettingsView:
         self._show_albums_switch = ft.Switch(value=True, active_color=CYAN, on_change=self._on_appearance_change)
         self._show_tracks_switch = ft.Switch(value=True, active_color=CYAN, on_change=self._on_appearance_change)
 
-        # Play Similar temperature slider
+        # Play Similar temperature slider. Default 0 = deterministic arg-max
+        # (see streamrip_api.get_walk_params for why); the control stays so
+        # variety is opt-in rather than imposed.
         self._temp_slider = ft.Slider(
             min=0.0,
             max=0.8,
             divisions=80,
             label="{value}",
-            value=0.3,
+            value=0.0,
             active_color=CYAN,
             on_change=self._on_temp_change,
         )
-        self._temp_value_text = ft.Text("0.30", color=TEXT, size=13, weight=ft.FontWeight.W_700)
+        self._temp_value_text = ft.Text("0.00", color=TEXT, size=13, weight=ft.FontWeight.W_700)
 
         # Play Similar mmr_lambda slider
         self._mmr_slider = ft.Slider(
@@ -1049,7 +1051,10 @@ class SettingsView:
             ft.Divider(color=BORDER, height=40),
             ft.Row([
                 ft.TextButton("Project GitHub", icon=ft.Icons.CODE_ROUNDED, on_click=self._launch_github),
-                ft.TextButton("Developer", icon=ft.Icons.PERSON_ROUNDED, on_click=lambda _: self.app.show_snackbar("Contact: mitsacopoulos@gmail.com")),
+                ft.TextButton("Developer", icon=ft.Icons.PERSON_ROUNDED, on_click=lambda _: (
+                    self.app.play_success_notification(),
+                    self.app.show_snackbar("Contact: mitsacopoulos@gmail.com")
+                )),
             ], alignment=ft.MainAxisAlignment.CENTER),
             ft.Container(height=20),
             ft.Text("2026 Mai An Lab", color=DIM, size=11, italic=True, text_align=ft.TextAlign.CENTER, width=float("inf")),
@@ -1311,9 +1316,17 @@ class SettingsView:
         dir_list   = ft.Column(tight=True, spacing=0, scroll=ft.ScrollMode.AUTO)
 
         def _close():
-            if bs_holder[0]:
-                bs_holder[0].open = False
-                bs_holder[0].update()
+            bs = bs_holder[0]
+            if bs:
+                bs.open = False
+                bs.update()
+                # Remove the sheet from overlay to prevent orphaned controls
+                # that cause a black screen on Android's Impeller renderer
+                try:
+                    self.app.page.overlay.remove(bs)
+                except ValueError:
+                    pass
+                bs_holder[0] = None
                 self.page.update()
 
         def _confirm_dir(path):
@@ -1476,7 +1489,7 @@ class SettingsView:
             
             temp_val = gen.get("walk_temperature")
             if temp_val is None:
-                temp_val = gen.get("play_similar_temperature", 0.3)
+                temp_val = gen.get("play_similar_temperature", 0.0)
             self._temp_slider.value = float(temp_val)
             self._temp_value_text.value = f"{self._temp_slider.value:.2f}"
 
@@ -1732,9 +1745,17 @@ class SettingsView:
         dir_list   = ft.Column(tight=True, spacing=0, scroll=ft.ScrollMode.AUTO)
 
         def _close(do_update=True):
-            if bs_holder[0]:
-                bs_holder[0].open = False
-                bs_holder[0].update()
+            bs = bs_holder[0]
+            if bs:
+                bs.open = False
+                bs.update()
+                # Remove the sheet from overlay to prevent orphaned controls
+                # that cause a black screen on Android's Impeller renderer
+                try:
+                    self.app.page.overlay.remove(bs)
+                except ValueError:
+                    pass
+                bs_holder[0] = None
                 if do_update and self.page:
                     self.page.update()
 

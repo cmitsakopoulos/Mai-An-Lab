@@ -617,95 +617,20 @@ def plot_pca_report(
 # used to fragment now forms a coherent region, its silhouette rises and its
 # community count falls.
 
-# Coarse buckets over the messy, multi-label, partly-French Qobuz genre tags.
-# Priority order matters (first match wins), and it encodes two constraints:
-#   1. Rare / historically-failing genres are matched FIRST within their family
-#      so they surface with their own colour instead of being swallowed by the
-#      Rock/Pop majority co-tags ("Pop, Rock, Metal" → Metal).
-#   2. Electronic / Classical / Folk-Cntry are kept at their ORIGINAL top
-#      priority: the walk's regional-scene test (`track_graph._is_regional`)
-#      special-cases the regional buckets (Folk/Cntry, Latin, Reggae, Asian-Pop),
-#      so a bucket that preceded them could silently change which seeds get the
-#      country pool constraint. The niche buckets below (Jazz…Asian-Pop) all sit
-#      *after* the majority families, so they only add resolution to display,
-#      normalization and the genre diagnostic. Substring collisions are avoided
-#      by ordering: Latin before Reggae ('reggaeton' ⊃ 'reggae'), the niche
-#      block after Soul ('jazz funk' stays Soul via 'funk'), Asian-Pop before
-#      Pop ('k-pop' ⊃ 'pop').
-_GENRE_RULES = [
-    ("Classical",  ("classical", "classique")),
-    ("Hip-Hop",    ("rap", "hip hop", "hip-hop", "hiphop", "trap", "хип", "рэп", "grime", "boom bap", "drill")),
-    ("Electronic", ("électronique", "electronica", "electro", "électro", "house", "techno", "edm", "trance", "drum & bass", "dnb", "dubstep", "ambient")),
-    ("Folk/Cntry", ("folk", "country", "blues", "bluegrass", "americana", "laiko", "laika", "laïko", "laïka", "laiki", "λαϊκό", "λαϊκά", "rebetiko", "ρεμπέτικο", "entechno", "έντεχνο", "greek folk", "world", "musiques du monde")),
-    ("Soul/R&B",   ("soul", "r&b", "funk", "rnb", "motown", "neo soul")),
-    ("Jazz",       ("jazz", "bebop")),
-    ("Latin",      ("latin", "salsa", "reggaeton", "bachata", "cumbia", "merengue", "bossa nova", "samba", "flamenco")),
-    ("Reggae",     ("reggae", "dancehall", "ragga")),
-    ("Gospel",     ("gospel", "worship")),
-    ("Soundtrack", ("soundtrack", "film score")),
-    ("Disco",      ("disco",)),
-    ("Metal",      ("metal", "métal", "hard rock", "grunge", "heavy metal")),
-    ("Rock/Alt",   ("rock", "alternatif", "alternative", "indé", "indie", "punk", "new wave", "post-punk", "рок")),
-    # Keys are matched as raw substrings against tags that have had separators
-    # stripped ('folk pop' → 'folkpop'), so bare 'kpop'/'cpop' are UNSAFE — they
-    # hide inside 'folkpop', 'darkpop', 'psychedelicpop'. Only distinctive or
-    # hyphen-kept forms: 'jpop' (no English word ends in 'j'), 'mandopop',
-    # 'cantopop', and the hyphenated 'k-pop'/'c-pop' for raw display strings.
-    ("Asian-Pop",  ("k-pop", "j-pop", "jpop", "mandopop", "cantopop", "c-pop")),
-    ("Pop",        ("pop", "поп", "greek pop", "greek")),
-]
-
-_GENRE_PALETTE = {
-    "Rock/Alt": "#40C4FF", "Pop": "#FF80AB", "Metal": "#FF5252",
-    "Hip-Hop": "#FFD740", "Electronic": "#76FF03", "Folk/Cntry": "#B388FF",
-    "Classical": "#FFFFFF", "Soul/R&B": "#FF6E40",
-    "Jazz": "#26C6DA", "Latin": "#FF7043", "Reggae": "#66BB6A",
-    "Gospel": "#BA68C8", "Soundtrack": "#5C6BC0", "Disco": "#F50057",
-    "Asian-Pop": "#E040FB",
-    "Other": "#888888", "Unknown": "#444444",
-}
-
-# The exact set of coarse bucket labels genre_bucket can emit. Used to recognise
-# a stored genre that is *itself* a bucket label — i.e. an artifact of the old
-# collapsing normalization — so it can be re-derived to a finer display tag.
-GENRE_BUCKET_LABELS = frozenset(label for label, _ in _GENRE_RULES) | {"Other", "Unknown"}
-
-
-def genre_bucket(genre: str | None) -> str:
-    """Map a free-text (multi-label) genre tag to one coarse bucket."""
-    g = (genre or "").strip().lower()
-    if not g:
-        return "Unknown"
-    for label, keys in _GENRE_RULES:
-        if any(k in g for k in keys):
-            return label
-    return "Other"
-
-
-def genre_tokens(genre: str | None) -> set[str]:
-    """Multi-label canonical genre set (FR/RU aware). Unlike genre_bucket's
-    first-match single label, returns ALL matching buckets — 39% of library
-    tags carry ≥2 genres. {'Unknown'} for empty, {'Other'} for unmatched."""
-    g = (genre or "").strip().lower()
-    if not g:
-        return {"Unknown"}
-    toks = {label for label, keys in _GENRE_RULES if any(k in g for k in keys)}
-    return toks or {"Other"}
-
-
-def genre_display_label(genre: str | None) -> str:
-    """Human-facing label for a genre tag: the coarse bucket when the tag maps to
-    one, else the raw tag itself (title-cased) so a genuinely novel genre reads
-    as *what it is* instead of a flat 'Other'. Empty/None → 'Unknown'.
-
-    This is the display counterpart to `genre_bucket`, which keeps 'Other' as a
-    real sentinel for logic (the `fix_and_normalize` back-fill, the silhouette
-    diagnostic's catch-all class). Use this one anywhere a person reads the
-    result — it never surfaces 'Other'."""
-    g = (genre or "").strip()
-    if not g:
-        return "Unknown"
-    return g.title() if genre_bucket(g) == "Other" else genre_bucket(g)
+# The coarse genre taxonomy lives in `genre_taxonomy` (pure stdlib) so the
+# metadata layer can import it without dragging numpy onto the walk's hot path.
+# Re-exported here unchanged: `from utils.pca_engine import genre_bucket` and
+# friends keep working exactly as before.
+from utils.genre_taxonomy import (           # noqa: F401  (re-export)
+    _GENRE_RULES,
+    _GENRE_PALETTE,
+    GENRE_BUCKET_LABELS,
+    NON_FAMILIES,
+    genre_bucket,
+    genre_tokens,
+    genre_families,
+    genre_display_label,
+)
 
 
 def plot_genre_report(
