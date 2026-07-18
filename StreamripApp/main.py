@@ -464,7 +464,6 @@ class StreamripFletApp:
         audio_engine.bind(
             on_playback_error=lambda _, d: self._on_playback_error_toast(d),
             on_queue_mutated=_on_queue_mutated,
-            on_jarvis_continue=self._on_jarvis_continue,
             on_similar_continue=self._on_similar_continue,
         )
 
@@ -955,7 +954,6 @@ class StreamripFletApp:
                     content=self._swipe_content,
                     expand=True,
                 ),
-                self.mini_player.build_autoplay_pill(),
                 self.mini_player.build(),
                 self._nav,
             ],
@@ -1645,170 +1643,7 @@ class StreamripFletApp:
         # Resume playback at the first newly appended slot
         audio_engine.play_track_at(first_new_index)
 
-    def _on_jarvis_continue(self, _inst, _val=None):
-        """Sync callback dispatched by AudioEngine when the Jarvis-controlled
-        queue runs dry. Bridges into the async continuation coroutine safely.
-        Shares the same double-dispatch guard as the similar/auto-dj paths."""
-        if not self.page:
-            return
-        if getattr(self, "_continuation_in_progress", False):
-            return
-        self._continuation_in_progress = True
-        self.page.run_task(self._run_continuation, self._jarvis_auto_continue_queue)
 
-    async def _jarvis_auto_continue_queue(self):
-        """Automatically extend a Jarvis-managed queue with 5 acoustically
-        similar tracks when playback reaches the end of the current list.
-
-        Walk order:
-          1. Determine seed from the last-played track (current_path or last
-             queue entry so the seed is valid even after engine state resets).
-          2. Build an avoid set from the runner's recent-play history.
-          3. Walk the acoustic+artist graph for up to 5 new paths.
-          4. Fetch full metadata from DB and append tracks to the live queue.
-          5. Post a premium Jarvis chat bubble and speak the announcement.
-          6. Kick off playback at the first newly-appended slot.
-        """
-        import asyncio
-        import random
-        from utils import track_graph as tg
-
-        # ── Seed resolution ──────────────────────────────────────────────────
-        # Default seed is the currently-playing track. When the trip-wire
-        # fires (≥2 of the last 3 continuation picks rejected) we re-anchor
-        # to the last track that earned a positive signal this session, so
-        # restarts pull back to something known-good instead of compounding
-        # a bad chain. Falls through to current_path when there's nothing
-        # liked yet this session.
-        recent = list(self._session_recent_outcomes)
-        tripwire = len(recent) >= 2 and recent.count(False) >= 2
-        seed_path = ""
-        if tripwire and self._session_last_liked_path:
-            seed_path = self._session_last_liked_path
-            logger.info(
-                "Jarvis continuation: trip-wire fired, re-seeding from "
-                "last-liked path %s", seed_path,
-            )
-        if not seed_path:
-            seed_path = audio_engine.current_path
-        if not seed_path and audio_engine.queue:
-            seed_path = audio_engine.queue[-1].get("path", "")
-        if not seed_path:
-            logger.warning("Jarvis continuation: no seed path found; skipping.")
-            return
-
-        # ── Avoid set ────────────────────────────────────────────────────────
-        avoid: set[str] = set()
-        runner = getattr(self.assistant_view, "_runner", None)
-        if runner is not None:
-            try:
-                avoid = await runner._avoid_set()
-            except Exception:
-                pass
-        avoid.add(seed_path)
-        # Add all currently queued tracks to avoid set to prevent duplicate recommendations
-        for t in audio_engine.queue:
-            if t.get("path"):
-                avoid.add(t["path"])
-        # Rejected tracks from this session are hard-avoided outright. (The old
-        # "penalise acoustically-similar tracks" negative centroid lived in the
-        # removed PageRank walker; re-porting it into `walk` as a negative-taste
-        # term is a planned enhancement — for now the avoid set blocks the exact
-        # rejects and the seed anchoring keeps the flow near the liked seed.)
-        for bad in self._session_bad_paths:
-            avoid.add(bad)
-
-        # ── Acoustic graph walk ───────────────────────────────────────────────
-        try:
-            temp, mmr = get_walk_params()
-            walk_paths = await tg.walk(
-                self.db_manager,
-                seed_path,
-                length=5,
-                avoid=avoid,
-                mmr_lambda=mmr,   # suppress remix / alt-mix chaining
-                temperature=temp,   # vary the queue across repeat continuations
-            )
-        except Exception as exc:
-            logger.warning("Jarvis continuation: graph walk failed: %s", exc)
-            walk_paths = []
-
-        if not walk_paths:
-            logger.info("Jarvis continuation: no neighbours found for seed %s", seed_path)
-            # Nothing to queue — stop cleanly so the engine doesn't hang.
-            audio_engine.stop()
-            return
-
-        # ── Fetch metadata and append to queue ───────────────────────────────
-        first_new_index = len(audio_engine.queue)
-        appended_tracks: list[dict] = []
-        for p in walk_paths:
-            try:
-                row = await self.db_manager.get_track_full(p)
-            except Exception:
-                row = None
-            if not row:
-                continue
-            track_dict = {
-                "path":        row.get("path"),
-                "track_title": row.get("title") or row.get("track_title") or os.path.basename(p),
-                "artist_name": row.get("artist") or row.get("artist_name") or "Unknown Artist",
-                "album_title": row.get("album")  or row.get("album_title")  or "Unknown Album",
-                "duration":    row.get("duration", 0.0) or 0.0,
-                "image_url":   row.get("image_url", "") or "",
-            }
-            audio_engine.queue_last(track_dict)
-            if runner is not None:
-                runner._remember(p, seed_path=seed_path)
-            appended_tracks.append(track_dict)
-
-        appended = len(appended_tracks)
-        if appended == 0:
-            logger.info("Jarvis continuation: metadata lookup failed for all neighbours.")
-            audio_engine.stop()
-            return
-
-        # ── Honour shuffle state when picking the first continuation track ────
-        # If the user is in shuffle (e.g. play_random), starting deterministically
-        # at first_new_index breaks the shuffle illusion for one track. For
-        # ordered modes (play_similar, sequential queues) we preserve the
-        # DSP-derived walk order.
-        if getattr(audio_engine, "is_shuffle", False) and appended > 1:
-            offset = random.randint(0, appended - 1)
-        else:
-            offset = 0
-        start_index = first_new_index + offset
-        first_track = appended_tracks[offset]
-        first_track_name = (
-            f"{first_track['track_title']} — {first_track['artist_name']}"
-        )
-
-        # ── Speak and post bubble ─────────────────────────────────────────────
-        spoken_msg = (
-            f"The queue has ended, sir. I've automatically continued with "
-            f"{appended} similar track{'s' if appended != 1 else ''}. "
-            f"Starting with {first_track_name}."
-        )
-        displayed_msg = (
-            f"Queue ended — automatically continued with **{appended}** "
-            f"acoustically similar track{'s' if appended != 1 else ''}. "
-            f"Now playing: **{first_track_name}**."
-        )
-
-        av = self.assistant_view
-        av._ensure_initialized()
-        try:
-            await av._append_bubble(
-                "assistant",
-                displayed_msg,
-                speak=True,
-                speak_text=spoken_msg,
-            )
-        except Exception as exc:
-            logger.warning("Jarvis continuation: bubble failed: %s", exc)
-
-        # ── Resume playback at chosen new track (shuffle-aware) ──────────────
-        audio_engine.play_track_at(start_index)
 
     def _fetch_artwork_url_async(self, img_url: str):
         # Check in-memory cache first; avoids any disk/network I/O
@@ -2299,7 +2134,6 @@ class StreamripFletApp:
                 library_tracks.insert(0, target_item)
                 target_idx = 0
 
-            audio_engine.jarvis_controlled = False
             audio_engine.set_queue(library_tracks, start_index=target_idx)
             return
 
@@ -2362,7 +2196,6 @@ class StreamripFletApp:
             # NON-DESTRUCTIVE: play the tapped song within the FULL library queue
             # (starting a chosen song is expected), then insert similar tracks
             # right after it. No queue wipe, no saved-queue bookkeeping.
-            audio_engine.jarvis_controlled = False
             audio_engine.set_queue(tracks, start_index=target_idx)
             self._play_similar_gen += 1
             audio_engine.play_similar_seed_path = target_track.get("path") or ""
@@ -2381,13 +2214,11 @@ class StreamripFletApp:
                 self._schedule_partition_save("queue_regular.json", tracks, target_idx, 0.0, 0.0)
             
             # 3. Set active queue to just the clicked track and start play
-            audio_engine.jarvis_controlled = False
             audio_engine.set_queue([target_track], start_index=0)
             
             # 4. Trigger new Auto-DJ curation starting with this track
             self.page.run_task(self._initiate_auto_dj_queue_async)
         else:
-            audio_engine.jarvis_controlled = False
             audio_engine.set_queue(tracks, start_index=target_idx)
 
     def set_play_similar_mode(self, enabled: bool, transitioning_to_shuffle: bool = False):

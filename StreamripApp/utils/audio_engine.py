@@ -63,7 +63,6 @@ class AudioEngine:
 
         self.queue: list[dict] = []
         self.current_index: int = 0
-        self.jarvis_controlled = False
         self.play_similar_seed_path = ""
 
         self._audio: AudioServiceControl | None = None
@@ -448,9 +447,7 @@ class AudioEngine:
                 self._schedule_push(target_idx, True)
             else:
                 self._set("is_playing", False)
-                if getattr(self, "jarvis_controlled", False):
-                    self.dispatch("on_jarvis_continue")
-                elif getattr(self, "play_similar_seed_path", ""):
+                if getattr(self, "play_similar_seed_path", ""):
                     self.dispatch("on_similar_continue")
                 else:
                     # Terminal end of a finite queue: remember it so the next
@@ -728,9 +725,7 @@ class AudioEngine:
             self._sync_metadata_for_current()
             self._schedule_skip(target)
             return
-        if getattr(self, "jarvis_controlled", False):
-            self.dispatch("on_jarvis_continue")
-        elif getattr(self, "play_similar_seed_path", ""):
+        if getattr(self, "play_similar_seed_path", ""):
             self.dispatch("on_similar_continue")
         else:
             self.stop()
@@ -1015,7 +1010,6 @@ class AudioEngine:
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     def stop(self):
-        self.jarvis_controlled = False
         if self._audio:
             target = self._audio
             self._is_loaded = False

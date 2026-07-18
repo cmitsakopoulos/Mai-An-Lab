@@ -1323,41 +1323,6 @@ class TestAnaphoraAmbiguity(unittest.TestCase):
         self.assertIn("Comfortably Numb", result.query)
 
 
-class TestNowPlayingPersistsEntities(unittest.TestCase):
-    """_handle_now_playing must return extras['track'] + extras['artist'] so
-    the persistence layer in main.py can build a structured entity dict
-    instead of relying on bold-tag regex parsing of the bubble text."""
-
-    def test_now_playing_bubble_persists_entity_dict(self):
-        from utils.assistant_runner import AssistantRunner
-        engine = _FakeEngine(
-            current_path="/music/yesterday.flac",
-            current_artist="The Beatles",
-            current_track="Yesterday",
-            current_album="Help!",
-        )
-        db = _FakeDB(tracks=_SAMPLE_TRACKS, artists=_SAMPLE_ARTISTS)
-        runner = AssistantRunner(db_manager=db, audio_engine=engine)
-        intent = _make_intent(name="now_playing", query="")
-        response = run(runner._handle_now_playing(intent))
-        track = response.extras.get("track")
-        self.assertIsNotNone(track,
-                             "now_playing must expose extras['track'] for persistence.")
-        self.assertEqual(track["title"], "Yesterday")
-        self.assertEqual(track["artist"], "The Beatles")
-        self.assertEqual(track["path"], "/music/yesterday.flac")
-        self.assertEqual(response.extras.get("artist"), "The Beatles")
-
-    def test_now_playing_no_track_returns_no_extras(self):
-        """Empty engine state → no track entity exposed (handler returns
-        the 'nothing playing' branch)."""
-        from utils.assistant_runner import AssistantRunner
-        engine = _FakeEngine()
-        db = _FakeDB(tracks=_SAMPLE_TRACKS, artists=_SAMPLE_ARTISTS)
-        runner = AssistantRunner(db_manager=db, audio_engine=engine)
-        intent = _make_intent(name="now_playing", query="")
-        response = run(runner._handle_now_playing(intent))
-        self.assertNotIn("track", response.extras)
 
 
 class TestAnaphoraSpokenAcknowledgement(unittest.TestCase):

@@ -53,33 +53,26 @@ class MiniPlayerBar:
         )
         self._progress   = ft.ProgressBar(value=0, color=CYAN, bgcolor=None, height=2)
 
-        # ── Auto-play radio pill ────────────────────────────────────────────
-        # Floats just above the bar so auto-play is reachable without opening
-        # the full player. One unified control (Play-Similar machinery); Auto-DJ
-        # is folded into this single toggle.
-        self._autoplay_icon  = ft.Icon(ft.Icons.ALL_INCLUSIVE_ROUNDED, color=DIM, size=15)
-        self._autoplay_state = ft.Text("OFF", color=DIM, size=11, weight=ft.FontWeight.W_800)
+        # ── Auto-play chip ──────────────────────────────────────────────────
+        # Trails the artist on the second line, filling space the artist text
+        # would otherwise waste — so the toggle costs the card no extra height.
+        # Long artist names are not a problem: _artist is expand=True with
+        # ellipsis, so it truncates and the chip keeps its intrinsic width.
+        # One unified control (Play-Similar machinery); Auto-DJ is folded into
+        # this single toggle. State reads purely from the cyan tint + fill.
+        self._autoplay_icon  = ft.Icon(ft.Icons.ALL_INCLUSIVE_ROUNDED, color=DIM, size=13)
+        self._autoplay_label = ft.Text("Auto-play", color=DIM, size=10, weight=ft.FontWeight.W_700)
         self._autoplay_pill  = ft.Container(
             content=ft.Row(
-                [
-                    self._autoplay_icon,
-                    ft.Text("Auto-play", color=TEXT, size=11, weight=ft.FontWeight.W_700),
-                    ft.Container(width=1, height=11, bgcolor=BORDER),
-                    self._autoplay_state,
-                ],
-                spacing=6, tight=True,
+                [self._autoplay_icon, self._autoplay_label],
+                spacing=5, tight=True,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
             ),
-            bgcolor=SURFACE,
+            bgcolor=SURFACE2,
             border=ft.Border.all(1, BORDER),
-            border_radius=20,
-            padding=ft.Padding.symmetric(horizontal=12, vertical=5),
+            border_radius=10,
+            padding=ft.Padding.symmetric(horizontal=8, vertical=3),
             on_click=self._on_autoplay_toggle,
-        )
-        self._autoplay_pill_wrap = ft.Row(
-            [self._autoplay_pill],
-            alignment=ft.MainAxisAlignment.CENTER,
-            visible=False,   # revealed together with the bar once a track exists
         )
 
         self._ever_shown  = False   # True once a title has been set at least once
@@ -103,7 +96,11 @@ class MiniPlayerBar:
                                     ft.Column(
                                         [
                                             ft.Row([self._title], spacing=8, alignment=ft.MainAxisAlignment.START),
-                                            self._artist
+                                            ft.Row(
+                                                [self._artist, self._autoplay_pill],
+                                                spacing=8,
+                                                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                                            ),
                                         ],
                                         spacing=2, expand=True,
                                     ),
@@ -150,9 +147,6 @@ class MiniPlayerBar:
     def build(self) -> ft.Control:
         return self.container
 
-    def build_autoplay_pill(self) -> ft.Control:
-        return self._autoplay_pill_wrap
-
     def _on_autoplay_toggle(self, _e):
         # Single unified auto-play toggle (Play-Similar machinery under the hood).
         self.app.set_play_similar_mode(not self.app.play_similar_mode)
@@ -168,7 +162,6 @@ class MiniPlayerBar:
                 # First reveal: make it occupy layout space, then animate in
                 self._ever_shown       = True
                 self.container.visible = True
-                self._autoplay_pill_wrap.visible = True
             self.container.opacity = 1.0
         elif self._ever_shown:
             # Playback stopped but we have history; show last track dimmed
@@ -186,24 +179,14 @@ class MiniPlayerBar:
             self._artwork.visible    = False
 
     def update_play_similar(self, enabled: bool):
-        self._artwork_container.border = ft.Border.all(2, CYAN) if enabled else None
-        self._music_icon_container.border = ft.Border.all(2, CYAN) if enabled else None
-        # Reflect on the auto-play pill (icon/label/tint).
+        # State reads entirely from the chip's tint + fill; the artwork border
+        # is left to Auto-DJ so the two signals stay distinguishable.
         self._autoplay_icon.color   = CYAN if enabled else DIM
-        self._autoplay_state.value  = "ON" if enabled else "OFF"
-        self._autoplay_state.color  = CYAN if enabled else DIM
-        self._autoplay_pill.bgcolor = apply_opacity(0.12, CYAN) if enabled else SURFACE
+        self._autoplay_label.color  = CYAN if enabled else DIM
+        self._autoplay_pill.bgcolor = apply_opacity(0.14, CYAN) if enabled else SURFACE2
         self._autoplay_pill.border  = ft.Border.all(1, apply_opacity(0.55, CYAN)) if enabled else ft.Border.all(1, BORDER)
         try:
             self._autoplay_pill.update()
-        except (RuntimeError, AssertionError):
-            pass
-        try:
-            self._artwork_container.update()
-        except (RuntimeError, AssertionError):
-            pass
-        try:
-            self._music_icon_container.update()
         except (RuntimeError, AssertionError):
             pass
 
