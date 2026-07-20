@@ -43,6 +43,12 @@ _CLUSTER_NEUTRAL = "#8A93A0"
 # black edges would be invisible), just a dark neutral a couple of steps above it.
 _NET_EDGE_COLOR = "#2E2E36"
 _NET_WALK_COLOR = "#00E676"
+# Zoom bounds for the graph's InteractiveViewer. Shared with _emit_net_shapes,
+# which counter-scales node sizes by the live zoom so magnifying the graph
+# separates nodes instead of scaling the crowding with them; the two must agree
+# or the clamp and the transform disagree about what 4× means.
+_NET_MIN_ZOOM = 0.8
+_NET_MAX_ZOOM = 5.0
 
 
 def _canon_genre(genre) -> str:
@@ -326,7 +332,6 @@ class LibraryView:
         self._net_local_paths: set[str] = set()   # seed + neighbours (survive re-walks)
         self._net_walk_seed_path: str | None = None  # node the drawn walk starts from
         self._net_readout_walk_btn: ft.Control | None = None
-        self._net_walk_is_live: bool = False      # True → showing the real auto-play buffer
         self._net_walk_task: asyncio.Task | None = None
         self._net_dims: tuple[int, int, int] = (0, 0, 0)  # (w, h, pad)
         # Pinned (focal_x, focal_y, scale) — frozen per seed so merging walk
@@ -354,14 +359,28 @@ class LibraryView:
         self._net_viewer: ft.Control | None = None  # InteractiveViewer (native pan/zoom)
         self._net_graph_collapsed = False           # graph hidden → list takes the pane
         self._net_collapse_icon: ft.Icon | None = None
-        # Live-tracking of the playing node. When ON, the graph recenters on the
-        # active track once it falls off-screen (maps-style); the pulse always
-        # follows it in place while it's a visible node. OFF lets the user
-        # explore a pinned neighbourhood freely (the pulse still glows if shown).
-        self._net_follow_current: bool = True
-        self._net_follow_btn: ft.Control | None = None
-        self._net_follow_icon: ft.Control | None = None
-        self._net_reseed_task: asyncio.Task | None = None  # debounced follow rebuild
+        # ── The pane's ONE identity switch: "explore" | "live" ──────────────
+        # This view used to infer its role from play_similar_mode: the same list
+        # silently became either a speculative walk or a mirror of the real
+        # auto-play buffer, and the same graph either stayed put or chased the
+        # playing track. Two contracts, no way to tell them apart, so it did
+        # neither job legibly. The role is now an explicit, user-owned mode.
+        #   explore → speculative walk from the SELECTION; the graph never moves
+        #             on its own and never steals the selection. An instrument.
+        #   live    → mirrors what is actually queued ahead and recenters on the
+        #             playing track. A readout.
+        self._net_mode: str = "explore"
+        self._net_mode_btn: ft.Control | None = None
+        self._net_mode_icon: ft.Control | None = None
+        self._net_mode_label: ft.Text | None = None
+        self._net_reseed_task: asyncio.Task | None = None  # debounced live rebuild
+        # Absolute viewer zoom, mirrored from the InteractiveViewer's gestures.
+        # Node radii are emitted DIVIDED by this so magnifying the graph actually
+        # separates nodes instead of scaling the crowding along with them — see
+        # _emit_net_shapes. _base is the zoom at gesture start (Flutter reports
+        # scale relative to that, not absolutely).
+        self._net_zoom: float = 1.0
+        self._net_zoom_base: float = 1.0
         self._view_tabs_row = ft.Row(spacing=6)
         self._update_view_tabs()
 
@@ -618,29 +637,50 @@ class LibraryView:
         ci = audio_engine.current_index
         return [t["path"] for t in q[ci + 1:] if t.get("_autoplay") and t.get("path")]
 
-    async def _compute_walk_seq(self, seed_path: str) -> tuple[list[str], bool]:
-        """Resolve the ordered walk shown beneath the graph. Returns
-        (paths, is_live).
+    def _live_queue_ahead(self) -> list[str]:
+        """What Now-Playing mode shows: the tracks genuinely queued after the
+        current one. Prefers the `_autoplay` radio buffer when Play Similar is
+        running (that IS the generated trajectory); otherwise falls back to the
+        plain queue tail, so the mode is never mysteriously empty during
+        ordinary listening."""
+        tagged = self._live_autoplay_buffer()
+        if tagged:
+            return tagged
+        q = audio_engine.queue
+        ci = audio_engine.current_index
+        return [t["path"] for t in q[ci + 1:] if t.get("path")]
 
-        Two sources, one rule:
-          • the selection IS the live track and auto-play is running → show the
-            REAL buffer already queued ahead of it. Never resample here: a fresh
-            walk uses a different avoid set and temperature>0 makes it
-            stochastic, so it would disagree with what is actually about to
-            play. That mismatch — a plausible trajectory contradicting the real
-            queue — is precisely what the old Walk tab shipped.
-          • anything else → a speculative "what if I started here" walk from the
+    async def _compute_walk_seq(self, seed_path: str) -> list[str]:
+        """Resolve the ordered sequence shown beneath the graph.
+
+        The source is decided by the pane's MODE, not inferred from playback
+        state. Inferring it meant the same list silently changed meaning
+        mid-session — a speculative trajectory and the real queue are different
+        claims about the future, and the user could not tell which was on screen.
+
+          • live    → the REAL queue ahead. Never resampled: a fresh walk uses a
+            different avoid set and temperature>0 makes it stochastic, so it
+            would disagree with what is actually about to play. A plausible
+            trajectory contradicting the real queue is the exact failure the old
+            Walk tab shipped.
+          • explore → a speculative "what if I started here" walk from the
             selection, seeded deterministically so the tuning sliders are
             readable: the same node must give the same walk, or a slider change
             is indistinguishable from the RNG.
-        """
-        if not seed_path:
-            return [], False
 
-        if getattr(self.app, "play_similar_mode", False) and seed_path == (audio_engine.current_path or ""):
-            buf = self._live_autoplay_buffer()
-            if buf:
-                return buf[: self._net_walk_length], True
+        Returns the paths only. It used to also return an `is_live` flag that
+        callers cached on the view — but the flag was never anything other than
+        `self._net_mode == "live"`, so the cache could only ever be right or
+        stale, never informative. Read the mode.
+        """
+        if self._net_mode == "live":
+            # Empty is a true answer here — quietly falling back to a
+            # speculative walk would reintroduce the ambiguity the mode exists
+            # to remove.
+            return self._live_queue_ahead()[: self._net_walk_length]
+
+        if not seed_path:
+            return []
 
         from utils import track_graph as tg
         from utils.streamrip_api import get_walk_params
@@ -653,7 +693,7 @@ class LibraryView:
             temperature=temp,
             rng_seed=self._walk_rng_seed(seed_path),
         )
-        return list(paths or []), False
+        return list(paths or [])
 
     def _schedule_net_walk_refresh(self, seed_path: str, delay: float = 0.2):
         """Recompute the walk overlay for a newly selected node, in place.
@@ -670,12 +710,12 @@ class LibraryView:
             try:
                 if delay > 0:
                     await asyncio.sleep(delay)
-                seq, is_live = await self._compute_walk_seq(seed_path)
+                seq = await self._compute_walk_seq(seed_path)
                 missing = [p for p in seq if p not in self._net_node_by_path]
                 new_rows = []
                 if missing:
                     new_rows = await self.app.db_manager.get_tracks_pca_coords_for_paths(missing)
-                self._apply_walk_seq(seed_path, seq, is_live, new_rows)
+                self._apply_walk_seq(seed_path, seq, new_rows)
             except asyncio.CancelledError:
                 pass
             except Exception as exc:
@@ -683,7 +723,7 @@ class LibraryView:
 
         self._net_walk_task = asyncio.create_task(_run())
 
-    def _apply_walk_seq(self, seed_path: str, seq: list[str], is_live: bool, new_rows: list):
+    def _apply_walk_seq(self, seed_path: str, seq: list[str], new_rows: list):
         """Merge freshly-walked nodes into the live graph and repaint the walk
         overlay + ordered list, without rebuilding the control tree."""
         if self._net_proj is None:
@@ -711,7 +751,6 @@ class LibraryView:
             self._declutter_net_nodes(movable=added)
 
         self._net_walk_seq = [p for p in seq if p in self._net_node_by_path]
-        self._net_walk_is_live = is_live
         self._net_walk_seed_path = seed_path
 
         # Drop nodes that belong to neither the neighbourhood nor the CURRENT
@@ -731,6 +770,13 @@ class LibraryView:
 
         self._rebuild_walk_edges(seed_path)
         self._redraw_net_canvas()
+        # The declutter pass above may have MOVED the playing node, and the
+        # pruning may have removed it. The pulse ring is a separately-positioned
+        # overlay, so without this it stays at the node's old pixel coords —
+        # a ring hovering over empty space or over the wrong track.
+        self._net_set_pulse_node(
+            self._net_node_by_path.get(audio_engine.current_path or "")
+        )
         self._refresh_net_readout()   # step numbers just changed
         self._rebuild_net_track_panel()
 
@@ -797,10 +843,14 @@ class LibraryView:
         readout.visible = True
         # Hide the commit button when the drawn walk ALREADY starts here — the
         # tap would recompute an identical walk (it's seeded deterministically),
-        # so offering it would just look broken.
+        # so offering it would just look broken. Hidden in live mode for the same
+        # reason: the sequence there is the real queue, which no amount of
+        # walking from a node can change, so the button would promise an effect
+        # it cannot deliver.
         btn = self._net_readout_walk_btn
         if btn is not None:
-            btn.visible = (nd["path"] != self._net_walk_seed_path)
+            btn.visible = (self._net_mode != "live"
+                           and nd["path"] != self._net_walk_seed_path)
         self.try_update(readout)
 
     def _place_net_node(self, nd: dict):
@@ -915,6 +965,70 @@ class LibraryView:
             nd.pop("_ox", None)
             nd.pop("_oy", None)
 
+    def _net_param_chip(self, label_fmt, options: list[int], current: int,
+                        item_fmt, tooltip: str, on_pick, accent: str = CYAN,
+                        leading_icon: str | None = None):
+        """A dropdown chip for one integer network parameter.
+
+        A method rather than a build-time closure because its two users now live
+        in different headers: density sits over the graph, steps sits over the
+        list it actually governs.
+
+        Holds refs to the label + every item's icon/text. A chip whose value
+        changes WITHOUT a full rebuild (steps — it only re-walks in place) has to
+        repaint itself; baking the strings in at build time is why the steps chip
+        looked frozen while the walk underneath it changed.
+        """
+        label_text = ft.Text(label_fmt(current), size=9.5,
+                             weight=ft.FontWeight.W_700, color=accent)
+        item_icons: list[ft.Icon] = []
+        item_texts: list[ft.Text] = []
+        items = []
+        for opt in options:
+            icon = ft.Icon(ft.Icons.CHECK_ROUNDED if opt == current else ft.Icons.TUNE_ROUNDED,
+                           size=13, color=accent if opt == current else DIM)
+            text = ft.Text(item_fmt(opt), size=11,
+                           color=TEXT if opt == current else DIM,
+                           weight=ft.FontWeight.W_700 if opt == current else ft.FontWeight.W_400)
+            item_icons.append(icon)
+            item_texts.append(text)
+            items.append(
+                ft.PopupMenuItem(
+                    content=ft.Row([icon, text], spacing=6, tight=True),
+                    on_click=lambda _e, v=opt: on_pick(v),
+                )
+            )
+        face: list[ft.Control] = []
+        if leading_icon is not None:
+            face.append(ft.Icon(leading_icon, size=12, color=accent))
+        face.append(label_text)
+        face.append(ft.Icon(ft.Icons.ARROW_DROP_DOWN_ROUNDED, size=14, color=accent))
+        button = ft.PopupMenuButton(
+            content=ft.Container(
+                content=ft.Row(face, spacing=2, tight=True,
+                               vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                bgcolor=apply_opacity(0.85, SURFACE2),
+                border=ft.Border.all(1, apply_opacity(0.25, accent)),
+                border_radius=8,
+                padding=ft.Padding.symmetric(horizontal=7, vertical=4),
+                tooltip=tooltip,
+            ),
+            items=items,
+            bgcolor=SURFACE2,
+        )
+
+        def refresh(val: int):
+            label_text.value = label_fmt(val)
+            for opt, icon, text in zip(options, item_icons, item_texts):
+                on = (opt == val)
+                icon.icon = ft.Icons.CHECK_ROUNDED if on else ft.Icons.TUNE_ROUNDED
+                icon.color = accent if on else DIM
+                text.color = TEXT if on else DIM
+                text.weight = ft.FontWeight.W_700 if on else ft.FontWeight.W_400
+            self.try_update(label_text, *item_icons, *item_texts)
+
+        return button, refresh
+
     def _build_interactive_network_canvas(
         self, rows, current_path, neighbors_list, walk_paths,
     ) -> ft.Control:
@@ -930,9 +1044,13 @@ class LibraryView:
         # ordered track list fills (and scrolls) the rest. avail_h is the FULL
         # screen, but graph+list live in a wrapper that's much shorter (search
         # bar, tabs, pagination, bottom nav, mini-player all sit outside it), so
-        # keep the graph modest and hard-capped — the collapse toggle gives the
-        # list the whole pane when the user wants to browse.
-        canvas_h = max(150, min(int(avail_h * 0.32), 280))
+        # it stays hard-capped.
+        # That cap used to be 0.32/280: a ~216px usable square asked to hold up
+        # to 36 neighbours plus 20 walk steps — a packing problem with no
+        # solution, which is why _declutter_net_nodes (correctly) refused to
+        # spread them. More area is the only honest fix; the collapse toggle
+        # still hands the whole pane to the list when the user wants to browse.
+        canvas_h = max(200, min(int(avail_h * 0.42), 400))
         canvas_w = int(avail_w)
         pad = 32                                   # edge padding in px
         self._net_dims = (canvas_w, canvas_h, pad)
@@ -1057,6 +1175,23 @@ class LibraryView:
             or raw_nodes[0]
         )
         fcx, fcy = focal["rx"], focal["ry"]
+        # Frame the FARTHEST node. This is not a stylistic choice — it is the
+        # invariant that keeps the graph honest: every node lands inside the
+        # canvas box, so nothing can be painted where it cannot be seen.
+        #
+        # A percentile fit was tried here (frame the bulk, let outliers fall
+        # outside) to stop far walk steps compressing the neighbourhood. It is
+        # WRONG, and not recoverably: the graph_stack is an ft.Stack sized to the
+        # canvas, and Flet Stacks clip HARD_EDGE by default, so the clip happens
+        # INSIDE the InteractiveViewer's transformed child. Anything outside the
+        # box is discarded before the transform — unreachable at every zoom and
+        # pan, while its edges are still drawn running off toward it.
+        # boundary_margin does not help: it governs how far the child may be
+        # panned, not what the child paints.
+        #
+        # The crowding that motivated the percentile is now the user's to
+        # resolve, interactively, via counter-scaled zoom (_emit_net_shapes) —
+        # which magnifies without ever hiding anything.
         half_span = max(
             max((abs(n["rx"] - fcx) for n in raw_nodes), default=1.0),
             max((abs(n["ry"] - fcy) for n in raw_nodes), default=1.0),
@@ -1100,6 +1235,40 @@ class LibraryView:
         readout_artist = ft.Text("", color=DIM, size=9.5,
                                  max_lines=1, overflow=ft.TextOverflow.ELLIPSIS, no_wrap=True)
 
+        # ── The three things you can do to a selected node ──────────────────
+        # Selecting only INSPECTS. Everything that changes state is one of these
+        # deliberate taps, so looking around never destroys what you're looking
+        # at. They escalate: hear it → re-frame around it → travel from it.
+        def _play_selection(_e=None):
+            nd = self._net_node_by_path.get(self._net_selected_path or "")
+            if nd is None:
+                return
+            self.app.trigger_haptic("network_walk")
+            # replace=True is non-destructive here: it inserts after the current
+            # track and jumps to it, so the queue tail and any running auto-play
+            # session survive being auditioned from the graph.
+            if self._enqueue_network_tracks([self._node_to_track(nd)], replace=True):
+                self.app.show_snackbar(
+                    f"Playing '{nd.get('title') or 'track'}'",
+                    icon=ft.Icons.PLAY_ARROW_ROUNDED, color=CYAN,
+                )
+
+        def _reseed_selection(_e=None):
+            path = self._net_selected_path
+            if not path:
+                return
+            self.app.trigger_haptic("network_reseed")
+            # Re-framing is an act of exploration, so it forces explore mode. In
+            # live mode the very next track change would reseed back onto the
+            # playing track and silently undo this — the button would appear to
+            # work and then unwork itself.
+            if self._net_mode == "live":
+                self._net_mode = "explore"
+                self._sync_net_mode_chip()
+            self._network_seed_path = path
+            self._net_selected_path = path
+            self.page.run_task(self.load_library)
+
         def _walk_from_selection(_e=None):
             path = self._net_selected_path
             if not path:
@@ -1107,21 +1276,39 @@ class LibraryView:
             self.app.trigger_haptic("network_walk")
             self._schedule_net_walk_refresh(path, delay=0.0)
 
-        # The COMMIT control. Selecting a node only inspects it; re-walking is
-        # what rebuilds the graph (new steps merged, stale ones pruned), so it
-        # has to be a separate deliberate tap — otherwise inspecting a node
-        # destroys the very graph you were inspecting and you can never look
-        # around. Green because green means "the walk" everywhere in this pane;
-        # the play glyph reads as "go from here". Distinct from the cyan Play
-        # button below, which plays tracks rather than re-walking.
-        readout_walk_btn = ft.Container(
-            content=ft.Icon(ft.Icons.PLAY_ARROW_ROUNDED, size=15, color=BG),
-            bgcolor=_NET_WALK_COLOR,
-            border_radius=13,
-            width=26, height=26,
-            alignment=ft.Alignment(0, 0),
-            tooltip="Walk from here",
-            on_click=_walk_from_selection,
+        def _readout_btn(icon_name, tooltip, on_click, *, fill=None, fg=None):
+            return ft.Container(
+                content=ft.Icon(icon_name, size=14, color=fg or CYAN),
+                bgcolor=fill if fill is not None else apply_opacity(0.16, CYAN),
+                border=None if fill is not None else ft.Border.all(1, apply_opacity(0.35, CYAN)),
+                border_radius=12,
+                width=24, height=24,
+                alignment=ft.Alignment(0, 0),
+                tooltip=tooltip,
+                on_click=on_click,
+            )
+
+        # Audition the node without leaving the graph — the missing verb that
+        # made the network a thing you could only read, never hear.
+        readout_play_btn = _readout_btn(
+            ft.Icons.PLAY_ARROW_ROUNDED, "Play this track", _play_selection,
+            fill=CYAN, fg=BG,
+        )
+        # Re-frame the whole neighbourhood on this node: the one action that
+        # answers "what does the map look like from HERE", which previously
+        # required finding the track in the list and long-pressing it.
+        readout_seed_btn = _readout_btn(
+            ft.Icons.ZOOM_IN_ROUNDED, "Explore from here — rebuild the map on this node",
+            _reseed_selection,
+        )
+        # The COMMIT control for the walk. Re-walking rebuilds the sequence (new
+        # steps merged, stale ones pruned), so it has to be a separate deliberate
+        # tap. Green because green means "the walk" everywhere in this pane, and
+        # a route glyph rather than the old play arrow — that arrow now belongs
+        # to the actual Play button beside it.
+        readout_walk_btn = _readout_btn(
+            ft.Icons.ROUTE_ROUNDED, "Walk from here", _walk_from_selection,
+            fill=_NET_WALK_COLOR, fg=BG,
         )
         self._net_readout_walk_btn = readout_walk_btn
 
@@ -1130,9 +1317,11 @@ class LibraryView:
                 [
                     ft.Column([readout_title, readout_artist], spacing=1, tight=True,
                               expand=True),
-                    readout_walk_btn,
+                    ft.Row([readout_play_btn, readout_seed_btn, readout_walk_btn],
+                           spacing=4, tight=True,
+                           vertical_alignment=ft.CrossAxisAlignment.CENTER),
                 ],
-                spacing=8, tight=True,
+                spacing=6, tight=True,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
             ),
             bgcolor=apply_opacity(0.92, SURFACE2),
@@ -1141,7 +1330,10 @@ class LibraryView:
             padding=ft.Padding.symmetric(horizontal=10, vertical=6),
             left=8,
             top=max(8, canvas_h - 52),
-            width=min(220, canvas_w - 16),
+            # Three action buttons now share this row with the title, so it needs
+            # more than the old 220 to keep the track name readable rather than
+            # ellipsised to nothing.
+            width=min(292, canvas_w - 16),
             visible=False,
             shadow=ft.BoxShadow(blur_radius=12, color=apply_opacity(0.3, "#000000")),
             animate_opacity=ft.Animation(120, ft.AnimationCurve.EASE_OUT),
@@ -1163,12 +1355,19 @@ class LibraryView:
 
         # ── Hit-test helpers ────────────────────────────────────────────────
         def _find_node_at(lx: float, ly: float) -> dict | None:
+            # Taps arrive in the canvas's own untransformed space, so the hit
+            # radius must match what was DRAWN there — i.e. counter-scaled by the
+            # same 1/zoom as the node itself. Left un-scaled, the 14px slop
+            # stayed a constant 14 canvas px (≈56 screen px at 4×), so zooming in
+            # to separate two nodes still gave you one fat overlapping target and
+            # defeated the point of zooming.
+            k = 1.0 / max(0.5, min(6.0, self._net_zoom or 1.0))
             best, best_dist = None, float("inf")
             for nd in self._net_nodes:
                 dx = lx - nd["px"]
                 dy = ly - nd["py"]
                 dist = math.sqrt(dx * dx + dy * dy)
-                tap_radius = nd["radius"] + 14
+                tap_radius = (nd["radius"] + 14) * k
                 if dist <= tap_radius and dist < best_dist:
                     best = nd
                     best_dist = dist
@@ -1224,112 +1423,56 @@ class LibraryView:
         )
 
         # ── Top Controls Header ─────────────────────────────────────────────
-        # No mode switch any more: one graph, with density (how much
-        # neighbourhood to draw) and steps (how far the green walk runs) as two
-        # independent chips — they used to share one control because only one
-        # could apply per mode.
-        def _param_chip(label_fmt, options: list[int], current: int,
-                        item_fmt, tooltip: str, on_pick, accent: str = CYAN):
-            # Hold refs to the label + every item's icon/text. A chip whose value
-            # changes WITHOUT a full rebuild (steps — it only re-walks in place)
-            # has to repaint itself; baking the strings in at build time is why
-            # the steps chip looked frozen while the walk underneath it changed.
-            label_text = ft.Text(label_fmt(current), size=9.5,
-                                 weight=ft.FontWeight.W_700, color=accent)
-            item_icons: list[ft.Icon] = []
-            item_texts: list[ft.Text] = []
-            items = []
-            for opt in options:
-                icon = ft.Icon(ft.Icons.CHECK_ROUNDED if opt == current else ft.Icons.TUNE_ROUNDED,
-                               size=13, color=accent if opt == current else DIM)
-                text = ft.Text(item_fmt(opt), size=11,
-                               color=TEXT if opt == current else DIM,
-                               weight=ft.FontWeight.W_700 if opt == current else ft.FontWeight.W_400)
-                item_icons.append(icon)
-                item_texts.append(text)
-                items.append(
-                    ft.PopupMenuItem(
-                        content=ft.Row([icon, text], spacing=6, tight=True),
-                        on_click=lambda _e, v=opt: on_pick(v),
-                    )
-                )
-            button = ft.PopupMenuButton(
-                content=ft.Container(
-                    content=ft.Row(
-                        [
-                            label_text,
-                            ft.Icon(ft.Icons.ARROW_DROP_DOWN_ROUNDED, size=14, color=accent),
-                        ],
-                        spacing=2, tight=True,
-                    ),
-                    bgcolor=apply_opacity(0.85, SURFACE2),
-                    border=ft.Border.all(1, apply_opacity(0.25, accent)),
-                    border_radius=8,
-                    padding=ft.Padding.symmetric(horizontal=7, vertical=4),
-                    tooltip=tooltip,
-                ),
-                items=items,
-                bgcolor=SURFACE2,
-            )
-
-            def refresh(val: int):
-                label_text.value = label_fmt(val)
-                for opt, icon, text in zip(options, item_icons, item_texts):
-                    on = (opt == val)
-                    icon.name = ft.Icons.CHECK_ROUNDED if on else ft.Icons.TUNE_ROUNDED
-                    icon.color = accent if on else DIM
-                    text.color = TEXT if on else DIM
-                    text.weight = ft.FontWeight.W_700 if on else ft.FontWeight.W_400
-                self.try_update(label_text, *item_icons, *item_texts)
-
-            return button, refresh
-
+        # Only DENSITY lives here now. It sets how much neighbourhood is drawn,
+        # so it belongs to the graph. Steps sets how long the sequence is, so it
+        # moved down to the list header — see _build_net_track_list. Each knob
+        # now sits on the thing it changes, and the header is one row again
+        # (two rows of chrome floating over a phone-height graph occluded the
+        # nodes it was meant to help you read).
         def _set_density(val: int):
             self.app.trigger_haptic("network_tap")
             self._net_k_neighbors = val
             self.page.run_task(self.load_library)
 
-        def _set_steps(val: int):
-            self.app.trigger_haptic("network_tap")
-            self._net_walk_length = val
-            # Steps only changes the overlay — no need to refetch the
-            # neighbourhood, so re-walk in place and keep the user's pan/zoom.
-            # Because there's no rebuild, the chip must repaint ITSELF.
-            if self._net_steps_chip_refresh is not None:
-                self._net_steps_chip_refresh(val)
-            self._schedule_net_walk_refresh(self._net_selected_path or current_path, delay=0.0)
-
         # Density triggers a full load_library() rebuild, so its chip is redrawn
         # from scratch and needs no refresher.
-        density_chip, _ = _param_chip(
+        density_chip, _ = self._net_param_chip(
             lambda o: f"Density: {o}", [12, 16, 24, 36], self._net_k_neighbors,
             lambda o: f"Density: {o} tracks", "Neighbourhood density", _set_density,
         )
-        steps_chip, steps_refresh = _param_chip(
-            lambda o: f"Steps: {o}", [5, 10, 15, 20], self._net_walk_length,
-            lambda o: f"Steps: {o} steps", "Walk length", _set_steps,
-            accent=_NET_WALK_COLOR,
-        )
-        self._net_steps_chip_refresh = steps_refresh
 
-        # Follow live track toggle chip
-        follow_icon = ft.Icon(
-            ft.Icons.MY_LOCATION if self._net_follow_current else ft.Icons.LOCATION_SEARCHING,
-            color=CYAN if self._net_follow_current else DIM, size=13,
+        # ── Mode chip: the pane's identity, stated out loud ──────────────────
+        # Deliberately the widest chip in the header and the only one carrying a
+        # word rather than a glyph. Everything else here tunes the view; this one
+        # decides what the view IS, and the old inferred behaviour was invisible
+        # precisely because nothing on screen named it.
+        live_mode = (self._net_mode == "live")
+        mode_accent = _NET_WALK_COLOR if live_mode else CYAN
+        mode_icon = ft.Icon(
+            ft.Icons.MY_LOCATION if live_mode else ft.Icons.TRAVEL_EXPLORE_ROUNDED,
+            color=mode_accent, size=13,
         )
-        self._net_follow_icon = follow_icon
-        follow_chip = ft.Container(
-            content=follow_icon,
+        mode_label = ft.Text(
+            "Now Playing" if live_mode else "Explore",
+            size=9.5, weight=ft.FontWeight.W_800, color=mode_accent,
+        )
+        self._net_mode_icon = mode_icon
+        self._net_mode_label = mode_label
+        mode_chip = ft.Container(
+            content=ft.Row([mode_icon, mode_label], spacing=4, tight=True,
+                           vertical_alignment=ft.CrossAxisAlignment.CENTER),
             bgcolor=apply_opacity(0.85, SURFACE2),
-            border=ft.Border.all(
-                1, apply_opacity(0.22, CYAN) if self._net_follow_current else apply_opacity(0.14, TEXT),
-            ),
+            border=ft.Border.all(1, apply_opacity(0.35, mode_accent)),
             border_radius=8,
-            padding=ft.Padding.all(5),
-            tooltip="Follow live playing track",
-            on_click=self._toggle_net_follow,
+            padding=ft.Padding.symmetric(horizontal=7, vertical=4),
+            tooltip=(
+                "Now Playing — mirrors the real queue and follows the track"
+                if live_mode else
+                "Explore — speculative walks; the graph stays where you put it"
+            ),
+            on_click=self._toggle_net_mode,
         )
-        self._net_follow_btn = follow_chip
+        self._net_mode_btn = mode_chip
 
         # Walk Tuning parameters chip
         tune_icon = ft.Icon(ft.Icons.TUNE_ROUNDED, color=CYAN, size=13)
@@ -1355,11 +1498,15 @@ class LibraryView:
             on_click=self._reset_net_view,
         )
 
+        # One row: mode + density on the left (what this pane is, and how much of
+        # it to draw), view actions on the right. This floats OVER the graph, so
+        # every row of chrome here is a row of nodes you can't see — with steps
+        # moved to the list header it fits on one line again at phone width.
         top_controls_overlay = ft.Container(
             content=ft.Row(
                 [
-                    ft.Row([density_chip, steps_chip], spacing=3, tight=True),
-                    ft.Row([follow_chip, tune_chip, fit_chip], spacing=3, tight=True),
+                    ft.Row([mode_chip, density_chip], spacing=3, tight=True),
+                    ft.Row([tune_chip, fit_chip], spacing=3, tight=True),
                 ],
                 alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -1396,7 +1543,7 @@ class LibraryView:
                 ))
             legend_overlay = ft.Container(
                 content=ft.Column(legend_rows, spacing=2, tight=True),
-                left=8, top=44,
+                left=8, top=44,   # clears the single-row control header above it
                 bgcolor=apply_opacity(0.82, SURFACE2),
                 border=ft.Border.all(1, apply_opacity(0.16, CYAN)),
                 border_radius=8,
@@ -1434,14 +1581,41 @@ class LibraryView:
             width=canvas_w,
             height=canvas_h,
         )
+        # ── Zoom mirroring ──────────────────────────────────────────────────
+        # Flutter reports gesture scale RELATIVE to the gesture's start, not
+        # absolutely, so the absolute zoom has to be accumulated: latch the
+        # current zoom on start, multiply by the gesture scale on update.
+        def _on_zoom_start(_e):
+            self._net_zoom_base = self._net_zoom
+
+        def _on_zoom_update(e):
+            s = getattr(e, "scale", 1.0) or 1.0
+            self._net_zoom = max(_NET_MIN_ZOOM, min(_NET_MAX_ZOOM,
+                                                    self._net_zoom_base * s))
+
+        def _on_zoom_end(_e):
+            # Re-emit ONCE, at gesture end. Repainting per update would put the
+            # whole shape list back on the bridge ~60×/s — exactly the cost the
+            # InteractiveViewer was adopted to eliminate. During the pinch the
+            # nodes scale with the native transform (as before); they snap to
+            # their counter-scaled size when the fingers lift.
+            self._redraw_net_canvas()
+            self._net_set_pulse_node(
+                self._net_node_by_path.get(audio_engine.current_path or "")
+            )
+
         graph_viewer = ft.InteractiveViewer(
             content=graph_stack,
             pan_enabled=True,
             scale_enabled=True,
-            min_scale=0.8,
-            max_scale=4.0,
-            boundary_margin=ft.Margin.all(160),   # allow panning past the edges
+            min_scale=_NET_MIN_ZOOM,
+            max_scale=_NET_MAX_ZOOM,
+            boundary_margin=ft.Margin.all(240),   # reach the framed-out outliers
             clip_behavior=ft.ClipBehavior.HARD_EDGE,
+            interaction_update_interval=90,       # throttle Flutter→Python updates
+            on_interaction_start=_on_zoom_start,
+            on_interaction_update=_on_zoom_update,
+            on_interaction_end=_on_zoom_end,
             width=canvas_w,
             height=canvas_h,
         )
@@ -1502,10 +1676,21 @@ class LibraryView:
     def _emit_net_shapes(self) -> list:
         """Build the canvas shape list from current node/edge state with enhanced
         neon visuals, radial glow auras, and cyan selection halos.
+
+        Every SIZE here is divided by the current viewer zoom (`k`), while
+        positions are left alone. The InteractiveViewer applies one uniform GPU
+        transform to the whole canvas, so baking sizes in meant radius and
+        inter-node distance scaled together and overlap was scale-INVARIANT: a
+        clump that collided at 1× collided identically at 4×, and zooming
+        magnified the crowding instead of resolving it. Counter-scaling makes
+        node size constant on screen, so zoom buys real separation and edges
+        emerge from the clump — which is the entire point of zoom on a graph.
         """
         canvas_w, canvas_h, _pad = self._net_dims
         nbp = self._net_node_by_path
         sel_path = self._net_selected_path
+        # Guarded: a zero/absurd zoom would divide the graph into oblivion.
+        k = 1.0 / max(0.5, min(6.0, self._net_zoom or 1.0))
 
         shapes: list = [
             cv.Rect(0, 0, canvas_w, canvas_h, paint=ft.Paint(color=BG, style=ft.PaintingStyle.FILL)),
@@ -1526,7 +1711,7 @@ class LibraryView:
             w = max(0.0, min(1.0, float(e.get("weight", 0.5))))
             paint = ft.Paint(
                 color=apply_opacity(0.45 + 0.55 * w, _NET_EDGE_COLOR),
-                stroke_width=0.9 + 1.6 * w,
+                stroke_width=(0.9 + 1.6 * w) * k,
                 style=ft.PaintingStyle.STROKE,
                 stroke_cap=ft.StrokeCap.ROUND,
             )
@@ -1546,7 +1731,7 @@ class LibraryView:
             fade = max(0.42, 1.0 - i / n_walk * 0.55)
             paint = ft.Paint(
                 color=apply_opacity(fade, _NET_WALK_COLOR),
-                stroke_width=2.4,
+                stroke_width=2.4 * k,
                 style=ft.PaintingStyle.STROKE,
                 stroke_cap=ft.StrokeCap.ROUND,
             )
@@ -1555,9 +1740,9 @@ class LibraryView:
             ux, uy = dx / length, dy / length
             # Stop the line at the node's edge so the arrowhead isn't buried
             # under the circle it points at.
-            bx = b["px"] - ux * (b["radius"] + 1.5)
-            by = b["py"] - uy * (b["radius"] + 1.5)
-            al = 7
+            bx = b["px"] - ux * (b["radius"] + 1.5) * k
+            by = b["py"] - uy * (b["radius"] + 1.5) * k
+            al = 7 * k
             elems = [
                 cv.Path.MoveTo(a["px"], a["py"]),
                 cv.Path.LineTo(bx, by),
@@ -1572,26 +1757,27 @@ class LibraryView:
 
         # Render node auras & halos first (so they sit underneath main circles)
         for nd in self._net_nodes:
-            px, py, r = nd["px"], nd["py"], nd["radius"]
+            px, py = nd["px"], nd["py"]
+            r = nd["radius"] * k
             col = nd["color"]
             is_selected = (nd["path"] == sel_path)
 
             if nd["is_seed"]:
                 # Seed node radial glow aura
-                shapes.append(cv.Circle(px, py, r + 9, paint=ft.Paint(color=apply_opacity(0.20, col), style=ft.PaintingStyle.FILL)))
-                shapes.append(cv.Circle(px, py, r + 3, paint=ft.Paint(color=apply_opacity(0.75, "#FFFFFF"), stroke_width=1.8, style=ft.PaintingStyle.STROKE)))
+                shapes.append(cv.Circle(px, py, r + 9 * k, paint=ft.Paint(color=apply_opacity(0.20, col), style=ft.PaintingStyle.FILL)))
+                shapes.append(cv.Circle(px, py, r + 3 * k, paint=ft.Paint(color=apply_opacity(0.75, "#FFFFFF"), stroke_width=1.8 * k, style=ft.PaintingStyle.STROKE)))
 
             if nd.get("walk_step"):
                 # On the walk: a green ring around the genre-coloured node, so a
                 # node reads as BOTH its genre and its place on the trajectory.
-                shapes.append(cv.Circle(px, py, r + 2.5, paint=ft.Paint(
+                shapes.append(cv.Circle(px, py, r + 2.5 * k, paint=ft.Paint(
                     color=apply_opacity(0.9, _NET_WALK_COLOR),
-                    stroke_width=1.8, style=ft.PaintingStyle.STROKE)))
+                    stroke_width=1.8 * k, style=ft.PaintingStyle.STROKE)))
 
             if is_selected:
                 # Selected node Cyan Halo ring & aura
-                shapes.append(cv.Circle(px, py, r + 11, paint=ft.Paint(color=apply_opacity(0.30, CYAN), style=ft.PaintingStyle.FILL)))
-                shapes.append(cv.Circle(px, py, r + 4.5, paint=ft.Paint(color=CYAN, stroke_width=2.4, style=ft.PaintingStyle.STROKE)))
+                shapes.append(cv.Circle(px, py, r + 11 * k, paint=ft.Paint(color=apply_opacity(0.30, CYAN), style=ft.PaintingStyle.FILL)))
+                shapes.append(cv.Circle(px, py, r + 4.5 * k, paint=ft.Paint(color=CYAN, stroke_width=2.4 * k, style=ft.PaintingStyle.STROKE)))
 
         # Render main node circles. Nodes carry NO track titles — the only text
         # on the canvas is walk numbering. Titles were unreadable at this scale
@@ -1599,25 +1785,32 @@ class LibraryView:
         # guess) and they crowded the graph; the selected track's name/artist
         # lives in the fixed bottom-left readout instead.
         for nd in self._net_nodes:
-            px, py, r = nd["px"], nd["py"], nd["radius"]
+            px, py = nd["px"], nd["py"]
+            r = nd["radius"] * k
             col = nd["color"]
 
             shapes.append(cv.Circle(px, py, r, paint=ft.Paint(color=col, style=ft.PaintingStyle.FILL)))
 
+            # NB: the playing track is marked by the pulse OVERLAY, not here.
+            # A canvas marker was added when the overlay was found to go stale
+            # after a declutter — but the fix for that was to re-place the
+            # overlay (see _apply_walk_seq), which made the canvas copy pure
+            # duplication that also forced a full shape re-serialisation on every
+            # track change. One marker, one mechanism, no per-track bridge churn.
             step = nd.get("walk_step") or 0
             if step:
                 # Step number in a green pill — the graph's ordering must match
                 # the list's row numbers exactly (both read nd["walk_step"]).
                 s_lbl = str(step)
-                s_w = len(s_lbl) * 6.0 + 9
+                s_w = (len(s_lbl) * 6.0 + 9) * k
                 s_x = px - s_w / 2
                 shapes.append(cv.Rect(
-                    s_x, py - r - 16, s_w, 13, border_radius=6,
+                    s_x, py - r - 16 * k, s_w, 13 * k, border_radius=6 * k,
                     paint=ft.Paint(color=apply_opacity(0.92, _NET_WALK_COLOR), style=ft.PaintingStyle.FILL),
                 ))
                 shapes.append(cv.Text(
-                    s_x + 4.5, py - r - 14.8, s_lbl,
-                    style=ft.TextStyle(size=8.5, weight=ft.FontWeight.W_800, color=BG),
+                    s_x + 4.5 * k, py - r - 14.8 * k, s_lbl,
+                    style=ft.TextStyle(size=8.5 * k, weight=ft.FontWeight.W_800, color=BG),
                     max_width=s_w,
                 ))
 
@@ -1694,18 +1887,48 @@ class LibraryView:
         # the neighbourhood the walk is drawn over).
         nodes = [self._net_node_by_path[p] for p in self._net_walk_seq
                  if p in self._net_node_by_path]
-        is_live = self._net_walk_is_live
-        sel = self._net_node_by_path.get(self._net_selected_path or "")
-        sel_title = (sel or {}).get("title") or "selection"
-        title_txt = "Up Next" if is_live else "The Walk"
-        count = len(nodes)
-        # Say which walk this is. "Playing" = the real auto-play buffer, so the
-        # rows below ARE what comes next; otherwise it's a preview from the
-        # selected node and the user should read it as hypothetical.
-        subtitle = (
-            f"{count} queued · playing" if is_live
-            else f"{count} step{'s' if count != 1 else ''} from {sel_title}"
+        # Read the MODE, not a cached flag. There used to be a `_net_walk_is_live`
+        # mirroring it, written asynchronously — so the header could render one
+        # answer while the mode chip a line above rendered the other. It was
+        # never independent (it was always just `mode == "live"`), only stale, so
+        # it is gone rather than gated.
+        is_live = (self._net_mode == "live")
+        title_txt = "Up Next" if is_live else "Graph Walk"
+        # No explanatory subtitle. It was prose compensating for an ambiguity the
+        # mode chip already removes, and restating the mode in a second place is
+        # what created the chance for the two to disagree at all. The title names
+        # the list; the chip names the mode; the steps chip carries the count.
+
+        # ── Steps: the length of THIS list, docked to it ────────────────────
+        # Lives here, not in the graph header, because it governs the sequence
+        # rather than the neighbourhood — and directly above a numbered list, a
+        # bare count needs no "Steps:" prefix to be legible. Compact on purpose:
+        # it shares the row with the batch buttons at phone width.
+        def _set_steps(val: int):
+            self.app.trigger_haptic("network_tap")
+            self._net_walk_length = val
+            # Repaint the chip itself for immediate feedback: the re-walk below
+            # is async, and the panel rebuild that would refresh it lands only
+            # once the walk resolves.
+            if self._net_steps_chip_refresh is not None:
+                self._net_steps_chip_refresh(val)
+            self._schedule_net_walk_refresh(
+                self._net_selected_path or self._net_walk_seed_path
+                or (audio_engine.current_path or ""),
+                delay=0.0,
+            )
+
+        # One wording for both modes. "How many tracks to show" is true whether
+        # they're walked or queued, so the chip has no mode-dependent copy to
+        # keep in sync — one less thing that can contradict the mode chip.
+        steps_chip, steps_refresh = self._net_param_chip(
+            lambda o: f"{o}", [5, 10, 15, 20], self._net_walk_length,
+            lambda o: f"{o} tracks", "How many tracks to show",
+            _set_steps,
+            accent=_NET_WALK_COLOR,
+            leading_icon=ft.Icons.ROUTE_ROUNDED,
         )
+        self._net_steps_chip_refresh = steps_refresh
 
         def _play_all(_e):
             self.app.trigger_haptic("network_walk")
@@ -1752,25 +1975,17 @@ class LibraryView:
             border_radius=8,
         )
 
+        # The title EXPANDS so it ellipsises inside its share of the row instead
+        # of shouldering the chips off the right edge at phone width.
         header = ft.Container(
             content=ft.Row(
                 [
-                    ft.Row(
-                        [
-                            collapse_btn,
-                            ft.Column(
-                                [
-                                    ft.Text(title_txt.upper(), size=11, weight=ft.FontWeight.W_800,
-                                            color=_NET_WALK_COLOR if is_live else CYAN),
-                                    ft.Text(subtitle, size=9, color=DIM,
-                                            max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
-                                ],
-                                spacing=0, tight=True,
-                            ),
-                        ],
-                        spacing=4, tight=True,
-                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                    ),
+                    collapse_btn,
+                    ft.Text(title_txt.upper(), size=11, weight=ft.FontWeight.W_800,
+                            color=_NET_WALK_COLOR if is_live else CYAN,
+                            max_lines=1, overflow=ft.TextOverflow.ELLIPSIS,
+                            expand=True),
+                    steps_chip,
                     # No Play/Add when these tracks are the LIVE buffer — they're
                     # already queued right after the current track, so both
                     # buttons would only insert duplicates of what's about to play.
@@ -1782,7 +1997,7 @@ class LibraryView:
                         spacing=6, tight=True,
                     ) if (nodes and not is_live) else ft.Container(width=0),
                 ],
-                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                spacing=6,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
             ),
             padding=ft.Padding.only(left=4, right=6, top=6, bottom=8),
@@ -1793,7 +2008,11 @@ class LibraryView:
                 [self._build_net_list_row(i, nd) for i, nd in enumerate(nodes)] or
                 [ft.Container(
                     content=ft.Text(
-                        "No walk from here — this track has no eligible neighbours.",
+                        # An empty LIVE list means the queue really is empty
+                        # ahead — a true and useful answer. Saying "no walk from
+                        # here" there would blame the graph for a queue fact.
+                        "Nothing queued ahead of this track." if is_live
+                        else "No walk from here — this track has no eligible neighbours.",
                         color=DIM, size=11, text_align=ft.TextAlign.CENTER,
                     ),
                     padding=20, alignment=ft.Alignment(0, 0),
@@ -1961,7 +2180,15 @@ class LibraryView:
             # re-walk from this node WITHOUT recentring the graph.
             _close()
             self.app.trigger_haptic("network_walk")
+            # Asking for a walk IS asking to explore. In live mode the sequence
+            # is the real queue and ignores the seed entirely, so without this
+            # the action would appear to do nothing at all; switching mode is
+            # the only reading of "start a walk here" that can be honoured.
+            switched = (self._net_mode == "live")
+            self._net_mode = "explore"
             self._net_selected_path = path
+            if switched:
+                self._sync_net_mode_chip()
             self._refresh_net_readout()
             self._redraw_net_canvas()
             self._schedule_net_walk_refresh(path, delay=0.0)
@@ -2026,6 +2253,12 @@ class LibraryView:
         viewer = self._net_viewer
         if viewer is None:
             return
+        # reset() returns the transform to identity, so the mirrored zoom must go
+        # with it — otherwise the shapes stay counter-scaled for a zoom level the
+        # viewer is no longer at, and the nodes come back the wrong size.
+        self._net_zoom = 1.0
+        self._net_zoom_base = 1.0
+        self._redraw_net_canvas()
         # InteractiveViewer.reset is a COROUTINE (it round-trips an invoke_method
         # to Flutter). Calling it bare only built a coroutine object and dropped
         # it — "coroutine 'InteractiveViewer.reset' was never awaited", and the
@@ -2049,7 +2282,7 @@ class LibraryView:
         if self._net_canvas is not None:
             self._net_canvas.visible = not collapsed
         if self._net_collapse_icon is not None:
-            self._net_collapse_icon.name = (
+            self._net_collapse_icon.icon = (
                 ft.Icons.KEYBOARD_ARROW_UP_ROUNDED if collapsed
                 else ft.Icons.KEYBOARD_ARROW_DOWN_ROUNDED
             )
@@ -2072,7 +2305,12 @@ class LibraryView:
                 ov.visible = False
                 self.try_update(ov)
             return
-        d = (nd["radius"] + 9) * 2
+        # Counter-scaled like the canvas shapes: the overlay lives INSIDE the
+        # viewer's transformed child, so it is magnified by the same zoom the
+        # node radii are divided by. Sizing it off the raw radius would leave the
+        # ring ballooning around a node that stayed put.
+        k = 1.0 / max(0.5, min(6.0, self._net_zoom or 1.0))
+        d = (nd["radius"] + 9) * 2 * k
         ov.width = d
         ov.height = d
         ov.border_radius = d / 2
@@ -2084,15 +2322,15 @@ class LibraryView:
         self.try_update(ov)
 
     def _sync_network_now_playing(self, prev_path, current_path):
-        """React to a track change while the Network view is live, without a
-        full rebuild when possible. If the new track is already a node we just
-        move the pulse ring onto it in place. If it has fallen off the graph and
-        follow-current is on, we reseed so the graph recenters on it."""
+        """React to a track change while the Network view is mounted, without a
+        full rebuild when possible. The pulse ring always moves onto the new
+        track if it is on the graph. Everything else is mode-dependent: only
+        Now-Playing mode may re-anchor the sequence or reseed the graph."""
         nbp = self._net_node_by_path
         if not nbp:
             # No graph mounted yet (empty/setup state) — seed it from the live
-            # track if we're meant to follow.
-            if self._net_follow_current and current_path:
+            # track, but only if this pane is meant to be tracking playback.
+            if self._net_mode == "live" and current_path:
                 self._schedule_net_reseed()
             return
 
@@ -2104,15 +2342,19 @@ class LibraryView:
         new = nbp.get(current_path) if current_path else None
         if new is not None:
             new["is_now_playing"] = True
+            # Moving the pulse overlay is the WHOLE update: one small mounted
+            # control, animated client-side. Repainting the canvas here would
+            # push the entire shape list (~100 objects for a 35-node graph) over
+            # the bridge on every track change, several times an hour, forever —
+            # to redraw a marker the overlay already is.
             self._net_set_pulse_node(new)
-            # The walk was anchored to the track that just finished — re-anchor it
-            # to the new one. Without this the list keeps showing the OLD
-            # trajectory: in a live auto-play session it would still list the
-            # track now playing as "up next", the exact stale-walk confusion this
-            # redesign removes. (Only needed on this branch — the fell-off-graph
-            # branch below reseeds, which rebuilds the walk anyway.)
-            if current_path and (self._net_walk_is_live
-                                 or self._net_selected_path == prev_path):
+            # Re-anchoring is a LIVE-mode behaviour only. It used to fire in
+            # explore mode too (whenever the selection happened to be the
+            # outgoing track), which silently dragged the user's inspection
+            # target onto whatever started playing and re-walked the graph out
+            # from under them — the select-to-inspect contract only holds if
+            # playback cannot move the selection.
+            if self._net_mode == "live" and current_path:
                 self._net_selected_path = current_path
                 self._schedule_net_walk_refresh(current_path)
             else:
@@ -2121,10 +2363,10 @@ class LibraryView:
             return
 
         # The active track isn't on the current graph.
-        if self._net_follow_current and current_path:
+        if self._net_mode == "live" and current_path:
             self._schedule_net_reseed()         # recenter on the live track
         else:
-            self._net_set_pulse_node(None)      # not following → just hide it
+            self._net_set_pulse_node(None)      # exploring → leave the graph put
 
     def _schedule_net_reseed(self, delay: float = 0.35):
         """Debounced rebuild of the network around the live track. Collapses a
@@ -2149,37 +2391,67 @@ class LibraryView:
 
         self._net_reseed_task = asyncio.create_task(_run())
 
-    def _toggle_net_follow(self, _e=None):
-        self._net_follow_current = not self._net_follow_current
-        on = self._net_follow_current
-        icon = self._net_follow_icon
+    def _sync_net_mode_chip(self):
+        """Repaint the mode chip from `_net_mode`. The mode can change from the
+        chip itself OR from a row action ("start a walk here" implies explore),
+        so the chip must be able to catch up without a rebuild — a chip that
+        says Now Playing over a speculative list is worse than no chip."""
+        live = (self._net_mode == "live")
+        accent = _NET_WALK_COLOR if live else CYAN
+        icon = self._net_mode_icon
         if icon is not None:
-            icon.name = ft.Icons.MY_LOCATION if on else ft.Icons.LOCATION_SEARCHING
-            icon.color = CYAN if on else DIM
-        btn = self._net_follow_btn
+            icon.icon = ft.Icons.MY_LOCATION if live else ft.Icons.TRAVEL_EXPLORE_ROUNDED
+            icon.color = accent
+        label = self._net_mode_label
+        if label is not None:
+            label.value = "Now Playing" if live else "Explore"
+            label.color = accent
+        btn = self._net_mode_btn
         if btn is not None:
-            btn.border = ft.Border.all(
-                1, apply_opacity(0.22, CYAN) if on else apply_opacity(0.14, TEXT)
+            btn.border = ft.Border.all(1, apply_opacity(0.35, accent))
+            btn.tooltip = (
+                "Now Playing — mirrors the real queue and follows the track"
+                if live else
+                "Explore — speculative walks; the graph stays where you put it"
             )
-        self.try_update(icon, btn)
-        # Confirm the toggle so its effect is legible even when no track is
-        # currently advancing (otherwise it only shows on the next track change).
+        self.try_update(icon, label, btn)
+
+    def _toggle_net_mode(self, _e=None):
+        """Flip the pane between Explore and Now Playing.
+
+        This is the one control that decides what everything below it means: the
+        sequence source (_compute_walk_seq), whether playback may move the
+        selection, and whether the graph recenters itself. Switching to live
+        snaps to the playing track; switching to explore pins the graph where it
+        is and hands the selection back to the user."""
+        self.app.trigger_haptic("network_tap")
+        self._net_mode = "live" if self._net_mode == "explore" else "explore"
+        live = (self._net_mode == "live")
+        accent = _NET_WALK_COLOR if live else CYAN
+        self._sync_net_mode_chip()
         try:
             self.app.show_snackbar(
-                "Following the playing track" if on
-                else "Free exploration — graph stays put",
-                icon=ft.Icons.MY_LOCATION if on else ft.Icons.LOCATION_SEARCHING,
-                color=CYAN,
+                "Now Playing — mirroring the real queue" if live
+                else "Explore — the graph stays where you put it",
+                icon=ft.Icons.MY_LOCATION if live else ft.Icons.TRAVEL_EXPLORE_ROUNDED,
+                color=accent,
             )
         except Exception:
             pass
-        # Turning follow back on snaps straight to the live track.
-        if on:
-            cur = audio_engine.current_path or ""
-            if cur and (self._network_seed_path or self._net_node_by_path.get(cur) is None):
-                self._schedule_net_reseed(delay=0.0)  # explicit tap → no debounce
-            elif cur:
+
+        cur = audio_engine.current_path or ""
+        if live:
+            # Snap to the live track: reseed if it isn't on the graph, otherwise
+            # just re-anchor the sequence in place.
+            if cur and self._net_node_by_path.get(cur) is None:
+                self._schedule_net_reseed(delay=0.0)   # explicit tap → no debounce
+                return
+            if cur:
+                self._net_selected_path = cur
                 self._net_set_pulse_node(self._net_node_by_path.get(cur))
+        # Both directions re-resolve the sequence: the SOURCE just changed, so
+        # the list underneath is now showing the wrong kind of future.
+        self._schedule_net_walk_refresh(self._net_selected_path or cur, delay=0.0)
 
     def _show_tuning_popup(self, e):
         from utils.streamrip_api import get_walk_params, update_config_params
@@ -2839,14 +3111,14 @@ class LibraryView:
                     is_empty = not first_chunk
                     if is_empty:
                         self._empty_label.visible = True
-                        self._empty_label.content.controls[0].name = ft.Icons.LIBRARY_MUSIC_OUTLINED
+                        self._empty_label.content.controls[0].icon = ft.Icons.LIBRARY_MUSIC_OUTLINED
                         self._empty_label.content.controls[0].color = apply_opacity(0.3, CYAN)
                         self._empty_label.content.controls[1].value = "It's empty in here."
                         self._empty_label.content.controls[2].value = "Index your folders to start listening."
                         # reset action button to "ENTER PATHS"
                         self._empty_label.content.controls[3].visible = True
                         self._empty_label.content.controls[4].visible = True
-                        self._empty_label.content.controls[4].content.controls[0].name = ft.Icons.SETTINGS_ROUNDED
+                        self._empty_label.content.controls[4].content.controls[0].icon = ft.Icons.SETTINGS_ROUNDED
                         self._empty_label.content.controls[4].content.controls[1].value = "ENTER PATHS"
                         self._empty_label.content.controls[4].on_click = self._on_enter_paths_click
                         self._empty_label.content.controls[4].style = ft.ButtonStyle(color=CYAN)
@@ -2964,11 +3236,16 @@ class LibraryView:
                         neighbors_list = await tg.neighbors(
                             self.app.db_manager, current_path, k=self._net_k_neighbors
                         )
-                        # The walk is seeded from the SELECTION (which defaults to
-                        # the seed on a fresh build), not from the seed itself.
-                        walk_seed = self._net_selected_path or current_path
-                        walk_paths, walk_is_live = await self._compute_walk_seq(walk_seed)
-                        self._net_walk_is_live = walk_is_live
+                        # Explore seeds the sequence from the SELECTION (which
+                        # defaults to the graph seed on a fresh build); live
+                        # always anchors on the track actually playing, since
+                        # that's what "queued ahead" is measured from.
+                        walk_seed = (
+                            (audio_engine.current_path or current_path)
+                            if self._net_mode == "live"
+                            else (self._net_selected_path or current_path)
+                        )
+                        walk_paths = await self._compute_walk_seq(walk_seed)
 
                     # Collect only the paths we need PCA coords for. walk_seed is
                     # included explicitly: a selection can sit OUTSIDE the current
@@ -3005,7 +3282,7 @@ class LibraryView:
                     if is_empty:
                         self._library_list.controls.clear()
                         self._empty_label.visible = True
-                        self._empty_label.content.controls[0].name = ft.Icons.HUB_ROUNDED
+                        self._empty_label.content.controls[0].icon = ft.Icons.HUB_ROUNDED
                         self._empty_label.content.controls[0].color = apply_opacity(0.3, CYAN)
                         self._empty_label.content.controls[1].value = "No network coordinates found."
                         self._empty_label.content.controls[2].value = "Make sure your tracks are analyzed."
@@ -3057,26 +3334,26 @@ class LibraryView:
                     if is_empty:
                         self._empty_label.visible = True
                         if self.view_mode == "playlists":
-                            self._empty_label.content.controls[0].name = ft.Icons.QUEUE_MUSIC_ROUNDED
+                            self._empty_label.content.controls[0].icon = ft.Icons.QUEUE_MUSIC_ROUNDED
                             self._empty_label.content.controls[0].color = apply_opacity(0.3, LIB_PLAYLIST_COLOR)
                             self._empty_label.content.controls[1].value = "No playlists yet."
                             self._empty_label.content.controls[2].value = "Create your first playlist below."
                             # Show action button as "CREATE PLAYLIST"
                             self._empty_label.content.controls[3].visible = True
                             self._empty_label.content.controls[4].visible = True
-                            self._empty_label.content.controls[4].content.controls[0].name = ft.Icons.ADD_ROUNDED
+                            self._empty_label.content.controls[4].content.controls[0].icon = ft.Icons.ADD_ROUNDED
                             self._empty_label.content.controls[4].content.controls[1].value = "CREATE PLAYLIST"
                             self._empty_label.content.controls[4].on_click = lambda e: self._create_playlist_dialog()
                             self._empty_label.content.controls[4].style = ft.ButtonStyle(color=LIB_PLAYLIST_COLOR)
                         else:
-                            self._empty_label.content.controls[0].name = ft.Icons.LIBRARY_MUSIC_OUTLINED
+                            self._empty_label.content.controls[0].icon = ft.Icons.LIBRARY_MUSIC_OUTLINED
                             self._empty_label.content.controls[0].color = apply_opacity(0.3, CYAN)
                             self._empty_label.content.controls[1].value = "It's empty in here."
                             self._empty_label.content.controls[2].value = "Index your folders to start listening."
                             # Reset action button to "ENTER PATHS"
                             self._empty_label.content.controls[3].visible = True
                             self._empty_label.content.controls[4].visible = True
-                            self._empty_label.content.controls[4].content.controls[0].name = ft.Icons.SETTINGS_ROUNDED
+                            self._empty_label.content.controls[4].content.controls[0].icon = ft.Icons.SETTINGS_ROUNDED
                             self._empty_label.content.controls[4].content.controls[1].value = "ENTER PATHS"
                             self._empty_label.content.controls[4].on_click = self._on_enter_paths_click
                             self._empty_label.content.controls[4].style = ft.ButtonStyle(color=CYAN)
@@ -3371,7 +3648,7 @@ class LibraryView:
             active_color = apply_opacity(0.1, CYAN)
             
             icon = tile.leading.controls[1]
-            icon.name = ft.Icons.EQUALIZER if is_current else ft.Icons.MUSIC_NOTE_ROUNDED
+            icon.icon = ft.Icons.EQUALIZER if is_current else ft.Icons.MUSIC_NOTE_ROUNDED
             icon.color = CYAN if is_current else LIB_TRACK_COLOR
             
             if isinstance(tile.title, ft.Row):
