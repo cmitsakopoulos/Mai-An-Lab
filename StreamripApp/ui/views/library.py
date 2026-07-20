@@ -203,6 +203,24 @@ def _node_radius(base: float, play_count) -> float:
 
 
 class LibraryView:
+    # --- Windowed-scroll geometry (tracks view) ------------------------------
+    # ROW_H is the single source of truth for row pitch: the spacer arithmetic
+    # is only exact because every track row is forced to exactly this height and
+    # the list runs at spacing=0 in tracks mode. Change one, change the other.
+    ROW_H = 64
+    LIST_PAD_TOP = 4
+    # Rows kept materialised beyond each edge of the viewport. 40 rows ~= 2500px
+    # of runway either side, so ordinary flings never outrun it. Raising this
+    # trades a more expensive re-slice for fewer of them.
+    WINDOW_LEAD = 40
+    # Only re-slice once the ideal window has drifted this many rows from the
+    # live one — without hysteresis every scroll tick would rebuild the list.
+    WINDOW_HYST = 10
+    # Flip to True and run `flet run` to print scroll/window telemetry to the
+    # terminal. Confirms whether slides are being computed AND applied, which is
+    # the difference between a windowing bug and an update-flush bug.
+    DEBUG_SCROLL = False
+
     def try_update(self, *controls):
         for c in controls:
             if c is not None:
@@ -411,7 +429,7 @@ class LibraryView:
 
         self._search_token = 0  # Incremented each keystroke to cancel stale queries
 
-        # Pagination variables for tracks view mode
+        # Pagination variables for albums/artists view modes
         self.current_page = 0
         self.items_per_page = 35
         self.total_pages = 1
@@ -424,12 +442,34 @@ class LibraryView:
         self._at_top_boundary = False
         self._top_boundary_time = 0.0
 
+        # --- Virtualised (windowed) infinite scroll, tracks view --------------
+        # Only a bounded slice of _flat_rows is ever materialised as controls;
+        # the rows above and below are represented by two spacer Containers of
+        # the exact height they would have occupied. That keeps the Python
+        # control tree constant-size no matter how far you scroll, while the
+        # scrollbar and fling physics still see the FULL list length.
+        #
+        # The whole scheme depends on every track row being exactly ROW_H tall,
+        # which is why the list drops to spacing=0 in tracks mode and the row
+        # carries an explicit height.
+        self._win_start = 0
+        self._win_end = 0
+        self._row_cache: dict[int, ft.Control] = {}
+        # Last viewport height reported by a scroll event. Seeds the very first
+        # window on a cold load, before any scroll has happened.
+        self._last_viewport = 0.0
+        # True while a slide is queued but not yet applied by safe_update.
+        self._sliding = False
+
         self._library_list = ft.ListView(
             expand=True,
             spacing=6,
             padding=ft.Padding.only(left=12, right=12, top=4, bottom=20),
             on_scroll=self._on_list_scroll,
-            scroll_interval=150,
+            scroll_interval=100,
+            # Build a screenful either side of the viewport ahead of time so a
+            # fast fling doesn't reveal unbuilt rows.
+            cache_extent=800,
         )
 
         self._animated_list_wrapper = ft.Container(
@@ -2836,10 +2876,184 @@ class LibraryView:
             if self.current_page > 0:
                 self.page.run_task(self.change_page, self.current_page - 1, scroll_to_bottom=True)
 
+    def _show_empty_library_state(self):
+        self._empty_label.visible = True
+        self._empty_label.content.controls[0].icon = ft.Icons.LIBRARY_MUSIC_OUTLINED
+        self._empty_label.content.controls[0].color = apply_opacity(0.3, CYAN)
+        self._empty_label.content.controls[1].value = "It's empty in here."
+        self._empty_label.content.controls[2].value = "Index your folders to start listening."
+        # reset action button to "ENTER PATHS"
+        self._empty_label.content.controls[3].visible = True
+        self._empty_label.content.controls[4].visible = True
+        self._empty_label.content.controls[4].content.controls[0].icon = ft.Icons.SETTINGS_ROUNDED
+        self._empty_label.content.controls[4].content.controls[1].value = "ENTER PATHS"
+        self._empty_label.content.controls[4].on_click = self._on_enter_paths_click
+        self._empty_label.content.controls[4].style = ft.ButtonStyle(color=CYAN)
+
+    # ---- windowed infinite scroll (tracks) ---------------------------------
+
+    def _placeholder(self) -> ft.Control:
+        """Cheap stand-in for one de-materialised row — a single control.
+
+        Every entry in the tracks list is exactly ROW_H tall, window or not.
+        That uniformity is what lets item_extent do its job (see _init_track_list).
+        """
+        return ft.Container(height=self.ROW_H)
+
+    def _ideal_window(self, pixels: float, viewport: float) -> tuple[int, int]:
+        """The slice of _flat_rows that should be live for this scroll offset.
+
+        Derived purely from the offset rather than accumulated from the previous
+        window, so a fling or a scrollbar drag that skips thousands of rows
+        resolves in a single step instead of walking there chunk by chunk.
+        """
+        n = len(self._flat_rows)
+        if n == 0:
+            return 0, 0
+        first = self._first_visible(pixels, n)
+        visible = math.ceil(viewport / self.ROW_H) if viewport else 12
+        start = max(0, first - self.WINDOW_LEAD)
+        end = min(n, first + visible + self.WINDOW_LEAD)
+        return start, end
+
+    def _first_visible(self, pixels: float, n: int) -> int:
+        """Index of the topmost row at this offset, clamped to the list.
+
+        macOS overscroll/rubber-banding reports pixels beyond both ends of the
+        list. Unclamped, an overscroll past the bottom yields first > n, which
+        makes the leading spacer taller than the entire list and corrupts the
+        scroll extent — exactly at the top/bottom edges where it's most visible.
+        """
+        idx = int(max(0.0, pixels - self.LIST_PAD_TOP) // self.ROW_H)
+        return max(0, min(idx, max(0, n - 1)))
+
+    def _init_track_list(self):
+        """Lay out one entry per track, all placeholders, all ROW_H tall.
+
+        The list length now equals the track count and never changes again — a
+        slide swaps individual entries in place rather than rebuilding the list.
+        That matters twice over: Flet patches only the indices that actually
+        changed instead of re-diffing the whole subtree, and because every entry
+        is exactly ROW_H, item_extent lets Flutter compute the scroll extent of
+        the full list WITHOUT building any of it. No estimation, so the scrollbar
+        and e.pixels are exact, and off-screen entries are still culled.
+        """
+        self._library_list.controls = [self._placeholder() for _ in self._flat_rows]
+        self._win_start = self._win_end = 0
+        self._row_cache.clear()
+        self._path_to_controls.clear()
+
+    def _rebuild_path_map(self):
+        self._path_to_controls.clear()
+        for i, ctrl in self._row_cache.items():
+            path = (self._flat_rows[i]["data"] or {}).get("path", "")
+            if path:
+                self._path_to_controls.setdefault(path, []).append(ctrl)
+
+    def _slide_window_to(self, start: int, end: int):
+        """Move the live window by swapping entries in place."""
+        controls = self._library_list.controls
+        if len(controls) != len(self._flat_rows):
+            # List not initialised for this dataset (a reload raced us).
+            return
+
+        # Retire rows that left the window.
+        for i in range(self._win_start, self._win_end):
+            if i < start or i >= end:
+                controls[i] = self._placeholder()
+                self._row_cache.pop(i, None)
+
+        # Materialise rows that entered it.
+        for i in range(start, end):
+            if i in self._row_cache:
+                continue
+            ctrl = self._track_row(self._flat_rows[i]["data"], depth=0)
+            self._row_cache[i] = ctrl
+            controls[i] = ctrl
+
+        self._win_start, self._win_end = start, end
+        # _track_row registers as it builds, so rebuild the map from the cache
+        # to drop retired rows in one pass.
+        self._rebuild_path_map()
+
+    def _maybe_slide_window(self, pixels: float, viewport: float):
+        if self._sliding:
+            return
+        start, end = self._ideal_window(pixels, viewport)
+        if (start, end) == (self._win_start, self._win_end):
+            return
+
+        first = self._first_visible(pixels, len(self._flat_rows))
+        last = first + (math.ceil(viewport / self.ROW_H) if viewport else 12)
+        # Hysteresis keeps ordinary scrolling cheap, but a viewport that has
+        # escaped the live window must re-slice immediately or it shows blank.
+        escaped = first < self._win_start or last > self._win_end
+        drifted = (
+            abs(start - self._win_start) > self.WINDOW_HYST
+            or abs(end - self._win_end) > self.WINDOW_HYST
+        )
+        if not (escaped or drifted):
+            return
+
+        # Mutate the tree inside safe_update, never from the scroll callback.
+        # safe_update owns an asyncio.Lock and the single coalesced page.update()
+        # for the whole app; rewriting _library_list.controls outside it lets a
+        # slide run while a flush is walking the same tree. _sliding then keeps
+        # scroll events (every ~100ms) from stacking overlapping slides on top
+        # of each other before the first one has been applied.
+        self._sliding = True
+
+        def _apply():
+            try:
+                self._slide_window_to(start, end)
+                if self.DEBUG_SCROLL:
+                    logger.error(
+                        "[win] APPLIED %d:%d controls=%d cache=%d",
+                        start, end, len(self._library_list.controls),
+                        len(self._row_cache),
+                    )
+            finally:
+                self._sliding = False
+
+        if self.DEBUG_SCROLL:
+            logger.error(
+                "[win] slide %d:%d -> %d:%d px=%.0f vp=%.0f escaped=%s drifted=%s",
+                self._win_start, self._win_end, start, end,
+                pixels, viewport, escaped, drifted,
+            )
+        self.app.safe_update(_apply)
+
+    async def _reset_scroll_top(self):
+        """Pin the list back to offset 0 after a reload.
+
+        The fresh window is always built for offset 0, but Flet keeps the old
+        pixel offset across a reload — leaving the two out of sync would park
+        the viewport on placeholders until the next gesture re-sliced it.
+
+        Deliberately does NOT set _is_programmatic_scroll: that flag gates the
+        scroll handler, so if this await ever failed to resolve it would wedge
+        scrolling permanently. wait_for is belt-and-braces on the same hazard.
+        """
+        try:
+            await asyncio.wait_for(
+                self._library_list.scroll_to(offset=0, duration=0), timeout=1.0
+            )
+            self._last_scroll_pixels = 0
+        except Exception:
+            pass
+
     def _on_list_scroll(self, e: ft.OnScrollEvent):
+        # Tracks is checked before the paging gates on purpose — it has no pages,
+        # and a gate left set by another path must never freeze the window.
+        if self.view_mode == "tracks":
+            self._last_scroll_pixels = e.pixels
+            if e.viewport_dimension:
+                self._last_viewport = e.viewport_dimension
+            self._maybe_slide_window(e.pixels, self._last_viewport)
+            return
         if self._is_changing_page or getattr(self, "_is_programmatic_scroll", False):
             return
-        if self.view_mode in ("tracks", "albums", "artists"):
+        if self.view_mode in ("albums", "artists"):
             self._last_scroll_pixels = e.pixels
             return
 
@@ -2889,8 +3103,9 @@ class LibraryView:
         self._next_page_btn.disabled = self.current_page >= self.total_pages - 1
         self._next_page_btn.icon_color = DIM if self.current_page >= self.total_pages - 1 else CYAN
 
+        # Tracks scrolls continuously now — no pages, no bar.
         self._pagination_bar.visible = self.total_pages > 1 and (
-            self.view_mode in ("tracks", "albums", "artists")
+            self.view_mode in ("albums", "artists")
         )
         self.try_update(self._pagination_bar)
 
@@ -3000,6 +3215,27 @@ class LibraryView:
         self._tracks_cache = None
         self._tracks_cache_key = None
 
+        # Any reload (search, sort, tab switch) invalidates the live window.
+        self._win_start = 0
+        self._win_end = 0
+        self._row_cache.clear()
+        self._sliding = False
+
+        # Spacer arithmetic assumes row pitch == ROW_H exactly, so the inter-row
+        # gap has to come out of the list in tracks mode; the other views keep
+        # their variable-height rows and their spacing.
+        is_windowed = self.view_mode == "tracks"
+        self._library_list.spacing = 0 if is_windowed else 6
+
+        # item_extent is the whole trick. Told every child is exactly ROW_H tall,
+        # Flutter uses a fixed-extent sliver: it can compute the scroll extent of
+        # all N entries without building a single one. Nothing is estimated, so
+        # the scrollbar is exact and e.pixels is trustworthy — and lazy building
+        # stays ON, so off-screen entries are culled instead of repainted.
+        # Requires uniform heights, which is why placeholders are also ROW_H.
+        self._library_list.item_extent = self.ROW_H if is_windowed else None
+        self._library_list.build_controls_on_demand = True
+
         if self.search_query:
             sq = self.search_query.lower()
             def matches_query(t):
@@ -3057,23 +3293,48 @@ class LibraryView:
                     suffix = " (CLOSEST MATCH)" if getattr(artists, "is_closest", False) else ""
                     stats_text = f"{len(artists)} {'ARTIST' if len(artists) == 1 else 'ARTISTS'}{suffix}"
                 
-                self.total_pages = math.ceil(len(self._flat_rows) / self.items_per_page)
-                
                 if self._load_token != token:
                     return
+
+                if self.view_mode == "tracks":
+                    # Virtualised: one bounded window over the full row list, no
+                    # pages and no ghosts. total_pages stays 1 so the pagination
+                    # bar and its swipe handler are inert here.
+                    self.total_pages = 1
+                    has_rows = bool(self._flat_rows)
+
+                    def finalize_tracks():
+                        self._stats_label.text = stats_text
+                        self._init_track_list()
+                        self._slide_window_to(
+                            *self._ideal_window(0.0, self._last_viewport)
+                        )
+                        self._search_spinner.visible = False
+                        if not has_rows:
+                            self._show_empty_library_state()
+                        old_content = self._animated_list_wrapper.content
+                        self._animated_list_wrapper.content = self._library_list
+                        if old_content != self._library_list:
+                            self._animated_list_wrapper.update()
+                        self._update_pagination_ui()
+                        self.page.update()
+                        if has_rows:
+                            self.page.run_task(self._reset_scroll_top)
+
+                    self.app.safe_update(finalize_tracks)
+                    return
+
+                self.total_pages = math.ceil(len(self._flat_rows) / self.items_per_page)
 
                 start_idx = self.current_page * self.items_per_page
                 end_idx = start_idx + self.items_per_page
                 page_items = self._flat_rows[start_idx:end_idx]
-                
+
                 first_chunk = []
                 if self.current_page > 0:
                     first_chunk.append(self._build_top_ghost())
-                    
-                if self.view_mode == "tracks":
-                    for item in page_items:
-                        first_chunk.append(self._track_row(item["data"], item["depth"]))
-                elif self.view_mode == "albums":
+
+                if self.view_mode == "albums":
                     for item in page_items:
                         a = item["data"]
                         node_id = f"album_{a['artist']}_{a['album']}"
@@ -3108,21 +3369,9 @@ class LibraryView:
                     self._library_list.controls.extend(first_chunk)
                     self._search_spinner.visible = False
                     
-                    is_empty = not first_chunk
-                    if is_empty:
-                        self._empty_label.visible = True
-                        self._empty_label.content.controls[0].icon = ft.Icons.LIBRARY_MUSIC_OUTLINED
-                        self._empty_label.content.controls[0].color = apply_opacity(0.3, CYAN)
-                        self._empty_label.content.controls[1].value = "It's empty in here."
-                        self._empty_label.content.controls[2].value = "Index your folders to start listening."
-                        # reset action button to "ENTER PATHS"
-                        self._empty_label.content.controls[3].visible = True
-                        self._empty_label.content.controls[4].visible = True
-                        self._empty_label.content.controls[4].content.controls[0].icon = ft.Icons.SETTINGS_ROUNDED
-                        self._empty_label.content.controls[4].content.controls[1].value = "ENTER PATHS"
-                        self._empty_label.content.controls[4].on_click = self._on_enter_paths_click
-                        self._empty_label.content.controls[4].style = ft.ButtonStyle(color=CYAN)
-                    
+                    if not first_chunk:
+                        self._show_empty_library_state()
+
                     old_content = self._animated_list_wrapper.content
                     self._animated_list_wrapper.content = self._library_list
                     if old_content != self._library_list:
@@ -3647,7 +3896,9 @@ class LibraryView:
                 return False
             active_color = apply_opacity(0.1, CYAN)
             
-            icon = tile.leading.controls[1]
+            # leading is a bare Icon at depth 0 and a Row only when indented.
+            lead = tile.leading
+            icon = lead.controls[1] if isinstance(lead, ft.Row) else lead
             icon.icon = ft.Icons.EQUALIZER if is_current else ft.Icons.MUSIC_NOTE_ROUNDED
             icon.color = CYAN if is_current else LIB_TRACK_COLOR
             
@@ -3665,7 +3916,15 @@ class LibraryView:
                 
             tile.bgcolor = active_color if is_current else "transparent"
             
-            if tile.page:
+            # .page raises rather than returning None when the control isn't
+            # mounted yet (a row built into the window but not yet flushed), so
+            # this can't be a plain truth test. The colour mutations above have
+            # already landed either way — they'll paint on the next flush.
+            try:
+                mounted = tile.page is not None
+            except Exception:
+                mounted = False
+            if mounted:
                 tile.update()
             return True
         except Exception:
@@ -3821,26 +4080,22 @@ class LibraryView:
 
         is_current = (path == audio_engine.current_path and bool(path))
 
+        # Built only when there's a format to show. The old unconditional badge
+        # cost two controls plus the wrapping title Row on every untagged row,
+        # just to be hidden via visible=False.
         fmt = (t.get("format") or "").upper()
         badge = ft.Container(
             content=ft.Text(fmt, size=10, weight=ft.FontWeight.BOLD, color=BG),
             bgcolor=CYAN if is_current else DIM,
             padding=ft.Padding.symmetric(horizontal=6, vertical=2),
             border_radius=4,
-            visible=bool(fmt),
-        )
-
-        def move_up(e):
-            self._move_playlist_track_in_place(playlist_id, path, -1)
-
-        def move_down(e):
-            self._move_playlist_track_in_place(playlist_id, path, +1)
-
-        def remove_from_pl(e):
-            self._remove_playlist_track_in_place(playlist_id, path, title)
+        ) if fmt else None
 
         trailing_controls = []
         if playlist_id:
+            def remove_from_pl(e):
+                self._remove_playlist_track_in_place(playlist_id, path, title)
+
             drag_handle = ft.Draggable(
                 group=f"playlist_{playlist_id}",
                 data=path,
@@ -3858,42 +4113,63 @@ class LibraryView:
             ))
 
         tile = ft.ListTile(
+            height=self.ROW_H,
             data={
                 "type": "track",
                 "depth": depth,
                 "playlist_id": playlist_id,
                 "path": path,
             },
-            leading=ft.Row(
-                [
-                    ft.Container(width=depth * 20, visible=depth > 0),
-                    ft.Icon(
-                        ft.Icons.EQUALIZER if is_current else ft.Icons.MUSIC_NOTE_ROUNDED,
-                        color=CYAN if is_current else accent,
-                    ),
-                ],
-                tight=True
+            # Bare Icon at depth 0 (the whole tracks view). The indent Container
+            # was dead weight there and the Row wrapped a single child.
+            leading=(
+                ft.Row(
+                    [
+                        ft.Container(width=depth * 20),
+                        ft.Icon(
+                            ft.Icons.EQUALIZER if is_current else ft.Icons.MUSIC_NOTE_ROUNDED,
+                            color=CYAN if is_current else accent,
+                        ),
+                    ],
+                    tight=True,
+                )
+                if depth > 0 else
+                ft.Icon(
+                    ft.Icons.EQUALIZER if is_current else ft.Icons.MUSIC_NOTE_ROUNDED,
+                    color=CYAN if is_current else accent,
+                )
             ),
-            title=ft.Row(
-                [
-                    ft.Text(
-                        title,
-                        color=CYAN if is_current else TEXT,
-                        size=14,
-                        weight=ft.FontWeight.W_600,
-                        max_lines=3,
-                        expand=True,
-                    ),
-                    badge,
-                ],
-                spacing=8,
-                vertical_alignment=ft.CrossAxisAlignment.START,
+            # Single-line + ellipsis keeps every row exactly ROW_H tall, which
+            # item_extent depends on. The Row exists only to carry the badge.
+            title=(
+                ft.Row(
+                    [
+                        ft.Text(
+                            title,
+                            color=CYAN if is_current else TEXT,
+                            size=14, weight=ft.FontWeight.W_600,
+                            max_lines=1, overflow=ft.TextOverflow.ELLIPSIS,
+                            expand=True,
+                        ),
+                        badge,
+                    ],
+                    spacing=8,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                )
+                if badge is not None else
+                ft.Text(
+                    title,
+                    color=CYAN if is_current else TEXT,
+                    size=14, weight=ft.FontWeight.W_600,
+                    max_lines=1, overflow=ft.TextOverflow.ELLIPSIS,
+                )
             ),
             subtitle=ft.Text(
                 f"Track {tnum}  ·  {artist}" if tnum else artist,
                 color=CYAN if is_current else DIM,
                 size=12,
-                max_lines=2,
+                max_lines=1,
+                overflow=ft.TextOverflow.ELLIPSIS,
             ),
             trailing=ft.Row(trailing_controls, tight=True, spacing=0) if playlist_id else None,
             bgcolor=apply_opacity(0.1, CYAN) if is_current else "transparent",
@@ -3904,48 +4180,16 @@ class LibraryView:
                 ("album", album_context[0], album_context[1]) if album_context else
                 ("library", None),
             ),
+            # ListTile handles long-press natively, so the row no longer needs a
+            # GestureDetector wrapper. "Play Next" lives in the menu this opens.
+            on_long_press=lambda e: self._on_track_long_press(meta),
         )
 
-        async def _on_swipe_right(e):
-            self.app.trigger_haptic("swipe_queue")
-            audio_engine.queue_next({
-                "path":        path,
-                "track_title": title,
-                "artist_name": artist,
-                "album_title": album,
-            })
-            await e.control.confirm_dismiss(False)
-            self.app.show_snackbar(f"'{title}' will play next", icon=ft.Icons.QUEUE_MUSIC_ROUNDED, color=CYAN)
-
-        dismissible = ft.Dismissible(
-            data={"path": path, "depth": depth, "type": "track"},
-            key=f"swipe_{abs(hash(path))}",
-            content=tile,
-            dismiss_direction=ft.DismissDirection.START_TO_END,
-            dismiss_thresholds={ft.DismissDirection.START_TO_END: 0.35},
-            movement_duration=ft.Duration(milliseconds=180),
-            background=ft.Container(
-                content=ft.Row(
-                    [
-                        ft.Container(width=20),
-                        ft.Icon(ft.Icons.QUEUE_MUSIC_ROUNDED, color=ft.Colors.WHITE, size=20),
-                        ft.Text("Next Up", color=ft.Colors.WHITE, size=13, weight=ft.FontWeight.W_700),
-                    ],
-                    tight=True,
-                    spacing=10,
-                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                ),
-                bgcolor=CYAN,
-                expand=True,
-            ),
-            on_confirm_dismiss=_on_swipe_right,
-        )
-
-        res = ft.GestureDetector(
-            content=dismissible,
-            data={"path": path, "depth": depth, "type": "track"},
-            on_long_press_start=lambda e: self._on_track_long_press(meta),
-        )
+        # The swipe-to-queue Dismissible used to wrap every row: 6 controls
+        # (Dismissible + background Container/Row/spacer/Icon/Text) built for all
+        # of them, visible only mid-gesture. Queueing next is unchanged — it's on
+        # the long-press menu — so this drops the shortcut, not the capability.
+        res = tile
 
         if playlist_id is not None:
             def drag_accept(e):
@@ -3973,7 +4217,11 @@ class LibraryView:
     def _build_partition_track_row(self, t: dict, partition_tracks: list[dict], depth: int = 0) -> ft.Control:
         res = self._track_row(t, depth=depth)
         path = t.get("path", "")
-        tile = res.content.content
+        # Walk to the tile rather than assuming the wrapper nesting, so row
+        # restructuring can't silently break the network view.
+        tile = self._get_tile(res)
+        if tile is None:
+            return res
 
         def play_partition_track(_e):
             self._tracks_cache = partition_tracks
