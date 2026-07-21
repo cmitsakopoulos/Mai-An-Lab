@@ -77,26 +77,46 @@ def ensure_config_exists():
         except Exception as e:
             logger.error(f"Failed to set empty download path: {e}")
 
-    # Check for version mismatch and update if necessary
+    # Repair when the version is stale OR the on-disk config is missing sections
+    # the current template defines. The structural check is not redundant: a
+    # config can share the current version yet still be incomplete — e.g. one
+    # written from an older, partial template that lacked whole streamrip sections
+    # (qobuz/tidal/…) and [downloads] fields ConfigData now requires. Such a
+    # config crashes ConfigData.from_toml with "missing N positional arguments",
+    # and a version-only gate never fires (the versions already match), so it
+    # stays broken forever.
+    #
+    # The repair is ADDITIVE (fill_missing), not template-authoritative: the live
+    # config mixes streamrip sections with app-only sections the streamrip
+    # template never defines (general/appearance/landing). update_config /
+    # Config.update_file would wipe those app sections — and any Qobuz/Tidal
+    # credentials living under a section the template rewrites — so we only add
+    # what's absent and touch nothing the user already set.
     try:
+        from .config import BLANK_CONFIG_PATH, fill_missing, toml_set_user_defaults
+
         with open(path, "r", encoding="utf-8") as f:
             doc = parse(f.read())
-        
-        # Safe access to version
+        with open(BLANK_CONFIG_PATH, "r", encoding="utf-8") as f:
+            template_doc = parse(f.read())
+        # Machine-specific defaults (download DB paths, youtube folder) so any
+        # section we fill in points at the right place instead of a blank/foreign
+        # path.
+        toml_set_user_defaults(template_doc)
+
         current_v = doc.get("misc", {}).get("version")
-        if current_v != CURRENT_CONFIG_VERSION:
-            logger.info(f"Migrating config from {current_v} to {CURRENT_CONFIG_VERSION}")
-            from .config import Config
-            Config.update_file(path)
-            # Inject version key explicitly so we do not loop infinitely
-            with open(path, "r", encoding="utf-8") as f:
-                new_doc = parse(f.read())
-            if "misc" not in new_doc:
-                new_doc["misc"] = {}
-            new_doc["misc"]["version"] = CURRENT_CONFIG_VERSION
+        added = fill_missing(doc, template_doc)
+
+        if added or current_v != CURRENT_CONFIG_VERSION:
+            if "misc" not in doc:
+                doc["misc"] = {}
+            doc["misc"]["version"] = CURRENT_CONFIG_VERSION
             with open(path, "w", encoding="utf-8") as f:
-                f.write(dumps(new_doc))
-            logger.info(f"Config successfully migrated and versioned to {CURRENT_CONFIG_VERSION}")
+                f.write(dumps(doc))
+            if added:
+                logger.info("Repaired config: filled in missing sections/keys from template")
+            else:
+                logger.info(f"Migrated config version {current_v} -> {CURRENT_CONFIG_VERSION}")
     except Exception as e:
         logger.error(f"Config migration failed: {e}")
 

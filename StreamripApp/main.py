@@ -517,8 +517,56 @@ class StreamripFletApp:
         # current without stalling the graph rebuild on a 1 req/s network cap.
         asyncio.create_task(self._enrich_metadata_async())
 
+        # Similarity-graph readiness check, off the hot path. Without this the
+        # ONLY automatic build was the state-ZIP auto-import branch above, so a
+        # library that was analysed but never had its graph built — or whose
+        # build failed silently — left the walk with no coordinates and
+        # `tg.walk()` returning [] for every seed. Auto-play then queued nothing
+        # and quietly fell through to the library tail, which reads as "bad
+        # recommendations" when it is actually no recommendations at all.
+        asyncio.create_task(self._ensure_graph_built_async())
+
         # Prune caches asynchronously to keep disk footprint bounded
         self.page.run_task(self._prune_caches_async)
+
+    async def _ensure_graph_built_async(self):
+        """Build the similarity graph if it is MISSING — never on a schedule.
+
+        Guarded on the real artifact (`coord_tracks`, i.e. persisted Zr
+        coordinates), not on an edge table nobody writes and not on a sidecar
+        count file, so this fires exactly when the walk would otherwise be dead
+        and stays quiet on every subsequent boot. Requires already-extracted DSP
+        features — it never triggers analysis, so the cost is one SVD over
+        existing vectors, not a network or decode pass."""
+        if getattr(self, "_ensuring_graph", False):
+            return
+        self._ensuring_graph = True
+        try:
+            # Let startup settle; this is deliberately behind the UI.
+            await asyncio.sleep(5)
+            from utils import track_graph as tg
+            status = await tg.graph_status(self.db_manager)
+            if status["total_tracks"] < 2 or status["coord_tracks"] > 0:
+                return  # nothing to do, or geometry already present
+            analysed = len(await self.db_manager.get_tracks_with_features(tg.FEATURES_VERSION))
+            if analysed < 2:
+                logger.info(
+                    "Graph readiness: %d tracks but only %d analysed — deferring "
+                    "to the analyser sweep.", status["total_tracks"], analysed,
+                )
+                return
+            logger.info(
+                "Graph readiness: %d analysed tracks but NO persisted coordinates "
+                "— building the similarity graph so auto-play can walk it.",
+                analysed,
+            )
+            await tg.build_metadata_edges(self.db_manager)
+            await tg.build_acoustic_edges(self.db_manager)
+            logger.info("Graph readiness: similarity graph built.")
+        except Exception as exc:
+            logger.error("Graph readiness build failed: %s", exc, exc_info=True)
+        finally:
+            self._ensuring_graph = False
 
     async def _enrich_metadata_async(self):
         """Background, incremental artist-metadata enrichment (MusicBrainz

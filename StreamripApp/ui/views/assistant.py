@@ -306,15 +306,21 @@ class AssistantView:
         missing_count = len(missing)
         logger.info("AssistantView: %d tracks need DSP features", missing_count)
 
-        # Check if the graph is already built and up-to-date for this library state
+        # Check if the graph is already built and up-to-date for this library state.
+        # The sidecar counts alone are NOT sufficient evidence: they describe the
+        # library, not the artifact, so a matching count happily certified a DB
+        # that had no geometry in it at all. The graph must actually be present.
         graph_state = self.chat_memory.load_graph_state()
+        needs_metadata = (status["artist_edges"] == 0 and status["album_edges"] == 0)
+        # Readiness = persisted Zr coordinates (what the walk loads), NOT the
+        # acoustic edge table, which build_acoustic_edges no longer writes.
+        needs_acoustic = (status["coord_tracks"] == 0 and status["total_tracks"] >= 2)
         is_up_to_date = (
             graph_state.get("total_tracks") == status["total_tracks"]
             and graph_state.get("missing_count") == missing_count
+            and not needs_acoustic
+            and not needs_metadata
         )
-
-        needs_metadata = (status["artist_edges"] == 0 and status["album_edges"] == 0)
-        needs_acoustic = (status["acoustic_edges"] == 0 and status["total_tracks"] >= 2)
 
         # Cheap path: rebuild metadata + acoustic edges from already-present
         # features. No DSP analysis required. Run silently.

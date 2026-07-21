@@ -4,6 +4,7 @@ import os
 import sys
 import hashlib
 import asyncio
+import logging
 from typing import Callable
 import flet as ft
 
@@ -11,6 +12,8 @@ from ui.tokens import TEXT, DIM, BORDER, SURFACE, SURFACE2, CYAN, BG, LIB_PLAYLI
 
 
 from utils.filepath_utils import get_temp_artwork_dir
+
+logger = logging.getLogger(__name__)
 
 
 def get_asset_path(path: str) -> str:
@@ -207,6 +210,71 @@ class ArtistMetadataDialog:
         )
         lbl_status = ft.Text("Loading current metadata...", color=DIM, size=12)
 
+        # Tap-to-add suggestions. Two sources, in order of relevance:
+        #   • the tags the artist's own FILES carry (albums.genre) — the source
+        #     usually knew an artist was 'Rap' even where MusicBrainz has no
+        #     entity for them at all, which is exactly the gap being filled here;
+        #   • the vocabulary the rest of the library already uses.
+        # Picking beats typing for more than convenience: the walk reads these
+        # tags through an NPMI model learned from co-occurrence across this
+        # library, so a one-off spelling has no relation to anything and gets
+        # fenced apart from the scene it belongs to. Suggestions keep hand
+        # entries inside the vocabulary the model can actually interpret.
+        sug_files = ft.Row(wrap=True, spacing=6, run_spacing=6)
+        sug_library = ft.Row(wrap=True, spacing=6, run_spacing=6)
+        lbl_files = ft.Text("From this artist's files", color=DIM, size=11, weight="bold", visible=False)
+        lbl_library = ft.Text("Used elsewhere in your library", color=DIM, size=11, weight="bold", visible=False)
+
+        def _current_tokens() -> list[str]:
+            return [g.strip() for g in (t_genres.value or "").split(",") if g and g.strip()]
+
+        def _toggle(tok: str):
+            toks = _current_tokens()
+            low = [t.lower() for t in toks]
+            if tok.lower() in low:
+                toks = [t for t in toks if t.lower() != tok.lower()]
+            else:
+                toks.append(tok)
+            t_genres.value = ", ".join(toks)
+            _restyle()
+            self.page.update()
+
+        def _chip(tok: str, subtitle: str | None = None) -> ft.Control:
+            selected = tok.lower() in [t.lower() for t in _current_tokens()]
+            label = tok if not subtitle else f"{tok}  {subtitle}"
+            return ft.Container(
+                content=ft.Text(
+                    label, size=11,
+                    color=(BG if selected else TEXT),
+                    weight="bold" if selected else None,
+                ),
+                bgcolor=(CYAN if selected else SURFACE),
+                border=ft.Border.all(1, CYAN if selected else BORDER),
+                border_radius=12,
+                padding=ft.Padding.symmetric(horizontal=10, vertical=5),
+                on_click=lambda e, t=tok: _toggle(t),
+                tooltip="Tap to remove" if selected else "Tap to add",
+            )
+
+        # Keep the chip fills in sync with whatever is in the text field, so
+        # typing and tapping stay consistent (the field remains the source of truth).
+        self._sug_files: list[str] = []
+        self._sug_library: list[tuple[str, int]] = []
+
+        def _restyle():
+            sug_files.controls = [_chip(t) for t in self._sug_files]
+            sug_library.controls = [
+                _chip(t, f"·{n}") for t, n in self._sug_library
+            ]
+            lbl_files.visible = bool(self._sug_files)
+            lbl_library.visible = bool(self._sug_library)
+
+        def _on_genres_change(_e):
+            _restyle()
+            self.page.update()
+
+        t_genres.on_change = _on_genres_change
+
         async def _load():
             try:
                 data = await self.app.db_manager.get_artist_enrichment(artist_name)
@@ -222,6 +290,24 @@ class ArtistMetadataDialog:
                     lbl_status.value = "No existing metadata row."
             except Exception as exc:
                 lbl_status.value = f"Error loading info: {exc}"
+            # Suggestions are best-effort: a failure here must never block the
+            # manual edit, which is the whole point of the dialog.
+            try:
+                self._sug_files = await self.app.db_manager.get_artist_source_genres(artist_name)
+            except Exception as exc:
+                logger.debug("source-genre suggestions unavailable: %s", exc)
+                self._sug_files = []
+            try:
+                vocab = await self.app.db_manager.get_genre_vocabulary(limit=40)
+                on_files = {t.lower() for t in self._sug_files}
+                self._sug_library = [
+                    (v["name"], v.get("artists", 0)) for v in vocab
+                    if v["name"].lower() not in on_files
+                ]
+            except Exception as exc:
+                logger.debug("genre vocabulary unavailable: %s", exc)
+                self._sug_library = []
+            _restyle()
             self.page.update()
 
         self.page.run_task(_load)
@@ -259,8 +345,12 @@ class ArtistMetadataDialog:
                 t_artist,
                 t_country,
                 t_genres,
+                lbl_files,
+                sug_files,
+                lbl_library,
+                sug_library,
                 ft.Text("Manual edits are preserved and will not be overwritten by automatic MusicBrainz sync.", color=DIM, size=11, italic=True),
-            ], spacing=12, tight=True),
+            ], spacing=12, tight=True, scroll=ft.ScrollMode.AUTO),
             actions=[
                 ft.TextButton("Cancel", on_click=lambda e: self._close()),
                 ft.Button(

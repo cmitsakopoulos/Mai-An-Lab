@@ -550,6 +550,37 @@ async def search_musicbrainz_artists_candidates(
         return await client.search_candidates(name, limit=limit)
 
 
+async def musicbrainz_artist_details(
+    mbid: str, contact: str = DEFAULT_CONTACT
+) -> dict:
+    """Full genres/country/area for a KNOWN MBID via a direct entity lookup.
+
+    The `/artist?query=` search payload the candidate picker uses often omits
+    genres (and sometimes country), so a candidate chosen there would be
+    committed with empty tags — leaving the artist an unresolved gap. This does
+    the reliable `/artist/{mbid}?inc=genres+tags` follow-up so a picked match
+    actually populates the fields the walk reads. Returns {} on any failure
+    (offline / bad MBID), so callers fall back to the shallow search data."""
+    if aiohttp is None or not mbid:
+        return {}
+    try:
+        async with aiohttp.ClientSession() as session:
+            client = MusicBrainzClient(session, contact=contact)
+            gdata, _ = await client._get(
+                f"artist/{mbid}", {"inc": "genres+tags", "fmt": "json"}
+            )
+    except Exception as exc:
+        logger.debug("MB detail lookup failed for %s: %s", mbid, exc)
+        return {}
+    if not gdata:
+        return {}
+    return {
+        "genres": _extract_genres(gdata),
+        "country": _extract_country(gdata),
+        "area": (gdata.get("area") or {}).get("name"),
+    }
+
+
 async def enrich_library(
     db_manager, *, with_genres: bool = True, limit=None,
     contact: str = DEFAULT_CONTACT, include_failed: bool = False,

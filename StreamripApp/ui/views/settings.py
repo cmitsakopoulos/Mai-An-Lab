@@ -682,6 +682,14 @@ class SettingsView:
                            on_tap=lambda _: self._show_sub_page("Audio & DSP", self._build_audio_dsp_group())),
             HubSettingItem(ft.Icons.VIBRATION_ROUNDED, "Haptic Feedback", "Vibration settings and intensity controls",
                            on_tap=lambda _: self._show_sub_page("Haptic Feedback", self._build_haptics_group())),
+
+            ft.Divider(color=BORDER, height=30),
+
+            # Library Intelligence Section — curation, not a dev chore.
+            ft.Text("LIBRARY INTELLIGENCE", size=11, color=CYAN, weight=ft.FontWeight.W_800),
+            HubSettingItem(ft.Icons.LABEL_IMPORTANT_ROUNDED, "Metadata",
+                           "Fix artist tags that power Auto-Play recommendations",
+                           on_tap=self._on_open_metadata_workbench_click),
             
             ft.Divider(color=BORDER, height=30),
             
@@ -789,7 +797,6 @@ class SettingsView:
                      "Clear DSP", 
                      self.app.clear_dsp_features
                 )),
-                ft.TextButton("Enrich Metadata", icon=ft.Icons.AUTO_FIX_HIGH_ROUNDED, on_click=self._on_launch_enrichment_wizard_click),
                 ft.TextButton("Wipe DB", icon=ft.Icons.DELETE_FOREVER, icon_color="#FF4444", on_click=lambda _: self._on_wipe_db_click()),
             ], wrap=True, spacing=10),
             ft.Divider(color=BORDER, height=20),
@@ -1219,6 +1226,15 @@ class SettingsView:
         if not getattr(self, "_enrichment_wizard_pane", None):
             self._enrichment_wizard_pane = MetadataEnrichmentWizardPane(self.app, on_back=lambda: self._show_hub())
         self._show_sub_page("Enrich Metadata", self._enrichment_wizard_pane)
+
+    def _on_open_metadata_workbench_click(self, _e=None):
+        """Standing metadata-curation surface — sync, review, and manual tagging
+        in one place (the old 5-step wizard is folded in). A fresh pane each open
+        so its coverage figures and gap list reflect the live DB."""
+        from ui.player.metadata_workbench import MetadataWorkbenchPane
+        pane = MetadataWorkbenchPane(self.app, on_back=lambda: self._show_hub())
+        self._metadata_workbench_pane = pane
+        self._show_sub_page("Metadata", pane)
 
     # ── State bundle (export/import) ────────────────────────────────────────
     def _on_export_state_click(self, _e):

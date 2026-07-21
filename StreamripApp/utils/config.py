@@ -500,3 +500,32 @@ def update_config(old_with_data: dict, new_without_data: dict):
     for k in common:
         old_val = _nested_get(old_with_data, *k)
         _nested_set(new_without_data, *k, val=old_val)
+
+
+def fill_missing(dst: dict, src: dict) -> bool:
+    """Additively repair `dst` (a user config) from `src` (a complete template).
+
+    Recursively copies any key/table `src` defines that `dst` lacks, and NEVER
+    touches a value the user already set or removes a key `src` doesn't know
+    about. Returns True if anything was added.
+
+    This is the additive counterpart to update_config, which is
+    template-authoritative and drops user keys the template lacks. That drop is
+    wrong for repairing a config written from an older/incomplete template: the
+    live file mixes streamrip sections (which ConfigData.from_toml requires in
+    full) with app-only sections the streamrip template never defines
+    (``general``/``appearance``/``landing``). update_config would wipe those app
+    sections; fill_missing keeps them while restoring the absent streamrip
+    sections/fields so from_toml stops raising "missing N positional arguments".
+    """
+    changed = False
+    for key in src.keys():
+        if key not in dst:
+            dst[key] = copy.deepcopy(src[key])
+            changed = True
+        else:
+            sval, dval = src[key], dst[key]
+            if isinstance(sval, dict) and isinstance(dval, dict):
+                if fill_missing(dval, sval):
+                    changed = True
+    return changed
