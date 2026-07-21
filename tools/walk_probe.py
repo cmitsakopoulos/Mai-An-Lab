@@ -21,13 +21,18 @@ Readiness / build
 -----------------
 The metadata factor only fires if the library is enriched (artist_enrichment
 country/genres) and, ideally, a genre_affinity model exists. And the walk needs
-acoustic edges at all. This tool reports that readiness and, with --build, runs
+Zr geometry at all. This tool reports that readiness and, with --build, runs
 the real pipeline (`build_acoustic_edges` + `build_metadata_edges`) into the DB:
 
-  • --build            build the graph. Runs enrich_library (MusicBrainz, ~1 req/s)
-                       for un-enriched artists, then edges + Louvain + genre model.
-  • --build --no-enrich  build edges/clusters/genre model from EXISTING enrichment
-                       only — no network. Fast; good for a first look.
+  • --build            build the graph: Zr geometry + metadata edges + NPMI
+                       genre model, from EXISTING enrichment.
+  • --build --no-enrich  same thing (kept for compatibility).
+
+NB --build does NOT enrich any more: MusicBrainz was decoupled out of
+`build_acoustic_edges` so a 1 req/s network cap can't stall a graph rebuild.
+An unenriched image walks on pure acoustics, and the metadata gate stays dark.
+To enrich a throwaway image first, run `utils.metadata_enrich.enrich_library`
+against it (StreamripApp/tools/enrich_artists.py wraps it).
 
 Both --build modes MUTATE the --db file (edges, clusters, pca_space,
 genre_affinity). Point it at a throwaway image, not your live app DB.
@@ -74,6 +79,8 @@ async def readiness(db) -> dict:
     r = {
         "tracks": await one("SELECT COUNT(*) FROM tracks"),
         "analyzed": await one("SELECT COUNT(*) FROM play_counts WHERE timbre IS NOT NULL"),
+        # THE acoustic-readiness field: the walk loads persisted Zr coords.
+        "coord_tracks": await one("SELECT COUNT(*) FROM play_counts WHERE pca_coords IS NOT NULL"),
         "acoustic_edges": await one("SELECT COUNT(*) FROM track_neighbors WHERE edge_kind='acoustic'"),
         "artist_edges": await one("SELECT COUNT(*) FROM track_neighbors WHERE edge_kind='artist'"),
         "clusters": await one("SELECT COUNT(DISTINCT cluster_id) FROM play_counts WHERE cluster_id IS NOT NULL"),
@@ -103,7 +110,8 @@ def print_readiness(r: dict) -> None:
     print("── readiness ──────────────────────────────────────────────")
     print(f"  tracks                    : {r['tracks']}")
     print(f"  analyzed (timbre)         : {r['analyzed']}")
-    print(f"  acoustic edges            : {r['acoustic_edges']}")
+    print(f"  Zr coords (walk-ready)    : {r['coord_tracks']}")
+    print(f"  acoustic edges (legacy)   : {r['acoustic_edges']}")
     print(f"  artist edges              : {r['artist_edges']}")
     print(f"  Louvain clusters          : {r['clusters']}")
     print(f"  enriched artists          : {r['enriched_artists']} "
@@ -111,8 +119,8 @@ def print_readiness(r: dict) -> None:
     print(f"  genre_affinity pairs      : {r['genre_affinity_pairs']}")
     cov = (100.0 * r["tracks_with_enriched_artist"] / r["analyzed"]) if r["analyzed"] else 0.0
     print(f"  analyzed w/ enriched artist: {r['tracks_with_enriched_artist']} ({cov:.0f}% metadata coverage)")
-    if not r["acoustic_edges"]:
-        print("  ⚠ no acoustic edges — walks will be empty. Run with --build.")
+    if not r["coord_tracks"]:
+        print("  ⚠ no Zr coordinates — walks will be empty. Run with --build.")
     if not r["genre_affinity_pairs"]:
         print("  ⚠ no genre_affinity model — genre term falls back to Dice overlap.")
     print()
@@ -135,15 +143,26 @@ async def _titles(db, paths):
 
 
 async def _edge_weight(db, a, b):
-    """Acoustic edge weight a→b (coherence proxy), or None if not adjacent."""
-    conn = await db.get_connection()
-    async with conn.execute(
-        "SELECT weight FROM track_neighbors "
-        "WHERE track_path=? AND neighbor_path=? AND edge_kind='acoustic'",
-        (a, b),
-    ) as cur:
-        row = await cur.fetchone()
-    return float(row[0]) if row else None
+    """Self-tuning acoustic affinity a↔b (the step-coherence proxy), or None if
+    either track has no coordinates.
+
+    Computed from the SAME coordinate graph the walk scores with —
+    exp(-d²/(σ_a·σ_b)) over the persisted Zr coords — rather than read out of
+    `track_neighbors`. The old edge-table lookup returned None for every pair
+    once the geometry moved to coordinates, which silently pinned the reported
+    coherence at 0.000 on every run and made the metric look like a walk
+    regression instead of a dead lookup."""
+    import numpy as np
+    graph = await tg._coord_graph_cached(db)
+    if graph is None:
+        return None
+    ia = graph["path_to_idx"].get(a)
+    ib = graph["path_to_idx"].get(b)
+    if ia is None or ib is None:
+        return None
+    X, sig = graph["X_zr"], graph["sigmas"]
+    d2 = float(np.sum((X[ia] - X[ib]) ** 2))
+    return float(np.exp(-d2 / (sig[ia] * sig[ib])))
 
 
 def _jaccard(a, b) -> float:
@@ -227,18 +246,23 @@ async def print_walk(db, label, seed, queue, titles):
 # ── seed selection ────────────────────────────────────────────────────────────
 
 async def pick_seeds(db, n, rng, seed_query):
-    """Seeds that have acoustic neighbours AND an enriched artist, so the A/B is
-    meaningful. `seed_query` matches title or artist substring."""
+    """Seeds that are walkable (have Zr coordinates) AND have an enriched
+    artist, so the A/B is meaningful. `seed_query` matches title or artist
+    substring.
+
+    Walkability is `pca_coords IS NOT NULL`, NOT a row in `track_neighbors`:
+    the walk traverses the coordinate graph, and the acoustic edge tier stopped
+    being written when the geometry moved to persisted coordinates — so joining
+    it here silently returned zero seeds on every library, healthy or not."""
     conn = await db.get_connection()
     base = """
         SELECT DISTINCT pc.track_path AS path, t.title AS title, ar.name AS artist
-        FROM track_neighbors n
-        JOIN play_counts pc ON pc.track_path = n.track_path
+        FROM play_counts pc
         JOIN tracks t   ON t.path = pc.track_path
         JOIN albums al  ON al.id = t.album_id
         JOIN artists ar ON ar.id = al.artist_id
         JOIN artist_enrichment e ON e.artist_name = ar.name
-        WHERE n.edge_kind='acoustic'
+        WHERE pc.pca_coords IS NOT NULL
           AND ((e.country IS NOT NULL AND e.country<>'') OR (e.genres IS NOT NULL AND e.genres<>''))
     """
     params = []
@@ -279,13 +303,12 @@ async def pick_seeds_by_genre(db, per, rng):
     conn = await db.get_connection()
     sql = """
         SELECT DISTINCT pc.track_path AS path, t.title AS title, ar.name AS artist
-        FROM track_neighbors n
-        JOIN play_counts pc ON pc.track_path = n.track_path
+        FROM play_counts pc
         JOIN tracks t   ON t.path = pc.track_path
         JOIN albums al  ON al.id = t.album_id
         JOIN artists ar ON ar.id = al.artist_id
         JOIN artist_enrichment e ON e.artist_name = ar.name
-        WHERE n.edge_kind='acoustic' AND e.genres IS NOT NULL AND e.genres<>''
+        WHERE pc.pca_coords IS NOT NULL AND e.genres IS NOT NULL AND e.genres<>''
     """
     async with conn.execute(sql) as cur:
         rows = [(r["path"], r["title"], r["artist"]) for r in await cur.fetchall()]
@@ -309,20 +332,15 @@ async def pick_seeds_by_genre(db, per, rng):
 # ── build ─────────────────────────────────────────────────────────────────────
 
 async def build_graph(db, no_enrich: bool):
-    if no_enrich:
-        # Neutralise the network enrichment phase inside build_acoustic_edges;
-        # edges/clusters/genre model are still built from existing enrichment.
-        import utils.metadata_enrich as me
-
-        async def _noop(*a, **k):
-            return None
-        me.enrich_library = _noop  # build_acoustic_edges imports this at call time
-        print("── building graph (NO enrich — existing metadata only) ─────")
-    else:
-        print("── building graph (WITH MusicBrainz enrich — this hits network) ─")
-    n_ac = await tg.build_acoustic_edges(db)
+    # `no_enrich` is now a no-op: build_acoustic_edges never touches the network
+    # (enrichment was decoupled out of it), so every build is an "existing
+    # metadata only" build. The flag is kept so old command lines still run.
+    print("── building graph (Zr geometry + edges, existing metadata only) ──")
+    n_coords = await tg.build_acoustic_edges(db)
     n_art, n_alb = await tg.build_metadata_edges(db)
-    print(f"  built {n_ac} acoustic, {n_art} artist, {n_alb} album edges\n")
+    # NB build_acoustic_edges returns the number of TRACKS given coordinates,
+    # not an edge count — it persists geometry, not acoustic edge rows.
+    print(f"  {n_coords} tracks projected; {n_art} artist, {n_alb} album edges\n")
 
 
 # ── main ──────────────────────────────────────────────────────────────────────
@@ -346,13 +364,17 @@ async def _run_with_db(db, args):
     r = await readiness(db)
     print_readiness(r)
 
-    if args.build or (r["acoustic_edges"] == 0 and not args.no_build):
+    # Readiness is the persisted Zr geometry (what the walk actually loads),
+    # NOT the acoustic edge table — build_acoustic_edges stopped writing edge
+    # rows when the geometry moved to coordinates, so gating on edges made this
+    # tool refuse to walk a perfectly healthy graph.
+    if args.build or (r["coord_tracks"] == 0 and not args.no_build):
         await build_graph(db, args.no_enrich)
         r = await readiness(db)
         print_readiness(r)
 
-    if r["acoustic_edges"] == 0:
-        print("No acoustic edges — nothing to walk. Re-run with --build.")
+    if r["coord_tracks"] == 0:
+        print("No persisted Zr coordinates — nothing to walk. Re-run with --build.")
         return 1
 
     rng = random.Random(args.rng)

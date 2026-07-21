@@ -23,7 +23,8 @@ continuous proximity the assistant needs instead of discrete buckets.
 The walk (`walk`, "Seed-Anchored Smooth Flow"):
   • METADATA DEFINES THE POOL, ACOUSTICS ORDER IT. `_pool_foreign` decides
     membership from the tags (genre boundary, plus a country boundary for
-    regional seeds); everything inside the pool is then ranked by proximity;
+    regional seeds and for seeds with no tags at all); everything inside the
+    pool is then ranked by proximity;
   • deterministic greedy trajectory — at each step pick the unvisited in-pool
     acoustic neighbour maximising 0.7·Sim(current) + 0.3·Sim(seed), so the queue
     flows forward while staying anchored to the seed (no random teleports);
@@ -671,12 +672,33 @@ def _pool_foreign(
     Two evidence-gated boundaries, either one foreign-marks the candidate:
       • GENRE — both carry genre tokens and their NPMI soft-set similarity is
         below `floor` (the Carti→laiko timbre-bridge across an obvious genre gap).
-      • COUNTRY (regional scenes only) — the SEED is a regional scene
-        (`_is_regional`) and both tracks carry a country and the countries
-        differ. For laiko/Latin/Reggae/Asian-Pop, cross-country IS the genre
+      • COUNTRY — both tracks carry a country, the countries differ, and the
+        SEED is either a regional scene (`_is_regional`) or has NO GENRE TAGS
+        AT ALL. For laiko/Latin/Reggae/Asian-Pop, cross-country IS the genre
         jump, and it catches the case genre can't: the right same-country
         continuation is frequently untagged, so only country separates it from
         an acoustically-near foreign-pop track.
+
+        The untagged-seed clause closes a hole that made the whole gate vacuous
+        for a sixth of this library. Both boundaries demand evidence on the SEED
+        side, so a seed with no tags used to pass BOTH tests trivially and walk
+        with no pool constraint whatsoever — the opposite of the intended
+        conservatism, because "we know nothing about this seed" was read as
+        "nothing is foreign to it" rather than "we cannot tell what is". Measured
+        on the real library: 25% of enriched artists come back status='ok',
+        score=100 with an EMPTY genre list (MusicBrainz simply has no tags for
+        them), and 60% of the GR-country catalogue is in that set — so the
+        untagged seeds are not a random sample, they are one scene. A Negros Tou
+        Moria seed walked straight out of Greek rap into Don Toliver, Metro
+        Boomin, 21 Savage and Nipsey Hussle; with this clause it holds the scene
+        (Mad Clip, RACK, Snik, Toquel, Dani Gambino).
+
+        Country is the right fallback specifically BECAUSE the tags are missing:
+        it is the one provenance field these artists do carry, and an untagged
+        artist in a tagged library is overwhelmingly a local-scene act that
+        MusicBrainz has not catalogued. Note this is strictly narrower than it
+        looks — it needs a country on BOTH sides, so it never fires for the
+        7% of tracks with no country at all.
 
     Conservative: fires only on positive evidence (both sides tagged on the
     relevant field, same artist exempt). Missing enrichment → not foreign, so an
@@ -696,9 +718,10 @@ def _pool_foreign(
     # Genre boundary (needs tags on both sides).
     if gs and gc and soft_set_sim(gs, gc, genre_model) < floor:
         return True
-    # Country boundary for regional seeds (needs a country on both sides).
+    # Country boundary. Fires for a regional-scene seed, and ALSO for a seed
+    # with no genre tags at all — see below.
     cs, cc = ms.get("country"), mc.get("country")
-    if cs and cc and cs != cc and _is_regional(gs):
+    if cs and cc and cs != cc and (_is_regional(gs) or not gs):
         return True
     return False
 
@@ -795,7 +818,7 @@ async def walk(
 
         pool(Seed)  = unvisited acoustic neighbours of T_i that are NOT
                       `_pool_foreign` to the Seed (genre boundary, or country
-                      boundary for regional scenes)
+                      boundary for regional scenes and untagged seeds)
         Score(C)    = 0.7·Sim(T_i, C) + 0.3·Sim(Seed, C)   # acoustic (dual)
                     + meta_lambda·meta(Seed, C)            # shared-country tiebreak
                     + genre_flow_lambda·gx(T_i, C)         # genre continuity (current-anchored)
@@ -1190,12 +1213,23 @@ async def bulk_analyze_library(
 
 
 async def graph_status(db_manager) -> dict:
-    """Compact summary used by the assistant's first-open initialisation flow
-    and the 'graph health' Settings panel (future). Returns counts per kind
-    and a coverage estimate."""
+    """Compact summary used by the assistant's first-open initialisation flow,
+    the startup readiness check, and the 'graph health' Settings panel.
+
+    `coord_tracks` is THE acoustic-readiness field: the walk loads persisted Zr
+    coordinates, so that column — not `track_neighbors` — says whether the
+    similarity graph exists. `acoustic_edges` is retained only so older callers
+    don't KeyError; it is structurally 0 now that `build_acoustic_edges`
+    persists geometry instead of edge rows, and must not be used to decide
+    whether to build (doing so is what left a real device with 1149 analysed
+    tracks, no coordinates, and a walk that returned nothing for every seed)."""
     total_tracks = await db_manager.get_total_tracks()
+    coord_tracks = 0
+    if hasattr(db_manager, "count_tracks_with_coords"):
+        coord_tracks = await db_manager.count_tracks_with_coords()
     return {
         "total_tracks": total_tracks,
+        "coord_tracks":   coord_tracks,
         "acoustic_edges": await db_manager.count_neighbors(KIND_ACOUSTIC),
         "artist_edges":   await db_manager.count_neighbors(KIND_ARTIST),
         "album_edges":    await db_manager.count_neighbors(KIND_ALBUM),

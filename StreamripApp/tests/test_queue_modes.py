@@ -902,6 +902,8 @@ class TestQueueModes(unittest.TestCase):
             "artist_edges": 5,
             "album_edges": 5,
             "acoustic_edges": 5,
+            # Readiness is the persisted Zr geometry, not the edge table.
+            "coord_tracks": 10,
         }
         self.app.db_manager.get_tracks_missing_features = AsyncMock(return_value=[])
         
@@ -943,7 +945,27 @@ class TestQueueModes(unittest.TestCase):
             mock_meta.assert_called_once()
             mock_acoustic.assert_called_once()
             view.chat_memory.save_graph_state.assert_called_with(10, 0)
-            
+
+        # 2b. Sidecar counts MATCH but the graph is absent -> must still rebuild.
+        # This is the defect that left a real device with 1149 analysed tracks,
+        # zero persisted coordinates, and walk() returning [] for every seed:
+        # the "is it up to date?" check compared library counts and never asked
+        # whether the artifact it was certifying actually existed.
+        view.chat_memory.load_graph_state.return_value = {
+            "total_tracks": 10,
+            "missing_count": 0,
+        }
+        empty_graph_status = dict(status, coord_tracks=0)
+
+        with patch("utils.track_graph.graph_status", new_callable=AsyncMock) as mock_status, \
+             patch("utils.track_graph.build_metadata_edges", new_callable=AsyncMock) as mock_meta, \
+             patch("utils.track_graph.build_acoustic_edges", new_callable=AsyncMock) as mock_acoustic:
+
+            mock_status.return_value = empty_graph_status
+            run_async(view._do_init())
+
+            mock_acoustic.assert_called_once()
+
         # 3. Test concurrency protection (_init_started lock)
         # We trigger multiple parallel calls to _init_assistant and verify that only one gets executed
         view._init_started = False
