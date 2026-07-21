@@ -183,35 +183,46 @@ class MetadataWorkbenchPane(ft.Container):
         with_g = cov.get("tracks_with_genres", 0)
         crit = cov.get("critical", 0)
         gaps = cov.get("gap_artists", 0)
+
+        badge_text = "NO DATA" if tracks == 0 else ("WALK READY" if pct >= 80 else "NEEDS TAGS")
+        badge_bg = DIM if tracks == 0 else (CYAN if pct >= 80 else ACCENT_AMBER)
+
         # Track-level three-way partition (green + amber + red == tracks), so the
         # bar is honest about proportions.
         g_green = cov.get("tracks_with_genres", 0)
         g_red = cov.get("tracks_critical", 0)
         g_amber = cov.get("tracks_partial", max(0, tracks - g_green - g_red))
-        bar = ft.Row([
-            ft.Container(expand=max(1, g_green), height=8, bgcolor=ACCENT_GREEN),
-            ft.Container(expand=max(1, g_amber), height=8, bgcolor=ACCENT_AMBER),
-            ft.Container(expand=max(1, g_red), height=8, bgcolor=ACCENT_RED),
-        ], spacing=2)
+        bar = ft.Container(
+            content=ft.Row([
+                ft.Container(expand=max(1, g_green), height=10, bgcolor=ACCENT_GREEN),
+                ft.Container(expand=max(1, g_amber), height=10, bgcolor=ACCENT_AMBER),
+                ft.Container(expand=max(1, g_red), height=10, bgcolor=ACCENT_RED),
+            ], spacing=2) if tracks > 0 else ft.Container(expand=True, height=10, bgcolor=SURFACE2),
+            border_radius=6, clip_behavior=ft.ClipBehavior.HARD_EDGE,
+            margin=ft.Margin.only(top=8, bottom=8),
+        )
 
         coverage_card = ft.Container(
             content=ft.Row([
                 ft.Column([
-                    ft.Text(f"{pct}%", size=30, weight=ft.FontWeight.W_800, color=CYAN),
-                    ft.Text("walk-ready", size=10, color=DIM),
-                ], spacing=0, horizontal_alignment="center", tight=True),
-                ft.Container(width=16),
+                    ft.Text(f"{pct}%", size=32, weight=ft.FontWeight.W_800, color=CYAN if tracks > 0 else DIM),
+                    ft.Container(
+                        content=ft.Text(badge_text, size=9, weight="bold", color=BG),
+                        bgcolor=badge_bg, border_radius=4,
+                        padding=ft.Padding.symmetric(horizontal=5, vertical=1),
+                    ),
+                ], spacing=2, horizontal_alignment="center", tight=True),
+                ft.Container(width=14),
                 ft.Column([
-                    ft.Text(f"{with_g:,} of {tracks:,} tracks have usable tags",
+                    ft.Text(f"{with_g:,} of {tracks:,} tracks have usable tags" if tracks > 0 else "No tracks indexed in library",
                             size=13, color=TEXT, weight="bold"),
-                    ft.Container(content=bar, border_radius=4,
-                                 margin=ft.Margin.only(top=8, bottom=8)),
-                    ft.Text(f"{gaps} artists need attention · {crit} critical",
+                    bar,
+                    ft.Text(f"{gaps} artists need attention · {crit} critical" if tracks > 0 else "Index your music library to begin metadata curation",
                             size=11.5, color=DIM),
                 ], spacing=0, expand=True),
             ], vertical_alignment="center"),
-            bgcolor=SURFACE2, border_radius=14, padding=14,
-            border=ft.Border.all(1, BORDER),
+            bgcolor=apply_opacity(0.12, SURFACE2), border_radius=14, padding=14,
+            border=ft.Border.all(1, apply_opacity(0.4, CYAN if tracks > 0 else BORDER)),
         )
 
         if self.syncing:
@@ -219,11 +230,25 @@ class MetadataWorkbenchPane(ft.Container):
         else:
             action = ft.Row([
                 self._filled_btn("Sync from MusicBrainz", lambda _e: self._start_sync(),
-                                 icon=ft.Icons.CLOUD_SYNC_ROUNDED, expand=True),
+                                 icon=ft.Icons.CLOUD_SYNC_ROUNDED, expand=True, disabled=(tracks == 0)),
             ])
 
+        refresh_btn = ft.Container(
+            content=ft.Row([
+                ft.Icon(ft.Icons.REFRESH_ROUNDED, size=13, color=CYAN),
+                ft.Text("Reload", size=11, color=CYAN, weight="bold"),
+            ], spacing=4, tight=True, vertical_alignment="center"),
+            bgcolor=apply_opacity(0.12, CYAN),
+            border_radius=6,
+            padding=ft.Padding.symmetric(horizontal=8, vertical=4),
+            border=ft.Border.all(1, apply_opacity(0.4, CYAN)),
+            on_click=lambda _e: self._reload(),
+            ink=True,
+            tooltip="Reload metadata from database",
+        )
+
         self._h_overview.content = ft.Column([
-            self._section_label("OVERVIEW"),
+            self._section_label("OVERVIEW", trailing=refresh_btn),
             coverage_card,
             action,
         ], spacing=10)
@@ -305,7 +330,10 @@ class MetadataWorkbenchPane(ft.Container):
         self._sync_counts.controls[0].value = f"✓ {self.s_ok}"
         self._sync_counts.controls[1].value = f"⚠ {self.s_low}"
         self._sync_counts.controls[2].value = f"✗ {self.s_gap}"
-        self.app.page.update()
+        try:
+            self.app.page.update()
+        except Exception:
+            pass
 
     def _cancel_sync(self):
         if self.cancel_event:
@@ -337,19 +365,22 @@ class MetadataWorkbenchPane(ft.Container):
 
     def _filter_pill(self, key: str, label: str, count: int) -> ft.Control:
         active = self.filter == key
+        bg_col = CYAN if active else "transparent"
+        fg_col = BG if active else DIM
+        badge_bg = apply_opacity(0.25, BG) if active else apply_opacity(0.12, TEXT)
+        badge_fg = BG if active else DIM
+
         return ft.Container(
             content=ft.Row([
-                ft.Text(label, size=12.5, color=CYAN if active else DIM,
-                        weight="bold" if active else None),
+                ft.Text(label, size=12.5, color=fg_col, weight="bold" if active else None),
                 ft.Container(
-                    content=ft.Text(str(count), size=11, color=CYAN if active else DIM,
-                                    font_family="monospace"),
-                    bgcolor=apply_opacity(0.22 if active else 0.08, CYAN if active else TEXT),
-                    border_radius=6, padding=ft.Padding.symmetric(horizontal=6, vertical=1),
+                    content=ft.Text(str(count), size=11, color=badge_fg, font_family="monospace", weight="bold"),
+                    bgcolor=badge_bg,
+                    border_radius=6, padding=ft.Padding.symmetric(horizontal=7, vertical=2),
                 ),
             ], spacing=7, tight=True, vertical_alignment="center"),
-            bgcolor=apply_opacity(0.14, CYAN) if active else "transparent",
-            border=ft.Border.all(1, apply_opacity(0.55, CYAN) if active else BORDER),
+            bgcolor=bg_col,
+            border=ft.Border.all(1, CYAN if active else BORDER),
             border_radius=10, padding=ft.Padding.symmetric(horizontal=12, vertical=8),
             on_click=lambda _e, k=key: self._set_filter(k), ink=True,
         )
@@ -382,10 +413,18 @@ class MetadataWorkbenchPane(ft.Container):
 
         gaps = self._visible_gaps()
         if not gaps:
-            self._h_body.content = self._empty_state(
-                "Nothing to fix in this view.",
-                "Every artist here has the tags Auto-Play needs.",
-            )
+            if self.coverage.get("tracks", 0) == 0:
+                self._h_body.content = self._empty_state(
+                    "Your library is empty.",
+                    "Index your music files or download tracks to populate artists and metadata tags.",
+                    icon=ft.Icons.LIBRARY_MUSIC_ROUNDED,
+                )
+            else:
+                self._h_body.content = self._empty_state(
+                    "Nothing to fix in this view.",
+                    "Every artist here has the tags Auto-Play needs.",
+                    icon=ft.Icons.CHECK_CIRCLE_ROUNDED,
+                )
             return
 
         groups: dict[str, list[dict]] = {}
@@ -407,10 +446,18 @@ class MetadataWorkbenchPane(ft.Container):
         q = self.search.strip().lower()
         items = [x for x in self.low_conf if not q or q in x["artist_name"].lower()]
         if not items:
-            self._h_body.content = self._empty_state(
-                "No uncertain matches.",
-                "Run a sync, or everything MusicBrainz returned is already resolved.",
-            )
+            if self.coverage.get("tracks", 0) == 0:
+                self._h_body.content = self._empty_state(
+                    "Your library is empty.",
+                    "Index your music files or download tracks to populate artists and metadata tags.",
+                    icon=ft.Icons.LIBRARY_MUSIC_ROUNDED,
+                )
+            else:
+                self._h_body.content = self._empty_state(
+                    "No uncertain matches.",
+                    "Run a sync, or everything MusicBrainz returned is already resolved.",
+                    icon=ft.Icons.CHECK_CIRCLE_ROUNDED,
+                )
             return
         controls: list[ft.Control] = [self._section_hint(
             "Matches MusicBrainz wasn't sure about. Accept to keep, reject to blank, "
@@ -422,9 +469,10 @@ class MetadataWorkbenchPane(ft.Container):
         self._h_body.content = ft.ListView(controls=controls, expand=True, spacing=0,
                                             build_controls_on_demand=True)
 
-    def _empty_state(self, title: str, sub: str) -> ft.Control:
+    def _empty_state(self, title: str, sub: str, icon=ft.Icons.CHECK_CIRCLE_ROUNDED) -> ft.Control:
+        icon_color = ACCENT_GREEN if icon == ft.Icons.CHECK_CIRCLE_ROUNDED else DIM
         return ft.Column([
-            ft.Icon(ft.Icons.CHECK_CIRCLE_ROUNDED, color=ACCENT_GREEN, size=40),
+            ft.Icon(icon, color=icon_color, size=40),
             ft.Text(title, color=TEXT, size=15, weight="bold"),
             ft.Text(sub, color=DIM, size=11.5, text_align=ft.TextAlign.CENTER),
         ], horizontal_alignment="center", alignment=ft.MainAxisAlignment.CENTER,
@@ -449,10 +497,23 @@ class MetadataWorkbenchPane(ft.Container):
             padding=ft.Padding.only(top=14, bottom=6),
         )
 
+    def _sev_badge(self, sev: int) -> ft.Control:
+        if sev == 0:
+            label, bg, fg = "CRITICAL", apply_opacity(0.18, ACCENT_RED), ACCENT_RED
+        elif sev == 1:
+            label, bg, fg = "NO TAGS", apply_opacity(0.18, ACCENT_AMBER), ACCENT_AMBER
+        else:
+            label, bg, fg = "PARTIAL", apply_opacity(0.14, ACCENT_AMBER), DIM
+        return ft.Container(
+            content=ft.Text(label, size=9.5, weight="bold", color=fg),
+            bgcolor=bg, border_radius=6,
+            padding=ft.Padding.symmetric(horizontal=7, vertical=3),
+            border=ft.Border.all(1, apply_opacity(0.4, fg)),
+            tooltip="No tags · no country" if sev == 0 else "Incomplete",
+        )
+
     def _sev_dot(self, sev: int) -> ft.Control:
-        color = {0: ACCENT_RED, 1: ACCENT_AMBER, 2: ACCENT_AMBER}.get(sev, ACCENT_GREEN)
-        return ft.Container(width=9, height=9, border_radius=5, bgcolor=color,
-                            tooltip="No tags · no country" if sev == 0 else "Incomplete")
+        return self._sev_badge(sev)
 
     # ── gap row + editor ──────────────────────────────────────────────────────
     def _visible_gaps(self) -> list[dict]:
@@ -493,22 +554,28 @@ class MetadataWorkbenchPane(ft.Container):
         return ft.Container(
             content=ft.Row([
                 checkbox,
-                self._sev_dot(sev),
+                self._sev_badge(sev),
                 ft.Column([
-                    ft.Text(name, size=14, weight="bold",
-                            color=CYAN if is_expanded else TEXT,
-                            overflow=ft.TextOverflow.ELLIPSIS, max_lines=1),
+                    ft.Row([
+                        ft.Text(_flag(country), size=14) if country else ft.Container(),
+                        ft.Text(name, size=14, weight="bold",
+                                color=CYAN if is_expanded else TEXT,
+                                overflow=ft.TextOverflow.ELLIPSIS, max_lines=1, expand=True),
+                    ], spacing=6, vertical_alignment="center"),
                     summary,
-                ], spacing=1, expand=True, tight=True),
+                ], spacing=2, expand=True, tight=True),
                 ft.Container(
-                    content=ft.Text(f"{tc}", size=10.5, color=DIM, font_family="monospace"),
-                    bgcolor=SURFACE, border_radius=5,
-                    padding=ft.Padding.symmetric(horizontal=7, vertical=3),
+                    content=ft.Text(f"{tc} trk{'s' if tc != 1 else ''}", size=10.5, color=DIM, font_family="monospace", weight="bold"),
+                    bgcolor=SURFACE, border_radius=6,
+                    padding=ft.Padding.symmetric(horizontal=8, vertical=4),
+                    border=ft.Border.all(1, BORDER),
                 ),
             ], vertical_alignment="center", spacing=11),
-            padding=ft.Padding.symmetric(horizontal=2, vertical=11),
-            bgcolor=apply_opacity(0.5, SURFACE2) if is_expanded else "transparent",
-            border=ft.Border(bottom=ft.BorderSide(1, apply_opacity(0.6, BORDER))),
+            padding=ft.Padding.symmetric(horizontal=10, vertical=10),
+            margin=ft.Margin.only(bottom=4),
+            bgcolor=apply_opacity(0.65, SURFACE2) if is_expanded else SURFACE2,
+            border_radius=10,
+            border=ft.Border.all(1, apply_opacity(0.65, CYAN) if is_expanded else apply_opacity(0.5, BORDER)),
             on_click=lambda _e, n=name: self._toggle_expand(n), ink=True,
         )
 
@@ -528,15 +595,16 @@ class MetadataWorkbenchPane(ft.Container):
             on_click=on_click, ink=True,
         )
 
+    def _on_country_change(self, val: str, flag_widget: ft.Text):
+        self.edit_country = (val or "").strip().upper()
+        if flag_widget:
+            flag_widget.value = _flag(self.edit_country)
+        self.app.page.update()
+
     def _tag_editor(self, item: dict, *, is_review: bool) -> ft.Control:
         """Inline hand-tagging editor for both gap artists and low-confidence
         review. Tag chips come from three inline sources — current selection, the
-        artist's own file tags, and the library vocabulary. MusicBrainz identity
-        lookup lives in its own dialog (`_open_mb_dialog`) rather than inline: the
-        candidate detail it needs to be useful (disambiguation, full genres) does
-        not fit the expanding row in portrait, and it now does the per-MBID
-        detail fetch that a shallow inline picker skipped. The footer sits on its
-        own row so Cancel/Save can't overflow narrow phones."""
+        artist's own file tags, and the library vocabulary."""
         name = item["artist_name"]
         source = self.source_cache.get(name, [])
         src_lc = {s.lower() for s in source}
@@ -556,37 +624,77 @@ class MetadataWorkbenchPane(ft.Container):
                               content_padding=ft.Padding.symmetric(horizontal=10, vertical=6),
                               on_change=lambda e: setattr(self, "edit_custom", e.control.value or ""),
                               on_submit=self._edit_add_custom)
-        country_field = ft.TextField(value=self.edit_country, width=110, dense=True, hint_text="ISO",
-                                     bgcolor=SURFACE2, border_color=BORDER, focused_border_color=CYAN,
-                                     text_style=ft.TextStyle(color=TEXT, size=13),
-                                     content_padding=ft.Padding.symmetric(horizontal=10, vertical=6),
-                                     on_change=lambda e: setattr(self, "edit_country", (e.control.value or "").upper()))
+
+        country_flag_preview = ft.Text(_flag(self.edit_country), size=18)
+        country_field = ft.TextField(
+            value=self.edit_country, width=100, dense=True, hint_text="ISO",
+            bgcolor=SURFACE2, border_color=BORDER, focused_border_color=CYAN,
+            text_style=ft.TextStyle(color=TEXT, size=13, weight="bold"),
+            content_padding=ft.Padding.symmetric(horizontal=10, vertical=6),
+            on_change=lambda e: self._on_country_change(e.control.value, country_flag_preview),
+        )
 
         blocks: list[ft.Control] = []
         if src_chips:
-            blocks += [
-                ft.Row([ft.Text("FROM THIS ARTIST'S FILES", size=10, color=DIM, weight="bold"),
-                        ft.Text("tap to add", size=10, color=ACCENT_GREEN)], spacing=8),
-                ft.Row(src_chips, wrap=True, spacing=6, run_spacing=6),
-            ]
-        blocks += [
-            ft.Text("GENRES", size=10, color=DIM, weight="bold"),
-            ft.Row((selected_chips + [custom]) if selected_chips else [custom],
-                   wrap=True, spacing=6, run_spacing=6),
-        ]
+            blocks.append(ft.Container(
+                content=ft.Column([
+                    ft.Row([
+                        ft.Icon(ft.Icons.FOLDER_ROUNDED, size=14, color=ACCENT_GREEN),
+                        ft.Text("FROM THIS ARTIST'S FILES", size=10, color=ACCENT_GREEN, weight="bold"),
+                        ft.Container(expand=True),
+                        ft.Text("tap to add", size=10, color=DIM),
+                    ], spacing=6, vertical_alignment="center"),
+                    ft.Row(src_chips, wrap=True, spacing=6, run_spacing=6),
+                ], spacing=8),
+                bgcolor=SURFACE2, border_radius=10, padding=10,
+                border=ft.Border.all(1, apply_opacity(0.35, ACCENT_GREEN)),
+            ))
+
+        blocks.append(ft.Container(
+            content=ft.Column([
+                ft.Row([
+                    ft.Icon(ft.Icons.LABEL_ROUNDED, size=14, color=CYAN),
+                    ft.Text("SELECTED GENRES", size=10, color=CYAN, weight="bold"),
+                ], spacing=6, vertical_alignment="center"),
+                ft.Row((selected_chips + [custom]) if selected_chips else [custom],
+                       wrap=True, spacing=6, run_spacing=6),
+            ], spacing=8),
+            bgcolor=SURFACE2, border_radius=10, padding=10,
+            border=ft.Border.all(1, apply_opacity(0.35, CYAN)),
+        ))
+
         if vocab_chips:
-            blocks += [
-                ft.Text("USED ELSEWHERE IN YOUR LIBRARY", size=10, color=DIM, weight="bold"),
-                ft.Row(vocab_chips, wrap=True, spacing=6, run_spacing=6),
-            ]
-        # Country on its own line; actions on their own line → no overflow.
-        blocks.append(ft.Row([ft.Text("COUNTRY", size=10, color=DIM, weight="bold"), country_field],
-                             spacing=10, vertical_alignment="center"))
-        # MusicBrainz identity lookup — opens a roomy dialog (see _open_mb_dialog).
+            blocks.append(ft.Container(
+                content=ft.Column([
+                    ft.Row([
+                        ft.Icon(ft.Icons.BOOKMARKS_ROUNDED, size=14, color=DIM),
+                        ft.Text("USED ELSEWHERE IN YOUR LIBRARY", size=10, color=DIM, weight="bold"),
+                    ], spacing=6, vertical_alignment="center"),
+                    ft.Row(vocab_chips, wrap=True, spacing=6, run_spacing=6),
+                ], spacing=8),
+                bgcolor=SURFACE2, border_radius=10, padding=10,
+                border=ft.Border.all(1, BORDER),
+            ))
+
+        blocks.append(ft.Container(
+            content=ft.Row([
+                ft.Row([
+                    ft.Icon(ft.Icons.PUBLIC_ROUNDED, size=14, color=CYAN),
+                    ft.Text("COUNTRY", size=10, color=CYAN, weight="bold"),
+                ], spacing=6, vertical_alignment="center"),
+                ft.Container(expand=True),
+                country_flag_preview,
+                country_field,
+            ], spacing=10, vertical_alignment="center"),
+            bgcolor=SURFACE2, border_radius=10, padding=10,
+            border=ft.Border.all(1, BORDER),
+        ))
+
         blocks.append(self._ghost_btn(
             "Search MusicBrainz", lambda _e, n=name: self._open_mb_dialog(n),
             fg=CYAN, icon=ft.Icons.TRAVEL_EXPLORE_ROUNDED,
         ))
+
         actions: list[ft.Control] = []
         if is_review:
             actions.append(self._ghost_btn("Reject", lambda _e, n=name: self._review_reject(n),
@@ -682,19 +790,21 @@ class MetadataWorkbenchPane(ft.Container):
         gstr = ", ".join(g for g in genres if g)
         score = cand.get("score") or 0
 
+        score_color = ACCENT_GREEN if score >= 80 else (ACCENT_AMBER if score >= 50 else ACCENT_RED)
         head = []
         if cc:
-            head.append(ft.Text(_flag(cc), size=14))
+            head.append(ft.Text(_flag(cc), size=16))
         head.append(ft.Text(cname, size=13.5, color=TEXT, weight="bold",
                             overflow=ft.TextOverflow.ELLIPSIS, max_lines=1, expand=True))
         head.append(ft.Container(
-            content=ft.Text(f"{score}%", size=10, color=ACCENT_AMBER, weight="bold"),
-            bgcolor=apply_opacity(0.14, ACCENT_AMBER), border_radius=5,
-            padding=ft.Padding.symmetric(horizontal=6, vertical=2),
+            content=ft.Text(f"{score}% match", size=10, color=score_color, weight="bold"),
+            bgcolor=apply_opacity(0.14, score_color), border_radius=6,
+            padding=ft.Padding.symmetric(horizontal=7, vertical=3),
+            border=ft.Border.all(1, apply_opacity(0.35, score_color)),
         ))
         lines: list[ft.Control] = [ft.Row(head, spacing=6, vertical_alignment="center")]
         if disamb:
-            lines.append(ft.Text(disamb, size=11, color=TEXT, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS))
+            lines.append(ft.Text(f"• {disamb}", size=11, color=TEXT, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS))
         lines.append(ft.Text(gstr or "no genres listed — fetched when you select",
                              size=10.5, color=DIM if gstr else ACCENT_AMBER,
                              max_lines=2, overflow=ft.TextOverflow.ELLIPSIS))
@@ -706,7 +816,7 @@ class MetadataWorkbenchPane(ft.Container):
         return ft.Container(
             content=ft.Column(lines, spacing=6, tight=True),
             bgcolor=SURFACE2, border_radius=10, padding=12,
-            border=ft.Border.all(1, BORDER),
+            border=ft.Border.all(1, apply_opacity(0.5, BORDER)),
         )
 
     def _use_mb_candidate(self, artist: str, cand: dict, dlg=None):
@@ -756,28 +866,35 @@ class MetadataWorkbenchPane(ft.Container):
         name = it["artist_name"]
         tc = it.get("track_count", 0)
         score = it.get("score", 0)
-        country = it.get("country") or "—"
+        country = it.get("country")
         genres = [x.get("name") if isinstance(x, dict) else str(x) for x in (it.get("genres") or [])]
         gstr = ", ".join(genres[:3]) or "no tags"
         is_expanded = self.expanded == name
+
+        score_color = ACCENT_GREEN if score >= 80 else (ACCENT_AMBER if score >= 50 else ACCENT_RED)
         return ft.Container(
             content=ft.Row([
-                self._sev_dot(1),
+                self._sev_badge(1),
                 ft.Column([
-                    ft.Text(name, size=14, weight="bold", color=CYAN if is_expanded else TEXT,
+                    ft.Row([
+                        ft.Text(_flag(country), size=14) if country else ft.Container(),
+                        ft.Text(name, size=14, weight="bold", color=CYAN if is_expanded else TEXT,
+                                overflow=ft.TextOverflow.ELLIPSIS, max_lines=1, expand=True),
+                    ], spacing=6, vertical_alignment="center"),
+                    ft.Text(f"{_COUNTRY_NAMES.get(country, country) if country else 'No country'} · {gstr}", size=11, color=DIM,
                             overflow=ft.TextOverflow.ELLIPSIS, max_lines=1),
-                    ft.Text(f"{country} · {gstr}", size=11, color=DIM,
-                            overflow=ft.TextOverflow.ELLIPSIS, max_lines=1),
-                ], spacing=1, expand=True, tight=True),
+                ], spacing=2, expand=True, tight=True),
                 ft.Container(
-                    content=ft.Text(f"{score}%", size=10.5, color=ACCENT_AMBER, weight="bold"),
-                    bgcolor=apply_opacity(0.14, ACCENT_AMBER), border_radius=5,
+                    content=ft.Text(f"{score}%", size=10.5, color=score_color, weight="bold"),
+                    bgcolor=apply_opacity(0.14, score_color), border_radius=6,
                     padding=ft.Padding.symmetric(horizontal=7, vertical=3),
+                    border=ft.Border.all(1, apply_opacity(0.3, score_color)),
                 ),
                 ft.Container(
-                    content=ft.Text(f"{tc}", size=10.5, color=DIM, font_family="monospace"),
-                    bgcolor=SURFACE, border_radius=5,
-                    padding=ft.Padding.symmetric(horizontal=7, vertical=3),
+                    content=ft.Text(f"{tc} trk{'s' if tc != 1 else ''}", size=10.5, color=DIM, font_family="monospace", weight="bold"),
+                    bgcolor=SURFACE, border_radius=6,
+                    padding=ft.Padding.symmetric(horizontal=8, vertical=4),
+                    border=ft.Border.all(1, BORDER),
                 ),
                 # One-tap accept of the match as-is — the wizard's primary review
                 # action. Keeps mbid/country/genres as source='musicbrainz' via
@@ -790,9 +907,11 @@ class MetadataWorkbenchPane(ft.Container):
                     tooltip="Accept this match",
                 ),
             ], vertical_alignment="center", spacing=11),
-            padding=ft.Padding.symmetric(horizontal=2, vertical=11),
-            bgcolor=apply_opacity(0.5, SURFACE2) if is_expanded else "transparent",
-            border=ft.Border(bottom=ft.BorderSide(1, apply_opacity(0.6, BORDER))),
+            padding=ft.Padding.symmetric(horizontal=10, vertical=10),
+            margin=ft.Margin.only(bottom=4),
+            bgcolor=apply_opacity(0.65, SURFACE2) if is_expanded else SURFACE2,
+            border_radius=10,
+            border=ft.Border.all(1, apply_opacity(0.65, CYAN) if is_expanded else apply_opacity(0.5, BORDER)),
             on_click=lambda _e, n=name: self._toggle_expand(n), ink=True,
         )
 

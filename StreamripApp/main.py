@@ -352,7 +352,7 @@ class StreamripFletApp:
                 
             cfg = load_config()
             appearance = cfg.get("appearance", {})
-            acc_color = appearance.get("accent_color", "#00BFFF")
+            acc_color = appearance.get("accent_color", "#FFD600")
             self.nav_indicator_color = appearance.get("nav_indicator_color", acc_color + "33")
             _apply_accent(acc_color)
         except: pass
@@ -560,6 +560,11 @@ class StreamripFletApp:
                 "— building the similarity graph so auto-play can walk it.",
                 analysed,
             )
+            # Prefer a scroll-quiet window. The builders now yield cooperatively,
+            # but holding the heaviest first-load work until the user pauses
+            # keeps the very first post-import scroll fully smooth. Bounded, so a
+            # user who never stops scrolling still gets the graph eventually.
+            await self._await_scroll_quiet()
             await tg.build_metadata_edges(self.db_manager)
             await tg.build_acoustic_edges(self.db_manager)
             logger.info("Graph readiness: similarity graph built.")
@@ -567,6 +572,24 @@ class StreamripFletApp:
             logger.error("Graph readiness build failed: %s", exc, exc_info=True)
         finally:
             self._ensuring_graph = False
+
+    def note_scroll_activity(self):
+        """Record that the user is actively scrolling. Read by
+        _await_scroll_quiet so a one-time first-load graph build can defer its
+        heaviest work out of an active fling. Cheap enough to call every tick."""
+        self._last_scroll_ts = time.monotonic()
+
+    async def _await_scroll_quiet(self, quiet: float = 1.0, max_wait: float = 20.0):
+        """Block until the user has not scrolled for `quiet` seconds, or until
+        `max_wait` elapses — whichever comes first. Lets the graph build wait for
+        a lull instead of contending with a live scroll, without ever deferring
+        indefinitely."""
+        deadline = time.monotonic() + max_wait
+        while time.monotonic() < deadline:
+            idle = time.monotonic() - getattr(self, "_last_scroll_ts", 0.0)
+            if idle >= quiet:
+                return
+            await asyncio.sleep(min(quiet - idle, 0.5))
 
     async def _enrich_metadata_async(self):
         """Background, incremental artist-metadata enrichment (MusicBrainz
@@ -776,6 +799,12 @@ class StreamripFletApp:
                     await conn.execute("DELETE FROM albums")
                     await conn.execute("DELETE FROM artists")
                     try:
+                        await conn.execute("DELETE FROM artist_enrichment")
+                    except: pass
+                    try:
+                        await conn.execute("DELETE FROM genre_affinity")
+                    except: pass
+                    try:
                         await conn.execute("DELETE FROM fts_search")
                     except: pass
                     await conn.commit()
@@ -808,7 +837,10 @@ class StreamripFletApp:
                     pass
 
             # Refresh UI
-            await self.library_view.load_library()
+            if hasattr(self, "library_view") and self.library_view:
+                await self.library_view.load_library()
+            if hasattr(self, "settings_view") and getattr(self.settings_view, "_metadata_workbench_pane", None):
+                self.settings_view._metadata_workbench_pane._reload()
             self.show_snackbar("Library database wiped successfully.")
         except Exception as exc:
             self.show_snackbar(f"Wipe failed: {exc}")
