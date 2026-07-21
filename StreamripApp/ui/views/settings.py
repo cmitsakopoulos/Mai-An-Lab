@@ -1229,12 +1229,14 @@ class SettingsView:
 
     def _on_open_metadata_workbench_click(self, _e=None):
         """Standing metadata-curation surface — sync, review, and manual tagging
-        in one place (the old 5-step wizard is folded in). A fresh pane each open
-        so its coverage figures and gap list reflect the live DB."""
+        in one place. Reuses the standing pane instance so background MusicBrainz
+        sync tasks continue uninterrupted when switching tabs or navigating away."""
         from ui.player.metadata_workbench import MetadataWorkbenchPane
-        pane = MetadataWorkbenchPane(self.app, on_back=lambda: self._show_hub())
-        self._metadata_workbench_pane = pane
-        self._show_sub_page("Metadata", pane)
+        if not getattr(self, "_metadata_workbench_pane", None):
+            self._metadata_workbench_pane = MetadataWorkbenchPane(self.app, on_back=lambda: self._show_hub())
+        elif not self._metadata_workbench_pane.syncing:
+            self._metadata_workbench_pane._reload()
+        self._show_sub_page("Metadata", self._metadata_workbench_pane)
 
     # ── State bundle (export/import) ────────────────────────────────────────
     def _on_export_state_click(self, _e):
@@ -1525,7 +1527,7 @@ class SettingsView:
             self._show_library_stats_switch.value  = bool(landing.get("show_library_stats", True))
 
             appearance = cfg.get("appearance", {})
-            self._selected_accent_color = appearance.get("accent_color", "#00BFFF")
+            self._selected_accent_color = appearance.get("accent_color", "#FFD600")
             self._show_jarvis_switch.value = bool(appearance.get("show_jarvis", True))
             self._show_network_switch.value = bool(appearance.get("show_network", False))
             self._show_playlists_switch.value = bool(appearance.get("show_playlists", True))

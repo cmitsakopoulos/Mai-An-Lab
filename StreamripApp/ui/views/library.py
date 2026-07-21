@@ -2978,6 +2978,10 @@ class LibraryView:
             pass
 
     def _on_list_scroll(self, e: ft.OnScrollEvent):
+        # Any scroll is live user activity — lets the one-time first-load graph
+        # build defer its heaviest work out of an active fling (see
+        # main._await_scroll_quiet).
+        self.app.note_scroll_activity()
         # Tracks is the fixed-extent windowed view: slide the live slice to
         # follow the offset. Everything else (albums, artists, playlists) is
         # progressive chunked scroll — pull the next chunk near the bottom.

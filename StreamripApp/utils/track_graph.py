@@ -230,7 +230,7 @@ async def build_acoustic_edges(
     surviving = _surviving_scalars(redundant)
     paths: list[str] = []
     vectors: list[np.ndarray] = []
-    for r in rows:
+    for i, r in enumerate(rows):
         # The graph embedding is the v4 BLOB with mfcc_delta removed
         # (GRAPH_EMBED_DIMS): the ablation showed delta is dead weight for
         # similarity. Old/short BLOBs unpack to None and are skipped.
@@ -242,6 +242,13 @@ async def build_acoustic_edges(
         # similarity alongside timbre. See `_all_scalars` / `_feature_vector`.
         paths.append(r["path"])
         vectors.append(_feature_vector(r, v, surviving))
+        # Cooperative yield. serious_python is single-threaded CPython, so this
+        # per-track assembly otherwise holds the asyncio loop for its whole
+        # duration on a large first-load build — long enough to freeze the UI's
+        # windowed-scroll slides. Hand control back every few hundred rows so
+        # Flet's bridge can flush pending updates between chunks.
+        if i % 512 == 0:
+            await asyncio.sleep(0)
 
     if len(vectors) < 2:
         return 0
@@ -423,7 +430,7 @@ async def build_metadata_edges(
     by_artist: dict[int, list[str]] = {}
     for r in rows:
         by_artist.setdefault(r["artist_id"], []).append(r["path"])
-    for paths in by_artist.values():
+    for gi, paths in enumerate(by_artist.values()):
         if len(paths) < 2:
             continue
         # For each source, write up to k other tracks. Sampling is biased
@@ -434,6 +441,11 @@ async def build_metadata_edges(
             others = [p for p in paths if p != src]
             for dst in others[:k]:
                 artist_edges.append((src, dst, 1.0))
+        # Cooperative yield (see build_acoustic_edges): a prolific-artist library
+        # makes this inner loop heavy enough to stall UI scroll on the single
+        # event-loop thread. Release it periodically.
+        if gi % 128 == 0:
+            await asyncio.sleep(0)
 
     await db_manager.replace_neighbors_bulk(artist_edges, KIND_ARTIST)
 

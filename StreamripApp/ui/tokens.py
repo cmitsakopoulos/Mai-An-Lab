@@ -7,9 +7,9 @@ SURFACE2 = "#111116"
 
 try:
     _cfg = load_config()
-    _accent_hex = _cfg.get("appearance", {}).get("accent_color", "#00BFFF")
+    _accent_hex = _cfg.get("appearance", {}).get("accent_color", "#FFD600")
 except Exception:
-    _accent_hex = "#00BFFF"
+    _accent_hex = "#FFD600"
 
 CYAN     = _accent_hex
 AMBER    = "#FFBF00"
