@@ -24,10 +24,16 @@ def get_asset_path(path: str) -> str:
 class PlaylistEditorDialog:
     def __init__(self, app: "StreamripFletApp"):
         self.app  = app
-        self.page = app.page
         self._dlg = None
 
+    @property
+    def page(self) -> ft.Page | None:
+        return self.app.page
+
     def open(self, pl_id: int, name: str, current_color: str):
+        if self._dlg and self.page and self._dlg in self.page.overlay:
+            self.page.overlay.remove(self._dlg)
+
         t_name = ft.TextField(value=name, label="Playlist Name", border_color=BORDER, focused_border_color=LIB_PLAYLIST_COLOR, bgcolor=SURFACE)
         
         colors = ["#FF5555", "#55FF55", "#5555FF", "#FFFF55", "#FF55FF", "#55FFFF", "#FFFFFF", "#FF8C00", "#8A2BE2"]
@@ -38,7 +44,8 @@ class PlaylistEditorDialog:
             selected_color[0] = c
             for i, circle in enumerate(color_row.controls):
                 circle.border = ft.Border.all(2, TEXT if colors[i] == c else "transparent")
-            self.page.update()
+            if self.page:
+                self.page.update()
 
         color_row = ft.Row(
             [
@@ -53,12 +60,11 @@ class PlaylistEditorDialog:
 
         def save(e):
             async def _do():
-                self._dlg.open = False
-                self.page.update()
+                self._close()
                 await self.app.db_manager.update_playlist(pl_id, name=t_name.value, color=selected_color[0])
                 await self.app.library_view.load_library()
-                self.app.show_snackbar(f"Playlist '{t_name.value}' updated.")
-            self.page.run_task(_do)
+            if self.page:
+                self.page.run_task(_do)
 
         self._dlg = ft.AlertDialog(
             title=ft.Text("Customize Playlist", color=TEXT),
@@ -73,23 +79,33 @@ class PlaylistEditorDialog:
                 ft.Button("Save", bgcolor=LIB_PLAYLIST_COLOR, color=BG, on_click=save)
             ]
         )
-        self.page.overlay.append(self._dlg)
-        self._dlg.open = True
-        self.page.update()
+        if self.page:
+            self.page.overlay.append(self._dlg)
+            self._dlg.open = True
+            self.page.update()
 
     def _close(self):
         if self._dlg:
             self._dlg.open = False
-            self.page.update()
+            if self.page:
+                self.page.update()
+            if self.page and self._dlg in self.page.overlay:
+                self.page.overlay.remove(self._dlg)
 
 
 class MetadataEditorDialog:
     def __init__(self, app: "StreamripFletApp"):
         self.app  = app
-        self.page = app.page
         self._dlg: ft.AlertDialog | None = None
 
+    @property
+    def page(self) -> ft.Page | None:
+        return self.app.page
+
     def open(self, edit_type: str, meta: dict):
+        if self._dlg and self.page and self._dlg in self.page.overlay:
+            self.page.overlay.remove(self._dlg)
+
         path        = meta.get("path", "")
         title_val   = meta.get("track_title", "")
         artist_val  = meta.get("artist_name", "")
@@ -143,13 +159,12 @@ class MetadataEditorDialog:
         content_cols += [t_artist, t_album]
 
         def save(e):
-            def _mutate():
-                self._dlg.open = False
-            self.app.safe_update(_mutate)
-            self.app.page.run_task(self.app.apply_metadata_edit,
-                edit_type, meta,
-                t_title.value, t_artist.value, t_album.value,
-            )
+            self._close()
+            if self.page:
+                self.page.run_task(self.app.apply_metadata_edit,
+                    edit_type, meta,
+                    t_title.value, t_artist.value, t_album.value,
+                )
 
         def delete(e):
             self._close()
@@ -175,24 +190,34 @@ class MetadataEditorDialog:
             content=ft.Column(content_cols, spacing=12, tight=True),
             actions=actions,
         )
-        self.page.overlay.append(self._dlg)
-        self._dlg.open = True
-        self.page.update()
+        if self.page:
+            self.page.overlay.append(self._dlg)
+            self._dlg.open = True
+            self.page.update()
 
     def _close(self):
         if self._dlg:
             self._dlg.open = False
-            self.page.update()
+            if self.page:
+                self.page.update()
+            if self.page and self._dlg in self.page.overlay:
+                self.page.overlay.remove(self._dlg)
 
 
 class ArtistMetadataDialog:
     """Dialog to view and manually edit artist provenance and genres."""
     def __init__(self, app: "StreamripFletApp"):
         self.app = app
-        self.page = app.page
         self._dlg: ft.AlertDialog | None = None
 
+    @property
+    def page(self) -> ft.Page | None:
+        return self.app.page
+
     def open(self, artist_name: str, on_saved: Callable | None = None):
+        if self._dlg and self.page and self._dlg in self.page.overlay:
+            self.page.overlay.remove(self._dlg)
+
         t_artist = ft.TextField(
             value=artist_name, label="Artist Name", read_only=True,
             border_color=BORDER, text_style=ft.TextStyle(color=TEXT), bgcolor=SURFACE
@@ -210,16 +235,6 @@ class ArtistMetadataDialog:
         )
         lbl_status = ft.Text("Loading current metadata...", color=DIM, size=12)
 
-        # Tap-to-add suggestions. Two sources, in order of relevance:
-        #   • the tags the artist's own FILES carry (albums.genre) — the source
-        #     usually knew an artist was 'Rap' even where MusicBrainz has no
-        #     entity for them at all, which is exactly the gap being filled here;
-        #   • the vocabulary the rest of the library already uses.
-        # Picking beats typing for more than convenience: the walk reads these
-        # tags through an NPMI model learned from co-occurrence across this
-        # library, so a one-off spelling has no relation to anything and gets
-        # fenced apart from the scene it belongs to. Suggestions keep hand
-        # entries inside the vocabulary the model can actually interpret.
         sug_files = ft.Row(wrap=True, spacing=6, run_spacing=6)
         sug_library = ft.Row(wrap=True, spacing=6, run_spacing=6)
         lbl_files = ft.Text("From this artist's files", color=DIM, size=11, weight="bold", visible=False)
@@ -237,7 +252,8 @@ class ArtistMetadataDialog:
                 toks.append(tok)
             t_genres.value = ", ".join(toks)
             _restyle()
-            self.page.update()
+            if self.page:
+                self.page.update()
 
         def _chip(tok: str, subtitle: str | None = None) -> ft.Control:
             selected = tok.lower() in [t.lower() for t in _current_tokens()]
@@ -256,8 +272,6 @@ class ArtistMetadataDialog:
                 tooltip="Tap to remove" if selected else "Tap to add",
             )
 
-        # Keep the chip fills in sync with whatever is in the text field, so
-        # typing and tapping stay consistent (the field remains the source of truth).
         self._sug_files: list[str] = []
         self._sug_library: list[tuple[str, int]] = []
 
@@ -271,7 +285,8 @@ class ArtistMetadataDialog:
 
         def _on_genres_change(_e):
             _restyle()
-            self.page.update()
+            if self.page:
+                self.page.update()
 
         t_genres.on_change = _on_genres_change
 
@@ -290,8 +305,6 @@ class ArtistMetadataDialog:
                     lbl_status.value = "No existing metadata row."
             except Exception as exc:
                 lbl_status.value = f"Error loading info: {exc}"
-            # Suggestions are best-effort: a failure here must never block the
-            # manual edit, which is the whole point of the dialog.
             try:
                 self._sug_files = await self.app.db_manager.get_artist_source_genres(artist_name)
             except Exception as exc:
@@ -308,9 +321,11 @@ class ArtistMetadataDialog:
                 logger.debug("genre vocabulary unavailable: %s", exc)
                 self._sug_library = []
             _restyle()
-            self.page.update()
+            if self.page:
+                self.page.update()
 
-        self.page.run_task(_load)
+        if self.page:
+            self.page.run_task(_load)
 
         def save(e):
             async def _do_save():
@@ -335,7 +350,8 @@ class ArtistMetadataDialog:
                     else:
                         on_saved()
 
-            self.page.run_task(_do_save)
+            if self.page:
+                self.page.run_task(_do_save)
 
         self._dlg = ft.AlertDialog(
             title=ft.Text(f"Fix Artist Info: {artist_name}", color=TEXT, size=16, weight="bold"),
@@ -360,12 +376,16 @@ class ArtistMetadataDialog:
                 ),
             ],
         )
-        self.page.overlay.append(self._dlg)
-        self._dlg.open = True
-        self.page.update()
+        if self.page:
+            self.page.overlay.append(self._dlg)
+            self._dlg.open = True
+            self.page.update()
 
     def _close(self):
         if self._dlg:
             self._dlg.open = False
-            self.page.update()
+            if self.page:
+                self.page.update()
+            if self.page and self._dlg in self.page.overlay:
+                self.page.overlay.remove(self._dlg)
 

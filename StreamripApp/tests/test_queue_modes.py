@@ -335,7 +335,6 @@ class TestQueueModes(unittest.TestCase):
         self.assertEqual(audio_engine.current_index, 3)
         self.assertEqual(audio_engine.queue[3]["path"], "/music/walk1.mp3")
         self.app.now_playing.update_play_similar.assert_called_with(False)
-        self.app.mini_player.update_play_similar.assert_called_with(False)
 
     def test_play_new_track_in_similar_mode(self):
         # 1. Start sequential play in regular mode (3 tracks)

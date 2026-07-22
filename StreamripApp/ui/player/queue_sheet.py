@@ -224,6 +224,11 @@ class QueueSheet:
 
             return AnimatedEntry(
                 ft.Dismissible(
+                    # Flutter requires a Key on every Dismissible; a keyless one
+                    # asserts at build time and blacks out the render. The key on
+                    # the AnimatedEntry wrapper does NOT satisfy the Dismissible
+                    # itself — it needs its own.
+                    key=f"qd_{i}",
                     content=card,
                     # Background exposed when swiping RIGHT (START_TO_END)
                     background=ft.Container(
@@ -369,4 +374,3 @@ class QueueSheet:
     def _clear_all(self):
         audio_engine.clear_queue()
         self.collapse()
-        self.app.show_snackbar("Playback queue cleared.")

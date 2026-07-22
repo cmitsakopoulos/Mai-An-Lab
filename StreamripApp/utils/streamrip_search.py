@@ -233,25 +233,37 @@ class StreamripSearcher:
             raise Exception(f"Connection failed: {exc}")
 
         async def _fetch_type(m_type: str) -> list:
-            try:
-                pages = await client.search(m_type, query, limit=limit, offset=offset)
-                items_out = []
-                for page in pages:
-                    for item in page.get(f"{m_type}s", {}).get("items", []):
-                        if isinstance(item, dict):
-                            item["_media_type"] = m_type
-                            items_out.append(item)
-                return items_out
-            except Exception as exc:
-                logger.warning("Qobuz search %s: %s", m_type, exc, exc_info=True)
-                return []
+            pages = await client.search(m_type, query, limit=limit, offset=offset)
+            items_out = []
+            for page in pages:
+                for item in page.get(f"{m_type}s", {}).get("items", []):
+                    if isinstance(item, dict):
+                        item["_media_type"] = m_type
+                        items_out.append(item)
+            return items_out
 
+        # Fetch each media type independently. A failure on a single type must
+        # not sink the whole search — but if EVERY type errors out we're looking
+        # at a connection / auth / app-secret problem, not an empty result set.
+        # In that case propagate a clear message so the UI can show an actionable
+        # error instead of a misleading "No results found".
         results_per_type = []
+        fetch_errors: list[Exception] = []
+        any_ok = False
         for m in media_types:
             if progress_callback:
                 progress_callback("Searching", f"Searching {m}s on Qobuz...")
-            items = await _fetch_type(m)
+            try:
+                items = await _fetch_type(m)
+            except Exception as exc:
+                logger.warning("Qobuz search %s failed: %s", m, exc, exc_info=True)
+                fetch_errors.append(exc)
+                continue
+            any_ok = True
             results_per_type.append(items)
+
+        if not any_ok and fetch_errors:
+            raise self._humanize_search_error(fetch_errors[0])
 
         if progress_callback:
             progress_callback("Processing", "Formatting search results...")
@@ -261,6 +273,32 @@ class StreamripSearcher:
             raw.extend(items)
 
         return self._parse_results(raw, "qobuz")
+
+    @staticmethod
+    def _humanize_search_error(exc: Exception) -> Exception:
+        """Translate a raw Qobuz/transport exception into a concise, actionable
+        message for the search screen. The API surfaces auth / bad-app-secret
+        failures as a non-200 status embedded in an AssertionError string
+        ("Status: 401, Response: ..."), so we sniff that out first."""
+        import re
+        msg = str(exc).strip() or exc.__class__.__name__
+        low = msg.lower()
+        status_match = re.search(r"status[:=]\s*(\d{3})", msg, re.IGNORECASE)
+        status = status_match.group(1) if status_match else None
+
+        if type(exc).__name__ == "InvalidAppSecretError" or "app secret" in low or "appsecret" in low:
+            return Exception("Qobuz rejected the App Secret. Check the App ID / Secret in the Settings tab.")
+        if status in ("400", "401", "403"):
+            return Exception(
+                f"Qobuz rejected the request (HTTP {status}). Your App ID / Secret or "
+                "credentials look invalid — verify them in the Settings tab."
+            )
+        if status == "429":
+            return Exception("Qobuz is rate-limiting requests (HTTP 429). Wait a moment and try again.")
+        if any(k in low for k in ("timeout", "timed out", "connect", "getaddrinfo",
+                                  "resolve", "network", "ssl", "connection reset", "unreachable")):
+            return Exception("Couldn't reach Qobuz — check your internet connection and try again.")
+        return Exception(f"Qobuz search failed: {msg}")
 
     def _parse_results(self, raw_items, source):
         # We wrap the raw_items in a dict that mimics the expected page format

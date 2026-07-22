@@ -55,6 +55,15 @@ INTENT_NEGATIVE       = "negative"        # no / later / not now (cancel pending
 INTENT_NAME_ENTITY    = "name_entity"     # call it X / name it X
 INTENT_GREET          = "greet"
 INTENT_HELP           = "help"
+INTENT_CREATOR        = "creator"         # who made/created you
+INTENT_COFFEE         = "coffee"          # make me coffee / tea
+INTENT_HAL            = "hal"             # open pod bay doors
+INTENT_IRON_MAN       = "iron_man"        # i am iron man
+INTENT_JOKE           = "joke"            # tell me a joke
+INTENT_TIME_DATE      = "time_date"       # what time / date is it
+INTENT_STATUS         = "status"          # system status / how are you
+INTENT_THANKS         = "thanks"          # thank you / cheers
+INTENT_QUOTE          = "quote"           # give me a quote
 INTENT_UNKNOWN        = "unknown"
 
 
@@ -123,6 +132,17 @@ def _build_patterns() -> list[tuple[str, re.Pattern]]:
         (INTENT_MUTE,         re.compile(r"^\s*(?:mute|silence|be\s+quiet)\s*$", re.I)),
         (INTENT_UNMUTE,       re.compile(r"^\s*(?:unmute|restore\s+volume)\s*$", re.I)),
 
+        # ── Conversational & Easter Eggs ────────────────────────────────────────
+        (INTENT_CREATOR,      re.compile(r"^\s*(?:who\s+(?:made|created|built|programmed)\s+you|who\s+is\s+your\s+(?:creator|father|maker)|who\s+are\s+you)\s*\??\s*$", re.I)),
+        (INTENT_COFFEE,       re.compile(r"^\s*(?:make|brew|get|pour)\s+(?:me\s+)?(?:a\s+)?(?:coffee|tea|cappuccino|espresso|drink)\s*[.!]?\s*$", re.I)),
+        (INTENT_HAL,          re.compile(r"^\s*(?:open\s+(?:the\s+)?pod\s+bay\s+doors?|hal\s*9000)\s*[.!]?\s*$", re.I)),
+        (INTENT_IRON_MAN,     re.compile(r"^\s*(?:i\s+am|i'm)\s+iron\s+man\s*[.!]?\s*$", re.I)),
+        (INTENT_JOKE,         re.compile(r"^\s*(?:tell\s+me\s+(?:a\s+)?joke|say\s+something\s+funny|make\s+me\s+laugh|got\s+any\s+jokes?)\s*\??\s*$", re.I)),
+        (INTENT_TIME_DATE,    re.compile(r"^\s*(?:what\s*'?s?\s+(?:the\s+|today's\s+)?(?:time|date)|what\s+time\s+is\s+it|what\s+is\s+the\s+(?:time|date)|what\s+day\s+is\s+it|tell\s+me\s+the\s+time|current\s+time)\s*\??\s*$", re.I)),
+        (INTENT_STATUS,       re.compile(r"^\s*(?:system\s+status|status\s+report|run\s+diagnostics?|how\s+are\s+you(?: doing)?|how's\s+it\s+going|how\s+are\s+things)\s*\??\s*$", re.I)),
+        (INTENT_THANKS,       re.compile(r"^\s*(?:thank\s+you|thanks(?:\s+jarvis)?|good\s+job|great\s+job|cheers|awesome|nice\s+one)\s*[.!]?\s*$", re.I)),
+        (INTENT_QUOTE,        re.compile(r"^\s*(?:give\s+me\s+a\s+quote|quote\s+(?:me|something)|say\s+something\s+(?:wise|inspirational|philosophical))\s*\??\s*$", re.I)),
+
         # ── Similarity / artist navigation ──────────────────────────────────────
         (INTENT_PLAY_SIMILAR, re.compile(
             r"^\s*(?P<verb>play|start|put\s+on|add|queue|enqueue|put)?\s*"
@@ -146,7 +166,7 @@ def _build_patterns() -> list[tuple[str, re.Pattern]]:
             r"(?:song|songs|track|tracks|music|tune|tunes|stuff|anything|something)\s*$",
             re.I
         )),
-        (INTENT_PLAY_RANDOM,  re.compile(r"^\s*(?:shuffle\s+play|surprise\s+me)\s*$", re.I)),
+        (INTENT_PLAY_RANDOM,  re.compile(r"^\s*(?:shuffle\s+play|surprise\s+me|sing(?:\s+a\s+song|\s+something)?)\s*\??\s*$", re.I)),
         # "play something else" / "play another" — fresh shuffle pick. Without
         # this the parser fell through to play_now and searched the library
         # for a literal track called "something else".

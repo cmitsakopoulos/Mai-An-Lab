@@ -1757,29 +1757,104 @@ class AssistantRunner:
             deferred_play=True,
         )
 
+    # ── Conversational Handlers ─────────────────────────────────────────────
+
+    async def _handle_creator(self, _intent: ai.Intent) -> AssistantResponse:
+        return AssistantResponse(
+            spoken="I am Jarvis, an assistant configured for library and audio playback management.",
+            displayed="Jarvis Audio Assistant — Configured for local library management."
+        )
+
+    async def _handle_coffee(self, _intent: ai.Intent) -> AssistantResponse:
+        return AssistantResponse(
+            spoken="I can only assist with audio playback and library management, sir.",
+            displayed="Functionality unavailable. Jarvis is limited to audio playback and library operations."
+        )
+
+    async def _handle_hal(self, _intent: ai.Intent) -> AssistantResponse:
+        return AssistantResponse(
+            spoken="Systems are operating normally, sir. What would you like to play?",
+            displayed="Systems operational. Ready for your playback command."
+        )
+
+    async def _handle_iron_man(self, _intent: ai.Intent) -> AssistantResponse:
+        return AssistantResponse(
+            spoken="Acknowledged, sir. Systems are online and ready for your command.",
+            displayed="Systems online. Ready for playback directives."
+        )
+
+    async def _handle_joke(self, _intent: ai.Intent) -> AssistantResponse:
+        return AssistantResponse(
+            spoken="I am better equipped for music curation than comedy, sir, but I am happy to manage your queue.",
+            displayed="I am better equipped for music curation than comedy, sir, but I am happy to manage your queue."
+        )
+
+    async def _handle_time_date(self, _intent: ai.Intent) -> AssistantResponse:
+        import datetime
+        now = datetime.datetime.now()
+        time_str = now.strftime("%I:%M %p").lstrip("0")
+        date_str = now.strftime("%A, %B %d, %Y")
+        return AssistantResponse(
+            spoken=f"It is currently {time_str} on {date_str}, sir.",
+            displayed=f"Time: **{time_str}** | Date: **{date_str}**"
+        )
+
+    async def _handle_status(self, _intent: ai.Intent) -> AssistantResponse:
+        return AssistantResponse(
+            spoken="All systems nominal, sir. Audio decoders operating at peak performance and music graph matrix is standing by.",
+            displayed="**System Diagnostics**\n• Core Engine: Operational\n• Audio Service: Active\n• Database Index: Synced"
+        )
+
+    async def _handle_thanks(self, _intent: ai.Intent) -> AssistantResponse:
+        return AssistantResponse(
+            spoken="You are very welcome, sir.",
+            displayed="You are very welcome, sir."
+        )
+
+    async def _handle_quote(self, _intent: ai.Intent) -> AssistantResponse:
+        quotes = [
+            ('"Where words fail, music speaks." — Hans Christian Andersen',
+             '*"Where words fail, music speaks."*\n— **Hans Christian Andersen**'),
+            ('"Music is the shorthand of emotion." — Leo Tolstoy',
+             '*"Music is the shorthand of emotion."*\n— **Leo Tolstoy**'),
+            ('"Without music, life would be a mistake." — Friedrich Nietzsche',
+             '*"Without music, life would be a mistake."*\n— **Friedrich Nietzsche**')
+        ]
+        spoken, displayed = random.choice(quotes)
+        return AssistantResponse(spoken=spoken, displayed=displayed)
+
     # ── Dispatch table ──────────────────────────────────────────────────────
     # Filled below the class so the method references resolve.
 
 
 AssistantRunner._INTENT_DISPATCH = {
-    ai.INTENT_PLAY_NOW:      AssistantRunner._handle_play_now,
-    ai.INTENT_QUEUE_ADD:     AssistantRunner._handle_queue_add,
-    ai.INTENT_QUEUE_NEXT:    AssistantRunner._handle_queue_next,
-    ai.INTENT_PLAY_SIMILAR:  AssistantRunner._handle_play_similar,
-    ai.INTENT_PLAY_MORE_BY:  AssistantRunner._handle_play_more_by,
-    ai.INTENT_PLAY_RANDOM:    AssistantRunner._handle_play_random,
-    ai.INTENT_SKIP:          AssistantRunner._handle_skip,
-    ai.INTENT_PREV:          AssistantRunner._handle_prev,
-    ai.INTENT_PAUSE:         AssistantRunner._handle_pause,
-    ai.INTENT_RESUME:        AssistantRunner._handle_resume,
-    ai.INTENT_STOP:          AssistantRunner._handle_stop,
-    ai.INTENT_CLEAR_QUEUE:   AssistantRunner._handle_clear_queue,
-    ai.INTENT_SHUFFLE:       AssistantRunner._handle_shuffle,
-    ai.INTENT_MUTE:          AssistantRunner._handle_mute,
-    ai.INTENT_UNMUTE:        AssistantRunner._handle_unmute,
-    ai.INTENT_RESCAN_DSP:    AssistantRunner._handle_rescan_dsp,
-    ai.INTENT_PLAY_THE_USUAL: AssistantRunner._handle_play_the_usual,
-    ai.INTENT_GREET:           AssistantRunner._handle_greet,
-    ai.INTENT_HELP:          AssistantRunner._handle_help,
-    ai.INTENT_UNKNOWN:       AssistantRunner._handle_unknown,
+    ai.INTENT_PLAY_NOW:        AssistantRunner._handle_play_now,
+    ai.INTENT_QUEUE_ADD:       AssistantRunner._handle_queue_add,
+    ai.INTENT_QUEUE_NEXT:      AssistantRunner._handle_queue_next,
+    ai.INTENT_PLAY_SIMILAR:    AssistantRunner._handle_play_similar,
+    ai.INTENT_PLAY_MORE_BY:    AssistantRunner._handle_play_more_by,
+    ai.INTENT_PLAY_RANDOM:     AssistantRunner._handle_play_random,
+    ai.INTENT_SKIP:            AssistantRunner._handle_skip,
+    ai.INTENT_PREV:            AssistantRunner._handle_prev,
+    ai.INTENT_PAUSE:           AssistantRunner._handle_pause,
+    ai.INTENT_RESUME:          AssistantRunner._handle_resume,
+    ai.INTENT_STOP:            AssistantRunner._handle_stop,
+    ai.INTENT_CLEAR_QUEUE:     AssistantRunner._handle_clear_queue,
+    ai.INTENT_SHUFFLE:         AssistantRunner._handle_shuffle,
+    ai.INTENT_MUTE:            AssistantRunner._handle_mute,
+    ai.INTENT_UNMUTE:          AssistantRunner._handle_unmute,
+    ai.INTENT_RESCAN_DSP:      AssistantRunner._handle_rescan_dsp,
+    ai.INTENT_PLAY_THE_USUAL:   AssistantRunner._handle_play_the_usual,
+    ai.INTENT_GREET:             AssistantRunner._handle_greet,
+    ai.INTENT_HELP:            AssistantRunner._handle_help,
+    ai.INTENT_CREATOR:         AssistantRunner._handle_creator,
+    ai.INTENT_COFFEE:          AssistantRunner._handle_coffee,
+    ai.INTENT_HAL:             AssistantRunner._handle_hal,
+    ai.INTENT_IRON_MAN:        AssistantRunner._handle_iron_man,
+    ai.INTENT_JOKE:            AssistantRunner._handle_joke,
+    ai.INTENT_TIME_DATE:       AssistantRunner._handle_time_date,
+    ai.INTENT_STATUS:          AssistantRunner._handle_status,
+    ai.INTENT_THANKS:          AssistantRunner._handle_thanks,
+    ai.INTENT_QUOTE:           AssistantRunner._handle_quote,
+    ai.INTENT_UNKNOWN:         AssistantRunner._handle_unknown,
 }
