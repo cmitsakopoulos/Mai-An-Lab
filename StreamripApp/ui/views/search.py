@@ -260,6 +260,44 @@ class SearchView:
             expand=True,
         )
 
+        # error state — shown INSTEAD of the empty "No results" label when the
+        # search itself failed to reach Qobuz (connection down, bad App ID /
+        # Secret, rejected credentials). Gives the user the specific reason plus
+        # a way to act on it, rather than silently pretending nothing matched.
+        self._error_detail = ft.Text(
+            "", color=DIM, size=12, text_align=ft.TextAlign.CENTER,
+            selectable=True, max_lines=4, overflow=ft.TextOverflow.ELLIPSIS,
+        )
+        self._error_label = ft.Container(
+            content=ft.Column(
+                [
+                    ft.Icon(ft.Icons.CLOUD_OFF_ROUNDED, color="#FF6B6B", size=48),
+                    ft.Text("Search couldn't connect", size=18, weight=ft.FontWeight.BOLD, color=TEXT),
+                    self._error_detail,
+                    ft.Container(height=12),
+                    ft.Row([
+                        ft.Button(
+                            "Check Settings",
+                            icon=ft.Icons.SETTINGS_ROUNDED,
+                            on_click=lambda _: self.app._switch_tab(3),
+                            style=ft.ButtonStyle(color=BG, bgcolor=CYAN),
+                        ),
+                        ft.TextButton(
+                            "Retry",
+                            icon=ft.Icons.REFRESH_ROUNDED,
+                            on_click=lambda _: self.page.run_task(self.start_search),
+                        ),
+                    ], alignment=ft.MainAxisAlignment.CENTER),
+                ],
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                spacing=8,
+            ),
+            alignment=ft.Alignment(0, 0),
+            visible=False,
+            expand=True,
+            padding=30,
+        )
+
 
         # download progress card
         self._progress_status  = ft.Text("Ready", color=TEXT, size=13, weight=ft.FontWeight.W_700)
@@ -491,6 +529,7 @@ class SearchView:
                     [
                         self._animated_results_wrapper,
                         self._empty_label,
+                        self._error_label,
                         self._setup_prompt,
                         self._landing_container,
                     ],
@@ -812,6 +851,7 @@ class SearchView:
             self._search_indicator.visible = False
             self._results_list.controls.clear()
             self._empty_label.visible = False
+            self._error_label.visible = False
             self.cached_results = {"track": [], "album": [], "artist": []}
             self.expanded_nodes.clear()
             self.node_cache.clear()
@@ -846,8 +886,9 @@ class SearchView:
         self.current_offset = 0
         self._is_loading_more = False
         self._empty_label.visible = False
+        self._error_label.visible = False
         self._landing_container.visible = False
-        
+
         # Proactive check for credentials
         from utils.streamrip_api import load_config
         cfg = load_config()
@@ -896,18 +937,19 @@ class SearchView:
             self._search_indicator.visible = False
             
             if results is None:
-                self._results_list.controls.clear()
+                self._show_search_error(
+                    "Couldn't reach Qobuz — check your internet connection and try again."
+                )
                 self.page.update()
-                self.app._show_error("Search failed: Network error.")
                 return
 
             if isinstance(results, dict) and "error" in results:
-                self._results_list.controls.clear()
+                self._show_search_error(results.get("error", "Unknown error"))
                 self.page.update()
-                self.app._show_error(results.get("error", "Unknown error"))
                 return
 
             if not results:
+                self._error_label.visible = False
                 self._empty_label.visible = True
                 self._results_list.controls.clear()
                 self._update_pagination_ui()
@@ -938,6 +980,17 @@ class SearchView:
 
         self.page.run_task(_update_ui)
 
+    def _show_search_error(self, message: str):
+        """Surface a search connection/auth failure inline in the results area
+        instead of the misleading empty state or the full-screen crash boundary.
+        Caller is responsible for the surrounding page.update()."""
+        self._error_detail.value = message or "An unknown error occurred while searching."
+        self._error_label.visible = True
+        self._empty_label.visible = False
+        self._landing_container.visible = False
+        self._results_list.controls.clear()
+        self._pagination_bar.visible = False
+
     def _rebuild_results(self):
         active_type = self.view_mode[:-1]  # "tracks" -> "track"
         source = self.cached_results.get(active_type, [])
@@ -951,6 +1004,7 @@ class SearchView:
         end_idx = start_idx + self.items_per_page
         page_items = source[start_idx:end_idx]
 
+        self._error_label.visible = False
         self._empty_label.visible = not source
 
         first_chunk = []
@@ -1416,7 +1470,6 @@ class SearchView:
                             data["preview_state"] = "playing"
                             icon_ctrl.content = ft.Icon(ft.Icons.STOP_CIRCLE_OUTLINED, color=CYAN, size=20)
                             container_ctrl.shadow = ft.BoxShadow(blur_radius=8, color=apply_opacity(0.15, CYAN))
-                            self.app.show_snackbar(f"Streaming preview: {title}")
                             icon_ctrl.update()
                             container_ctrl.update()
                             self.hide_preview_progress()
@@ -1476,7 +1529,6 @@ class SearchView:
                         icon_ctrl.content = ft.Icon(ft.Icons.STOP_CIRCLE_OUTLINED, color=CYAN, size=20)
                         container_ctrl.shadow = ft.BoxShadow(blur_radius=8, color=apply_opacity(0.15, CYAN))
                         audio_engine.set_queue([meta], start_index=0)
-                        self.app.show_snackbar(f"Playing preview (downloaded): {title}")
                         icon_ctrl.update()
                         container_ctrl.update()
                         self.hide_preview_progress()

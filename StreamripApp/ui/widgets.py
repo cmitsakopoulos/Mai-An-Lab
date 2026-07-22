@@ -2,7 +2,6 @@ import os
 import re
 import sys
 import logging
-import asyncio
 import platform
 import threading
 import subprocess
@@ -109,135 +108,62 @@ class NotificationSystem:
     def __init__(self, app):
         self.app = app
         self.page = app.page
-        self._initialized = False
-        self.container = None
-        self.wrapper = None
-        self._active_notifications = []
-
-    def _ensure_initialized(self):
-        if self._initialized:
-            return
-        self.container = ft.Column(
-            tight=True,
-            spacing=10,
-            width=320,
-        )
-        self.wrapper = ft.Container(
-            content=self.container,
-            top=40,
-            right=20,
-        )
-        self.page.overlay.append(self.wrapper)
-        self._initialized = True
+        # The snackbar currently on screen, so a burst retires the old one
+        # instead of stacking. Held directly (not via pop_dialog) so dismissing
+        # a toast never pops an unrelated dialog off the stack.
+        self._current: "ft.SnackBar | None" = None
 
     def show(self, text: str, icon=ft.Icons.NOTIFICATIONS_ROUNDED, color=CYAN):
-        # Don't try to animate UI elements into a suspended/hidden client;
-        # it causes buffer back-pressure and spurious 120 Hz wakeups.
-        if self.app.is_background:
+        # Native ft.SnackBar via page.show_dialog. The previous implementation
+        # stacked custom cards in a positioned Container appended to page.overlay;
+        # on Flet 0.86 desktop that overlay structure blanked the ENTIRE view — a
+        # silent Flutter render failure with nothing in the Python log — so any
+        # toast took the app down. SnackBar is a DialogControl presented through
+        # the same managed show_dialog path the dialogs use, so it renders and
+        # auto-dismisses without blanking. The show(text, icon, color) API is
+        # unchanged, so all call sites keep working.
+        if self.app.is_background or not self.page:
             return
-        self._ensure_initialized()
 
-        # Limit to at most 3 active notifications
-        while len(self._active_notifications) >= 3:
-            oldest = self._active_notifications.pop(0)
-            if oldest.data and callable(oldest.data):
-                oldest.data()
+        def _present():
+            prev = self._current
+            if prev is not None:
+                try:
+                    prev.open = False
+                    prev.update()
+                except Exception:
+                    pass
+                self._current = None
+            sb = ft.SnackBar(
+                content=ft.Row(
+                    [
+                        ft.Icon(icon, color=color, size=20),
+                        ft.Text(
+                            text, color=TEXT, size=13, weight=ft.FontWeight.W_500,
+                            expand=True, no_wrap=False, max_lines=3,
+                        ),
+                    ],
+                    spacing=12, tight=True,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                bgcolor=SURFACE2,
+                behavior=ft.SnackBarBehavior.FLOATING,
+                show_close_icon=True,
+                close_icon_color=DIM,
+                duration=3000,
+                margin=ft.Margin.all(12),
+                padding=ft.Padding.symmetric(horizontal=14, vertical=10),
+                shape=ft.RoundedRectangleBorder(radius=12),
+            )
+            self._current = sb
+            try:
+                self.page.show_dialog(sb)
+            except Exception:
+                logger.exception("snackbar show failed")
 
-        # Create a sleek notification card
-        notification = ft.Container(
-            content=ft.Row(
-                [
-                    ft.Container(
-                        content=ft.Icon(icon, color=color, size=20),
-                        bgcolor=apply_opacity(0.1, color),
-                        padding=10,
-                        border_radius=8,
-                    ),
-                    ft.Text(
-                        text, 
-                        color=TEXT, 
-                        size=13, 
-                        weight=ft.FontWeight.W_500, 
-                        expand=True,
-                        no_wrap=False,
-                        max_lines=3,
-                    ),
-                ],
-                spacing=12,
-                vertical_alignment=ft.CrossAxisAlignment.CENTER,
-            ),
-            bgcolor=SURFACE2,
-            border=ft.Border.all(1, apply_opacity(0.1, TEXT)),
-            border_radius=12,
-            padding=ft.Padding.symmetric(horizontal=12, vertical=10),
-            shadow=ft.BoxShadow(
-                blur_radius=20,
-                color=apply_opacity(0.3, BG),
-                offset=ft.Offset(0, 10),
-            ),
-            animate_opacity=300,
-            opacity=0,
-            offset=ft.Offset(0.3, 0),
-            animate_offset=ft.Animation(400, ft.AnimationCurve.DECELERATE),
-        )
-
-        dismissed = [False]
-
-        def _do_dismiss_immediate():
-            if dismissed[0]: return
-            dismissed[0] = True
-            if dismissible in self._active_notifications:
-                self._active_notifications.remove(dismissible)
-            def _remove():
-                if dismissible in self.container.controls:
-                    self.container.controls.remove(dismissible)
-            self.app.safe_update(_remove)
-
-        def _do_dismiss():
-            if dismissed[0]: return
-            dismissed[0] = True
-            if dismissible in self._active_notifications:
-                self._active_notifications.remove(dismissible)
-            # If the app is in the background we can't drive animations;
-            # skip straight to an immediate removal instead.
-            if self.app.is_background:
-                _do_dismiss_immediate()
-                return
-            def _fade_out():
-                notification.opacity = 0
-                notification.offset = ft.Offset(0.3, 0)
-            self.app.safe_update(_fade_out)
-
-            async def _remove_after():
-                await asyncio.sleep(0.4)
-                def _remove():
-                    if dismissible in self.container.controls:
-                        self.container.controls.remove(dismissible)
-                self.app.safe_update(_remove)
-            asyncio.create_task(_remove_after())
-
-        dismissible = ft.Dismissible(
-            content=notification,
-            dismiss_direction=ft.DismissDirection.HORIZONTAL,
-            on_dismiss=lambda e: _do_dismiss_immediate(),
-        )
-        dismissible.data = _do_dismiss
-        self._active_notifications.append(dismissible)
-
-        def _add():
-            self.container.controls.insert(0, dismissible)
-            notification.opacity = 1
-            notification.offset = ft.Offset(0, 0)
-
-        self.app.safe_update(_add)
-
-        async def _dismiss():
-            await asyncio.sleep(4)
-            _do_dismiss()
-
-        notification.on_click = lambda _: _do_dismiss()
-
-        asyncio.create_task(_dismiss())
+        # Route through safe_update so any thread can call show() and it lands in
+        # the app's single coalesced page.update().
+        self.app.safe_update(_present)
 
 
 class AnimatedEntry(ft.Container):

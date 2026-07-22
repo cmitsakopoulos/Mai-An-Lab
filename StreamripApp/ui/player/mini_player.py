@@ -53,28 +53,6 @@ class MiniPlayerBar:
         )
         self._progress   = ft.ProgressBar(value=0, color=CYAN, bgcolor=None, height=2)
 
-        # ── Auto-play chip ──────────────────────────────────────────────────
-        # Trails the artist on the second line, filling space the artist text
-        # would otherwise waste — so the toggle costs the card no extra height.
-        # Long artist names are not a problem: _artist is expand=True with
-        # ellipsis, so it truncates and the chip keeps its intrinsic width.
-        # One unified control (Play-Similar machinery); Auto-DJ is folded into
-        # this single toggle. State reads purely from the cyan tint + fill.
-        self._autoplay_icon  = ft.Icon(ft.Icons.ALL_INCLUSIVE_ROUNDED, color=DIM, size=13)
-        self._autoplay_label = ft.Text("Auto-play", color=DIM, size=10, weight=ft.FontWeight.W_700)
-        self._autoplay_pill  = ft.Container(
-            content=ft.Row(
-                [self._autoplay_icon, self._autoplay_label],
-                spacing=5, tight=True,
-                vertical_alignment=ft.CrossAxisAlignment.CENTER,
-            ),
-            bgcolor=SURFACE2,
-            border=ft.Border.all(1, BORDER),
-            border_radius=10,
-            padding=ft.Padding.symmetric(horizontal=8, vertical=3),
-            on_click=self._on_autoplay_toggle,
-        )
-
         self._ever_shown  = False   # True once a title has been set at least once
         self._last_title  = ""
         self._last_artist = ""
@@ -96,11 +74,7 @@ class MiniPlayerBar:
                                     ft.Column(
                                         [
                                             ft.Row([self._title], spacing=8, alignment=ft.MainAxisAlignment.START),
-                                            ft.Row(
-                                                [self._artist, self._autoplay_pill],
-                                                spacing=8,
-                                                vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                                            ),
+                                            ft.Row([self._artist], spacing=8, alignment=ft.MainAxisAlignment.START),
                                         ],
                                         spacing=2, expand=True,
                                     ),
@@ -147,10 +121,6 @@ class MiniPlayerBar:
     def build(self) -> ft.Control:
         return self.container
 
-    def _on_autoplay_toggle(self, _e):
-        # Single unified auto-play toggle (Play-Similar machinery under the hood).
-        self.app.set_play_similar_mode(not self.app.play_similar_mode)
-
     def update_meta(self, title: str, artist: str):
         # Called from within safe_update; mutate directly, rely on outer page.update()
         if title:
@@ -177,18 +147,6 @@ class MiniPlayerBar:
             self._artwork.visible    = True
         else:
             self._artwork.visible    = False
-
-    def update_play_similar(self, enabled: bool):
-        # State reads entirely from the chip's tint + fill; the artwork border
-        # is left to Auto-DJ so the two signals stay distinguishable.
-        self._autoplay_icon.color   = CYAN if enabled else DIM
-        self._autoplay_label.color  = CYAN if enabled else DIM
-        self._autoplay_pill.bgcolor = apply_opacity(0.14, CYAN) if enabled else SURFACE2
-        self._autoplay_pill.border  = ft.Border.all(1, apply_opacity(0.55, CYAN)) if enabled else ft.Border.all(1, BORDER)
-        try:
-            self._autoplay_pill.update()
-        except (RuntimeError, AssertionError):
-            pass
 
     def update_auto_dj(self, enabled: bool):
         self._artwork_container.border = ft.Border.all(2, AMBER) if enabled else None

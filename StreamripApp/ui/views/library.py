@@ -209,10 +209,15 @@ class LibraryView:
     # the list runs at spacing=0 in tracks mode. Change one, change the other.
     ROW_H = 64
     LIST_PAD_TOP = 4
-    # Rows kept materialised beyond each edge of the viewport. 40 rows ~= 2500px
-    # of runway either side, so ordinary flings never outrun it. Raising this
-    # trades a more expensive re-slice for fewer of them.
-    WINDOW_LEAD = 40
+    # Rows kept materialised beyond each edge of the viewport. 20 rows ~= 1280px
+    # of runway either side — still clear of a normal fling between scroll ticks
+    # (every 100ms), while roughly halving how many rows a full re-slice has to
+    # BUILD versus the old 40. That per-re-slice build + serialize is the residual
+    # scroll hitch on a large library (Python-side control construction over the
+    # Flet bridge), so a smaller window is the direct lever; the Flutter-side
+    # cache_extent (800px) still covers the gap on the very fastest flings.
+    # Raising this trades a more expensive re-slice for fewer of them.
+    WINDOW_LEAD = 20
     # Only re-slice once the ideal window has drifted this many rows from the
     # live one — without hysteresis every scroll tick would rebuild the list.
     WINDOW_HYST = 10
@@ -1238,11 +1243,7 @@ class LibraryView:
             # replace=True is non-destructive here: it inserts after the current
             # track and jumps to it, so the queue tail and any running auto-play
             # session survive being auditioned from the graph.
-            if self._enqueue_network_tracks([self._node_to_track(nd)], replace=True):
-                self.app.show_snackbar(
-                    f"Playing '{nd.get('title') or 'track'}'",
-                    icon=ft.Icons.PLAY_ARROW_ROUNDED, color=CYAN,
-                )
+            self._enqueue_network_tracks([self._node_to_track(nd)], replace=True)
 
         def _reseed_selection(_e=None):
             path = self._net_selected_path
@@ -1923,17 +1924,11 @@ class LibraryView:
 
         def _play_all(_e):
             self.app.trigger_haptic("network_walk")
-            n = self._enqueue_network_tracks([self._node_to_track(nd) for nd in nodes], replace=True)
-            if n:
-                self.app.show_snackbar(f"Playing the walk · {n} tracks",
-                                       icon=ft.Icons.PLAY_ARROW_ROUNDED, color=CYAN)
+            self._enqueue_network_tracks([self._node_to_track(nd) for nd in nodes], replace=True)
 
         def _add_all(_e):
             self.app.trigger_haptic("swipe_queue")
-            n = self._enqueue_network_tracks([self._node_to_track(nd) for nd in nodes], replace=False)
-            if n:
-                self.app.show_snackbar(f"Playing next · {n} tracks",
-                                       icon=ft.Icons.QUEUE_PLAY_NEXT_ROUNDED, color=CYAN)
+            self._enqueue_network_tracks([self._node_to_track(nd) for nd in nodes], replace=False)
 
         def _batch_btn(label, icon_name, on_click, primary=False):
             return ft.Container(
@@ -2050,8 +2045,6 @@ class LibraryView:
             # multi-thousand-track library queue means it never plays.
             self.app.trigger_haptic("swipe_queue")
             audio_engine.queue_next(self._node_to_track(nd))
-            self.app.show_snackbar(f"'{title}' plays next",
-                                   icon=ft.Icons.QUEUE_PLAY_NEXT_ROUNDED, color=CYAN)
 
         lead = ft.Container(
             content=ft.Text(lead_txt, size=10, weight=ft.FontWeight.W_800,
@@ -2128,13 +2121,12 @@ class LibraryView:
         path = nd.get("path") or ""
         title = nd.get("title") or "this track"
         meta = self._node_to_track(nd)
-        bs_holder = [None]
 
+        # Flet 0.86 dialog-stack presentation — see _open_track_context_menu for
+        # why the legacy overlay+`.open` path leaves the modal barrier stuck.
         def _close():
-            if bs_holder[0]:
-                bs_holder[0].open = False
-                bs_holder[0].update()
-                self.page.update()
+            if self.page:
+                self.page.pop_dialog()
 
         def _play_from_here(_e):
             # Slice the WALK, not _net_nodes. `index` is the row's position in the
@@ -2151,10 +2143,7 @@ class LibraryView:
             ]
             if not tail:
                 tail = [self._node_to_track(nd)]
-            n = self._enqueue_network_tracks(tail, replace=True)
-            if n:
-                self.app.show_snackbar(f"Playing {n} tracks from '{title}'",
-                                       icon=ft.Icons.PLAY_ARROW_ROUNDED, color=CYAN)
+            self._enqueue_network_tracks(tail, replace=True)
 
         def _reseed(_e):
             # Recentre the NEIGHBOURHOOD here: refetch neighbours, re-fit the
@@ -2185,7 +2174,8 @@ class LibraryView:
             self._schedule_net_walk_refresh(path, delay=0.0)
 
         def _add_to_playlist(_e):
-            self.page.run_task(self._open_add_to_playlist_sheet, meta, bs_holder[0])
+            _close()
+            self.page.run_task(self._open_add_to_playlist_sheet, meta)
 
         bs = ft.BottomSheet(
             content=ft.Container(
@@ -2223,10 +2213,7 @@ class LibraryView:
             ),
             bgcolor=SURFACE,
         )
-        bs_holder[0] = bs
-        self.page.overlay.append(bs)
-        bs.open = True
-        self.page.update()
+        self.page.show_dialog(bs)
 
     def _redraw_net_canvas(self):
         """Regenerate the canvas shape list in place. Only called when geometry
@@ -2420,15 +2407,6 @@ class LibraryView:
         live = (self._net_mode == "live")
         accent = _NET_WALK_COLOR if live else CYAN
         self._sync_net_mode_chip()
-        try:
-            self.app.show_snackbar(
-                "Now Playing — mirroring the real queue" if live
-                else "Explore — the graph stays where you put it",
-                icon=ft.Icons.MY_LOCATION if live else ft.Icons.TRAVEL_EXPLORE_ROUNDED,
-                color=accent,
-            )
-        except Exception:
-            pass
 
         cur = audio_engine.current_path or ""
         if live:
@@ -2459,8 +2437,6 @@ class LibraryView:
             g = int(197 + (68 - 197) * ratio)
             b = int(94 + (68 - 94) * ratio)
             return f"#{r:02x}{g:02x}{b:02x}"
-
-        dlg_holder = [None]
 
         # Action handlers
         def _on_mmr_change(e):
@@ -2510,9 +2486,7 @@ class LibraryView:
         )
 
         def _close_dialog(_e):
-            if dlg_holder[0]:
-                dlg_holder[0].open = False
-                dlg_holder[0].update()
+            self.page.pop_dialog()
 
         dlg = ft.AlertDialog(
             title=ft.Row(
@@ -2550,10 +2524,7 @@ class LibraryView:
             actions_alignment=ft.MainAxisAlignment.END,
             bgcolor=SURFACE2,
         )
-        dlg_holder[0] = dlg
-        self.page.overlay.append(dlg)
-        dlg.open = True
-        self.page.update()
+        self.page.show_dialog(dlg)
 
     async def _run_net_pulse(self, token: int):
         """Pulse the now-playing ring until a newer build supersedes this token.
@@ -2703,8 +2674,7 @@ class LibraryView:
         def pick(val):
             self.sort_mode = val
             self._sort_icon_btn.tooltip = f"Sort: {val.capitalize()}"
-            self._sort_bs.open = False
-            self.page.update()
+            self.page.pop_dialog()
             self.page.run_task(self.load_library)
 
         self._sort_bs = ft.BottomSheet(
@@ -2738,9 +2708,7 @@ class LibraryView:
             ),
             bgcolor=SURFACE,
         )
-        self.page.overlay.append(self._sort_bs)
-        self._sort_bs.open = True
-        self.page.update()
+        self.page.show_dialog(self._sort_bs)
 
     # ── flat tree loading ─────────────────────────────────────────────────────
     async def _build_rows_generator(self):
@@ -3550,12 +3518,10 @@ class LibraryView:
             async def _do():
                 name = name_field.value.strip()
                 if not name: return
-                self.dlg.open = False
-                self.page.update()
+                self.page.pop_dialog()
                 try:
                     await self.app.db_manager.create_playlist(name)
                     await self.load_library()
-                    self.app.show_snackbar(f"Playlist '{name}' created!", icon=ft.Icons.CHECK_CIRCLE_OUTLINE, color=LIB_PLAYLIST_COLOR)
                 except Exception as ex:
                     self.app.show_snackbar(f"Failed: {ex}")
             self.page.run_task(_do)
@@ -3564,14 +3530,12 @@ class LibraryView:
             title=ft.Text("New Playlist"),
             content=ft.Container(content=name_field, padding=ft.Padding.only(top=10)),
             actions=[
-                ft.TextButton("Cancel", on_click=lambda e: setattr(self.dlg, "open", False) or self.page.update()),
+                ft.TextButton("Cancel", on_click=lambda e: self.page.pop_dialog()),
                 ft.TextButton("Create", on_click=on_create),
             ],
             actions_alignment=ft.MainAxisAlignment.END,
         )
-        self.page.overlay.append(self.dlg)
-        self.dlg.open = True
-        self.page.update()
+        self.page.show_dialog(self.dlg)
 
     def _playlist_row(self, pl: dict, node_id: str, expanded: bool) -> ft.Control:
         name   = pl.get("name") or "Untitled Playlist"
@@ -3583,7 +3547,6 @@ class LibraryView:
             async def _do():
                 await self.app.db_manager.delete_playlist(pl_id)
                 await self.load_library()
-                self.app.show_snackbar(f"'{name}' deleted.", icon=ft.Icons.DELETE_OUTLINE)
             self.page.run_task(_do)
 
         def _edit_pl(_e):
@@ -3808,7 +3771,6 @@ class LibraryView:
 
         async def _commit():
             await self.app.db_manager.remove_track_from_playlist(playlist_id, path)
-            self.app.show_snackbar(f"Removed '{title}' from playlist.")
         self.page.run_task(_commit)
 
     def _track_row(self, t: dict, depth: int = 0, playlist_id: int = None,
@@ -3987,26 +3949,37 @@ class LibraryView:
         self._open_track_context_menu(meta)
 
     def _open_track_context_menu(self, meta: dict):
-        bs_holder = [None]
-        
+        # Flet 0.86: BottomSheet is a DialogControl, and the modal barrier's
+        # teardown is only wired up when the sheet is presented via
+        # page.show_dialog() — which stacks it in the framework's own _dialogs
+        # container and wraps on_dismiss to unmount it. The legacy path this used
+        # to take (page.overlay.append + `.open = True`, then `.open = False` to
+        # close) renders the sheet but never installs that dismiss lifecycle, so
+        # closing leaves the dark barrier stuck over the whole app — the "black
+        # screen". show_dialog/pop_dialog is the supported 0.86 API; it also
+        # never touches page.overlay, so the persistent now-playing / queue /
+        # quality sheets that live there are no longer at risk from this menu.
         def _close():
-            if bs_holder[0]:
-                bs_holder[0].open = False
-                bs_holder[0].update()
-                self.page.update()
+            if self.page:
+                self.page.pop_dialog()
 
         def _play_next(_e):
+            # Feedback is a haptic tick, not a toast: the custom snackbar overlay
+            # blanks the whole view on Flet 0.86 desktop, and a vibration is the
+            # right affordance on the phone anyway. No-op on macOS.
             _close()
             audio_engine.queue_next(meta)
-            self.app.show_snackbar(f"'{meta.get('track_title')}' will play next", icon=ft.Icons.QUEUE_MUSIC_ROUNDED, color=CYAN)
+            self.app.trigger_haptic("swipe_queue")
 
         def _add_to_queue(_e):
             _close()
             audio_engine.queue_last(meta)
-            self.app.show_snackbar(f"'{meta.get('track_title')}' added to queue", icon=ft.Icons.PLAYLIST_ADD_ROUNDED, color=CYAN)
+            self.app.trigger_haptic("swipe_queue")
 
         def _add_to_playlist(_e):
-            self.page.run_task(self._open_add_to_playlist_sheet, meta, bs_holder[0])
+            # Pop this menu, then present the playlist picker as its own dialog.
+            _close()
+            self.page.run_task(self._open_add_to_playlist_sheet, meta)
 
         def _edit_meta(_e):
             _close()
@@ -4074,37 +4047,34 @@ class LibraryView:
             ),
             bgcolor=SURFACE,
         )
-        bs_holder[0] = bs
-        self.page.overlay.append(bs)
-        bs.open = True
-        self.page.update()
+        self.page.show_dialog(bs)
 
-    async def _open_add_to_playlist_sheet(self, meta: dict, existing_bs: ft.BottomSheet = None):
+    async def _open_add_to_playlist_sheet(self, meta: dict):
+        # Presented and dismissed through the Flet 0.86 dialog stack
+        # (show_dialog / pop_dialog) for the same reason as the track menu: the
+        # legacy overlay+`.open` path leaves the modal barrier stuck. This sheet
+        # is always its own dialog now — it used to reuse the track menu's sheet
+        # in place, which the show_dialog model doesn't support (each dialog is a
+        # discrete stack entry).
         playlists = await self.app.db_manager.get_all_playlists(sort_mode="name")
-        bs_holder = [existing_bs]
-        
+
         def _close():
-            if bs_holder[0]:
-                bs_holder[0].open = False
-                bs_holder[0].update()
-                self.page.update()
+            if self.page:
+                self.page.pop_dialog()
 
         def _create_new(_e):
             _close()
-            
-            dlg_holder = [None]
+
             name_field = ft.TextField(label="Playlist Name", autofocus=True)
-            
+
             async def _submit(_e2):
                 name = name_field.value.strip()
                 if not name: return
                 try:
                     pl_id = await self.app.db_manager.create_playlist(name)
                     await self.app.db_manager.add_track_to_playlist(pl_id, meta["path"])
-                    if dlg_holder[0]:
-                        dlg_holder[0].open = False
-                        dlg_holder[0].update()
-                    self.app.show_snackbar(f"Added to '{name}'", icon=ft.Icons.CHECK_CIRCLE_OUTLINE, color=CYAN)
+                    if self.page:
+                        self.page.pop_dialog()
                     if self.view_mode == "playlists":
                         await self.load_library()
                 except Exception as exc:
@@ -4114,21 +4084,17 @@ class LibraryView:
                 title=ft.Text("New Playlist"),
                 content=name_field,
                 actions=[
-                    ft.TextButton("Cancel", on_click=lambda _: setattr(dlg_holder[0], 'open', False) or dlg_holder[0].update()),
+                    ft.TextButton("Cancel", on_click=lambda _: self.page.pop_dialog()),
                     ft.Button("Create", on_click=_submit, bgcolor=CYAN, color=BG),
                 ],
             )
-            dlg_holder[0] = dlg
-            self.page.overlay.append(dlg)
-            dlg.open = True
-            self.page.update()
+            self.page.show_dialog(dlg)
 
         def _add_to_existing(pl_id, pl_name):
             async def _do():
                 _close()
                 try:
                     await self.app.db_manager.add_track_to_playlist(pl_id, meta["path"])
-                    self.app.show_snackbar(f"Added to '{pl_name}'", icon=ft.Icons.CHECK_CIRCLE_OUTLINE, color=CYAN)
                     if self.view_mode == "playlists" and f"playlist_{pl_id}" in self.expanded_nodes:
                         await self.load_library()
                 except Exception as exc:
@@ -4167,18 +4133,11 @@ class LibraryView:
             padding=16,
         )
 
-        if bs_holder[0]:
-            bs_holder[0].content = container_content
-            bs_holder[0].update()
-        else:
-            bs = ft.BottomSheet(
-                content=container_content,
-                bgcolor=SURFACE,
-            )
-            bs_holder[0] = bs
-            self.page.overlay.append(bs)
-            bs.open = True
-            self.page.update()
+        bs = ft.BottomSheet(
+            content=container_content,
+            bgcolor=SURFACE,
+        )
+        self.page.show_dialog(bs)
 
     # ── library scan ─────────────────────────────────────────────────────────
     def start_scan(self):

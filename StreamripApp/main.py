@@ -453,7 +453,6 @@ class StreamripFletApp:
         self.now_playing.update_shuffle(audio_engine.is_shuffle)
         self.now_playing.update_repeat(audio_engine.repeat_mode)
         self.now_playing.update_play_similar(self.play_similar_mode)
-        self.mini_player.update_play_similar(self.play_similar_mode)
         self.now_playing.update_auto_dj(self.auto_dj_mode)
         self.mini_player.update_auto_dj(self.auto_dj_mode)
 
@@ -933,9 +932,21 @@ class StreamripFletApp:
         Thread-safe entry point: may be called from any background thread.
         """
         if not self.page: return
-        
-        # Use run_task to bridge the sync/async gap safely
-        self.page.run_task(self._safe_update_handler, fn)
+
+        # A UI rebuild (e.g. after a download completes) tears down the Flet
+        # session while background workers — the queue controller, notification
+        # dismiss timers — may still hold a reference to the old page. Both
+        # page.session and run_task then raise RuntimeError("...destroyed
+        # session."). Touching the session first lets us bail *before* run_task
+        # eagerly builds the coroutine it can't schedule — which is what leaks
+        # the "coroutine was never awaited" RuntimeWarning — and the surrounding
+        # guard covers the tiny window where the session dies mid-call.
+        try:
+            # Use run_task to bridge the sync/async gap safely.
+            _ = self.page.session
+            self.page.run_task(self._safe_update_handler, fn)
+        except RuntimeError:
+            return
 
     async def _safe_update_handler(self, fn):
         async with self._update_lock:
@@ -1413,16 +1424,6 @@ class StreamripFletApp:
         if not like and getattr(self, "auto_dj_mode", False):
             audio_engine.next()
 
-        verb = ("Liked" if like else "Disliked") if new_state is not None else "Cleared"
-        try:
-            self.show_snackbar(
-                f"{verb}: {audio_engine.current_track or 'track'}",
-                icon=(ft.Icons.THUMB_UP if like else ft.Icons.THUMB_DOWN)
-                if new_state is not None else ft.Icons.REMOVE_CIRCLE_OUTLINE,
-            )
-        except Exception:
-            pass
-
     async def _initiate_play_similar_queue_async(self, path: str, gen: int = 0):
         """Cheap acoustic-only initial fill for Play Similar.
 
@@ -1626,11 +1627,6 @@ class StreamripFletApp:
 
     async def _force_replenish_similar_queue(self):
         """Force replenish / extend the queue using the graph walk, waking up in the background."""
-        try:
-            self.show_snackbar("Replenishing queue...", icon=ft.Icons.AUTO_AWESOME)
-        except Exception:
-            pass
-
         if self.play_similar_mode:
             path = None
             if audio_engine.queue:
@@ -1651,7 +1647,6 @@ class StreamripFletApp:
                 self.play_similar_mode = True
                 audio_engine.play_similar_seed_path = path
                 self.now_playing.update_play_similar(True)
-                self.mini_player.update_play_similar(True)
                 self._play_similar_recommendation_in_progress = True
                 try:
                     await self._recommend_similar_async(path, 8, self._play_similar_gen)
@@ -2360,13 +2355,6 @@ class StreamripFletApp:
         self._save_pref("play_similar_mode", enabled)
         
         self.now_playing.update_play_similar(enabled)
-        self.mini_player.update_play_similar(enabled)
-        
-        verb = "Enabled" if enabled else "Disabled"
-        self.show_snackbar(
-            f"Auto-play: {verb}",
-            icon=ft.Icons.ALL_INCLUSIVE_ROUNDED if enabled else ft.Icons.LINK_OFF_ROUNDED,
-        )
 
         if enabled:
             # NON-DESTRUCTIVE model: no save / replace / restore of the queue.
@@ -2406,12 +2394,6 @@ class StreamripFletApp:
 
         self.now_playing.update_auto_dj(enabled)
         self.mini_player.update_auto_dj(enabled)
-
-        verb = "Enabled" if enabled else "Disabled"
-        self.show_snackbar(
-            f"Auto-DJ: {verb}",
-            icon=ft.Icons.AUTO_AWESOME_ROUNDED if enabled else ft.Icons.AUTO_AWESOME_OUTLINED
-        )
 
         if enabled:
             # 1. Mutual exclusivity: turn off shuffle
@@ -3196,7 +3178,22 @@ async def main(page: ft.Page):
         
     page.theme_mode = ft.ThemeMode.DARK
     page.bgcolor = BG
-    page.scrollbar_theme = ft.ScrollbarTheme(thickness=1.5, radius=1)
+    # Scrollbar theme MUST live inside page.theme (below) — ft.Page has no
+    # scrollbar_theme field, so assigning page.scrollbar_theme is a dead no-op
+    # Flet never serialises, which is why nothing showed on Android. Material
+    # scrollbars are also hidden on mobile unless thumb_visibility is forced on,
+    # and made grabbable (thicker + interactive) so a long fling can be dragged
+    # back up. _ideal_window already resolves a thousand-row thumb drag in one
+    # slide, so scrubbing the tracks list is cheap.
+    scrollbar_theme = ft.ScrollbarTheme(
+        thumb_visibility=True,
+        interactive=True,
+        thickness=5,
+        radius=4,
+        main_axis_margin=4,
+        cross_axis_margin=2,
+        thumb_color=apply_opacity(0.55, DIM),
+    )
     
     # Configure audio to allow mixing with other apps' sounds (Fixes concurrency)
     if AudioContext:
@@ -3219,6 +3216,7 @@ async def main(page: ft.Page):
         page.fonts = {"Outfit": font_path}
         page.theme = ft.Theme(
             font_family="Outfit",
+            scrollbar_theme=scrollbar_theme,
             navigation_bar_theme=ft.NavigationBarTheme(
                 label_text_style=ft.TextStyle(size=12),
             )
@@ -3226,6 +3224,7 @@ async def main(page: ft.Page):
     else:
         logger.warning("Font asset missing, using system default")
         page.theme = ft.Theme(
+            scrollbar_theme=scrollbar_theme,
             navigation_bar_theme=ft.NavigationBarTheme(
                 label_text_style=ft.TextStyle(size=12),
             )

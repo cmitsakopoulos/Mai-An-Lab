@@ -189,6 +189,24 @@ class SemanticIntentClassifier:
             ],
             "play_the_usual": [
                 "play the usual", "queue up the usual", "play my usual", "queue my usual songs"
+            ],
+            "creator": [
+                "who made you", "who created you", "who programmed you", "who built you", "who is your father"
+            ],
+            "joke": [
+                "tell me a joke", "say something funny", "make me laugh", "got any jokes"
+            ],
+            "time_date": [
+                "what time is it", "what is the date", "what day is it", "tell me the time"
+            ],
+            "status": [
+                "system status", "status report", "run diagnostics", "how are you doing"
+            ],
+            "thanks": [
+                "thank you", "thanks jarvis", "good job", "cheers", "awesome"
+            ],
+            "quote": [
+                "give me a quote", "say something wise", "quote me"
             ]
         }
         

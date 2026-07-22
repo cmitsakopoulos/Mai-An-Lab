@@ -286,7 +286,7 @@ class MetadataWorkbenchPane(ft.Container):
         self.syncing = True
         self.cancel_event = asyncio.Event()
         self.s_cur = self.s_total = self.s_ok = self.s_low = self.s_gap = 0
-        self.s_name = "starting…"
+        self.s_name = "Starting…"
         self._render_overview()
         self.app.page.update()
         self.app.page.run_task(self._do_sync)
@@ -398,7 +398,7 @@ class MetadataWorkbenchPane(ft.Container):
                 ft.TextButton("Clear", on_click=lambda _e: self._clear_selection(),
                               style=ft.ButtonStyle(color=DIM)),
                 ft.Container(expand=True),
-                self._filled_btn("Tag all →", lambda _e: self._open_batch_editor()),
+                self._filled_btn("Tag All →", lambda _e: self._open_batch_editor()),
             ], vertical_alignment="center"),
             bgcolor=apply_opacity(0.10, CYAN), border_radius=12,
             padding=ft.Padding.symmetric(horizontal=12, vertical=8),
@@ -509,7 +509,7 @@ class MetadataWorkbenchPane(ft.Container):
             bgcolor=bg, border_radius=6,
             padding=ft.Padding.symmetric(horizontal=7, vertical=3),
             border=ft.Border.all(1, apply_opacity(0.4, fg)),
-            tooltip="No tags · no country" if sev == 0 else "Incomplete",
+            tooltip="No Tags · No Country" if sev == 0 else "Incomplete",
         )
 
     def _sev_dot(self, sev: int) -> ft.Control:
@@ -538,11 +538,11 @@ class MetadataWorkbenchPane(ft.Container):
         country = g.get("country")
 
         if not genres and not country:
-            summary = ft.Text("No tags · no country", size=11, color=ACCENT_RED)
+            summary = ft.Text("No Tags · No Country", size=11, color=ACCENT_RED)
         elif not genres:
-            summary = ft.Text("No tags", size=11, color=ACCENT_RED)
+            summary = ft.Text("No Tags", size=11, color=ACCENT_RED)
         elif not country:
-            summary = ft.Text(f"{', '.join(genres[:3])} · no country", size=11, color=DIM,
+            summary = ft.Text(f"{', '.join(genres[:3])} · No Country", size=11, color=DIM,
                               overflow=ft.TextOverflow.ELLIPSIS, max_lines=1)
         else:
             summary = ft.Text(", ".join(genres[:3]), size=11, color=DIM,
@@ -565,7 +565,7 @@ class MetadataWorkbenchPane(ft.Container):
                     summary,
                 ], spacing=2, expand=True, tight=True),
                 ft.Container(
-                    content=ft.Text(f"{tc} trk{'s' if tc != 1 else ''}", size=10.5, color=DIM, font_family="monospace", weight="bold"),
+                    content=ft.Text(f"{tc} Track{'s' if tc != 1 else ''}", size=10.5, color=DIM, font_family="monospace", weight="bold"),
                     bgcolor=SURFACE, border_radius=6,
                     padding=ft.Padding.symmetric(horizontal=8, vertical=4),
                     border=ft.Border.all(1, BORDER),
@@ -618,7 +618,7 @@ class MetadataWorkbenchPane(ft.Container):
                        if v["name"].lower() not in self.edit_genres
                        and v["name"].lower() not in src_lc][:10]
 
-        custom = ft.TextField(value=self.edit_custom, hint_text="add a genre…", dense=True, width=150, bgcolor=SURFACE2,
+        custom = ft.TextField(value=self.edit_custom, hint_text="Add a genre…", dense=True, width=150, bgcolor=SURFACE2,
                               border_color=BORDER, focused_border_color=CYAN,
                               text_style=ft.TextStyle(color=TEXT, size=12),
                               content_padding=ft.Padding.symmetric(horizontal=10, vertical=6),
@@ -642,7 +642,7 @@ class MetadataWorkbenchPane(ft.Container):
                         ft.Icon(ft.Icons.FOLDER_ROUNDED, size=14, color=ACCENT_GREEN),
                         ft.Text("FROM THIS ARTIST'S FILES", size=10, color=ACCENT_GREEN, weight="bold"),
                         ft.Container(expand=True),
-                        ft.Text("tap to add", size=10, color=DIM),
+                        ft.Text("Tap to add", size=10, color=DIM),
                     ], spacing=6, vertical_alignment="center"),
                     ft.Row(src_chips, wrap=True, spacing=6, run_spacing=6),
                 ], spacing=8),
@@ -730,7 +730,7 @@ class MetadataWorkbenchPane(ft.Container):
         res_h = max(200, min(380, ph - 280))
 
         query_field = ft.TextField(
-            value=artist, label="Artist name", dense=True,
+            value=artist, label="Artist Name", dense=True,
             border_color=BORDER, focused_border_color=CYAN,
             text_style=ft.TextStyle(color=TEXT, size=13), bgcolor=SURFACE2,
         )
@@ -805,12 +805,12 @@ class MetadataWorkbenchPane(ft.Container):
         lines: list[ft.Control] = [ft.Row(head, spacing=6, vertical_alignment="center")]
         if disamb:
             lines.append(ft.Text(f"• {disamb}", size=11, color=TEXT, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS))
-        lines.append(ft.Text(gstr or "no genres listed — fetched when you select",
+        lines.append(ft.Text(gstr or "No genres listed — fetched when you select",
                              size=10.5, color=DIM if gstr else ACCENT_AMBER,
                              max_lines=2, overflow=ft.TextOverflow.ELLIPSIS))
         lines.append(ft.Row([
             ft.Container(expand=True),
-            self._filled_btn("Use this match", lambda _e, c=cand: self._use_mb_candidate(artist, c, dlg),
+            self._filled_btn("Use This Match", lambda _e, c=cand: self._use_mb_candidate(artist, c, dlg),
                              icon=ft.Icons.CHECK_ROUNDED),
         ]))
         return ft.Container(
@@ -868,7 +868,7 @@ class MetadataWorkbenchPane(ft.Container):
         score = it.get("score", 0)
         country = it.get("country")
         genres = [x.get("name") if isinstance(x, dict) else str(x) for x in (it.get("genres") or [])]
-        gstr = ", ".join(genres[:3]) or "no tags"
+        gstr = ", ".join(genres[:3]) or "No Tags"
         is_expanded = self.expanded == name
 
         score_color = ACCENT_GREEN if score >= 80 else (ACCENT_AMBER if score >= 50 else ACCENT_RED)
@@ -881,7 +881,7 @@ class MetadataWorkbenchPane(ft.Container):
                         ft.Text(name, size=14, weight="bold", color=CYAN if is_expanded else TEXT,
                                 overflow=ft.TextOverflow.ELLIPSIS, max_lines=1, expand=True),
                     ], spacing=6, vertical_alignment="center"),
-                    ft.Text(f"{_COUNTRY_NAMES.get(country, country) if country else 'No country'} · {gstr}", size=11, color=DIM,
+                    ft.Text(f"{_COUNTRY_NAMES.get(country, country) if country else 'No Country'} · {gstr}", size=11, color=DIM,
                             overflow=ft.TextOverflow.ELLIPSIS, max_lines=1),
                 ], spacing=2, expand=True, tight=True),
                 ft.Container(
@@ -891,7 +891,7 @@ class MetadataWorkbenchPane(ft.Container):
                     border=ft.Border.all(1, apply_opacity(0.3, score_color)),
                 ),
                 ft.Container(
-                    content=ft.Text(f"{tc} trk{'s' if tc != 1 else ''}", size=10.5, color=DIM, font_family="monospace", weight="bold"),
+                    content=ft.Text(f"{tc} Track{'s' if tc != 1 else ''}", size=10.5, color=DIM, font_family="monospace", weight="bold"),
                     bgcolor=SURFACE, border_radius=6,
                     padding=ft.Padding.symmetric(horizontal=8, vertical=4),
                     border=ft.Border.all(1, BORDER),
@@ -1064,7 +1064,7 @@ class MetadataWorkbenchPane(ft.Container):
                                      border_color=BORDER, focused_border_color=CYAN,
                                      text_style=ft.TextStyle(color=TEXT), bgcolor=SURFACE2)
         chips_row = ft.Row(wrap=True, spacing=6, run_spacing=6)
-        custom = ft.TextField(hint_text="add a genre…", dense=True, width=170,
+        custom = ft.TextField(hint_text="Add a genre…", dense=True, width=170,
                               border_color=BORDER, focused_border_color=CYAN,
                               text_style=ft.TextStyle(color=TEXT, size=12), bgcolor=SURFACE2)
 
@@ -1104,7 +1104,7 @@ class MetadataWorkbenchPane(ft.Container):
 
         dlg = ft.AlertDialog(
             bgcolor=SURFACE,
-            title=ft.Text(f"Tag {len(names)} artists", color=TEXT, size=16, weight="bold"),
+            title=ft.Text(f"Tag {len(names)} Artists", color=TEXT, size=16, weight="bold"),
             content=ft.Column([
                 ft.Text("Applies the same country and genres to every selected artist.", color=DIM, size=11),
                 ft.Text(", ".join(names[:6]) + ("…" if len(names) > 6 else ""), color=DIM, size=11, italic=True),
@@ -1115,7 +1115,7 @@ class MetadataWorkbenchPane(ft.Container):
             ], tight=True, spacing=10, scroll=ft.ScrollMode.AUTO, width=360),
             actions=[
                 ft.TextButton("Cancel", on_click=lambda _e: setattr(dlg, "open", False) or self.app.page.update()),
-                self._filled_btn("Apply to all", _apply),
+                self._filled_btn("Apply to All", _apply),
             ],
         )
         self.app.page.overlay.append(dlg)
