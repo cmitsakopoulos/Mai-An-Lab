@@ -1642,6 +1642,28 @@ class DatabaseManager:
         async with conn.execute(sql, (window_seconds,)) as cursor:
             return {r[0] for r in await cursor.fetchall()}
 
+    async def get_recent_tracks(self, limit: int = 15) -> list[dict]:
+        """Distinct tracks most-recently 'played', newest first, with metadata.
+        Unlike recent_played_paths (an unordered set for the avoid-list), this
+        preserves recency order so the assistant can answer 'what did I just
+        play' / 'play what I was listening to earlier'."""
+        conn = await self.get_connection()
+        sql = '''
+            SELECT t.path, t.title, ar.name AS artist, al.title AS album, al.genre,
+                   MAX(ph.played_at) AS last_played
+            FROM playback_history ph
+            JOIN tracks t   ON t.path = ph.track_path
+            JOIN albums al  ON al.id  = t.album_id
+            JOIN artists ar ON ar.id  = al.artist_id
+            WHERE ph.event = 'played'
+            GROUP BY t.path
+            ORDER BY last_played DESC
+            LIMIT ?
+        '''
+        async with conn.execute(sql, (limit,)) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(r) for r in rows]
+
     async def get_track_full(self, path: str) -> dict | None:
         """Single-row lookup returning title/artist/album/genre and the DSP
         timbre BLOB for a path. The LEFT JOIN on play_counts means callers
@@ -1650,7 +1672,7 @@ class DatabaseManager:
         vector immediately after grabbing the metadata."""
         conn = await self.get_connection()
         sql = '''
-            SELECT t.path, t.title, t.duration, t.format,
+            SELECT t.path, t.title, t.duration, t.format, t.bpm, t.energy, t.brightness,
                    ar.name AS artist, al.title AS album, al.year, al.genre,
                    pc.timbre
             FROM tracks t

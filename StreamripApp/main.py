@@ -657,14 +657,13 @@ class StreamripFletApp:
     def open_wipe_confirmation(self):
         """Opens a confirmation dialog before wiping the database."""
         def on_confirm(e):
-            self.wipe_dialog.open = False
-            self.page.update()
-            # The actual wipe happens here (purely SQL, no file deletion)
+            if self.page:
+                self.page.pop_dialog()
             self.page.run_task(self.wipe_database)
             
         def on_cancel(e):
-            self.wipe_dialog.open = False
-            self.page.update()
+            if self.page:
+                self.page.pop_dialog()
 
         self.wipe_dialog = ft.AlertDialog(
             modal=True,
@@ -684,10 +683,8 @@ class StreamripFletApp:
             actions_alignment=ft.MainAxisAlignment.END,
         )
         
-        self.page.overlay.append(self.wipe_dialog)
-        self.page.dialog = self.wipe_dialog
-        self.wipe_dialog.open = True
-        self.page.update()
+        if self.page:
+            self.page.show_dialog(self.wipe_dialog)
 
 
 
@@ -774,9 +771,8 @@ class StreamripFletApp:
             ),
         )
         
-        self.page.overlay.append(self.onboarding_dlg)
-        self.onboarding_dlg.open = True
-        self.page.update()
+        if self.page:
+            self.page.show_dialog(self.onboarding_dlg)
 
     async def wipe_database(self):
         """Clears all indexed data from the local database without deleting the file."""
@@ -2827,14 +2823,13 @@ class StreamripFletApp:
                 width=320,
             ),
         )
-        self.page.overlay.append(dlg)
-        dlg.open = True
-        self.page.update()
+        if self.page:
+            self.page.show_dialog(dlg)
 
     def confirm_delete_track(self, path: str, title: str):
         def execute(_e):
-            dlg.open = False
-            self.page.update()
+            if self.page:
+                self.page.pop_dialog()
             self.page.run_task(self._delete_track, path)
 
         dlg = ft.AlertDialog(
@@ -2845,7 +2840,7 @@ class StreamripFletApp:
                 color=DIM, size=13,
             ),
             actions=[
-                ft.TextButton("Cancel", on_click=lambda _e: setattr(dlg, "open", False) or self.page.update()),
+                ft.TextButton("Cancel", on_click=lambda _e: self.page.pop_dialog() if self.page else None),
                 ft.Button(
                     content=ft.Text("Delete"),
                     style=ft.ButtonStyle(bgcolor="#FF2222", color=TEXT),
@@ -2853,9 +2848,8 @@ class StreamripFletApp:
                 ),
             ],
         )
-        self.page.overlay.append(dlg)
-        dlg.open = True
-        self.page.update()
+        if self.page:
+            self.page.show_dialog(dlg)
 
 
     async def _delete_track(self, path: str):
@@ -3067,13 +3061,13 @@ class StreamripFletApp:
     def open_maintenance_confirmation(self, title: str, description: str, button_text: str, action_coro):
         """Generic confirmation dialog for maintenance tasks."""
         def on_confirm(e):
-            dialog.open = False
-            self.page.update()
+            if self.page:
+                self.page.pop_dialog()
             self.page.run_task(action_coro)
             
         def on_cancel(e):
-            dialog.open = False
-            self.page.update()
+            if self.page:
+                self.page.pop_dialog()
 
         dialog = ft.AlertDialog(
             modal=True,
@@ -3088,10 +3082,8 @@ class StreamripFletApp:
             ],
             actions_alignment=ft.MainAxisAlignment.END,
         )
-        self.page.overlay.append(dialog)
-        self.page.dialog = dialog
-        dialog.open = True
-        self.page.update()
+        if self.page:
+            self.page.show_dialog(dialog)
 
     # ── config / prefs ───────────────────────────────────────────────────────
     def sync_config_to_ui(self):

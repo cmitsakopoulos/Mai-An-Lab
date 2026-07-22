@@ -11,7 +11,7 @@ import functools
 import logging
 import os
 import shutil
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, field
 from pathlib import Path
 
 import sys
@@ -246,6 +246,16 @@ class MiscConfig:
     check_for_updates: bool
 
 
+@dataclass(slots=True)
+class AssistantConfig:
+    llm_enabled: bool = True
+    llm_provider: str = "gemini"
+    gemini_api_key: str = ""
+    gemini_model: str = "gemini-3.5-flash-lite"
+    ollama_endpoint: str = "http://localhost:11434/v1"
+    ollama_model: str = "llama3.2"
+
+
 HOME = Path.home()
 DEFAULT_DOWNLOADS_FOLDER = os.path.join(HOME, "StreamripDownloads")
 DEFAULT_DOWNLOADS_DB_PATH = os.path.join(APP_DIR, "downloads.db")
@@ -280,6 +290,7 @@ class ConfigData:
     conversion: ConversionConfig
 
     misc: MiscConfig
+    assistant: AssistantConfig = field(default_factory=AssistantConfig)
 
     _modified: bool = False
 
@@ -307,6 +318,8 @@ class ConfigData:
         database = DatabaseConfig(**toml["database"])  # type: ignore
         conversion = ConversionConfig(**toml["conversion"])  # type: ignore
         misc = MiscConfig(**toml["misc"])  # type: ignore
+        assistant_dict = dict(toml.get("assistant", {}))
+        assistant = AssistantConfig(**assistant_dict) if assistant_dict else AssistantConfig()
 
         return cls(
             toml=toml,
@@ -325,6 +338,7 @@ class ConfigData:
             database=database,
             conversion=conversion,
             misc=misc,
+            assistant=assistant,
         )
 
     @classmethod
@@ -354,6 +368,9 @@ class ConfigData:
         update_toml_section_from_config(self.toml["cli"], self.cli)
         update_toml_section_from_config(self.toml["database"], self.database)
         update_toml_section_from_config(self.toml["conversion"], self.conversion)
+        if "assistant" not in self.toml:
+            self.toml["assistant"] = {}
+        update_toml_section_from_config(self.toml["assistant"], self.assistant)
 
     def get_source(
         self,

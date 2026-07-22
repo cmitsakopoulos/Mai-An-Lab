@@ -31,8 +31,12 @@ class PlaylistEditorDialog:
         return self.app.page
 
     def open(self, pl_id: int, name: str, current_color: str):
-        if self._dlg and self.page and self._dlg in self.page.overlay:
-            self.page.overlay.remove(self._dlg)
+        if self._dlg and self.page:
+            try:
+                self.page.pop_dialog()
+            except Exception:
+                pass
+            self._dlg = None
 
         t_name = ft.TextField(value=name, label="Playlist Name", border_color=BORDER, focused_border_color=LIB_PLAYLIST_COLOR, bgcolor=SURFACE)
         
@@ -77,20 +81,19 @@ class PlaylistEditorDialog:
             actions=[
                 ft.TextButton("Cancel", on_click=lambda e: self._close()),
                 ft.Button("Save", bgcolor=LIB_PLAYLIST_COLOR, color=BG, on_click=save)
-            ]
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
         )
         if self.page:
-            self.page.overlay.append(self._dlg)
-            self._dlg.open = True
-            self.page.update()
+            self.page.show_dialog(self._dlg)
 
     def _close(self):
-        if self._dlg:
-            self._dlg.open = False
-            if self.page:
-                self.page.update()
-            if self.page and self._dlg in self.page.overlay:
-                self.page.overlay.remove(self._dlg)
+        if self.page:
+            try:
+                self.page.pop_dialog()
+            except Exception:
+                pass
+        self._dlg = None
 
 
 class MetadataEditorDialog:
@@ -103,8 +106,12 @@ class MetadataEditorDialog:
         return self.app.page
 
     def open(self, edit_type: str, meta: dict):
-        if self._dlg and self.page and self._dlg in self.page.overlay:
-            self.page.overlay.remove(self._dlg)
+        if self._dlg and self.page:
+            try:
+                self.page.pop_dialog()
+            except Exception:
+                pass
+            self._dlg = None
 
         path        = meta.get("path", "")
         title_val   = meta.get("track_title", "")
@@ -170,38 +177,41 @@ class MetadataEditorDialog:
             self._close()
             self.app.confirm_delete_track(path, title_val)
 
-        actions = [
-            ft.TextButton("Cancel", on_click=lambda e: self._close()),
-            ft.Button(
-                content=ft.Text("Save"),
-                style=ft.ButtonStyle(bgcolor=CYAN, color=BG),
-                on_click=save,
-            ),
-        ]
+        cancel_btn = ft.TextButton("Cancel", on_click=lambda e: self._close())
+        save_btn = ft.Button(
+            content=ft.Text("Save"),
+            style=ft.ButtonStyle(bgcolor=CYAN, color=BG),
+            on_click=save,
+        )
+
         if edit_type == "track" and path:
-            actions.insert(0, ft.TextButton(
+            delete_btn = ft.TextButton(
                 content=ft.Text("DELETE TRACK", color="#FF4444", size=11, weight="bold"),
-                on_click=delete
-            ))
+                on_click=delete,
+            )
+            actions = [delete_btn, cancel_btn, save_btn]
+            actions_align = ft.MainAxisAlignment.SPACE_BETWEEN
+        else:
+            actions = [cancel_btn, save_btn]
+            actions_align = ft.MainAxisAlignment.END
 
         self._dlg = ft.AlertDialog(
             title=ft.Text("Edit Metadata", color=TEXT),
             bgcolor=SURFACE,
             content=ft.Column(content_cols, spacing=12, tight=True),
             actions=actions,
+            actions_alignment=actions_align,
         )
         if self.page:
-            self.page.overlay.append(self._dlg)
-            self._dlg.open = True
-            self.page.update()
+            self.page.show_dialog(self._dlg)
 
     def _close(self):
-        if self._dlg:
-            self._dlg.open = False
-            if self.page:
-                self.page.update()
-            if self.page and self._dlg in self.page.overlay:
-                self.page.overlay.remove(self._dlg)
+        if self.page:
+            try:
+                self.page.pop_dialog()
+            except Exception:
+                pass
+        self._dlg = None
 
 
 class ArtistMetadataDialog:
@@ -377,15 +387,13 @@ class ArtistMetadataDialog:
             ],
         )
         if self.page:
-            self.page.overlay.append(self._dlg)
-            self._dlg.open = True
-            self.page.update()
+            self.page.show_dialog(self._dlg)
 
     def _close(self):
-        if self._dlg:
-            self._dlg.open = False
-            if self.page:
-                self.page.update()
-            if self.page and self._dlg in self.page.overlay:
-                self.page.overlay.remove(self._dlg)
+        if self.page:
+            try:
+                self.page.pop_dialog()
+            except Exception:
+                pass
+        self._dlg = None
 

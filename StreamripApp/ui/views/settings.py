@@ -6,7 +6,8 @@ import asyncio
 import flet as ft
 import flet.canvas as cv
 from ui.tokens import (
-    BG, SURFACE, SURFACE2, CYAN, AMBER, TEXT, DIM, BORDER, apply_opacity
+    BG, SURFACE, SURFACE2, CYAN, AMBER, TEXT, DIM, BORDER, apply_opacity,
+    lerp_hex, MMR_RAMP, TEMP_RAMP
 )
 from ui.widgets import OnyxButton, HubSettingItem, pick_folder
 
@@ -339,6 +340,74 @@ class SettingsView:
             active_color=CYAN
         )
 
+        # AI Assistant (Jarvis) Controls
+        self._assistant_llm_switch = ft.Switch(value=True, active_color=CYAN)
+        self._assistant_provider_dropdown = ft.Dropdown(
+            label="AI Provider",
+            options=[
+                ft.dropdown.Option(key="gemini", text="Google Gemini API (Cloud)"),
+                ft.dropdown.Option(key="ollama", text="Local Server (Ollama / LM Studio)"),
+            ],
+            value="gemini",
+            bgcolor=SURFACE2,
+            border_color=BORDER,
+            focused_border_color=CYAN,
+            text_style=ft.TextStyle(color=TEXT, size=13),
+            label_style=ft.TextStyle(color=CYAN, size=11),
+            border_radius=10,
+        )
+        self._assistant_api_key_field = ft.TextField(
+            label="Google Gemini API Key",
+            hint_text="Paste your key from aistudio.google.com",
+            bgcolor=SURFACE2,
+            border_color=BORDER,
+            focused_border_color=CYAN,
+            text_style=ft.TextStyle(color=TEXT, size=13),
+            label_style=ft.TextStyle(color=CYAN, size=11),
+            border_radius=10,
+            password=True,
+            can_reveal_password=True,
+        )
+        self._assistant_model_dropdown = ft.Dropdown(
+            label="Gemini Model",
+            options=[
+                ft.dropdown.Option(key="gemini-3.5-flash-lite", text="Gemini 3.5 Flash-Lite (Recommended — Fast & Free)"),
+                ft.dropdown.Option(key="gemini-3.5-flash", text="Gemini 3.5 Flash (Agentic, High Performance)"),
+                ft.dropdown.Option(key="gemini-3.6-flash", text="Gemini 3.6 Flash (Latest — July 2026)"),
+                ft.dropdown.Option(key="gemini-2.5-flash", text="Gemini 2.5 Flash (Legacy — Retires Oct 2026)"),
+                ft.dropdown.Option(key="gemini-2.5-pro", text="Gemini 2.5 Pro (Legacy — Retires Oct 2026)"),
+            ],
+            value="gemini-3.5-flash-lite",
+            bgcolor=SURFACE2,
+            border_color=BORDER,
+            focused_border_color=CYAN,
+            text_style=ft.TextStyle(color=TEXT, size=13),
+            label_style=ft.TextStyle(color=CYAN, size=11),
+            border_radius=10,
+        )
+        self._assistant_ollama_url_field = ft.TextField(
+            label="Local Endpoint URL",
+            hint_text="http://localhost:11434/v1",
+            value="http://localhost:11434/v1",
+            bgcolor=SURFACE2,
+            border_color=BORDER,
+            focused_border_color=CYAN,
+            text_style=ft.TextStyle(color=TEXT, size=13),
+            label_style=ft.TextStyle(color=CYAN, size=11),
+            border_radius=10,
+        )
+        self._assistant_ollama_model_field = ft.TextField(
+            label="Local Model Name",
+            hint_text="llama3.2",
+            value="llama3.2",
+            bgcolor=SURFACE2,
+            border_color=BORDER,
+            focused_border_color=CYAN,
+            text_style=ft.TextStyle(color=TEXT, size=13),
+            label_style=ft.TextStyle(color=CYAN, size=11),
+            border_radius=10,
+        )
+
         # Config Editor
         self._config_editor = ft.TextField(
             multiline=True,
@@ -395,29 +464,34 @@ class SettingsView:
 
         # Play Similar temperature slider. Default 0 = deterministic arg-max
         # (see streamrip_api.get_walk_params for why); the control stays so
-        # variety is opt-in rather than imposed.
+        # variety is opt-in rather than imposed. Its fill warms amber → red as
+        # it climbs (TEMP_RAMP) to signal the quality trade-off.
+        self._TEMP_MAX, self._MMR_MAX = 0.8, 0.4
         self._temp_slider = ft.Slider(
             min=0.0,
-            max=0.8,
+            max=self._TEMP_MAX,
             divisions=80,
             label="{value}",
             value=0.0,
-            active_color=CYAN,
+            active_color=lerp_hex(*TEMP_RAMP, 0.0),
+            thumb_color=lerp_hex(*TEMP_RAMP, 0.0),
             on_change=self._on_temp_change,
         )
-        self._temp_value_text = ft.Text("0.00", color=TEXT, size=13, weight=ft.FontWeight.W_700)
+        self._temp_value_text = ft.Text("0.00", color=lerp_hex(*TEMP_RAMP, 0.0), size=13, weight=ft.FontWeight.W_800)
 
-        # Play Similar mmr_lambda slider
+        # Play Similar mmr_lambda slider — the safe variety lever, so its fill
+        # warms teal → green as it climbs (MMR_RAMP).
         self._mmr_slider = ft.Slider(
             min=0.0,
-            max=0.4,
+            max=self._MMR_MAX,
             divisions=40,
             label="{value}",
             value=0.15,
-            active_color=CYAN,
+            active_color=lerp_hex(*MMR_RAMP, 0.15 / self._MMR_MAX),
+            thumb_color=lerp_hex(*MMR_RAMP, 0.15 / self._MMR_MAX),
             on_change=self._on_mmr_change,
         )
-        self._mmr_value_text = ft.Text("0.15", color=TEXT, size=13, weight=ft.FontWeight.W_700)
+        self._mmr_value_text = ft.Text("0.15", color=lerp_hex(*MMR_RAMP, 0.15 / self._MMR_MAX), size=13, weight=ft.FontWeight.W_800)
 
         # DSP Controls
         self._dynamism_switch = ft.Switch(value=False, active_color=CYAN, on_change=self._on_dynamism_change)
@@ -667,6 +741,8 @@ class SettingsView:
             
             # Set-up Section
             ft.Text("SET-UP", size=11, color=CYAN, weight=ft.FontWeight.W_800),
+            HubSettingItem(ft.Icons.SMART_TOY_ROUNDED, "AI Assistant (Jarvis)", "Google Gemini API key, providers & LLM settings",
+                           on_tap=lambda _: self._show_sub_page("AI Assistant", self._build_assistant_group())),
             HubSettingItem(ft.Icons.LOCK_PERSON_ROUNDED, "Authentication", "Qobuz credentials & tokens", 
                            on_tap=lambda _: self._show_sub_page("Account", self._build_auth_group())),
             HubSettingItem(ft.Icons.STORAGE_ROUNDED, "Storage & Paths", "Library and download locations", 
@@ -997,18 +1073,39 @@ class SettingsView:
             ]),
             ft.Divider(color=BORDER, height=40),
             ft.Text("Play Similar / Discovery Settings", weight=ft.FontWeight.BOLD, color=CYAN),
-            ft.Text("Variety (Temperature)", weight=ft.FontWeight.BOLD, color=TEXT, size=14),
-            ft.Text("Controls the random softmax exploration of similarity walks. 0.0 is deterministic (always same transitions), while higher values add variety.", color=DIM, size=12),
-            ft.Row([
-                ft.Container(content=self._temp_slider, expand=True),
-                ft.Container(content=self._temp_value_text, margin=ft.Margin.only(right=10)),
-            ], vertical_alignment=ft.CrossAxisAlignment.CENTER),
-            ft.Container(height=5),
-            ft.Text("Avoid Near-Duplicates (MMR)", weight=ft.FontWeight.BOLD, color=TEXT, size=14),
-            ft.Text("Applies a Maximal-Marginal-Relevance penalty to suppress remixes, alternate mixes, or duplicates of already played/queued tracks.", color=DIM, size=12),
+            ft.Text(
+                "These two dials shape every similarity walk — Play Similar, "
+                "autoplay continuation and the Network view all read them.",
+                color=DIM, size=12,
+            ),
+            ft.Container(height=8),
+            ft.Text("Avoid Near-Duplicates (MMR)", weight=ft.FontWeight.BOLD, color=lerp_hex(*MMR_RAMP, 1.0), size=14),
+            ft.Text(
+                "Discounts a candidate the more it sounds like a track already in "
+                "the queue, so remixes, alternate mixes and the same song on "
+                "another release stop chaining. This is the recommended way to add "
+                "variety — it spreads the queue out without wandering off-genre. "
+                "Default 0.15.",
+                color=DIM, size=12,
+            ),
             ft.Row([
                 ft.Container(content=self._mmr_slider, expand=True),
                 ft.Container(content=self._mmr_value_text, margin=ft.Margin.only(right=10)),
+            ], vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            ft.Container(height=10),
+            ft.Text("Variety (Temperature)", weight=ft.FontWeight.BOLD, color=lerp_hex(*TEMP_RAMP, 1.0), size=14),
+            ft.Text(
+                "At 0 the walk is deterministic — it always steps to the closest "
+                "match, so the same seed returns the same queue every time (and "
+                "stays reproducible for debugging). Higher values sample among the "
+                "top few matches, so repeat plays vary — but the queue drifts "
+                "further from the seed and quality falls off. Keep it low unless "
+                "you specifically want shuffle-on-repeat.",
+                color=DIM, size=12,
+            ),
+            ft.Row([
+                ft.Container(content=self._temp_slider, expand=True),
+                ft.Container(content=self._temp_value_text, margin=ft.Margin.only(right=10)),
             ], vertical_alignment=ft.CrossAxisAlignment.CENTER),
             ft.Divider(color=BORDER, height=40),
             ft.Text("Cache Maintenance", weight=ft.FontWeight.BOLD, color=DIM),
@@ -1334,18 +1431,12 @@ class SettingsView:
         dir_list   = ft.Column(tight=True, spacing=0, scroll=ft.ScrollMode.AUTO)
 
         def _close():
-            bs = bs_holder[0]
-            if bs:
-                bs.open = False
-                bs.update()
-                # Remove the sheet from overlay to prevent orphaned controls
-                # that cause a black screen on Android's Impeller renderer
+            if self.app.page:
                 try:
-                    self.app.page.overlay.remove(bs)
-                except ValueError:
+                    self.app.page.pop_dialog()
+                except Exception:
                     pass
-                bs_holder[0] = None
-                self.page.update()
+            bs_holder[0] = None
 
         def _confirm_dir(path):
             _close()
@@ -1487,9 +1578,8 @@ class SettingsView:
             bgcolor=SURFACE,
         )
         bs_holder[0] = bs
-        self.app.page.overlay.append(bs)
-        bs.open = True
-        self.app.page.update()
+        if self.app.page:
+            self.app.page.show_dialog(bs)
 
     def refresh(self):
         from utils.streamrip_api import get_default_download_path
@@ -1510,9 +1600,11 @@ class SettingsView:
                 temp_val = gen.get("play_similar_temperature", 0.0)
             self._temp_slider.value = float(temp_val)
             self._temp_value_text.value = f"{self._temp_slider.value:.2f}"
+            self._recolor_walk_slider(self._temp_slider, self._temp_value_text, TEMP_RAMP, self._TEMP_MAX)
 
             self._mmr_slider.value = float(gen.get("walk_mmr_lambda", 0.15))
             self._mmr_value_text.value = f"{self._mmr_slider.value:.2f}"
+            self._recolor_walk_slider(self._mmr_slider, self._mmr_value_text, MMR_RAMP, self._MMR_MAX)
 
             qobuz = cfg.get("qobuz", {})
             self._qobuz_user_id_field.value = str(qobuz.get("email_or_userid", ""))
@@ -1551,6 +1643,15 @@ class SettingsView:
             self._haptic_network_tap_dropdown.value = haptics.get("network_tap_intensity", "selection")
             self._haptic_network_reseed_dropdown.value = haptics.get("network_reseed_intensity", "medium")
             self._haptic_network_walk_dropdown.value = haptics.get("network_walk_intensity", "light")
+
+            # Load AI Assistant Settings
+            assistant_cfg = cfg.get("assistant", {})
+            self._assistant_llm_switch.value = bool(assistant_cfg.get("llm_enabled", True))
+            self._assistant_provider_dropdown.value = str(assistant_cfg.get("llm_provider", "gemini"))
+            self._assistant_api_key_field.value = str(assistant_cfg.get("gemini_api_key", ""))
+            self._assistant_model_dropdown.value = str(assistant_cfg.get("gemini_model", "gemini-3.5-flash-lite"))
+            self._assistant_ollama_url_field.value = str(assistant_cfg.get("ollama_endpoint", "http://localhost:11434/v1"))
+            self._assistant_ollama_model_field.value = str(assistant_cfg.get("ollama_model", "llama3.2"))
             active_p = dsp.get("active_preset", "Flat")
             self._refresh_eq_presets_dropdown(active_value=active_p)
             self._update_eq_sliders_from_active_preset()
@@ -1682,10 +1783,20 @@ class SettingsView:
             if hasattr(lib_view, "load_library"):
                 self.page.run_task(lib_view.load_library)
 
+    def _recolor_walk_slider(self, slider, value_text, ramp, max_val):
+        """Keep a walk-parameter slider's fill, thumb and numeric readout on the
+        same semantic colour as its value. Callers update `.value` first."""
+        c = lerp_hex(*ramp, (slider.value or 0.0) / max_val)
+        slider.active_color = c
+        slider.thumb_color = c
+        value_text.color = c
+
     def _on_temp_change(self, e):
         val = round(self._temp_slider.value, 2)
         self._temp_value_text.value = f"{val:.2f}"
+        self._recolor_walk_slider(self._temp_slider, self._temp_value_text, TEMP_RAMP, self._TEMP_MAX)
         self._temp_value_text.update()
+        self._temp_slider.update()
         from utils.streamrip_api import update_config_params
         update_config_params({
             "general": {
@@ -1696,7 +1807,9 @@ class SettingsView:
     def _on_mmr_change(self, e):
         val = round(self._mmr_slider.value, 2)
         self._mmr_value_text.value = f"{val:.2f}"
+        self._recolor_walk_slider(self._mmr_slider, self._mmr_value_text, MMR_RAMP, self._MMR_MAX)
         self._mmr_value_text.update()
+        self._mmr_slider.update()
         from utils.streamrip_api import update_config_params
         update_config_params({
             "general": {
@@ -1763,19 +1876,12 @@ class SettingsView:
         dir_list   = ft.Column(tight=True, spacing=0, scroll=ft.ScrollMode.AUTO)
 
         def _close(do_update=True):
-            bs = bs_holder[0]
-            if bs:
-                bs.open = False
-                bs.update()
-                # Remove the sheet from overlay to prevent orphaned controls
-                # that cause a black screen on Android's Impeller renderer
+            if self.app.page:
                 try:
-                    self.app.page.overlay.remove(bs)
-                except ValueError:
+                    self.app.page.pop_dialog()
+                except Exception:
                     pass
-                bs_holder[0] = None
-                if do_update and self.page:
-                    self.page.update()
+            bs_holder[0] = None
 
         def _confirm(path):
             _close(do_update=False)
@@ -1898,9 +2004,8 @@ class SettingsView:
             bgcolor=SURFACE,
         )
         bs_holder[0] = bs
-        self.app.page.overlay.append(bs)
-        bs.open = True
-        self.app.page.update()
+        if self.app.page:
+            self.app.page.show_dialog(bs)
 
     def _browse_download_folder(self, e):
         if hasattr(sys, 'getandroidapilevel'):
@@ -2414,6 +2519,94 @@ class SettingsView:
                     self._haptic_network_reseed_dropdown,
                     ft.Container(height=5),
                     self._haptic_network_walk_dropdown,
+                ], spacing=10),
+                padding=16,
+                bgcolor=SURFACE2,
+                border_radius=10,
+                border=ft.Border.all(1, BORDER),
+            ),
+            ft.Container(height=50)
+        ], spacing=20)
+
+    def _save_assistant_settings(self):
+        from utils.streamrip_api import update_config_params
+        update_config_params({
+            "assistant": {
+                "llm_enabled": self._assistant_llm_switch.value,
+                "llm_provider": self._assistant_provider_dropdown.value or "gemini",
+                "gemini_api_key": self._assistant_api_key_field.value.strip(),
+                "gemini_model": self._assistant_model_dropdown.value or "gemini-3.5-flash-lite",
+                "ollama_endpoint": self._assistant_ollama_url_field.value.strip() or "http://localhost:11434/v1",
+                "ollama_model": self._assistant_ollama_model_field.value.strip() or "llama3.2",
+            }
+        })
+        self.app.show_snackbar("Jarvis AI Assistant settings saved successfully.")
+        self.app.safe_update(lambda: None)
+
+    def _test_assistant_connection(self):
+        """Ping the currently-entered provider with a minimal completion and
+        surface the outcome inline — the settings form otherwise gives no
+        feedback until the assistant is used for real."""
+        self.app.page.run_task(self._test_assistant_connection_async)
+
+    async def _test_assistant_connection_async(self):
+        from utils.llm_engine import LLMEngine
+        provider = self._assistant_provider_dropdown.value or "gemini"
+        engine = LLMEngine(
+            provider=provider,
+            api_key=(self._assistant_api_key_field.value or "").strip(),
+            model=self._assistant_model_dropdown.value or "gemini-3.5-flash-lite",
+            ollama_endpoint=(self._assistant_ollama_url_field.value or "").strip() or "http://localhost:11434/v1",
+            ollama_model=(self._assistant_ollama_model_field.value or "").strip() or "llama3.2",
+        )
+        if not engine.is_configured():
+            self.app.show_snackbar("Enter your API key or a local endpoint first.")
+            return
+        self.app.show_snackbar(f"Testing connection to {provider}…")
+        res = await engine.chat_completion([{"role": "user", "content": "Reply with the single word: OK"}])
+        if res.success:
+            self.app.show_snackbar(f"✓ {provider} connection OK.")
+        else:
+            self.app.show_snackbar(f"✗ Connection failed: {res.error_message}")
+
+    def _build_assistant_group(self):
+        return ft.Column([
+            ft.Text("Configure Large Language Model integration for your voice/chat assistant Jarvis.", color=DIM, size=12),
+            ft.Container(
+                content=ft.Column([
+                    ft.Row([
+                        ft.Icon(ft.Icons.SMART_TOY_ROUNDED, color=CYAN, size=20),
+                        ft.Text("Jarvis AI Intelligence", weight=ft.FontWeight.BOLD, color=TEXT, size=14),
+                    ], spacing=10),
+                    ft.Text("Enable conversational AI, smart playlist curation, and deep library analysis.", color=DIM, size=12),
+                    ft.Row([
+                        self._assistant_llm_switch,
+                        ft.Text("Enable LLM Agent Intelligence", color=TEXT, size=12)
+                    ], spacing=10),
+                    ft.Container(height=5),
+                    self._assistant_provider_dropdown,
+                    ft.Container(height=5),
+                    self._assistant_api_key_field,
+                    ft.Text("• Free tier API keys can be generated at aistudio.google.com with 0 cost & 0 credit card.", color=DIM, size=11),
+                    ft.Container(height=5),
+                    self._assistant_model_dropdown,
+                    ft.Container(height=5),
+                    self._assistant_ollama_url_field,
+                    ft.Container(height=5),
+                    self._assistant_ollama_model_field,
+                    ft.Container(height=10),
+                    OnyxButton(
+                        text="Save AI Assistant Settings",
+                        icon=ft.Icons.SAVE_ROUNDED,
+                        on_tap=lambda _: self._save_assistant_settings()
+                    ),
+                    ft.Container(height=4),
+                    ft.OutlinedButton(
+                        "Test Connection",
+                        icon=ft.Icons.WIFI_TETHERING_ROUNDED,
+                        style=ft.ButtonStyle(color=CYAN, side=ft.BorderSide(1, CYAN)),
+                        on_click=lambda _: self._test_assistant_connection(),
+                    ),
                 ], spacing=10),
                 padding=16,
                 bgcolor=SURFACE2,

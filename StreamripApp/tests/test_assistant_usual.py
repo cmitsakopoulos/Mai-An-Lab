@@ -53,7 +53,6 @@ class TestAssistantUsual(unittest.TestCase):
 
     def test_handler_plays_track(self):
         import asyncio
-        loop = asyncio.get_event_loop()
         
         sample_tracks = [{
             "path": "/music/track1.mp3",
@@ -72,7 +71,7 @@ class TestAssistantUsual(unittest.TestCase):
         async def run_test():
             return await runner.dispatch(intent)
             
-        res = loop.run_until_complete(run_test())
+        res = asyncio.run(run_test())
         self.assertTrue(res.success)
         self.assertEqual(len(engine.queue), 1)
         self.assertEqual(engine.queue[0]["path"], "/music/track1.mp3")
@@ -81,7 +80,6 @@ class TestAssistantUsual(unittest.TestCase):
 
     def test_handler_no_history_fails(self):
         import asyncio
-        loop = asyncio.get_event_loop()
         
         engine = _FakeEngine()
         db = _FakeDB([])
@@ -92,7 +90,7 @@ class TestAssistantUsual(unittest.TestCase):
         async def run_test():
             return await runner.dispatch(intent)
             
-        res = loop.run_until_complete(run_test())
+        res = asyncio.run(run_test())
         self.assertFalse(res.success)
         self.assertIn("enough play history", res.spoken)
 

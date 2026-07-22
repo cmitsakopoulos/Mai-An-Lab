@@ -15,6 +15,66 @@ else:
 logger = logging.getLogger(__name__)
 
 
+class ModelModePill(ft.Container):
+    """Sleek radio-pill toggle on the Jarvis header bar allowing the user to
+    switch between the AI Agent (LLM tool-calling) and the classic Semantic model."""
+
+    def __init__(self, is_llm: bool = True, on_change=None):
+        super().__init__()
+        self.is_llm = is_llm
+        self.on_change = on_change
+
+        self.border_radius = 18
+        self.bgcolor = SURFACE2
+        self.border = ft.Border.all(1, BORDER)
+        self.padding = ft.Padding.all(3)
+
+        self._llm_icon = ft.Container(
+            width=6, height=6, border_radius=3, bgcolor=CYAN, margin=ft.Margin.only(right=4)
+        )
+        self._llm_text = ft.Text("AI Agent", size=11, weight=ft.FontWeight.W_700)
+        self._llm_item = ft.Container(
+            content=ft.Row([self._llm_icon, self._llm_text], spacing=0, tight=True),
+            padding=ft.Padding.symmetric(horizontal=10, vertical=4),
+            border_radius=14,
+            on_click=lambda _: self._toggle(True),
+        )
+
+        self._semantic_text = ft.Text("Semantic", size=11, weight=ft.FontWeight.W_700)
+        self._semantic_item = ft.Container(
+            content=self._semantic_text,
+            padding=ft.Padding.symmetric(horizontal=10, vertical=4),
+            border_radius=14,
+            on_click=lambda _: self._toggle(False),
+        )
+
+        self.content = ft.Row([self._llm_item, self._semantic_item], spacing=2, tight=True)
+        self._apply_styles()
+
+    def _apply_styles(self):
+        if self.is_llm:
+            self._llm_item.bgcolor = CYAN
+            self._llm_text.color = BG
+            self._llm_icon.bgcolor = BG
+            self._semantic_item.bgcolor = ft.Colors.TRANSPARENT
+            self._semantic_text.color = DIM
+        else:
+            self._semantic_item.bgcolor = CYAN
+            self._semantic_text.color = BG
+            self._llm_item.bgcolor = ft.Colors.TRANSPARENT
+            self._llm_text.color = DIM
+            self._llm_icon.bgcolor = DIM
+
+    def _toggle(self, enable_llm: bool):
+        if self.is_llm != enable_llm:
+            self.is_llm = enable_llm
+            self._apply_styles()
+            if self.page:
+                self.update()
+            if self.on_change:
+                self.on_change(self.is_llm)
+
+
 class AssistantView:
     """Integrated chat surface for the faux-AI assistant.
 
@@ -48,6 +108,16 @@ class AssistantView:
         from utils.chat_memory import ChatMemoryManager
         self.chat_memory = ChatMemoryManager()
         self._history_list = []
+
+    def _on_mode_toggle(self, is_llm: bool):
+        from utils.streamrip_api import update_config_params
+        update_config_params({
+            "assistant": {
+                "llm_enabled": is_llm
+            }
+        })
+        label = "AI Agent" if is_llm else "Semantic Parser"
+        self.app.show_snackbar(f"Jarvis engine mode set to: {label}")
 
     def _ensure_initialized(self):
         if self._initialized:
@@ -118,15 +188,18 @@ class AssistantView:
             on_click=lambda _e: self.clear_chat_manually(),
         )
 
-        # Initialisation banner: hidden once the graph is ready.
-        self._init_label = ft.Text(
-            "Preparing your music network…", color=DIM, size=12,
-        )
-        self._init_bar = ft.ProgressBar(value=None, color=CYAN, bgcolor=SURFACE2)
-        self._init_banner = ft.Container(
-            content=ft.Column([self._init_label, self._init_bar], spacing=6),
-            padding=ft.Padding.symmetric(horizontal=16, vertical=10),
-            visible=False,
+        # Radio pill mode toggle (AI Agent vs Semantic model)
+        is_llm_active = True
+        try:
+            from utils.streamrip_api import load_config
+            cfg = load_config()
+            is_llm_active = bool(cfg.get("assistant", {}).get("llm_enabled", True))
+        except Exception:
+            pass
+
+        self._mode_pill = ModelModePill(
+            is_llm=is_llm_active,
+            on_change=self._on_mode_toggle,
         )
 
         # Load session history
@@ -150,7 +223,10 @@ class AssistantView:
                     content=ft.Row(
                         [
                             ft.Text("JARVIS", color=TEXT, size=13,
-                                    weight=ft.FontWeight.W_700, expand=True),
+                                    weight=ft.FontWeight.W_700),
+                            ft.Container(expand=True),
+                            self._mode_pill,
+                            ft.Container(width=4),
                             self._clear_btn,
                             self._tts_toggle,
                         ],
@@ -159,7 +235,6 @@ class AssistantView:
                     ),
                     padding=ft.Padding.symmetric(horizontal=16, vertical=12),
                 ),
-                self._init_banner,
                 ft.Divider(color=BORDER, height=1),
                 # Messages Slot
                 ft.Container(content=self._messages, expand=True),
@@ -225,39 +300,21 @@ class AssistantView:
             self._init_started = False
 
     async def _do_init(self):
-        # Yield to the UI loop for a beat to ensure the Jarvis tab finishes
-        # its initial paint before we start the heavy DSP/Graph work.
         await asyncio.sleep(0.2)
         
-        # Scroll any existing history to bottom on open
         if hasattr(self, "_messages") and self._messages:
             try:
                 await self._messages.scroll_to(offset=-1, duration=0)
             except Exception:
                 pass
 
-        if getattr(self, "_analysing_library", False):
-            has_busy_msg = any(
-                msg["sender"] == "assistant" and "busy analyzing the music library" in msg["text"]
-                for msg in self._history_list
-            )
-            if not has_busy_msg:
-                await self._append_bubble(
-                    "assistant",
-                    "I am currently busy analyzing the music library and rebuilding the DSP graph, sir. I will notify you as soon as I am done.",
-                )
-            return
-
-        self._set_banner(visible=True, message="Checking your library…", determinate=None)
         logger.info("AssistantView: init flow started")
 
-        # Lazy runner construction.
-        from utils.assistant_runner import AssistantRunner, PendingConfirmation
+        from utils.assistant_runner import AssistantRunner
         from utils import track_graph as tg
         if self._runner is None:
             self._runner = AssistantRunner(self.app.db_manager, audio_engine)
 
-        # Voice config — slower pace + lower pitch for the Jarvis persona.
         if audio_engine.audio_service:
             self.page.run_task(
                 audio_engine.audio_service.tts_set_voice, pitch=0.75, rate=0.75
@@ -267,18 +324,13 @@ class AssistantView:
             status = await tg.graph_status(self.app.db_manager)
         except Exception as exc:
             logger.exception("AssistantView: graph_status failed")
-            self._set_banner(visible=False)
             await self._append_bubble(
                 "assistant",
                 f"Couldn't read your library: {exc}",
             )
             return
 
-        logger.info("AssistantView: graph_status = %s", status)
-
-        # Empty library: nothing to do, just inform the user.
         if status["total_tracks"] == 0:
-            self._set_banner(visible=False)
             if not self._init_greeted:
                 self._init_greeted = True
                 self.chat_memory.save_session(self._history_list, self._init_greeted)
@@ -289,246 +341,30 @@ class AssistantView:
                 if not has_empty_msg:
                     await self._append_bubble(
                         "assistant",
-                        "Your library looks empty. Scan a music folder in "
-                        "Library → Scan, then ask me to 'rescan my library'.",
+                        "Your library looks empty. Scan a music folder in Library → Scan to get started.",
                     )
             return
 
-        # Count tracks that the analyser would touch — drives both the
-        # confirmation prompt and the "everything's fine" silent path.
-        try:
-            missing = await self.app.db_manager.get_tracks_missing_features(
-                tg.FEATURES_VERSION
-            )
-        except Exception as exc:
-            logger.warning("AssistantView: missing-features check failed: %s", exc)
-            missing = []
-        missing_count = len(missing)
-        logger.info("AssistantView: %d tracks need DSP features", missing_count)
-
-        # Check if the graph is already built and up-to-date for this library state.
-        # The sidecar counts alone are NOT sufficient evidence: they describe the
-        # library, not the artifact, so a matching count happily certified a DB
-        # that had no geometry in it at all. The graph must actually be present.
         graph_state = self.chat_memory.load_graph_state()
         needs_metadata = (status["artist_edges"] == 0 and status["album_edges"] == 0)
-        # Readiness = persisted Zr coordinates (what the walk loads), NOT the
-        # acoustic edge table, which build_acoustic_edges no longer writes.
         needs_acoustic = (status["coord_tracks"] == 0 and status["total_tracks"] >= 2)
         is_up_to_date = (
             graph_state.get("total_tracks") == status["total_tracks"]
-            and graph_state.get("missing_count") == missing_count
             and not needs_acoustic
             and not needs_metadata
         )
 
-        # Cheap path: rebuild metadata + acoustic edges from already-present
-        # features. No DSP analysis required. Run silently.
-        # This runs if the graph has never been built, OR if the library state has changed
-        # and there are no missing features to analyze (so we can silently rebuild edges).
-        if not is_up_to_date and (needs_metadata or needs_acoustic or missing_count == 0):
-            self._set_banner(
-                visible=True,
-                message="Linking your music graph…",
-                determinate=None,
-            )
+        if not is_up_to_date:
             try:
                 await tg.build_metadata_edges(self.app.db_manager)
                 await tg.build_acoustic_edges(self.app.db_manager)
-                self.chat_memory.save_graph_state(status["total_tracks"], missing_count)
+                self.chat_memory.save_graph_state(status["total_tracks"], 0)
             except Exception as exc:
                 logger.warning("AssistantView: edge build failed: %s", exc)
-            self._set_banner(visible=False)
 
-        # Now ask the user about any DSP work. Never auto-run.
-        if missing_count > 0:
-            self._set_banner(visible=False)
-            if not self._init_greeted:
-                self._init_greeted = True
-                self.chat_memory.save_session(self._history_list, self._init_greeted)
-                has_dsp_prompt = any(
-                    msg["sender"] == "assistant" and any(k in msg["text"] for k in ["DSP", "analys", "unindexed", "profile", "acoustic"])
-                    for msg in self._history_list
-                )
-                if not has_dsp_prompt:
-                    self._runner.queue_confirmation(PendingConfirmation(
-                        prompt="rescan",
-                        on_yes_action="rebuild_graph",
-                        on_yes_msg=f"Acknowledged. Analysing {missing_count} tracks now.",
-                        on_no_msg="Understood. I'll work with what I have for now.",
-                    ))
-                    dsp_text = self._runner._say("dsp_prompt", missing=missing_count, total=status['total_tracks'])
-                    dsp_speak = self._runner._say("dsp_prompt_speak", missing=missing_count, total=status['total_tracks'])
-                    await self._append_bubble(
-                        "assistant",
-                        dsp_text,
-                        speak=True,
-                        speak_text=dsp_speak,
-                    )
-            return
-
-        # Everything's built and analysed. Show a quiet "ready" bubble (no TTS;
-        # the assistant only speaks when something actually happened — e.g.
-        # after a graph rebuild — not on every reopen of the pane).
-        self._set_banner(visible=False)
         if not self._init_greeted:
             self._init_greeted = True
             self.chat_memory.save_session(self._history_list, self._init_greeted)
-            if not self._history_list:
-                edge_total = (status["acoustic_edges"]
-                               + status["artist_edges"] + status["album_edges"])
-                greeting_text = self._runner._say("greeting")
-                status_line = f"\n\n*System status: {status['total_tracks']} tracks mapped, {edge_total} graph edges active.*"
-                await self._append_bubble(
-                    "assistant",
-                    greeting_text + status_line,
-                )
-
-    async def _do_graph_rebuild(self):
-        """Long-running operation: run the analyser for any tracks lacking
-        features, then rebuild metadata + acoustic edges. Invoked when the
-        runner emits action='rebuild_graph' (either from a confirmation
-        yes-response or the explicit 'rescan' intent)."""
-        import time
-        from utils import track_graph as tg
-        self._analysing_library = True
-        audio_active = bool(audio_engine.audio_service)
-        is_desktop = (sys.platform == "darwin")
-        can_analyze = audio_active or is_desktop
-        start_time = time.time()
-
-        try:
-            if not can_analyze:
-                await self._append_bubble(
-                    "assistant",
-                    "*Audio engine not active. Running edge linkage in offline developer mode...*",
-                )
-
-            try:
-                missing = await self.app.db_manager.get_tracks_missing_features(
-                    tg.FEATURES_VERSION
-                )
-            except Exception as exc:
-                logger.warning("AssistantView: missing-features check failed: %s", exc)
-                missing = []
-
-            if missing and can_analyze:
-                total = len(missing)
-                self._init_cancel = False
-                if not is_desktop:
-                    await self._append_bubble(
-                        "assistant",
-                        "*Sir, please ensure a song is playing (even at 0 volume) in the background. "
-                        "This activates Android's keep-alive service, preventing the OS from killing "
-                        "our background DSP worker thread while we work!*",
-                        speak=True,
-                        speak_text="Sir, please ensure a song is playing in the background. This activates Android's keep-alive service, preventing the OS from killing our background DSP thread.",
-                    )
-                self._set_banner(
-                    visible=True,
-                    message=f"Analysing 1 / {total} tracks…",
-                    determinate=0.0,
-                )
-
-                async def _on_progress(done, total_, current, failures):
-                    if self._init_cancel:
-                        return
-                    
-                    # Compute dynamic estimated time remaining (ETA)
-                    eta_str = ""
-                    if done > 0 and total_ > done:
-                        elapsed = time.time() - start_time
-                        avg_time_per_track = elapsed / done
-                        remaining_tracks = total_ - done
-                        eta_seconds = int(avg_time_per_track * remaining_tracks)
-                        
-                        if eta_seconds < 60:
-                            eta_str = f" (~{eta_seconds}s left)"
-                        elif eta_seconds < 3600:
-                            eta_str = f" (~{eta_seconds // 60}m {eta_seconds % 60}s left)"
-                        else:
-                            eta_str = f" (~{eta_seconds // 3600}h {(eta_seconds % 3600) // 60}m left)"
-
-                    suffix = f" ({failures} failed)" if failures else ""
-                    self._set_banner(
-                        visible=True,
-                        message=f"Analysing {done} / {total_}{suffix}{eta_str}…",
-                        determinate=(done / total_) if total_ else None,
-                    )
-                    # Keep background process alive and show progress on Android notification
-                    if audio_active and audio_engine.audio_service:
-                        try:
-                            await audio_engine.audio_service.show_progress_notification(
-                                title="DSP Analysis Progress",
-                                content=f"Analysing {done} / {total_}{suffix}{eta_str}",
-                                progress=done,
-                                total=total_
-                            )
-                        except Exception as ex:
-                            logger.warning("AssistantView: failed to update notification: %s", ex)
-
-                try:
-                    result = await tg.bulk_analyze_library(
-                        self.app.db_manager,
-                        audio_engine.audio_service,
-                        progress_cb=_on_progress,
-                        cancel_check=lambda: self._init_cancel,
-                    )
-                    logger.info("AssistantView: analyser sweep done: %s", result)
-                except Exception as exc:
-                    logger.warning("AssistantView: analyser sweep failed: %s", exc)
-            elif missing and not can_analyze:
-                logger.info("AssistantView: skipped bulk feature extraction (no audio service)")
-
-            # Rebuild edges — metadata is fast, acoustic depends on new feature
-            # vectors. Run both unconditionally after a sweep so the graph
-            # reflects the latest analyser output.
-            self._set_banner(visible=True, message="Linking similar tracks…", determinate=None)
-            try:
-                # build_acoustic_edges persists the unified Zr geometry
-                # (projection + per-track coords + Louvain communities) too.
-                await tg.build_metadata_edges(self.app.db_manager)
-                await tg.build_acoustic_edges(self.app.db_manager)
-
-                # Fetch new status and missing count to save the correct graph state
-                new_status = await tg.graph_status(self.app.db_manager)
-                new_missing = await self.app.db_manager.get_tracks_missing_features(tg.FEATURES_VERSION)
-                self.chat_memory.save_graph_state(new_status["total_tracks"], len(new_missing))
-            except Exception as exc:
-                logger.warning("AssistantView: edge rebuild failed: %s", exc)
-
-            self._set_banner(visible=False)
-            
-            if hasattr(self.app, "library_view") and self.app.library_view:
-                self.app.library_view._cached_unanalysed = None
-
-            await self._append_bubble(
-                "assistant",
-                "Analysis complete. Similarity walks are ready.",
-                speak=True,
-            )
-        finally:
-            self._analysing_library = False
-            # Clear Android system progress notification
-            if audio_active:
-                try:
-                    await audio_engine.audio_service.show_progress_notification(
-                        title="",
-                        content="",
-                        progress=0,
-                        total=0,
-                        done=True
-                    )
-                except Exception as ex:
-                    logger.warning("AssistantView: failed to cancel notification: %s", ex)
-
-    def _set_banner(self, visible: bool, message: str = "", determinate=None):
-        def _mutate():
-            self._init_banner.visible = visible
-            if message:
-                self._init_label.value = message
-            self._init_bar.value = determinate
-        self.app.safe_update(_mutate)
 
     # ── Chat plumbing ──────────────────────────────────────────────────────
 
@@ -818,6 +654,14 @@ class AssistantView:
             _artist = (_track.get("artist") or _track.get("artist_name")
                        if _track else response.extras.get("artist"))
         intent = getattr(response, "intent", None)
+        # Thread AI-agent provenance onto the intent so the bubble can render the
+        # Stage 3 badge — response.extras is not otherwise persisted on the msg.
+        agent_prov = response.extras.get("agent")
+        if agent_prov and intent is not None:
+            try:
+                intent.extras["agent"] = agent_prov
+            except Exception:
+                pass
         _entities = {
             "track":  _track,
             "artist": _artist,
@@ -853,12 +697,6 @@ class AssistantView:
                 self.app.page.update()
         except Exception:
             pass
-
-        # Honour any UI-side action the runner requested. Long-running
-        # operations limit here, not in the runner, so we own the banner +
-        # cancellation state.
-        if response.action == "rebuild_graph":
-            await self._do_graph_rebuild()
 
     async def _append_bubble(
         self,
@@ -985,32 +823,71 @@ class AssistantView:
                 s1_text = "Stage 1: Regex (No Match)"
                 s1_icon = ft.Icons.CANCEL_OUTLINED
                 s1_color = "#E57373"
-                
+
                 s2_text = "Stage 2: VLM (No Match)"
                 s2_icon = ft.Icons.CANCEL_OUTLINED
                 s2_color = "#E57373"
 
-            bubble_content = ft.Column(
-                [
-                    bubble_content,
-                    ft.Container(height=1, bgcolor="#262626", margin=ft.Margin.symmetric(vertical=6)),
-                    ft.Row(
-                        [
-                            ft.Icon(s1_icon, color=s1_color, size=11),
-                            ft.Text(s1_text, color=s1_color, size=10, weight=ft.FontWeight.W_500)
-                        ],
-                        spacing=6,
-                        alignment=ft.MainAxisAlignment.START,
-                    ),
-                    ft.Row(
-                        [
-                            ft.Icon(s2_icon, color=s2_color, size=11),
-                            ft.Text(s2_text, color=s2_color, size=10, weight=ft.FontWeight.W_500)
-                        ],
-                        spacing=6,
-                        alignment=ft.MainAxisAlignment.START,
+            # Stage 3: AI Agent. When the LLM tool-calling agent handled the turn
+            # it supersedes the semantic stage (which is bypassed in agent mode).
+            agent = extras.get("agent") if isinstance(extras, dict) else None
+            s3 = None
+            if agent and agent.get("used_llm"):
+                s2_text = "Stage 2: VLM (Skipped)"
+                s2_icon = ft.Icons.REMOVE_CIRCLE_OUTLINE
+                s2_color = DIM
+                seen_tools = []
+                for t in (agent.get("tools") or []):
+                    if t not in seen_tools:
+                        seen_tools.append(t)
+                tool_str = (" · " + ", ".join(seen_tools)) if seen_tools else ""
+                s3 = (ft.Icons.AUTO_AWESOME_ROUNDED, f"Stage 3: AI Agent (Handled{tool_str})", "#81C784")
+
+            column_children = [
+                bubble_content,
+                ft.Container(height=1, bgcolor="#262626", margin=ft.Margin.symmetric(vertical=6)),
+            ]
+
+            options = extras.get("options")
+            if options and not is_user:
+                option_controls = []
+                for opt in options:
+                    opt_id = str(opt.get("id", ""))
+                    opt_title = str(opt.get("title", ""))
+                    opt_sub = str(opt.get("subtitle", ""))
+                    btn = ft.OutlinedButton(
+                        f"{opt_id}. {opt_title}",
+                        tooltip=opt_sub if opt_sub else None,
+                        style=ft.ButtonStyle(
+                            color=CYAN,
+                            side=ft.BorderSide(1, CYAN),
+                        ),
+                        on_click=lambda _e, tid=opt_id: self.page.run_task(self._handle_user_text, tid),
                     )
-                ],
+                    option_controls.append(btn)
+                column_children.append(ft.Column(option_controls, spacing=4))
+                column_children.append(ft.Container(height=1, bgcolor="#262626", margin=ft.Margin.symmetric(vertical=6)))
+
+            stage_specs = [
+                (s1_icon, s1_text, s1_color),
+                (s2_icon, s2_text, s2_color),
+            ]
+            if s3 is not None:
+                stage_specs.append(s3)
+            column_children.extend([
+                ft.Row(
+                    [
+                        ft.Icon(ic, color=col, size=11),
+                        ft.Text(tx, color=col, size=10, weight=ft.FontWeight.W_500),
+                    ],
+                    spacing=6,
+                    alignment=ft.MainAxisAlignment.START,
+                )
+                for (ic, tx, col) in stage_specs
+            ])
+
+            bubble_content = ft.Column(
+                column_children,
                 spacing=4,
                 tight=True,
             )
@@ -1031,21 +908,39 @@ class AssistantView:
         )
 
     def _build_empty_state(self) -> ft.Container:
+        sample_prompts = [
+            "play something chill",
+            "play similar",
+            "tell me about this track",
+            "save queue as playlist Favorites",
+            "help",
+        ]
+        chips = [
+            ft.OutlinedButton(
+                p,
+                style=ft.ButtonStyle(
+                    color=CYAN,
+                    side=ft.BorderSide(1, CYAN),
+                ),
+                on_click=lambda _e, text=p: self.page.run_task(self._handle_user_text, text),
+            )
+            for p in sample_prompts
+        ]
         return ft.Container(
             content=ft.Column(
                 [
                     ft.Icon(ft.Icons.AUTO_AWESOME_ROUNDED, color=CYAN, size=42),
-                    ft.Text("Jarvis", color=TEXT, size=20,
+                    ft.Text("JARVIS", color=TEXT, size=20,
                             weight=ft.FontWeight.W_900,
                             text_align=ft.TextAlign.CENTER),
                     ft.Text(
-                        "Try: 'play stairway', 'more like this', "
-                        "'add radiohead to queue', or 'help'.",
+                        "At your service, sir. Speak or tap a command below:",
                         color=DIM, size=12, text_align=ft.TextAlign.CENTER,
                     ),
+                    ft.Row(chips, wrap=True, alignment=ft.MainAxisAlignment.CENTER, spacing=6),
                 ],
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                spacing=8,
+                spacing=12,
             ),
             padding=ft.Padding.all(24),
         )

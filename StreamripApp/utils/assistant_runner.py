@@ -26,7 +26,7 @@ import logging
 import random
 import re
 from dataclasses import dataclass, field
-from typing import Optional, List, Callable
+from typing import Any, Optional, List, Callable
 
 from utils import assistant_intent as ai
 from utils import track_graph
@@ -70,6 +70,21 @@ class PendingConfirmation:
     on_no_msg: str = "Understood. Standing by."
     on_yes_callback: Optional[Callable] = None
     on_no_callback: Optional[Callable] = None
+
+
+@dataclass
+class ChoiceOption:
+    id: str
+    title: str
+    subtitle: str = ""
+    payload: dict = field(default_factory=dict)
+
+
+@dataclass
+class PendingChoice:
+    prompt: str
+    options: list[ChoiceOption]
+    on_select_callback: Optional[Callable[[ChoiceOption], Any]] = None
 
 
 
@@ -121,18 +136,34 @@ class AssistantRunner:
         # the DSP analyser sweep). Resolved on the next dispatch when the
         # user replies with INTENT_AFFIRMATIVE / INTENT_NEGATIVE.
         self._pending: Optional[PendingConfirmation] = None
+        self._pending_choice: Optional[PendingChoice] = None
         self._history_cache: Optional[dict] = None
         # Optional injected callable returning the live in-memory history
         # list. When set (by AssistantView), the resolver skips the disk
         # round-trip through ChatMemoryManager and reads in-process state
         # directly. Reset per-dispatch by dispatch() / dispatch_text().
         self._history_provider: Optional[Callable[[], list]] = None
+        # ── AI-agent (LLM tool-calling) loop state ──────────────────────────
+        # Reset per agent turn by agent_reset(). Tools mutate these via the
+        # agent_* helpers so all runner state stays owned by the runner.
+        self._agent_deferred_play: bool = False
+        self._agent_interrupt: Optional["AssistantResponse"] = None
+        self._agent_last_extras: dict = {}
+        self._agent_tools_used: list[str] = []
+        # Parsed AssistantConfig cache, invalidated by config-file mtime so we
+        # don't re-read + re-serialise the TOML on every single agent turn.
+        self._cfg_cache = None
+        self._cfg_mtime: float = 0.0
 
     def queue_confirmation(self, prompt: PendingConfirmation) -> None:
         """Stage a pending yes/no for the next user turn. Replaces any
         previously-pending confirmation; the assistant only ever holds one
         open question at a time."""
         self._pending = prompt
+
+    def queue_choice(self, choice: PendingChoice) -> None:
+        """Stage a multi-option choice for the next user turn."""
+        self._pending_choice = choice
 
     # ── Jarvis Personality ──────────────────────────────────────────────────
 
@@ -529,19 +560,38 @@ class AssistantRunner:
             "{time_greeting}, sir. Systems aligned and ready to execute.",
             "{time_greeting}, sir. Caches primed and indexed. Command me."
         ],
-        "dsp_prompt": [
-            "Good day, sir. I notice **{missing}** of your **{total}** tracks are not DSP-analyzed. Without features, similarity walks won't work. Analyze now? (yes/no)",
-            "Systems report **{missing}** of **{total}** tracks lack DSP features. This affects similarity discovery. Shall I proceed with background analysis, sir?",
-            "Sir, there are **{missing}** unindexed tracks in your database of **{total}**. I recommend running the DSP analyzer. Initiate scan now? (yes/no)",
-            "Greetings, sir. Detected **{missing}** tracks requiring DSP profiling. Run analyzer to optimize graph? (yes/no)",
-            "Acoustic graph scan complete, sir. **{missing}** of **{total}** tracks lack DSP parameters. Launch background analysis now? (yes/no)"
+        "disambiguation": [
+            "I found {count} tracks matching '{query}', sir. Which one would you prefer?",
+            "Multiple entries match '{query}', sir. Kindly select your preferred choice:",
+            "Your collection contains {count} hits for '{query}', sir. Please choose from the options below:",
+            "I've indexed {count} matches for '{query}', sir. Which shall we queue?"
         ],
-        "dsp_prompt_speak": [
-            "I notice {missing} of your tracks are not analyzed, sir. Shall I run the analyzer now?",
-            "Greetings, sir. Detected {missing} tracks lacking DSP profiles. Analyze them now?",
-            "Sir, {missing} tracks lack acoustic features. Initiate the database scan?",
-            "There are {missing} unprofiled tracks, sir. Run background acoustic analysis?",
-            "I've found {missing} tracks without acoustic metrics, sir. Run the analyzer?"
+        "mood_steer": [
+            "{affirmative} Curated a {mood} mix for you, sir. Starting with '{title}' by {artist}.",
+            "{affirmative} Assembled a {mood} selection, sir. Now playing '{title}' by {artist}.",
+            "{affirmative} Tailored a {mood} listening flow for you, sir. Starting '{title}'.",
+            "{affirmative} Calibrating audio dynamics for a {mood} aesthetic, sir. Playing '{title}'."
+        ],
+        "track_info": [
+            "Currently playing '{title}' by {artist}, from the album '{album}'. Track duration is {duration}.",
+            "Inspecting track registers, sir: '{title}' by {artist}, from '{album}' ({duration}).",
+            "Telemetry reports playing '{title}' by {artist}, featured on '{album}'. Duration: {duration}.",
+            "Active deck is streaming '{title}' by {artist}, from '{album}' ({duration}), sir."
+        ],
+        "queue_save": [
+            "{affirmative} Saved current walk to playlist '{name}' ({count} tracks).",
+            "{affirmative} Created playlist '{name}' with {count} walk tracks.",
+            "{affirmative} Registered current walk as playlist '{name}' containing {count} tracks, sir."
+        ],
+        "queue_remove": [
+            "{affirmative} Removed '{title}' by {artist} from the queue. {remaining} tracks remaining.",
+            "{affirmative} Dropped '{title}' by {artist} from your active queue. {remaining} tracks left.",
+            "{affirmative} Pruned '{title}' by {artist} from the queue stack. {remaining} items remain."
+        ],
+        "queue_move": [
+            "{affirmative} Moved '{title}' to play next.",
+            "{affirmative} Repositioned '{title}' to the top of the queue, sir.",
+            "{affirmative} Shifted '{title}' to position #{pos} in your queue."
         ]
     }
 
@@ -613,7 +663,50 @@ class AssistantRunner:
 
     async def _dispatch_inner(self, intent: ai.Intent) -> AssistantResponse:
 
-
+        # Resolve pending multi-choice dialog first.
+        pending_choice = self._pending_choice
+        if pending_choice is not None:
+            if intent.name == ai.INTENT_NEGATIVE:
+                self._pending_choice = None
+                return AssistantResponse(
+                    spoken="Understood, sir. Selection cancelled.",
+                    displayed="Selection cancelled.",
+                )
+            selected_option = None
+            q_raw = (intent.query or intent.raw or "").strip().lower()
+            digit_map = {
+                "1": 0, "one": 0, "first": 0,
+                "2": 1, "two": 1, "second": 1,
+                "3": 2, "three": 2, "third": 2,
+                "4": 3, "four": 3, "fourth": 3,
+                "5": 4, "five": 4, "fifth": 4,
+            }
+            idx = digit_map.get(q_raw)
+            if idx is not None and 0 <= idx < len(pending_choice.options):
+                selected_option = pending_choice.options[idx]
+            else:
+                for opt in pending_choice.options:
+                    if q_raw in opt.title.lower() or (opt.subtitle and q_raw in opt.subtitle.lower()):
+                        selected_option = opt
+                        break
+            if selected_option is not None:
+                self._pending_choice = None
+                if pending_choice.on_select_callback:
+                    try:
+                        return await pending_choice.on_select_callback(selected_option)
+                    except Exception as e:
+                        logger.exception("PendingChoice: on_select_callback failed")
+                        return AssistantResponse(
+                            spoken="I had trouble processing that choice, sir.",
+                            displayed=f"Error executing choice callback: {e}",
+                            success=False,
+                        )
+                return AssistantResponse(
+                    spoken=f"Selection confirmed: {selected_option.title}.",
+                    displayed=f"Selected: **{selected_option.title}**",
+                )
+            # Anything else: drop pending choice and route normally as a fresh turn.
+            self._pending_choice = None
 
         # Resolve pending confirmation first.
         pending = self._pending
@@ -688,8 +781,18 @@ class AssistantRunner:
             )
 
         try:
-            handler = self._INTENT_DISPATCH.get(intent.name, AssistantRunner._handle_unknown)
-            return await handler(self, intent)
+            # Instant offline execution for basic media controls (<5ms execution)
+            FAST_DETERMINISTIC_INTENTS = {
+                ai.INTENT_SKIP, ai.INTENT_PREV, ai.INTENT_PAUSE, ai.INTENT_RESUME,
+                ai.INTENT_STOP, ai.INTENT_CLEAR_QUEUE, ai.INTENT_SHUFFLE,
+                ai.INTENT_MUTE, ai.INTENT_UNMUTE
+            }
+            if intent.name in FAST_DETERMINISTIC_INTENTS:
+                handler = self._INTENT_DISPATCH.get(intent.name, AssistantRunner._handle_unknown)
+                return await handler(self, intent)
+
+            # Complex / conversational / discovery queries route through LLM engine if enabled
+            return await self._dispatch_llm(intent)
         except Exception as exc:
             logger.exception("AssistantRunner: handler failed for %s", intent.name)
             return AssistantResponse(
@@ -698,12 +801,307 @@ class AssistantRunner:
                 success=False,
             )
 
+    # ── AI agent (in-process LLM tool-calling) ──────────────────────────────
+
+    def _load_assistant_cfg(self):
+        """Return the cached AssistantConfig, re-parsing only when the on-disk
+        config changes (keyed by file mtime). Avoids re-reading + re-serialising
+        the whole TOML on every agent turn."""
+        try:
+            import os
+            from utils.streamrip_api import get_config_path
+            path = get_config_path()
+            mtime = os.path.getmtime(path) if os.path.exists(path) else 0.0
+        except Exception:
+            mtime = 0.0
+        if self._cfg_cache is not None and mtime == self._cfg_mtime:
+            return self._cfg_cache
+        try:
+            from utils.config import ConfigData
+            from utils.streamrip_api import load_config
+            from tomlkit import dumps
+            cfg_dict = load_config()
+            cfg = ConfigData.from_toml(dumps(cfg_dict)) if isinstance(cfg_dict, dict) else None
+        except Exception:
+            cfg = None
+        self._cfg_cache = cfg
+        self._cfg_mtime = mtime
+        return cfg
+
+    def agent_reset(self) -> None:
+        """Clear per-turn agent-loop state before an LLM tool-calling pass."""
+        self._agent_deferred_play = False
+        self._agent_interrupt = None
+        self._agent_last_extras = {}
+        self._agent_tools_used = []
+
+    async def _execute_intent(self, intent: ai.Intent) -> AssistantResponse:
+        """Run one intent through its leaf handler directly, bypassing the LLM
+        branch and the pending/anaphora machinery. This is the bridge agent
+        tools use to reuse the proven deterministic handlers."""
+        handler = self._INTENT_DISPATCH.get(intent.name, AssistantRunner._handle_unknown)
+        return await handler(self, intent)
+
+    def _absorb_agent_response(self, resp: AssistantResponse) -> None:
+        """Fold a bridged handler's response into agent-loop state: carry the
+        deferred-play flag forward (the view starts audio after TTS), remember
+        entities for anaphora, and short-circuit the loop when the handler armed
+        a disambiguation choice or confirmation that needs the user."""
+        if resp is None:
+            return
+        if resp.deferred_play:
+            self._agent_deferred_play = True
+        if resp.extras:
+            self._agent_last_extras = resp.extras
+        if self._pending_choice is not None or self._pending is not None:
+            self._agent_interrupt = resp
+
+    async def agent_run_intent(self, intent_name: str, query: Optional[str] = None,
+                               extras: Optional[dict] = None) -> dict:
+        """Bridge an agent tool call to a runner handler, absorb its side
+        effects, and return a compact JSON-serialisable result for the model."""
+        intent = ai.Intent(name=intent_name, query=query, raw=query or "", extras=extras or {})
+        resp = await self._execute_intent(intent)
+        self._absorb_agent_response(resp)
+        from utils.llm_tools import strip_markdown
+        result: dict = {"success": resp.success, "message": strip_markdown(resp.displayed)}
+        if resp.extras.get("options"):
+            result["options"] = resp.extras["options"]
+            result["awaiting_choice"] = True
+        return result
+
+    def _stage_tracks(self, tracks: list[dict], label: str) -> AssistantResponse:
+        """Replace the queue with an explicit ordered track list (album /
+        playlist playback). Stages only — the view starts audio after TTS."""
+        engine_tracks = [_to_engine_track(t) for t in tracks]
+        self.engine.set_queue(engine_tracks, start_index=0)
+        if engine_tracks:
+            self._remember(engine_tracks[0]["path"])
+        return AssistantResponse(
+            spoken=f"{self._say('affirmative')} Playing {label}.",
+            displayed=f"Playing **{label}** ({len(engine_tracks)} tracks).",
+            extras={"track": tracks[0] if tracks else None, "queued": len(engine_tracks)},
+            deferred_play=True,
+        )
+
+    async def agent_play_tracks(self, tracks: list[dict], label: str) -> dict:
+        """Bridge for album/playlist playback: stage an explicit list now and
+        absorb the deferred-play flag so the view starts audio after TTS."""
+        if not tracks:
+            return {"success": False, "message": f"No tracks found for {label}."}
+        resp = self._stage_tracks(tracks, label)
+        self._absorb_agent_response(resp)
+        from utils.llm_tools import strip_markdown
+        return {"success": True, "message": strip_markdown(resp.displayed)}
+
+    def agent_request_confirmation(self, spoken: str, displayed: str,
+                                   on_yes: Callable) -> dict:
+        """Arm a yes/no confirmation for a destructive/outward tool action and
+        stop the agent loop so the prompt is surfaced deterministically. The
+        real action (`on_yes`, an async callable returning an AssistantResponse)
+        runs only when the user affirms on the next turn."""
+        from utils.llm_tools import strip_markdown
+        self._pending = PendingConfirmation(
+            prompt=spoken,
+            on_yes_msg=spoken,
+            on_no_msg="Understood, sir. Cancelled.",
+            on_yes_callback=on_yes,
+        )
+        self._agent_interrupt = AssistantResponse(spoken=spoken, displayed=displayed)
+        return {"success": True, "awaiting_confirmation": True,
+                "message": strip_markdown(displayed)}
+
+    def _history_snapshot(self) -> list:
+        """Single source of chat history for the agent: the live in-memory list
+        when the view injected one, else a disk read. No double-counting."""
+        if self._history_provider is not None:
+            try:
+                return list(self._history_provider() or [])
+            except Exception:
+                pass
+        try:
+            from utils.chat_memory import ChatMemoryManager
+            return ChatMemoryManager().load_session().get("messages", [])
+        except Exception:
+            return []
+
+    async def _agent_context_line(self) -> str:
+        """A short live-context line injected into the agent's system prompt so
+        trivial 'this song / my library' questions need no tool round-trip."""
+        parts: list[str] = []
+        try:
+            path = getattr(self.engine, "current_path", "") or ""
+            if path:
+                t = await self.db.get_track_full(path)
+                if t:
+                    head = " — ".join(b for b in (t.get("title"), t.get("artist")) if b)
+                    if head:
+                        extra = [x for x in (t.get("album"), t.get("genre")) if x]
+                        suffix = f" ({', '.join(extra)})" if extra else ""
+                        parts.append(f"Now playing: {head}{suffix}.")
+        except Exception:
+            pass
+        try:
+            total = await self.db.get_total_tracks()
+            if total:
+                parts.append(f"Local library holds {total} tracks.")
+        except Exception:
+            pass
+        return " ".join(parts)
+
+    def _finalize_agent(self, reply_markdown: str) -> AssistantResponse:
+        """Wrap the agent's final text into a response: markdown for the bubble,
+        stripped plain text for TTS, plus carried playback/entity/provenance."""
+        from utils.llm_tools import strip_markdown
+        resp = AssistantResponse(
+            spoken=strip_markdown(reply_markdown) or "At your service, sir.",
+            displayed=reply_markdown,
+            deferred_play=self._agent_deferred_play,
+        )
+        resp.extras = dict(self._agent_last_extras or {})
+        resp.extras["agent"] = {"used_llm": True, "tools": list(self._agent_tools_used)}
+        return resp
+
+    def _finalize_agent_interrupt(self) -> AssistantResponse:
+        """Return the disambiguation/confirmation prompt a tool raised, tagged
+        with agent provenance so the bubble shows the AI-agent stage."""
+        resp = self._agent_interrupt
+        if resp.extras is None:
+            resp.extras = {}
+        resp.extras.setdefault("agent", {"used_llm": True, "tools": list(self._agent_tools_used)})
+        return resp
+
+    async def _dispatch_llm(self, intent: ai.Intent) -> AssistantResponse:
+        """Route a request through the in-process AI agent — an LLM tool-calling
+        loop over the runner's music tools. Falls back to the deterministic
+        handler whenever the agent is disabled, unconfigured, or errors."""
+        cfg = self._load_assistant_cfg()
+        acfg = cfg.assistant if (cfg and hasattr(cfg, "assistant")) else None
+
+        if acfg is not None and not acfg.llm_enabled:
+            return await self._execute_intent(intent)
+
+        provider = acfg.llm_provider if acfg else "gemini"
+        from utils.llm_engine import LLMEngine
+        engine = LLMEngine(
+            provider=provider,
+            api_key=acfg.gemini_api_key if acfg else "",
+            model=acfg.gemini_model if acfg else "gemini-2.5-flash",
+            ollama_endpoint=acfg.ollama_endpoint if acfg else "http://localhost:11434/v1",
+            ollama_model=acfg.ollama_model if acfg else "llama3.2",
+        )
+
+        if not engine.is_configured():
+            # No key / local server: fall back to deterministic parsing for
+            # known intents; only nag on a truly unrecognised utterance.
+            if intent.name != ai.INTENT_UNKNOWN:
+                return await self._execute_intent(intent)
+            return AssistantResponse(
+                spoken="Please configure your free Gemini API key in Settings, AI Assistant, to activate my full intelligence, sir.",
+                displayed="**AI Agent unconfigured**: paste your free API key from [Google AI Studio](https://aistudio.google.com/) under **Settings → AI Assistant** to enable conversational AI & smart curation.",
+                success=False,
+            )
+
+        self.agent_reset()
+        from utils.llm_tools import get_agent_tools, execute_tool
+
+        system_prompt = (
+            "You are Jarvis, a concise, sophisticated AI assistant embedded in the Mai An Lab "
+            "high-fidelity music app. Address the user as 'sir'. You can both KNOW and ACT on the "
+            "user's library via tools: read tools (library overview & stats, top-played, artists, "
+            "an artist's albums, an album's tracks, playlists and their contents, recently played, "
+            "and rich per-track details incl. bpm/energy) and action tools (search, play/enqueue/"
+            "play-next, play whole albums or playlists, the DSP similarity walk, mood steering, "
+            "transport control, saving playlists, and Qobuz online search). "
+            "Answer library questions by calling the read tools and reasoning over the results — "
+            "e.g. counts, 'most played', 'how many by X', 'what's on this album'. Chain tools when "
+            "needed (look up, then act). Only reference tracks the tools actually return — never "
+            "invent library paths. When a tool reports it is awaiting the user's confirmation or "
+            "choice, stop and let the user answer. Keep spoken replies short and natural (read aloud "
+            "by text-to-speech)."
+        )
+        ctx = await self._agent_context_line()
+        if ctx:
+            system_prompt = f"{system_prompt}\n\nLive context — {ctx}"
+
+        messages = [{"role": "system", "content": system_prompt}]
+        history = self._history_snapshot()
+        for m in history[-10:]:
+            role = "user" if m.get("sender") == "user" else "assistant"
+            messages.append({"role": role, "content": m.get("text", "")})
+
+        raw_query = (intent.raw or intent.query or "").strip()
+        # The view appends the user turn to history *before* dispatch, so it may
+        # already be the last message — don't feed it to the model twice.
+        if not (len(messages) > 1 and messages[-1]["role"] == "user"
+                and (messages[-1]["content"] or "").strip() == raw_query):
+            messages.append({"role": "user", "content": raw_query})
+
+        tools = get_agent_tools()
+        import json
+        res = None
+        for _ in range(4):
+            res = await engine.chat_completion(messages, tools=tools)
+            if not res.success:
+                logger.warning("Agent LLM call failed: %s", res.error_message)
+                if intent.name != ai.INTENT_UNKNOWN:
+                    return await self._execute_intent(intent)
+                return AssistantResponse(
+                    spoken=f"My apologies, sir. The connection to {provider} failed.",
+                    displayed=f"Error connecting to AI provider ({provider}): {res.error_message}",
+                    success=False,
+                )
+
+            if not res.tool_calls:
+                return self._finalize_agent(res.content or "At your service, sir.")
+
+            # Echo the provider's raw assistant message verbatim so Gemini
+            # thinking models get their thought_signature back (a reconstructed
+            # message drops it and the next turn 400s). Fall back to a rebuilt
+            # message only if the provider gave us nothing raw.
+            if res.raw_message:
+                assistant_msg = dict(res.raw_message)
+                assistant_msg.setdefault("role", "assistant")
+            else:
+                assistant_msg = {
+                    "role": "assistant",
+                    "content": res.content or "",
+                    "tool_calls": [
+                        {
+                            "id": tc["id"],
+                            "type": "function",
+                            "function": {"name": tc["name"], "arguments": json.dumps(tc["args"])},
+                        }
+                        for tc in res.tool_calls
+                    ],
+                }
+            messages.append(assistant_msg)
+
+            for tc in res.tool_calls:
+                tool_res = await execute_tool(tc["name"], tc["args"], self)
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc["id"],
+                    "content": json.dumps(tool_res),
+                })
+
+            # A tool asked for confirmation or disambiguation: surface it now,
+            # bypassing further LLM turns.
+            if self._agent_interrupt is not None:
+                return self._finalize_agent_interrupt()
+
+        return self._finalize_agent(res.content if (res and res.content) else "Task executed successfully, sir.")
+
 
     async def dispatch_text(self, text: str,
                             history_provider: Optional[Callable[[], list]] = None,
                             ) -> AssistantResponse:
-        """Convenience: parse + dispatch in one call."""
-        intent = ai.parse(text)
+        """Convenience: parse + dispatch in one call. When the AI agent is
+        enabled, skip the BGE semantic stage on a regex miss — the LLM handles
+        those turns, so an embedding classify would be wasted work."""
+        cfg = self._load_assistant_cfg()
+        agent_on = bool(cfg.assistant.llm_enabled) if (cfg and hasattr(cfg, "assistant")) else False
+        intent = ai.parse(text, semantic_fallback=not agent_on)
         return await self.dispatch(intent, history_provider=history_provider)
 
     # ── Recent-playback tracking ────────────────────────────────────────────
@@ -1237,6 +1635,53 @@ class AssistantRunner:
         prefix_spoken = f"I couldn't find exactly '{intent.query}', sir. Playing " if is_fuzzy else ""
         prefix_displayed = f"No exact match for '{intent.query}'. Playing " if is_fuzzy else ""
 
+        # Disambiguation check: multiple hits with matching title across 2+ distinct artists
+        q_clean = (intent.query or "").strip().lower()
+        if len(hits) > 1 and q_clean:
+            title_matches = [
+                h for h in hits
+                if q_clean in (h.get("title") or h.get("track_title") or "").lower()
+            ]
+            distinct_artists = {
+                (h.get("artist") or h.get("artist_name") or "").lower()
+                for h in title_matches
+            }
+            if len(title_matches) >= 2 and len(distinct_artists) >= 2:
+                opts = [
+                    ChoiceOption(
+                        id=str(i + 1),
+                        title=f"{h.get('title')} — {h.get('artist')}",
+                        subtitle=f"Album: {h.get('album', 'Unknown Album')}",
+                        payload=h,
+                    )
+                    for i, h in enumerate(title_matches[:4])
+                ]
+
+                async def _on_select(choice_opt: ChoiceOption) -> AssistantResponse:
+                    t = choice_opt.payload
+                    etrack = _to_engine_track(t)
+                    self.engine.set_queue([etrack], start_index=0)
+                    self._remember(etrack["path"])
+                    return AssistantResponse(
+                        spoken=f"{self._say('affirmative')} Playing '{t.get('title')}' by {t.get('artist')}.",
+                        displayed=f"Playing choice: **{t.get('title')}** — {t.get('artist')}",
+                        extras={"track": t},
+                        deferred_play=True,
+                    )
+
+                dis_spoken = self._say("disambiguation", count=len(opts), query=intent.query)
+                self.queue_choice(PendingChoice(
+                    prompt=dis_spoken,
+                    options=opts,
+                    on_select_callback=_on_select,
+                ))
+
+                return AssistantResponse(
+                    spoken=dis_spoken,
+                    displayed=f"Multiple matches found for **{intent.query}**. Please choose one:",
+                    extras={"options": [{"id": o.id, "title": o.title, "subtitle": o.subtitle} for o in opts]},
+                )
+
         if len(engine_tracks) == 1:
             self.engine.set_queue(engine_tracks, start_index=0)
             self._remember(engine_tracks[0]["path"])
@@ -1614,41 +2059,31 @@ class AssistantRunner:
             displayed="Audio unmuted (resumed), sir."
         )
 
-
-    async def _handle_rescan_dsp(self, _intent: ai.Intent) -> AssistantResponse:
-        """Manual trigger for 'rescan/reindex/analyse my library'. Always
-        emits the rebuild_graph action — the view decides whether the work
-        is needed (analyser has nothing to do when all tracks are already
-        analysed) and shows the banner accordingly."""
-        from utils import track_graph as tg
-        try:
-            missing = await self.db.get_tracks_missing_features(tg.FEATURES_VERSION)
-        except Exception as exc:
-            logger.warning("rescan_dsp missing-check failed: %s", exc)
-            missing = []
-        count = len(missing)
-        if count == 0:
-            return AssistantResponse(
-                spoken="Library already fully analysed, sir.",
-                displayed="Every track has DSP features — nothing to scan.",
-            )
-        return AssistantResponse(
-            spoken=f"Acknowledged. Analysing {count} tracks now.",
-            displayed=f"Running DSP analysis on **{count}** tracks…",
-            action="rebuild_graph",
-        )
-
     async def _handle_help(self, _intent: ai.Intent) -> AssistantResponse:
         spoken_msg = (
-            "I can manage your playback, queue tracks, "
-            "or walk the acoustic similarity graph, sir. Just say 'play more like this' "
-            "or 'more by this artist' to begin."
+            "I can manage your playback, curate playlists, edit the active queue, "
+            "steer the music mood, or look up track trivia, sir. Ask me 'what can you do' "
+            "or type 'help' anytime."
         )
         displayed_msg = (
-            "### Jarvis System Capabilities\n\n"
-            "*   **Playback**: `play [song/artist]`, `pause`, `resume`, `skip`, `prev`, `shuffle`\n"
-            "*   **Similarity Graph**: `play similar`, `more like this`, `more by this artist`\n"
-            "*   **Sub-systems**: `rescan dsp`, `clear queue`"
+            "### Jarvis Protocol & Capabilities\n\n"
+            "**Playback & Search**\n"
+            "• `play [song/artist/album]` — Search & play immediately (asks if multiple matches)\n"
+            "• `1`, `2`, or `option [N]` — Select a choice during multi-match prompts\n"
+            "• `pause` | `resume` | `skip` | `previous` | `shuffle` | `mute` | `unmute` | `stop`\n\n"
+            "**Queue & Playlist Curation**\n"
+            "• `add [song] to queue` | `play [song] next` — Append or insert tracks\n"
+            "• `remove track [N]` | `remove [song]` — Drop item from active queue\n"
+            "• `move [song/N] to top` — Reorder queue tracks\n"
+            "• `save queue as playlist [Name]` — Export current queue to a local playlist\n\n"
+            "**Discovery & Mood Steering**\n"
+            "• `play similar` | `more like this` — Walk acoustic similarity graph\n"
+            "• `play more by this artist` | `play the usual` | `surprise me`\n"
+            "• `play something chill` | `make queue energetic` — Mood/Vibe steering\n\n"
+            "**Context & Utility**\n"
+            "• `tell me about this track` | `track info` — Metadata & acoustic details\n"
+            "• `who made you` | `system status` | `what time is it` | `rescan dsp`\n"
+            "• Anaphora memory: `play their top songs`, `queue that album`"
         )
         return AssistantResponse(spoken=spoken_msg, displayed=displayed_msg)
 
@@ -1823,6 +2258,213 @@ class AssistantRunner:
         spoken, displayed = random.choice(quotes)
         return AssistantResponse(spoken=spoken, displayed=displayed)
 
+    # ── Advanced Conversational Queue & Trivia Handlers ──────────────────────
+
+    async def _handle_queue_remove(self, intent: ai.Intent) -> AssistantResponse:
+        if not self.engine.queue:
+            return AssistantResponse(
+                spoken="The queue is currently empty, sir.",
+                displayed="Queue is empty.",
+                success=False,
+            )
+        q = (intent.query or "").strip().lower()
+        removed_track = None
+
+        if q.isdigit():
+            idx = int(q) - 1
+            if 0 <= idx < len(self.engine.queue):
+                removed_track = self.engine.queue.pop(idx)
+
+        if not removed_track:
+            if q in ("last", "the last song", "the last track", "last track"):
+                removed_track = self.engine.queue.pop(-1)
+            elif q in ("first", "the first song", "the first track"):
+                removed_track = self.engine.queue.pop(0)
+            else:
+                for i, tr in enumerate(self.engine.queue):
+                    t_title = (tr.get("track_title") or tr.get("title") or "").lower()
+                    if q in t_title:
+                        removed_track = self.engine.queue.pop(i)
+                        break
+
+        if not removed_track:
+            return AssistantResponse(
+                spoken=f"I couldn't find '{intent.query}' in the current queue, sir.",
+                displayed=f"Item **{intent.query}** not found in active queue.",
+                success=False,
+            )
+
+        title = removed_track.get("track_title") or removed_track.get("title") or "Track"
+        artist = removed_track.get("artist_name") or removed_track.get("artist") or "Unknown Artist"
+        remaining = len(self.engine.queue)
+        return AssistantResponse(
+            spoken=self._say("queue_remove", title=title, artist=artist, remaining=remaining, affirmative=self._say("affirmative")),
+            displayed=f"Removed: **{title}** — {artist}. Queue remaining: **{remaining}**.",
+        )
+
+    async def _handle_queue_move(self, intent: ai.Intent) -> AssistantResponse:
+        if not self.engine.queue or len(self.engine.queue) < 2:
+            return AssistantResponse(
+                spoken="The queue does not have enough tracks to reorder, sir.",
+                displayed="Not enough tracks in queue to reorder.",
+                success=False,
+            )
+        q = (intent.query or "").strip().lower()
+        target_idx = None
+        if q.isdigit():
+            idx = int(q) - 1
+            if 0 <= idx < len(self.engine.queue):
+                target_idx = idx
+
+        if target_idx is None:
+            for i, tr in enumerate(self.engine.queue):
+                t_title = (tr.get("track_title") or tr.get("title") or "").lower()
+                if q in t_title:
+                    target_idx = i
+                    break
+
+        if target_idx is None:
+            return AssistantResponse(
+                spoken=f"I couldn't find '{intent.query}' in the active queue, sir.",
+                displayed=f"Item **{intent.query}** not found in queue.",
+                success=False,
+            )
+
+        track = self.engine.queue.pop(target_idx)
+        curr_idx = getattr(self.engine, "current_index", 0)
+        insert_at = min(curr_idx + 1, len(self.engine.queue))
+        self.engine.queue.insert(insert_at, track)
+
+        title = track.get("track_title") or track.get("title") or "Track"
+        return AssistantResponse(
+            spoken=self._say("queue_move", title=title, pos=insert_at + 1, affirmative=self._say("affirmative")),
+            displayed=f"Moved **{title}** to position #{insert_at + 1} in queue.",
+        )
+
+    async def _handle_save_queue(self, intent: ai.Intent) -> AssistantResponse:
+        if not self.engine.queue:
+            return AssistantResponse(
+                spoken="There are no active walk tracks in your queue, sir.",
+                displayed="Queue is empty. Cannot save walk.",
+                success=False,
+            )
+        name = (intent.query or "Saved Walk").strip()
+        try:
+            playlist_id = await self.db.create_playlist(name)
+        except Exception:
+            import time
+            name = f"{name} ({int(time.time())})"
+            playlist_id = await self.db.create_playlist(name)
+
+        # Save the current walk: tracks from the current playing position onwards
+        curr_idx = getattr(self.engine, "current_index", 0)
+        if curr_idx < 0 or curr_idx >= len(self.engine.queue):
+            curr_idx = 0
+        walk_tracks = self.engine.queue[curr_idx:]
+
+        added_count = 0
+        for track in walk_tracks:
+            path = track.get("path")
+            if path:
+                await self.db.add_track_to_playlist(playlist_id, path)
+                added_count += 1
+
+        return AssistantResponse(
+            spoken=self._say("queue_save", name=name, count=added_count, affirmative=self._say("affirmative")),
+            displayed=f"Saved current walk to playlist: **{name}** ({added_count} tracks).",
+        )
+
+    async def _handle_mood_steer(self, intent: ai.Intent) -> AssistantResponse:
+        mood = (intent.query or "chill").lower()
+        tracks = await self.db.get_all_tracks()
+        if not tracks:
+            return AssistantResponse(
+                spoken="Your library is currently empty, sir.",
+                displayed="Library empty.",
+                success=False,
+            )
+
+        def mood_score(t: dict) -> float:
+            score = 0.0
+            tempo = float(t.get("bpm") or t.get("tempo") or 0.0)
+            genre = (t.get("genre") or "").lower()
+            title = (t.get("title") or t.get("track_title") or "").lower()
+            album = (t.get("album") or t.get("album_title") or "").lower()
+            text = f"{genre} {title} {album}"
+
+            if mood in ("chill", "relaxing", "calm", "quiet", "slow", "mellow"):
+                if tempo > 0:
+                    score += max(0.0, (120.0 - tempo) / 10.0)
+                chill_keywords = ("chill", "lo-fi", "lofi", "ambient", "acoustic", "piano", "jazz", "downtempo", "sleep", "calm", "relax")
+                for kw in chill_keywords:
+                    if kw in text:
+                        score += 5.0
+            elif mood in ("energetic", "upbeat", "fast", "intense", "workout", "party", "hype"):
+                if tempo > 0:
+                    score += max(0.0, (tempo - 100.0) / 10.0)
+                hype_keywords = ("rock", "metal", "dance", "electronic", "house", "techno", "pop", "hip hop", "rap", "punk", "workout", "energy")
+                for kw in hype_keywords:
+                    if kw in text:
+                        score += 5.0
+            elif mood in ("focus", "study", "work", "instrumental"):
+                focus_keywords = ("ambient", "classical", "instrumental", "piano", "soundtrack", "study", "chill")
+                for kw in focus_keywords:
+                    if kw in text:
+                        score += 5.0
+
+            score += random.random() * 2.0
+            return score
+
+        sorted_tracks = sorted(tracks, key=mood_score, reverse=True)
+        selected = sorted_tracks[:15]
+        random.shuffle(selected)
+
+        engine_tracks = [_to_engine_track(t) for t in selected]
+        self.engine.set_queue(engine_tracks, start_index=0)
+        self._remember(engine_tracks[0]["path"])
+
+        first = selected[0]
+        title = first.get("title") or first.get("track_title") or "Unknown"
+        artist = first.get("artist") or first.get("artist_name") or "Unknown Artist"
+
+        return AssistantResponse(
+            spoken=self._say("mood_steer", mood=mood, title=title, artist=artist, affirmative=self._say("affirmative")),
+            displayed=f"Curated **{mood.capitalize()} Mix** ({len(selected)} tracks). Playing: **{title}** — {artist}.",
+            extras={"track": first, "mood": mood},
+            deferred_play=True,
+        )
+
+    async def _handle_track_info(self, intent: ai.Intent) -> AssistantResponse:
+        current = None
+        if hasattr(self.engine, "current_track") and self.engine.current_track:
+            current = self.engine.current_track
+        elif self.engine.queue and hasattr(self.engine, "current_index"):
+            idx = getattr(self.engine, "current_index", 0)
+            if 0 <= idx < len(self.engine.queue):
+                current = self.engine.queue[idx]
+
+        if not current:
+            return AssistantResponse(
+                spoken="No track is currently playing, sir.",
+                displayed="No active track playing.",
+                success=False,
+            )
+
+        title = current.get("track_title") or current.get("title") or "Unknown Track"
+        artist = current.get("artist_name") or current.get("artist") or "Unknown Artist"
+        album = current.get("album_title") or current.get("album") or "Single / Unknown Album"
+        duration = float(current.get("duration", 0.0) or 0.0)
+        dur_str = f"{int(duration // 60)}m {int(duration % 60)}s" if duration > 0 else "Unknown length"
+
+        spoken = self._say("track_info", title=title, artist=artist, album=album, duration=dur_str)
+        displayed = f"**Track Info**\n• Title: **{title}**\n• Artist: **{artist}**\n• Album: **{album}**\n• Duration: **{dur_str}**"
+
+        return AssistantResponse(
+            spoken=spoken,
+            displayed=displayed,
+            extras={"track": current},
+        )
+
     # ── Dispatch table ──────────────────────────────────────────────────────
     # Filled below the class so the method references resolve.
 
@@ -1831,6 +2473,12 @@ AssistantRunner._INTENT_DISPATCH = {
     ai.INTENT_PLAY_NOW:        AssistantRunner._handle_play_now,
     ai.INTENT_QUEUE_ADD:       AssistantRunner._handle_queue_add,
     ai.INTENT_QUEUE_NEXT:      AssistantRunner._handle_queue_next,
+    ai.INTENT_CHOICE_SELECT:   AssistantRunner._handle_unknown,
+    ai.INTENT_QUEUE_REMOVE:    AssistantRunner._handle_queue_remove,
+    ai.INTENT_QUEUE_MOVE:      AssistantRunner._handle_queue_move,
+    ai.INTENT_SAVE_QUEUE:      AssistantRunner._handle_save_queue,
+    ai.INTENT_MOOD_STEER:      AssistantRunner._handle_mood_steer,
+    ai.INTENT_TRACK_INFO:      AssistantRunner._handle_track_info,
     ai.INTENT_PLAY_SIMILAR:    AssistantRunner._handle_play_similar,
     ai.INTENT_PLAY_MORE_BY:    AssistantRunner._handle_play_more_by,
     ai.INTENT_PLAY_RANDOM:     AssistantRunner._handle_play_random,
@@ -1843,7 +2491,6 @@ AssistantRunner._INTENT_DISPATCH = {
     ai.INTENT_SHUFFLE:         AssistantRunner._handle_shuffle,
     ai.INTENT_MUTE:            AssistantRunner._handle_mute,
     ai.INTENT_UNMUTE:          AssistantRunner._handle_unmute,
-    ai.INTENT_RESCAN_DSP:      AssistantRunner._handle_rescan_dsp,
     ai.INTENT_PLAY_THE_USUAL:   AssistantRunner._handle_play_the_usual,
     ai.INTENT_GREET:             AssistantRunner._handle_greet,
     ai.INTENT_HELP:            AssistantRunner._handle_help,

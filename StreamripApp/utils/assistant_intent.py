@@ -49,9 +49,14 @@ INTENT_UNMUTE         = "unmute"
 INTENT_SHUFFLE        = "shuffle"
 INTENT_PLAY_RANDOM    = "play_random"     # play a random song and shuffle
 INTENT_PLAY_THE_USUAL = "play_the_usual"    # play a track from most played
-INTENT_RESCAN_DSP     = "rescan_dsp"      # run analyser for missing tracks
 INTENT_AFFIRMATIVE    = "affirmative"     # yes / yeah / do it (confirmation)
 INTENT_NEGATIVE       = "negative"        # no / later / not now (cancel pending)
+INTENT_CHOICE_SELECT  = "choice_select"   # choice selection (1, first, etc.)
+INTENT_QUEUE_REMOVE   = "queue_remove"    # remove item from queue
+INTENT_QUEUE_MOVE     = "queue_move"      # move item in queue
+INTENT_SAVE_QUEUE     = "save_queue"      # save queue as playlist
+INTENT_MOOD_STEER     = "mood_steer"      # mood/vibe based curation
+INTENT_TRACK_INFO     = "track_info"      # song trivia & metadata info
 INTENT_NAME_ENTITY    = "name_entity"     # call it X / name it X
 INTENT_GREET          = "greet"
 INTENT_HELP           = "help"
@@ -96,25 +101,17 @@ def _build_patterns() -> list[tuple[str, re.Pattern]]:
             r"^\s*(?:no|nope|nah|not\s+now|later|cancel|stop|forget\s+it|"
             r"negative|never\s+mind|nevermind)\s*[.!]?\s*$", re.I)),
 
+        # ── Choice selection (multi-choice pending dialogue) ───────────────────
+        (INTENT_CHOICE_SELECT, re.compile(
+            r"^\s*(?:option|choice|number|#)?\s*(?P<q>1|2|3|4|5|one|two|three|four|five|first|second|third|fourth|fifth)(?:\s+one)?\s*$",
+            re.I
+        )),
+
         # ── Naming / Entity Specification ───────────────────────────────────────
         (INTENT_NAME_ENTITY, re.compile(
             r"^\s*(?:call\s+(?:the\s+)?playlist|name\s+(?:the\s+)?playlist|call\s+it|name\s+it|make\s+it|called|named|titled)\s+(?P<q>.+?)\s*$",
             re.I
         )),
-
-        # ── Manual graph maintenance ────────────────────────────────────────────
-        # Verb-only: "rescan", "reindex", "reanalyse".
-        (INTENT_RESCAN_DSP,   re.compile(
-            r"^\s*(?:rescan|re-?scan|reindex|re-?index|re-?analy[sz]e)\s*$",
-            re.I)),
-        # Verb + object: covers most natural phrasings, including modifiers
-        # like "new" ("analyse new tracks") and "the/my" ("scan the library").
-        (INTENT_RESCAN_DSP,   re.compile(
-            r"^\s*(?:rescan|re-?scan|reindex|re-?index|analy[sz]e|"
-            r"rebuild|refresh|update|scan)\s+"
-            r"(?:(?:my|the|new|for\s+new|all)\s+)*"
-            r"(?:library|graph|music|tracks?|songs?|dsp|features?)\s*$",
-            re.I)),
 
         # ── Verbless single-word commands first ─────────────────────────────────
         (INTENT_GREET,        re.compile(
@@ -143,7 +140,17 @@ def _build_patterns() -> list[tuple[str, re.Pattern]]:
         (INTENT_THANKS,       re.compile(r"^\s*(?:thank\s+you|thanks(?:\s+jarvis)?|good\s+job|great\s+job|cheers|awesome|nice\s+one)\s*[.!]?\s*$", re.I)),
         (INTENT_QUOTE,        re.compile(r"^\s*(?:give\s+me\s+a\s+quote|quote\s+(?:me|something)|say\s+something\s+(?:wise|inspirational|philosophical))\s*\??\s*$", re.I)),
 
-        # ── Similarity / artist navigation ──────────────────────────────────────
+        # ── Song Metadata & Trivia ──────────────────────────────────────────────
+        (INTENT_TRACK_INFO,   re.compile(r"^\s*(?:tell\s+me\s+(?:about|more\s+about)|what\s+is|info\s+on|trivia\s+on)\s+(?:this|the|current)\s+(?:track|song|music|album)\s*\??\s*$", re.I)),
+        (INTENT_TRACK_INFO,   re.compile(r"^\s*(?:track|song)\s+info(?:rmation)?\s*\??\s*$", re.I)),
+
+        # ── Similarity / Mood / Curation ────────────────────────────────────────
+        (INTENT_MOOD_STEER,   re.compile(
+            r"^\s*(?:play|make|set)\s+(?:something\s+|the\s+queue\s+|a\s+|some\s+)?"
+            r"(?P<q>chill|relaxing|calm|quiet|energetic|upbeat|fast|slow|intense|focus|workout)\s*"
+            r"(?:music|tracks?|songs?|vibes?|for\s+reading|for\s+studying)?\s*$",
+            re.I
+        )),
         (INTENT_PLAY_SIMILAR, re.compile(
             r"^\s*(?P<verb>play|start|put\s+on|add|queue|enqueue|put)?\s*"
             r"(?:a\s+|some\s+|something\s+|stuff\s+|tracks?\s+|songs?\s+|music\s+|tunes?\s+)?"
@@ -185,7 +192,27 @@ def _build_patterns() -> list[tuple[str, re.Pattern]]:
 
 
 
-        # ── Queue ops with query ────────────────────────────────────────────────
+        # ── Advanced Queue & Walk ops with query ─────────────────────────────
+        (INTENT_SAVE_QUEUE, re.compile(
+            r"^\s*(?:save|create|make)\s+(?:the\s+|this\s+|current\s+)?(?:queue|walk)\s+as\s+(?:a\s+)?(?:playlist\s+)?(?P<q>.+?)\s*$",
+            re.I
+        )),
+        (INTENT_SAVE_QUEUE, re.compile(
+            r"^\s*(?:save|create|make)\s+(?:a\s+)?playlist\s+(?:called|named|from\s+(?:the\s+)?(?:queue|walk))?\s+(?P<q>.+?)\s*$",
+            re.I
+        )),
+        (INTENT_SAVE_QUEUE, re.compile(
+            r"^\s*save\s+(?:the\s+|this\s+|current\s+)?walk(?:\s+to\s+(?:a\s+)?playlist)?(?:\s+(?P<q>.+?))?\s*$",
+            re.I
+        )),
+        (INTENT_QUEUE_MOVE, re.compile(
+            r"^\s*(?:move|shift|put)\s+(?P<q>.+?)\s+(?:to\s+(?:the\s+)?top|next|first)\s*$",
+            re.I
+        )),
+        (INTENT_QUEUE_REMOVE, re.compile(
+            r"^\s*(?:remove|delete|drop|take\s+off)\s+(?P<q>.+?)(?:\s+(?:from|in)\s+(?:the\s+)?queue)?\s*$",
+            re.I
+        )),
         (INTENT_QUEUE_NEXT, re.compile(
             r"^\s*(?:play\s+)?(?P<q>.+?)\s+next\s*$", re.I
         )),
@@ -297,12 +324,17 @@ def _clean_query(q: str) -> str:
     return q
 
 
-def parse(text: str) -> Intent:
+def parse(text: str, semantic_fallback: bool = True) -> Intent:
     """Parse one user utterance into a typed Intent.
 
     Returns Intent(name=INTENT_UNKNOWN, raw=...) when nothing matches; the
     runner uses that as the cue to either ask for clarification or to
-    fall back to a free-text library search."""
+    fall back to a free-text library search.
+
+    ``semantic_fallback`` gates the local BGE Vector Space Model stage. When the
+    AI agent is active the runner passes False: a regex miss goes straight to
+    the LLM, so paying for an embedding classify we'll discard is wasted work
+    (and battery). Fast deterministic controls come from regex either way."""
     raw = text or ""
     
     # Direct raw match for greetings/wake-word-only prompts to prevent _normalise from tearing them apart
@@ -339,6 +371,10 @@ def parse(text: str) -> Intent:
 
     # --- SEMANTIC FALLBACK GATEWAY ---
     # If the syntactic regex loop misses, we fall back to our local BGE Vector Space Model!
+    # Skipped entirely when the AI agent is active (the LLM handles regex misses),
+    # so we don't pay for an embedding classify whose result we'd throw away.
+    if not semantic_fallback:
+        return Intent(name=INTENT_UNKNOWN, raw=raw)
     # Bypassing semantic fallback for purely numeric parameters or very short utterances
     # to prevent structural misclassification of dialog slot-filling parameters (like '5').
     if normalised.isdigit() or len(normalised) < 3:
@@ -413,9 +449,14 @@ __all__ = [
     "INTENT_SHUFFLE",
     "INTENT_PLAY_RANDOM",
     "INTENT_PLAY_THE_USUAL",
-    "INTENT_RESCAN_DSP",
     "INTENT_AFFIRMATIVE",
     "INTENT_NEGATIVE",
+    "INTENT_CHOICE_SELECT",
+    "INTENT_QUEUE_REMOVE",
+    "INTENT_QUEUE_MOVE",
+    "INTENT_SAVE_QUEUE",
+    "INTENT_MOOD_STEER",
+    "INTENT_TRACK_INFO",
     "INTENT_NAME_ENTITY",
     "INTENT_GREET",
     "INTENT_HELP",

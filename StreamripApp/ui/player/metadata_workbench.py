@@ -554,7 +554,6 @@ class MetadataWorkbenchPane(ft.Container):
         return ft.Container(
             content=ft.Row([
                 checkbox,
-                self._sev_badge(sev),
                 ft.Column([
                     ft.Row([
                         ft.Text(_flag(country), size=14) if country else ft.Container(),
@@ -772,13 +771,12 @@ class MetadataWorkbenchPane(ft.Container):
                 results,
             ], tight=True, spacing=10, width=dlg_w),
             actions=[
-                ft.TextButton("Close", on_click=lambda _e: setattr(dlg, "open", False) or self.app.page.update()),
+                ft.TextButton("Close", on_click=lambda _e: self.app.page.pop_dialog() if self.app.page else None),
                 self._filled_btn("Search", lambda _e: _search()),
             ],
         )
-        self.app.page.overlay.append(dlg)
-        dlg.open = True
-        self.app.page.update()
+        if self.app.page:
+            self.app.page.show_dialog(dlg)
         _search()
 
     def _mb_dialog_card(self, artist: str, cand: dict, dlg) -> ft.Control:
@@ -853,8 +851,11 @@ class MetadataWorkbenchPane(ft.Container):
             except Exception as exc:
                 logger.exception("use_mb_candidate failed: %s", exc)
                 self.app.show_snackbar(f"Match failed: {exc}", color=ACCENT_RED)
-            if dlg is not None:
-                dlg.open = False
+            if dlg is not None and self.app.page:
+                try:
+                    self.app.page.pop_dialog()
+                except Exception:
+                    pass
             self.expanded = None
             self.selected.discard(artist)
             self.source_cache.pop(artist, None)
@@ -874,7 +875,6 @@ class MetadataWorkbenchPane(ft.Container):
         score_color = ACCENT_GREEN if score >= 80 else (ACCENT_AMBER if score >= 50 else ACCENT_RED)
         return ft.Container(
             content=ft.Row([
-                self._sev_badge(1),
                 ft.Column([
                     ft.Row([
                         ft.Text(_flag(country), size=14) if country else ft.Container(),
@@ -1095,8 +1095,8 @@ class MetadataWorkbenchPane(ft.Container):
 
             async def _do():
                 n = await self.db.set_manual_artist_enrichment_bulk(names, country=country, genres=genres)
-                dlg.open = False
-                self.app.page.update()
+                if self.app.page:
+                    self.app.page.pop_dialog()
                 self.app.show_snackbar(f"Tagged {n} artists", icon=ft.Icons.CHECK_CIRCLE, color=CYAN)
                 self.selected.clear()
                 await self._reload_async()
@@ -1114,10 +1114,9 @@ class MetadataWorkbenchPane(ft.Container):
                 chips_row,
             ], tight=True, spacing=10, scroll=ft.ScrollMode.AUTO, width=360),
             actions=[
-                ft.TextButton("Cancel", on_click=lambda _e: setattr(dlg, "open", False) or self.app.page.update()),
+                ft.TextButton("Cancel", on_click=lambda _e: self.app.page.pop_dialog() if self.app.page else None),
                 self._filled_btn("Apply to All", _apply),
             ],
         )
-        self.app.page.overlay.append(dlg)
-        dlg.open = True
-        self.app.page.update()
+        if self.app.page:
+            self.app.page.show_dialog(dlg)
