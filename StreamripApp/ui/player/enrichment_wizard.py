@@ -449,8 +449,11 @@ class MetadataEnrichmentWizardPane(ft.Container):
                                 status="ok",
                                 score=c_obj.get("score", 100),
                             )
-                            sub_dlg.open = False
-                            self.app.page.update()
+                            if self.app.page:
+                                try:
+                                    self.app.page.pop_dialog()
+                                except Exception:
+                                    pass
                             self._load_low_confidence_data()
 
                         self.app.page.run_task(_save_cand)
@@ -480,12 +483,11 @@ class MetadataEnrichmentWizardPane(ft.Container):
 
         search_field.on_submit = _do_search
         sub_dlg.actions = [
-            ft.TextButton("Cancel", on_click=lambda e: setattr(sub_dlg, "open", False) or self.app.page.update()),
+            ft.TextButton("Cancel", on_click=lambda e: self.app.page.pop_dialog() if self.app.page else None),
             ft.Button("Search", on_click=_do_search),
         ]
-        self.app.page.overlay.append(sub_dlg)
-        sub_dlg.open = True
-        self.app.page.update()
+        if self.app.page:
+            self.app.page.show_dialog(sub_dlg)
         _do_search()
 
     # ── Step 4: Manual Overrides ────────────────────────────────────────────

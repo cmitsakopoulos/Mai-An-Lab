@@ -378,6 +378,7 @@ class TestQueueModes(unittest.TestCase):
         self.app._session_bad_paths = []
         self.app._on_similar_continue = main.StreamripFletApp._on_similar_continue.__get__(self.app, main.StreamripFletApp)
         self.app._similar_auto_continue_queue = main.StreamripFletApp._similar_auto_continue_queue.__get__(self.app, main.StreamripFletApp)
+        self.app._run_continuation = main.StreamripFletApp._run_continuation.__get__(self.app, main.StreamripFletApp)
         audio_engine.bind(on_similar_continue=self.app._on_similar_continue)
 
         # 1. Start sequential play in Play Similar mode
@@ -392,9 +393,9 @@ class TestQueueModes(unittest.TestCase):
 
         # Mock graph walker & database lookup for replenishment
         new_walk_tracks = ["/music/walk1.mp3", "/music/walk2.mp3"]
-        self.app.db_manager.get_track_full.side_effect = lambda p: {
-            "path": p, "title": "Walk Title", "artist": "Walk Artist", "album": "Walk Album"
-        }
+        async def _get_tf_walk(p):
+            return {"path": p, "title": "Walk Title", "artist": "Walk Artist", "album": "Walk Album"}
+        self.app.db_manager.get_track_full.side_effect = _get_tf_walk
 
         # Patch walk to return our mocked walk tracks
         with patch("utils.track_graph.walk", new_callable=AsyncMock) as mock_walk:
@@ -534,9 +535,9 @@ class TestQueueModes(unittest.TestCase):
             np.ones(8, dtype=np.float32),   # stds
             np.eye(8, 3, dtype=np.float32), # projection matrix V_keep
         )
-        self.app.db_manager.get_track_full.side_effect = lambda p: next(
-            (t for t in self.sample_tracks if t["path"] == p), None
-        )
+        async def _get_tf(p):
+            return next((t for t in self.sample_tracks if t["path"] == p), None)
+        self.app.db_manager.get_track_full.side_effect = _get_tf
 
         # Setup initial sequential queue
         run_async(self.app._play_track_core("/music/song1.mp3"))
@@ -814,12 +815,13 @@ class TestQueueModes(unittest.TestCase):
         self.app._session_bad_paths = []
         self.app._on_similar_continue = main.StreamripFletApp._on_similar_continue.__get__(self.app, main.StreamripFletApp)
         self.app._similar_auto_continue_queue = main.StreamripFletApp._similar_auto_continue_queue.__get__(self.app, main.StreamripFletApp)
+        self.app._run_continuation = main.StreamripFletApp._run_continuation.__get__(self.app, main.StreamripFletApp)
         audio_engine.bind(on_similar_continue=self.app._on_similar_continue)
 
         new_walk_tracks = ["/music/walk1.mp3", "/music/walk2.mp3"]
-        self.app.db_manager.get_track_full.side_effect = lambda p: {
-            "path": p, "title": "Walk Title", "artist": "Walk Artist", "album": "Walk Album"
-        }
+        async def _get_tf_walk(p):
+            return {"path": p, "title": "Walk Title", "artist": "Walk Artist", "album": "Walk Album"}
+        self.app.db_manager.get_track_full.side_effect = _get_tf_walk
 
         with patch("utils.track_graph.walk", new_callable=AsyncMock) as mock_walk:
             mock_walk.return_value = new_walk_tracks
@@ -887,7 +889,6 @@ class TestQueueModes(unittest.TestCase):
         view._init_greeted = False
         view._runner = None
         view._history_list = []
-        view._set_banner = MagicMock()
         view._append_bubble = AsyncMock()
         view.chat_memory = MagicMock()
         

@@ -8,9 +8,9 @@ from collections import Counter
 import flet as ft
 import flet.canvas as cv
 from ui.tokens import (
-    BG, SURFACE, SURFACE2, CYAN, AMBER, TEXT, DIM, BORDER, 
-    SOURCE_COLORS, LIB_ARTIST_COLOR, LIB_ALBUM_COLOR, LIB_TRACK_COLOR, 
-    LIB_PLAYLIST_COLOR, apply_opacity
+    BG, SURFACE, SURFACE2, CYAN, AMBER, TEXT, DIM, BORDER,
+    SOURCE_COLORS, LIB_ARTIST_COLOR, LIB_ALBUM_COLOR, LIB_TRACK_COLOR,
+    LIB_PLAYLIST_COLOR, apply_opacity, lerp_hex, MMR_RAMP, TEMP_RAMP
 )
 from ui.widgets import AnimatedEntry, AccordionCard, src_color
 
@@ -462,7 +462,7 @@ class LibraryView:
         self._library_list = ft.ListView(
             expand=True,
             spacing=6,
-            padding=ft.Padding.only(left=12, right=12, top=4, bottom=20),
+            padding=ft.Padding.only(left=12, right=2, top=4, bottom=20),
             on_scroll=self._on_list_scroll,
             scroll_interval=100,
             # Build a screenful either side of the viewport ahead of time so a
@@ -2426,26 +2426,37 @@ class LibraryView:
         from utils.streamrip_api import get_walk_params, update_config_params
         temp_val, mmr_val = get_walk_params()
 
-        # Labels for display
-        mmr_label = ft.Text(f"Avoid Duplicates (MMR): {mmr_val:.2f}", color=TEXT, size=11, weight=ft.FontWeight.W_700)
-        temp_label = ft.Text(f"Variety (Temperature): {temp_val:.2f}", color=TEXT, size=11, weight=ft.FontWeight.W_700)
+        MMR_MAX, TEMP_MAX = 0.4, 0.8
 
-        def _get_slider_color(val, max_val):
-            ratio = min(1.0, max(0.0, val / max_val))
-            # Green (rgb(34, 197, 94)) to Red (rgb(239, 68, 68))
-            r = int(34 + (239 - 34) * ratio)
-            g = int(197 + (68 - 197) * ratio)
-            b = int(94 + (68 - 94) * ratio)
-            return f"#{r:02x}{g:02x}{b:02x}"
+        def _mmr_color(val):
+            return lerp_hex(*MMR_RAMP, val / MMR_MAX)
 
-        # Action handlers
+        def _temp_color(val):
+            return lerp_hex(*TEMP_RAMP, val / TEMP_MAX)
+
+        # A coloured value badge sits at the end of each heading row: it reads
+        # out the live value and its colour tracks the slider, so the number
+        # and the fill always agree.
+        def _badge(val, color):
+            return ft.Container(
+                content=ft.Text(f"{val:.2f}", size=12, weight=ft.FontWeight.W_800, color=color),
+                bgcolor=apply_opacity(0.14, color),
+                border_radius=6,
+                padding=ft.Padding.symmetric(horizontal=8, vertical=2),
+            )
+
+        mmr_badge = _badge(mmr_val, _mmr_color(mmr_val))
+        temp_badge = _badge(temp_val, _temp_color(temp_val))
+
         def _on_mmr_change(e):
             val = float(e.control.value)
-            mmr_label.value = f"Avoid Duplicates (MMR): {val:.2f}"
-            c = _get_slider_color(val, 0.4)
+            c = _mmr_color(val)
+            mmr_badge.content.value = f"{val:.2f}"
+            mmr_badge.content.color = c
+            mmr_badge.bgcolor = apply_opacity(0.14, c)
             e.control.active_color = c
             e.control.thumb_color = c
-            mmr_label.update()
+            mmr_badge.update()
             e.control.update()
 
         def _on_mmr_change_end(e):
@@ -2455,11 +2466,13 @@ class LibraryView:
 
         def _on_temp_change(e):
             val = float(e.control.value)
-            temp_label.value = f"Variety (Temperature): {val:.2f}"
-            c = _get_slider_color(val, 0.8)
+            c = _temp_color(val)
+            temp_badge.content.value = f"{val:.2f}"
+            temp_badge.content.color = c
+            temp_badge.bgcolor = apply_opacity(0.14, c)
             e.control.active_color = c
             e.control.thumb_color = c
-            temp_label.update()
+            temp_badge.update()
             e.control.update()
 
         def _on_temp_change_end(e):
@@ -2468,22 +2481,35 @@ class LibraryView:
             self.page.run_task(self.load_library)
 
         mmr_slider = ft.Slider(
-            min=0.0, max=0.4, value=mmr_val,
+            min=0.0, max=MMR_MAX, value=mmr_val,
             divisions=40,
-            active_color=_get_slider_color(mmr_val, 0.4),
-            thumb_color=_get_slider_color(mmr_val, 0.4),
+            active_color=_mmr_color(mmr_val),
+            thumb_color=_mmr_color(mmr_val),
             on_change=_on_mmr_change,
             on_change_end=_on_mmr_change_end,
         )
 
         temp_slider = ft.Slider(
-            min=0.0, max=0.8, value=temp_val,
+            min=0.0, max=TEMP_MAX, value=temp_val,
             divisions=80,
-            active_color=_get_slider_color(temp_val, 0.8),
-            thumb_color=_get_slider_color(temp_val, 0.8),
+            active_color=_temp_color(temp_val),
+            thumb_color=_temp_color(temp_val),
             on_change=_on_temp_change,
             on_change_end=_on_temp_change_end,
         )
+
+        def _heading(text, badge):
+            return ft.Row(
+                [
+                    ft.Text(text, color=TEXT, size=13, weight=ft.FontWeight.W_700),
+                    badge,
+                ],
+                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            )
+
+        def _caption(text):
+            return ft.Text(text, color=DIM, size=11)
 
         def _close_dialog(_e):
             self.page.pop_dialog()
@@ -2499,20 +2525,35 @@ class LibraryView:
             content=ft.Container(
                 content=ft.Column(
                     [
-                        ft.Text("Fine-tune how walk paths are selected. Changes take effect immediately.", color=DIM, size=10),
-                        ft.Container(height=4),
-                        mmr_label,
+                        ft.Text(
+                            "How the next track in the walk is chosen. Changes apply immediately.",
+                            color=DIM, size=11,
+                        ),
+                        ft.Container(height=10),
+                        _heading("Avoid Near-Duplicates", mmr_badge),
                         mmr_slider,
-                        ft.Text("Higher values penalize similarity to already-played tracks to prevent duplicate tracks and alternate mixes.", color=DIM, size=9),
-                        ft.Container(height=6),
-                        temp_label,
+                        _caption(
+                            "Discounts a track the more it sounds like one already "
+                            "in the queue — so remixes, alternate mixes and the same "
+                            "song on another release stop chaining. The safe way to "
+                            "add variety: it spreads the queue out without wandering "
+                            "off-genre."
+                        ),
+                        ft.Container(height=14),
+                        _heading("Variety (Temperature)", temp_badge),
                         temp_slider,
-                        ft.Text("Higher values introduce random variety in neighbor selections. Low values keep choices deterministic.", color=DIM, size=9),
+                        _caption(
+                            "At 0 the walk is deterministic — it always steps to the "
+                            "closest match, so the same seed gives the same queue. "
+                            "Higher rolls the dice among the top few matches, so "
+                            "repeat plays differ — but the queue drifts further from "
+                            "the seed. Keep it low unless you want shuffle-on-repeat."
+                        ),
                     ],
                     spacing=2,
                     tight=True,
                 ),
-                width=260,
+                width=300,
             ),
             actions=[
                 ft.TextButton(

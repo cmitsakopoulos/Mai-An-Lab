@@ -88,10 +88,8 @@ async def test_metadata_editor_dialog_lifecycle():
     meta = {"path": "/test/song.mp3", "track_title": "Test Title", "artist_name": "Test Artist", "album_title": "Test Album"}
     editor.open("track", meta)
 
-    assert len(mock_page.overlay) == 1
-    assert editor._dlg.open is True
+    mock_page.show_dialog.assert_called_once_with(editor._dlg)
 
-    # Closing dialog cleans up overlay
+    # Closing dialog cleans up dialog
     editor._close()
-    assert editor._dlg.open is False
-    assert len(mock_page.overlay) == 0
+    mock_page.pop_dialog.assert_called_once()

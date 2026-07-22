@@ -33,6 +33,25 @@ LIB_TRACK_COLOR    = "#35fc03"
 LIB_PLAYLIST_COLOR = "#FFBF00"
 LIB_PARTITION_COLOR = "#00FF88"
 
+def lerp_hex(c0: str, c1: str, ratio: float) -> str:
+    """Linear-interpolate between two #RRGGBB colours. ratio is clamped to
+    [0,1]. Used to give the walk-parameter sliders a semantic fill that tracks
+    their value."""
+    ratio = min(1.0, max(0.0, ratio))
+    a, b = c0.lstrip("#"), c1.lstrip("#")
+    r = int(int(a[0:2], 16) + (int(b[0:2], 16) - int(a[0:2], 16)) * ratio)
+    g = int(int(a[2:4], 16) + (int(b[2:4], 16) - int(a[2:4], 16)) * ratio)
+    bl = int(int(a[4:6], 16) + (int(b[4:6], 16) - int(a[4:6], 16)) * ratio)
+    return f"#{r:02x}{g:02x}{bl:02x}"
+
+# Semantic ramps for the two walk-parameter sliders. MMR is the *safe* variety
+# lever (spreads the queue without wandering off-genre), so it warms from teal
+# to green — "more of a good thing". Temperature trades queue quality for
+# randomness, so it warms from amber to red — "more adventurous / higher risk".
+MMR_RAMP  = ("#2DD4BF", "#00FF88")   # teal → green
+TEMP_RAMP = ("#FFBF00", "#FF4444")   # amber → red
+
+
 def apply_opacity(opacity: float, hex_color: str) -> str:
     if hex_color == "white": hex_color = "#FFFFFF"
     if hex_color == "black": hex_color = "#000000"
