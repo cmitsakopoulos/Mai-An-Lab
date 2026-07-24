@@ -77,9 +77,9 @@ from utils.genre_eval import knn_purity, knn_purity_z, compute_silhouette_scores
 _N_MFCC = 20
 _N_CHROMA = 12
 
-# The 7 raw continuous scalars subject to covariance cleaving (key_mode is
-# structural/harmonic and handled separately). Order matches _RAW_FEATURES minus
-# key_mode, which is what redundant_raw_features can return.
+# The 7 raw continuous scalars subject to covariance cleaving. Matches
+# pca_engine._RAW_FEATURES exactly (key/`key_mode` is no longer part of the
+# geometry, so redundant_raw_features never returns it).
 _CONT_SCALARS = [
     "bpm", "brightness", "energy", "rolloff", "beat_strength",
     "spectral_flatness", "spectral_contrast",

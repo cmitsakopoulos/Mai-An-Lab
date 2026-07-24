@@ -218,14 +218,15 @@ class ScaleButton(ft.GestureDetector):
 
 
 class OnyxButton(ScaleButton):
-    def __init__(self, text: str, icon: str = None, on_tap=None, height=50, width=None, **kwargs):
+    def __init__(self, text: str, icon: str = None, on_tap=None, height=50, width=None, text_size=14, padding=None, **kwargs):
         content_row = ft.Row(
             [
-                ft.Icon(icon, color=BG, size=20) if icon else ft.Container(),
-                ft.Text(text, color=BG, weight=ft.FontWeight.W_700, size=14),
+                ft.Icon(icon, color=BG, size=16 if text_size < 13 else 18 if text_size < 14 else 20) if icon else ft.Container(),
+                ft.Text(text, color=BG, weight=ft.FontWeight.W_700, size=text_size),
             ],
             alignment=ft.MainAxisAlignment.CENTER,
-            spacing=10,
+            tight=True if width is None else False,
+            spacing=6 if text_size < 13 else 8 if text_size < 14 else 10,
         )
         super().__init__(
             content=ft.Container(
@@ -233,6 +234,7 @@ class OnyxButton(ScaleButton):
                 bgcolor=CYAN,
                 height=height,
                 width=width,
+                padding=padding or (ft.Padding.symmetric(horizontal=16, vertical=8) if width is None else None),
                 border_radius=12,
                 alignment=ft.Alignment(0, 0),
             ),

@@ -107,7 +107,6 @@ debug_log("importing streamrip_api")
 from utils.streamrip_api import (
     load_config, update_config_params, download,
     get_config_path, repair_config, get_default_download_path,
-    get_walk_params,
 )
 
 debug_log("importing audio_engine")
@@ -227,8 +226,7 @@ class StreamripFletApp:
         # on top of the global taste model. None of this is persisted —
         # the goal is to react inside one listening session, then reset.
         #   * _session_bad_paths: paths the user just rejected (skip/dislike).
-        #     Walk() penalises candidates whose timbre is close to any of
-        #     these, similar to the existing MMR diversity term.
+        #     Fed into walk()'s `avoid` set so they are excluded outright.
         #   * _session_last_liked_path: most recent track that earned a
         #     positive signal in this session. Used as a fallback seed
         #     when the trip-wire trips, so we anchor back to something
@@ -1424,9 +1422,9 @@ class StreamripFletApp:
         """Cheap acoustic-only initial fill for Play Similar.
 
         No taste model, no percentile matrix, no negative-embedding load.
-        The avoid set already blocks session-disliked tracks; the graph walk
-        is pure cosine + artist edges at low temperature for a tight,
-        predictable first queue.
+        The avoid set already blocks session-disliked tracks; the walk is the
+        library ranked by acoustic proximity to the seed, so the first queue is
+        tight, deterministic and predictable.
         """
         import os
         from utils import track_graph as tg
@@ -1439,23 +1437,27 @@ class StreamripFletApp:
             # Session-rejected paths go straight into the avoid set — no
             # embedding fetch needed; the graph won't visit them at all.
             avoid.update(self._session_bad_paths)
+            # Anything still sitting in the auto-play buffer is not a candidate
+            # either. The walk is deterministic, so without this a re-enable
+            # from an unchanged seed returns
+            # the exact block already queued and inserts a duplicate copy of it —
+            # the queue "not updating" on the first press. Only the tagged buffer
+            # is excluded; the library tail below it MUST stay eligible.
+            avoid.update(self._autoplay_buffer_paths())
             # Play Similar leans purely on graph topology + DSP similarity +
             # metadata. The 7-day recent-played window is deliberately kept
             # out of the avoid set so a large library's natural listening
             # history doesn't strip the seed's top-K neighbours mid-walk.
             # `recent_played_paths` stays in db_manager for future features.
 
-            # Seed-anchored smooth walk: the 0.3·seed term + metadata/cluster
-            # penalties keep the queue in the seed's genre/community, replacing
-            # the old restart-probability band-aid for two-hop genre drift.
-            temp, mmr = get_walk_params()
+            # Seed-anchored similarity queue: the library ranked by acoustic
+            # proximity to the seed, filtered by the metadata pool gate and
+            # capped per artist/album.
             walk_paths = await tg.walk(
                 self.db_manager,
                 path,
                 length=8,
                 avoid=avoid,
-                mmr_lambda=mmr,   # suppress remix / alt-mix chaining
-                temperature=temp,   # vary the queue across repeat requests
             )
 
             # Re-check after the await — user may have toggled off mid-walk
@@ -1484,9 +1486,14 @@ class StreamripFletApp:
                     # current track via the native insert — the current source is
                     # NOT reloaded, so playback is never cut. The queue tail (e.g.
                     # the rest of the library) is preserved below the block. Dedup
-                    # only against the current track + this block; NOT the tail, or
-                    # nothing from the library could ever be recommended.
+                    # against the current track + the existing buffer + this
+                    # block; NOT the tail, or nothing from the library could ever
+                    # be recommended.
                     seen = {audio_engine.current_path}
+                    # Re-read the buffer here, not from the pre-walk avoid set:
+                    # a replenish or a manual add may have landed while we were
+                    # awaiting the walk.
+                    seen.update(self._autoplay_buffer_paths())
                     block = []
                     for et in engine_tracks:
                         p = et.get("path")
@@ -1495,10 +1502,18 @@ class StreamripFletApp:
                             block.append(et)
                             seen.add(p)
                     if block:
+                        # queue_after_current dispatches on_queue_mutated, whose
+                        # handler routes the sheet rebuild through safe_update —
+                        # refreshing again here was duplicate work, and unguarded
+                        # (a raise inside refresh() aborted the rest of this block
+                        # and logged a misleading "failed to initiate").
                         audio_engine.queue_after_current(block)
-                        if hasattr(self, "queue_sheet") and self.queue_sheet and self.queue_sheet._initialized:
-                            self.queue_sheet.refresh()
                         logger.info("Auto-play: inserted %d similar tracks after the current song.", len(block))
+                    else:
+                        logger.info(
+                            "Auto-play: walk from %s returned only tracks already queued; nothing inserted.",
+                            os.path.basename(path),
+                        )
         except Exception as exc:
             logger.exception("Play Similar: Failed to initiate similar queue: %s", exc)
 
@@ -1532,14 +1547,11 @@ class StreamripFletApp:
             # `recent_played_paths` stays in db_manager for future features.
 
             walk_len = max(count + 4, count * 2)
-            temp, mmr = get_walk_params()
             walk_tracks = await tg.walk(
                 self.db_manager,
                 path,
                 length=walk_len,
                 avoid=avoid,
-                mmr_lambda=mmr,   # suppress remix / alt-mix chaining
-                temperature=temp,   # vary the queue across repeat requests
             )
 
             # Re-check after the await
@@ -1590,6 +1602,36 @@ class StreamripFletApp:
             logger.exception("Play Similar: Failed to generate dynamic recommendations: %s", exc)
         finally:
             self._play_similar_recommendation_in_progress = False
+
+    def _autoplay_buffer_paths(self) -> set[str]:
+        """Paths of the `_autoplay` tracks currently queued AHEAD of the playing
+        track. This is the only part of the queue a walk must avoid: the tail
+        below it is the whole library, and avoiding that would leave the walk
+        with no candidates at all."""
+        q  = audio_engine.queue
+        ci = audio_engine.current_index
+        return {t["path"] for t in q[ci + 1:] if t.get("_autoplay") and t.get("path")}
+
+    def _drop_autoplay_buffer(self) -> int:
+        """Remove the pending auto-play buffer — every `_autoplay` track queued
+        AFTER the current one — and return how many were dropped.
+
+        Turning Auto-play off has to actually take the recommendations out of the
+        queue, otherwise the toggle reads as a no-op: the same up-next list keeps
+        playing, and re-enabling from the same seed re-runs a walk that is
+        deterministic, producing the identical
+        block a second time. Still non-destructive where it matters: the playing
+        track is never touched (no source reload, no cut) and the library tail
+        below the buffer is preserved, so playback simply resumes down the
+        library once this song ends."""
+        q  = audio_engine.queue
+        ci = audio_engine.current_index
+        victims = [i for i in range(ci + 1, len(q)) if q[i].get("_autoplay")]
+        if not victims:
+            return 0
+        audio_engine.remove_indices(victims)
+        logger.info("Auto-play: dropped %d pending recommendation(s) on toggle-off.", len(victims))
+        return len(victims)
 
     def _replenish_similar_queue_if_needed(self):
         """Keep an ~8-track auto-play buffer of similar songs queued right after
@@ -1706,14 +1748,11 @@ class StreamripFletApp:
         # (see _initiate_play_similar_queue_async for rationale).
 
         try:
-            temp, mmr = get_walk_params()
             walk_paths = await tg.walk(
                 self.db_manager,
                 seed_path,
                 length=8,
                 avoid=avoid,
-                mmr_lambda=mmr,   # suppress remix / alt-mix chaining
-                temperature=temp,   # vary the queue across repeat continuations
             )
         except Exception as exc:
             logger.warning("Play Similar continuation: graph walk failed: %s", exc)
@@ -2369,10 +2408,14 @@ class StreamripFletApp:
             if path:
                 self.page.run_task(self._initiate_play_similar_queue_async, path, gen)
         else:
-            # Nothing to restore — the library was never removed; it resumes
-            # below the current similar buffer once that plays out. Just stop
-            # replenishing (the gen bump above already cancels in-flight fills).
+            # Nothing to RESTORE — the library was never removed, it is still
+            # sitting below the buffer. But the buffer itself must go: leaving it
+            # queued made "off" look like a dead button (the same recommendations
+            # kept playing) and made the NEXT "on" look dead too, because the
+            # deterministic walk re-inserted the very tracks still sitting there.
+            # The gen bump above already cancels in-flight fills.
             audio_engine.play_similar_seed_path = ""
+            self._drop_autoplay_buffer()
 
         if hasattr(self, "queue_sheet") and self.queue_sheet and self.queue_sheet._initialized:
             self.safe_update(self.queue_sheet.refresh)
@@ -3040,7 +3083,6 @@ class StreamripFletApp:
                 try:
                     await conn.execute("UPDATE play_counts SET timbre = NULL, features_version = 0, pca_coords = NULL")
                     await conn.execute("DELETE FROM track_neighbors WHERE edge_kind = 'acoustic'")
-                    await conn.execute("DELETE FROM pca_space")
                     await conn.commit()
                 except Exception:
                     await conn.rollback()
@@ -3172,11 +3214,17 @@ async def main(page: ft.Page):
     page.bgcolor = BG
     # Scrollbar theme MUST live inside page.theme (below) — ft.Page has no
     # scrollbar_theme field, so assigning page.scrollbar_theme is a dead no-op
-    # Flet never serialises, which is why nothing showed on Android. Material
-    # scrollbars are also hidden on mobile unless thumb_visibility is forced on,
-    # and made grabbable (thicker + interactive) so a long fling can be dragged
-    # back up. _ideal_window already resolves a thousand-row thumb drag in one
-    # slide, so scrubbing the tracks list is cheap.
+    # Flet never serialises. Material scrollbars are also hidden on mobile unless
+    # thumb_visibility is forced on, and made grabbable (thicker + interactive)
+    # so a long fling can be dragged back up. _ideal_window already resolves a
+    # thousand-row thumb drag in one slide, so scrubbing the tracks list is cheap.
+    #
+    # CAVEAT: this theme only styles a Scrollbar that actually EXISTS. Flet wraps
+    # a scrollable in its own Scrollbar only when the control's `scroll` prop is
+    # set (flet ScrollableControl.build); otherwise the bare list falls to
+    # Flutter's MaterialScrollBehavior, which adds a Scrollbar on desktop but NOT
+    # on Android/iOS. So every ListView that needs a visible bar on the phone must
+    # also pass scroll=ft.ScrollMode.ALWAYS — the theme alone is not enough.
     scrollbar_theme = ft.ScrollbarTheme(
         thumb_visibility=True,
         interactive=True,

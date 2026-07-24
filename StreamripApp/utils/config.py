@@ -254,6 +254,7 @@ class AssistantConfig:
     gemini_model: str = "gemini-3.5-flash-lite"
     ollama_endpoint: str = "http://localhost:11434/v1"
     ollama_model: str = "llama3.2"
+    personality_prompt: str = ""
 
 
 HOME = Path.home()

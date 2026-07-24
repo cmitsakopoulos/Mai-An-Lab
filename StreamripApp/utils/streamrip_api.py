@@ -160,32 +160,6 @@ def update_config_params(params):
         logger.error(f"Failed to update config: {e}")
         return False
 
-def get_walk_params():
-    """(temperature, mmr_lambda) for the similarity walk, from config.
-
-    temperature defaults to 0.0 — a DETERMINISTIC walk. Sampling among the top
-    candidates buys variety across repeat presses, but measured on the real
-    library it also costs queue quality: from a Playboi Carti seed the arg-max
-    walk gives the tight rage cluster (Metro Boomin -> Yeat -> Lil Uzi Vert),
-    while temperature 0.3 wanders into Rick Ross / Skepta / LEX on the same
-    seed, differently each run. Reproducibility is also what makes the walk
-    debuggable — the same seed must give the same queue when you are reading
-    queues to judge a change. mmr_lambda is the principled source of variety:
-    it demotes near-duplicates instead of randomising the ranking.
-
-    Both remain user-tunable (Settings > Play Similar, and the Library tuning
-    dialog); this is only the default when the key is unset."""
-    try:
-        cfg = load_config()
-        gen = cfg.get("general", {})
-        temp = gen.get("walk_temperature")
-        if temp is None:
-            temp = gen.get("play_similar_temperature", 0.0)
-        mmr = gen.get("walk_mmr_lambda", 0.15)
-        return float(temp), float(mmr)
-    except Exception:
-        return 0.0, 0.15
-
 def repair_config():
     ensure_config_exists()
     return True

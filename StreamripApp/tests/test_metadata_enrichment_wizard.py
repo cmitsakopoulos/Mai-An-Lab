@@ -105,3 +105,47 @@ def test_junk_and_closest_match_filtering():
     match = _closest_match("Kanye West", [junk_artist, real_artist])
     assert match is not None
     assert match["name"] == "Ye"
+
+
+@pytest.mark.asyncio
+async def test_enrichment_progress_recording_and_propagation():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = os.path.join(tmpdir, "test.db")
+        db = DatabaseManager(db_path)
+        await db.initialize()
+
+        conn = await db.get_connection()
+        aid = await db._get_or_create_artist(conn, "Artist SyncTest")
+        await conn.execute(
+            "INSERT INTO albums (artist_id, title, genre) VALUES (?, ?, ?)",
+            (aid, "Test Album", "Pop"),
+        )
+        await conn.commit()
+
+        # Before sync: artist needs enrichment
+        needing_before = await db.get_artists_needing_enrichment(include_failed=True)
+        assert "Artist SyncTest" in needing_before
+
+        # Sync records progress to DB (status='ok' even if empty genres)
+        await db.upsert_artist_enrichment(
+            "Artist SyncTest", country="US", genres=[{"name": "trap", "count": 5}],
+            source="musicbrainz", score=100, status="ok",
+        )
+
+        # After sync: artist is NO LONGER in needing list (progress recorded permanently)
+        needing_after = await db.get_artists_needing_enrichment(include_failed=True)
+        assert "Artist SyncTest" not in needing_after
+
+        # Verify metadata propagation to album genre bucket
+        summary = await db.fix_and_normalize_track_genres()
+        assert summary["scanned"] >= 1
+
+        async with conn.execute(
+            "SELECT genre_bucket FROM albums WHERE artist_id = ?", (aid,)
+        ) as cur:
+            row = await cur.fetchone()
+        assert row is not None
+        assert "Hip-Hop" in row[0] or "Pop" in row[0]
+
+        await db.close()
+

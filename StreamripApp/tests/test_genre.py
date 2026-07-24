@@ -20,14 +20,20 @@ def test_genre_bucket_regression_guards():
     assert genre_bucket("Рэп") == "Hip-Hop"
     assert genre_bucket("Électronique") == "Electronic"
     assert genre_bucket("classique") == "Classical"
-    assert genre_bucket("рок") == "Rock/Alt"
+    assert genre_bucket("рок") == "Rock"
     assert genre_bucket("поп") == "Pop"
-    
+
+    # Rock/Alt split: Alt is matched before Rock, both before Pop.
+    assert genre_bucket("Alternative") == "Alt"
+    assert genre_bucket("Indie Rock") == "Alt"        # 'indie' (Alt) beats 'rock'
+    assert genre_bucket("Post-Punk") == "Alt"
+    assert genre_bucket("Classic Rock") == "Rock"     # no Alt key -> Rock
+
     # Priority order matching (rare/failing matched before rock/pop)
     # "Pop, Rock, Metal" -> Metal
     assert genre_bucket("Pop, Rock, Metal") == "Metal"
-    # "Pop, Rock" -> Rock/Alt (since Rock/Alt matches before Pop)
-    assert genre_bucket("Pop, Rock") == "Rock/Alt"
+    # "Pop, Rock" -> Rock (since Rock matches before Pop)
+    assert genre_bucket("Pop, Rock") == "Rock"
 
 
 def test_genre_bucket_niche_families():
@@ -81,7 +87,7 @@ def test_genre_display_label():
 
 def test_genre_tokens():
     # Multi-label sets
-    assert genre_tokens("Pop, Rock, Metal") == {"Metal", "Rock/Alt", "Pop"}
+    assert genre_tokens("Pop, Rock, Metal") == {"Metal", "Rock", "Pop"}
     assert genre_tokens("Rap & House") == {"Hip-Hop", "Electronic"}
     
     # FR/RU translations

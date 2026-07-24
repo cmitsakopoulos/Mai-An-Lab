@@ -68,3 +68,7 @@ Thumbs.db
 # Host-side offload cache and temporary workspaces
 tools/offload_cache/
 tools/offload_temp/
+
+# Migration plans, need work; all roads lead to rome, back to a fucking taste model
+WALK_PREDICTIVE_CEILING.md
+WALK_REDESIGN_PLAN.md

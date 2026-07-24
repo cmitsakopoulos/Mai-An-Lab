@@ -73,7 +73,16 @@ _GENRE_RULES = [
     ("Soundtrack", ("soundtrack", "film score")),
     ("Disco",      ("disco",)),
     ("Metal",      ("metal", "métal", "hard rock", "grunge", "heavy metal")),
-    ("Rock/Alt",   ("rock", "alternatif", "alternative", "indé", "indie", "punk", "new wave", "post-punk", "рок")),
+    # Rock split into Alt (indie / alternative / post-punk / new-wave) and Rock
+    # (classic / general rock). Alt is matched FIRST so a compound tag resolves to
+    # the more specific side: 'alternative rock' / 'indie rock' / 'punk rock' →
+    # Alt, while bare 'rock' / 'classic rock' → Rock. Together they cover exactly
+    # what the old single 'Rock/Alt' bucket did (Metal still precedes both, so
+    # 'hard rock' / 'grunge' stay Metal); the split only refines which side a
+    # track lands on so the journey graph can separate a 70s-classic-rock node
+    # from an indie/post-punk one instead of conflating them.
+    ("Alt",        ("alternatif", "alternative", "indé", "indie", "punk", "new wave", "post-punk")),
+    ("Rock",       ("rock", "рок")),
     # Keys are matched as raw substrings against tags that have had separators
     # stripped ('folk pop' → 'folkpop'), so bare 'kpop'/'cpop' are UNSAFE — they
     # hide inside 'folkpop', 'darkpop', 'psychedelicpop'. Only distinctive or
@@ -84,7 +93,7 @@ _GENRE_RULES = [
 ]
 
 _GENRE_PALETTE = {
-    "Rock/Alt": "#40C4FF", "Pop": "#FF80AB", "Metal": "#FF5252",
+    "Rock": "#40C4FF", "Alt": "#7C4DFF", "Pop": "#FF80AB", "Metal": "#FF5252",
     "Hip-Hop": "#FFD740", "Electronic": "#76FF03", "Folk/Cntry": "#B388FF",
     "Classical": "#FFFFFF", "Soul/R&B": "#FF6E40",
     "Jazz": "#26C6DA", "Latin": "#FF7043", "Reggae": "#66BB6A",
@@ -137,7 +146,7 @@ def genre_families(tags) -> frozenset:
     Enrichment tokens arrive with separators stripped ('alternative hip hop' →
     'alternativehiphop'), and the rules match raw substrings, so the multi-label
     view leaks generic families into specific tags: 'alternativehiphop' picks up
-    Rock/Alt via 'alternative', which was enough to call Kendrick Lamar and
+    Alt via 'alternative', which was enough to call Kendrick Lamar and
     Slipknot same-family. The priority order exists precisely to resolve that —
     it puts the rare/specific family first — so one primary label per tag is the
     robust signal here. Use `genre_tokens` where you want the full label set

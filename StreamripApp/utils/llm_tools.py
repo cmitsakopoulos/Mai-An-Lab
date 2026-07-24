@@ -147,15 +147,38 @@ def get_agent_tools() -> List[Dict[str, Any]]:
         {
             "name": "steer_mood",
             "description": (
-                "Build a mood/vibe-based mix from the local library (e.g. 'chill', 'energetic', "
-                "'focus', 'workout') and start playing it."
+                "Build a mood/vibe-based mix from the local library based on any mood descriptor "
+                "(e.g. 'chill', 'energetic', 'melancholic', 'focus', 'workout', 'dark', 'upbeat', 'rainy day') "
+                "and start playing it using DSP acoustic feature matching."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "mood": {"type": "string", "description": "Target mood/vibe, e.g. 'chill', 'energetic', 'focus'."},
+                    "mood": {"type": "string", "description": "Target mood or vibe description."},
                 },
                 "required": ["mood"],
+            },
+        },
+        {
+            "name": "search_by_acoustic_profile",
+            "description": (
+                "Search the local music library by acoustic properties extracted by DSP "
+                "(energy 0.0-1.0, brightness 0.0-1.0, bpm range, genre filters). "
+                "Use when the user asks for music with specific acoustic traits or energy levels."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "min_energy": {"type": "number", "description": "Minimum energy (0.0=calm to 1.0=intense)."},
+                    "max_energy": {"type": "number", "description": "Maximum energy (0.0 to 1.0)."},
+                    "min_brightness": {"type": "number", "description": "Minimum acoustic brightness (0.0=dark/warm to 1.0=bright)."},
+                    "max_brightness": {"type": "number", "description": "Maximum acoustic brightness."},
+                    "min_bpm": {"type": "integer", "description": "Minimum tempo in BPM."},
+                    "max_bpm": {"type": "integer", "description": "Maximum tempo in BPM."},
+                    "genre": {"type": "string", "description": "Optional genre substring filter."},
+                    "limit": {"type": "integer", "description": "Max results (default 10)."},
+                },
+                "required": [],
             },
         },
         {
@@ -395,6 +418,45 @@ async def execute_tool(tool_name: str, args: Dict[str, Any], runner: "AssistantR
         if tool_name == "steer_mood":
             mood = (args.get("mood") or "chill").strip()
             return await runner.agent_run_intent(ai.INTENT_MOOD_STEER, query=mood)
+
+        if tool_name == "search_by_acoustic_profile":
+            if runner.db is None:
+                return {"success": False, "error": "Library unavailable."}
+            min_e = float(args.get("min_energy")) if args.get("min_energy") is not None else None
+            max_e = float(args.get("max_energy")) if args.get("max_energy") is not None else None
+            min_b = float(args.get("min_brightness")) if args.get("min_brightness") is not None else None
+            max_b = float(args.get("max_brightness")) if args.get("max_brightness") is not None else None
+            min_bpm = float(args.get("min_bpm")) if args.get("min_bpm") is not None else None
+            max_bpm = float(args.get("max_bpm")) if args.get("max_bpm") is not None else None
+            genre = (args.get("genre") or "").strip().lower()
+            limit = int(args.get("limit") or 10)
+
+            all_tracks = await runner.db.get_all_tracks()
+            matches = []
+            for t in (all_tracks or []):
+                d = dict(t)
+                g = (d.get("genre") or "").lower()
+                if genre and genre not in g:
+                    continue
+                bpm = float(d.get("bpm") or d.get("tempo") or 0.0)
+                if min_bpm is not None and bpm > 0 and bpm < min_bpm:
+                    continue
+                if max_bpm is not None and bpm > 0 and bpm > max_bpm:
+                    continue
+                energy = float(d.get("energy", 0.5) or 0.5)
+                if min_e is not None and energy < min_e:
+                    continue
+                if max_e is not None and energy > max_e:
+                    continue
+                bright = float(d.get("brightness", 0.5) or 0.5)
+                if min_b is not None and bright < min_b:
+                    continue
+                if max_b is not None and bright > max_b:
+                    continue
+                matches.append(_slim_track(d))
+                if len(matches) >= limit:
+                    break
+            return {"success": True, "count": len(matches), "tracks": matches}
 
         if tool_name == "playback_control":
             action = (args.get("action") or "").strip().lower()

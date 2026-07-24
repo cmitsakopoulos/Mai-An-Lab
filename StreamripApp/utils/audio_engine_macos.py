@@ -981,6 +981,30 @@ class AudioEngine:
                     self._page.run_task(self.play_current)
             self.dispatch("on_queue_mutated")
 
+    def remove_indices(self, indices: list[int]):
+        """Remove several queue slots in one dispatch, never touching the slot
+        that is playing (so playback is untouched and current_index only shifts
+        for removals BEHIND it). Parity with the Android engine — Auto-play calls
+        this to drop its pending 'up next' buffer when the mode is switched off."""
+        with self._lock:
+            targets = sorted(
+                {i for i in indices if 0 <= i < len(self.queue) and i != self.current_index},
+                reverse=True,
+            )
+            if not targets:
+                return
+            for i in targets:
+                if self._is_shuffle:
+                    self._on_track_removed_from_shuffle(i)
+                self.queue.pop(i)
+            shift = sum(1 for i in targets if i < self.current_index)
+            if shift:
+                self.current_index = max(0, self.current_index - shift)
+            if not self.queue:
+                self.stop()
+                return
+            self.dispatch("on_queue_mutated")
+
     def move_queue_item(self, old_index: int, new_index: int):
         with self._lock:
             if not (0 <= old_index < len(self.queue) and 0 <= new_index < len(self.queue)):
