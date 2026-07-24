@@ -3,11 +3,14 @@ import sys
 import platform
 import logging
 import asyncio
+import math
+import time
+from dataclasses import dataclass, field
 import flet as ft
 import flet.canvas as cv
 from ui.tokens import (
     BG, SURFACE, SURFACE2, CYAN, AMBER, TEXT, DIM, BORDER, apply_opacity,
-    lerp_hex, MMR_RAMP, TEMP_RAMP
+    lerp_hex
 )
 from ui.widgets import OnyxButton, HubSettingItem, pick_folder
 
@@ -17,6 +20,17 @@ else:
     from utils.audio_engine import audio_engine
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(slots=True)
+class SettingSearchEntry:
+    title: str
+    subtitle: str
+    category: str
+    subpage_name: str
+    icon: any
+    on_select: callable
+    keywords: list[str] = field(default_factory=list)
 
 
 class EqualizerCurve(ft.Container):
@@ -276,6 +290,7 @@ class SettingsView:
             text_style=ft.TextStyle(color=TEXT, size=13),
             label_style=ft.TextStyle(color=CYAN, size=11),
             border_radius=10,
+            expand=True,
         )
         self._lib_path_field = ft.TextField(
             label="Library Path",
@@ -286,6 +301,7 @@ class SettingsView:
             text_style=ft.TextStyle(color=TEXT, size=13),
             label_style=ft.TextStyle(color=CYAN, size=11),
             border_radius=10,
+            expand=True,
         )
 
         self._selected_accent_color = CYAN
@@ -310,8 +326,6 @@ class SettingsView:
             text_style=ft.TextStyle(color=TEXT, size=13),
             label_style=ft.TextStyle(color=CYAN, size=11),
             border_radius=10,
-            password=True,
-            can_reveal_password=True,
         )
         self._qobuz_app_id_field = ft.TextField(
             label="Qobuz App ID",
@@ -332,8 +346,6 @@ class SettingsView:
             text_style=ft.TextStyle(color=TEXT, size=13),
             label_style=ft.TextStyle(color=CYAN, size=11),
             border_radius=10,
-            password=True,
-            can_reveal_password=True,
         )
         self._qobuz_use_token_switch = ft.Switch(
             value=True,
@@ -355,6 +367,7 @@ class SettingsView:
             text_style=ft.TextStyle(color=TEXT, size=13),
             label_style=ft.TextStyle(color=CYAN, size=11),
             border_radius=10,
+            on_select=lambda _e: self._update_assistant_provider_visibility(),
         )
         self._assistant_api_key_field = ft.TextField(
             label="Google Gemini API Key",
@@ -365,8 +378,6 @@ class SettingsView:
             text_style=ft.TextStyle(color=TEXT, size=13),
             label_style=ft.TextStyle(color=CYAN, size=11),
             border_radius=10,
-            password=True,
-            can_reveal_password=True,
         )
         self._assistant_model_dropdown = ft.Dropdown(
             label="Gemini Model",
@@ -404,6 +415,19 @@ class SettingsView:
             border_color=BORDER,
             focused_border_color=CYAN,
             text_style=ft.TextStyle(color=TEXT, size=13),
+            label_style=ft.TextStyle(color=CYAN, size=11),
+            border_radius=10,
+        )
+        self._assistant_personality_field = ft.TextField(
+            label="Personality / System Directive Prompt",
+            hint_text="You are Jarvis, a concise, sophisticated AI assistant embedded in the Mai An Lab high-fidelity music app. Address the user as 'sir'.",
+            multiline=True,
+            min_lines=3,
+            max_lines=6,
+            bgcolor=SURFACE2,
+            border_color=BORDER,
+            focused_border_color=CYAN,
+            text_style=ft.TextStyle(color=TEXT, size=12),
             label_style=ft.TextStyle(color=CYAN, size=11),
             border_radius=10,
         )
@@ -461,37 +485,6 @@ class SettingsView:
         self._show_artists_switch = ft.Switch(value=True, active_color=CYAN, on_change=self._on_appearance_change)
         self._show_albums_switch = ft.Switch(value=True, active_color=CYAN, on_change=self._on_appearance_change)
         self._show_tracks_switch = ft.Switch(value=True, active_color=CYAN, on_change=self._on_appearance_change)
-
-        # Play Similar temperature slider. Default 0 = deterministic arg-max
-        # (see streamrip_api.get_walk_params for why); the control stays so
-        # variety is opt-in rather than imposed. Its fill warms amber → red as
-        # it climbs (TEMP_RAMP) to signal the quality trade-off.
-        self._TEMP_MAX, self._MMR_MAX = 0.8, 0.4
-        self._temp_slider = ft.Slider(
-            min=0.0,
-            max=self._TEMP_MAX,
-            divisions=80,
-            label="{value}",
-            value=0.0,
-            active_color=lerp_hex(*TEMP_RAMP, 0.0),
-            thumb_color=lerp_hex(*TEMP_RAMP, 0.0),
-            on_change=self._on_temp_change,
-        )
-        self._temp_value_text = ft.Text("0.00", color=lerp_hex(*TEMP_RAMP, 0.0), size=13, weight=ft.FontWeight.W_800)
-
-        # Play Similar mmr_lambda slider — the safe variety lever, so its fill
-        # warms teal → green as it climbs (MMR_RAMP).
-        self._mmr_slider = ft.Slider(
-            min=0.0,
-            max=self._MMR_MAX,
-            divisions=40,
-            label="{value}",
-            value=0.15,
-            active_color=lerp_hex(*MMR_RAMP, 0.15 / self._MMR_MAX),
-            thumb_color=lerp_hex(*MMR_RAMP, 0.15 / self._MMR_MAX),
-            on_change=self._on_mmr_change,
-        )
-        self._mmr_value_text = ft.Text("0.15", color=lerp_hex(*MMR_RAMP, 0.15 / self._MMR_MAX), size=13, weight=ft.FontWeight.W_800)
 
         # DSP Controls
         self._dynamism_switch = ft.Switch(value=False, active_color=CYAN, on_change=self._on_dynamism_change)
@@ -689,13 +682,56 @@ class SettingsView:
             OnyxButton("SAVE", on_tap=self._on_save_custom_preset, width=90),
         ], spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER)
 
-        self._apply_visuals_btn = OnyxButton("APPLY VISUALS", ft.Icons.PALETTE, on_tap=lambda _: self._save_appearance_settings(), visible=False)
+        self._active_save_handler = None
+        self._apply_visuals_btn = OnyxButton("SAVE CHANGES", ft.Icons.SAVE_ROUNDED, on_tap=lambda _: self._on_floating_save_click(), visible=False)
         self._apply_visuals_container = ft.Container(
-            content=self._apply_visuals_btn,
-            bottom=10,
+            content=ft.Row(
+                [self._apply_visuals_btn],
+                alignment=ft.MainAxisAlignment.CENTER,
+            ),
+            bottom=15,
             left=0,
             right=0,
+            visible=False,
         )
+
+        self._search_input = ft.TextField(
+            hint_text="Search settings...",
+            hint_style=ft.TextStyle(color=DIM, size=13),
+            bgcolor="transparent",
+            border=ft.InputBorder.NONE,
+            text_style=ft.TextStyle(color=TEXT, size=13),
+            content_padding=ft.Padding.only(left=4, right=4, top=12, bottom=12),
+            expand=True,
+            cursor_color=CYAN,
+            multiline=False,
+            max_lines=1,
+            on_change=lambda _e: self._on_search_change(),
+        )
+        self._clear_btn = ft.IconButton(
+            icon=ft.Icons.CLOSE,
+            icon_color=DIM,
+            icon_size=16,
+            visible=False,
+            on_click=lambda _e: self._clear_search(),
+        )
+        self._search_bar_container = ft.Container(
+            content=ft.Row(
+                [
+                    ft.Icon(ft.Icons.SEARCH_ROUNDED, color=CYAN, size=18),
+                    self._search_input,
+                    self._clear_btn,
+                ],
+                spacing=4,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            bgcolor=SURFACE2,
+            border=ft.Border.all(1.5, BORDER),
+            border_radius=14,
+            padding=ft.Padding.only(left=12, right=6, top=0, bottom=0),
+            animate=ft.Animation(150, ft.AnimationCurve.EASE_OUT),
+        )
+        self._search_registry = self._build_search_registry()
 
         self._scroll_column = ft.Column(
             scroll=ft.ScrollMode.AUTO,
@@ -712,6 +748,95 @@ class SettingsView:
             expand=True, 
             padding=ft.Padding.symmetric(horizontal=28, vertical=20),
         )
+
+    def _get_subpage_state(self, subpage_name: str) -> dict:
+        if subpage_name == "AI Assistant":
+            return {
+                "llm_enabled": getattr(self, "_assistant_llm_switch", None) and self._assistant_llm_switch.value,
+                "provider": getattr(self, "_assistant_provider_dropdown", None) and self._assistant_provider_dropdown.value,
+                "api_key": getattr(self, "_assistant_api_key_field", None) and (self._assistant_api_key_field.value or "").strip(),
+                "model": getattr(self, "_assistant_model_dropdown", None) and self._assistant_model_dropdown.value,
+                "ollama_url": getattr(self, "_assistant_ollama_url_field", None) and (self._assistant_ollama_url_field.value or "").strip(),
+                "ollama_model": getattr(self, "_assistant_ollama_model_field", None) and (self._assistant_ollama_model_field.value or "").strip(),
+                "personality": getattr(self, "_assistant_personality_field", None) and (self._assistant_personality_field.value or "").strip(),
+            }
+        elif subpage_name == "Account":
+            return {
+                "user_id": getattr(self, "_qobuz_user_id_field", None) and (self._qobuz_user_id_field.value or "").strip(),
+                "token": getattr(self, "_qobuz_token_field", None) and (self._qobuz_token_field.value or "").strip(),
+                "app_id": getattr(self, "_qobuz_app_id_field", None) and (self._qobuz_app_id_field.value or "").strip(),
+                "app_secret": getattr(self, "_qobuz_app_secret_field", None) and (self._qobuz_app_secret_field.value or "").strip(),
+                "use_token": getattr(self, "_qobuz_use_token_switch", None) and self._qobuz_use_token_switch.value,
+            }
+        elif subpage_name == "Storage":
+            return {
+                "dl_path": getattr(self, "_dl_path_field", None) and (self._dl_path_field.value or "").strip(),
+                "lib_path": getattr(self, "_lib_path_field", None) and (self._lib_path_field.value or "").strip(),
+            }
+        elif subpage_name == "Appearance":
+            return {
+                "startup_page": getattr(self, "_startup_page_dropdown", None) and self._startup_page_dropdown.value,
+                "default_sort": getattr(self, "_default_sort_dropdown", None) and self._default_sort_dropdown.value,
+                "most_listened": getattr(self, "_show_most_listened_switch", None) and self._show_most_listened_switch.value,
+                "library_stats": getattr(self, "_show_library_stats_switch", None) and self._show_library_stats_switch.value,
+                "jarvis": getattr(self, "_show_jarvis_switch", None) and self._show_jarvis_switch.value,
+                "network": getattr(self, "_show_network_switch", None) and self._show_network_switch.value,
+                "playlists": getattr(self, "_show_playlists_switch", None) and self._show_playlists_switch.value,
+                "artists": getattr(self, "_show_artists_switch", None) and self._show_artists_switch.value,
+                "albums": getattr(self, "_show_albums_switch", None) and self._show_albums_switch.value,
+                "tracks": getattr(self, "_show_tracks_switch", None) and self._show_tracks_switch.value,
+                "accent_color": getattr(self, "_selected_accent_color", None),
+            }
+        elif subpage_name == "Audio & DSP":
+            gains = [round(b.get("gain", 0.0), 1) for b in getattr(self, "_eq_bands", [])]
+            return {
+                "dynamism": getattr(self, "_dynamism_switch", None) and self._dynamism_switch.value,
+                "equaliser": getattr(self, "_equaliser_switch", None) and self._equaliser_switch.value,
+                "preset_type": getattr(self, "_eq_preset_type_radio", None) and self._eq_preset_type_radio.value,
+                "preset": getattr(self, "_eq_preset_dropdown", None) and self._eq_preset_dropdown.value,
+                "gains": gains,
+            }
+        return {}
+
+    def _check_dirty(self, subpage_name: str, on_save_handler=None, label="SAVE CHANGES", icon=ft.Icons.SAVE_ROUNDED):
+        current_state = self._get_subpage_state(subpage_name)
+        baseline_state = getattr(self, "_baseline_subpage_state", None)
+        if baseline_state is not None and current_state != baseline_state:
+            self._mark_dirty(on_save_handler, label=label, icon=icon)
+        else:
+            self._hide_save_bar()
+
+    def _mark_dirty(self, on_save_handler=None, label="SAVE CHANGES", icon=ft.Icons.SAVE_ROUNDED):
+        if on_save_handler is not None:
+            self._active_save_handler = on_save_handler
+        
+        self._apply_visuals_btn = OnyxButton(
+            label,
+            icon=icon,
+            on_tap=lambda _: self._on_floating_save_click(),
+            height=46,
+        )
+        self._apply_visuals_container.content = ft.Row(
+            [self._apply_visuals_btn],
+            alignment=ft.MainAxisAlignment.CENTER,
+        )
+        self._apply_visuals_container.visible = True
+        self.app.safe_update(lambda: None)
+
+    def _hide_save_bar(self):
+        self._active_save_handler = None
+        self._apply_visuals_container.visible = False
+        self.app.safe_update(lambda: None)
+
+    def _on_floating_save_click(self):
+        if self._active_save_handler:
+            handler = self._active_save_handler
+            self._hide_save_bar()
+            handler()
+            if getattr(self, "_current_subpage_name", None):
+                self._baseline_subpage_state = self._get_subpage_state(self._current_subpage_name)
+        else:
+            self._hide_save_bar()
 
     def build(self) -> ft.Control:
         self.refresh()
@@ -730,72 +855,423 @@ class SettingsView:
             self._show_hub() # Start at the Hub
         return self.main_content
 
+    def _build_search_registry(self) -> list[SettingSearchEntry]:
+        return [
+            SettingSearchEntry(
+                title="AI Assistant (Jarvis)",
+                subtitle="Google Gemini API key, providers & LLM settings",
+                category="SET-UP",
+                subpage_name="AI Assistant",
+                icon=ft.Icons.SMART_TOY_ROUNDED,
+                on_select=lambda: self._show_sub_page("AI Assistant", self._build_assistant_group()),
+                keywords=[
+                    "gemini", "ollama", "api key", "llm", "jarvis", "ai", "assistant",
+                    "personality", "prompt", "zax", "model", "voice", "speech", "stt",
+                    "tts", "agent", "intelligence", "endpoint", "lm studio", "local server",
+                    "chat", "bot", "system directive", "voice command", "apikey", "disable", "enable"
+                ]
+            ),
+            SettingSearchEntry(
+                title="Authentication",
+                subtitle="Qobuz credentials & tokens",
+                category="SET-UP",
+                subpage_name="Account",
+                icon=ft.Icons.LOCK_PERSON_ROUNDED,
+                on_select=lambda: self._show_sub_page("Account", self._build_auth_group()),
+                keywords=[
+                    "qobuz", "token", "login", "auth", "credentials", "account",
+                    "app id", "app secret", "password", "username", "user", "secret",
+                    "qobuz app", "session", "sign in", "reauthenticate"
+                ]
+            ),
+            SettingSearchEntry(
+                title="Storage & Paths",
+                subtitle="Library and download locations",
+                category="SET-UP",
+                subpage_name="Storage",
+                icon=ft.Icons.STORAGE_ROUNDED,
+                on_select=lambda: self._show_sub_page("Storage", self._build_storage_group()),
+                keywords=[
+                    "download", "path", "folder", "directory", "streamrip", "location",
+                    "storage", "music folder", "save", "destination", "library path", "db path", "disk", "target"
+                ]
+            ),
+            SettingSearchEntry(
+                title="Appearance",
+                subtitle="Accent colors and UI behavior",
+                category="CUSTOMISATION",
+                subpage_name="Appearance",
+                icon=ft.Icons.PALETTE_ROUNDED,
+                on_select=lambda: self._show_sub_page("Appearance", self._build_appearance_group()),
+                keywords=[
+                    "accent", "color", "theme", "dark", "light", "visual", "ui",
+                    "appearance", "font", "startup", "sort", "landing", "default sort",
+                    "history", "stats", "display", "style"
+                ]
+            ),
+            SettingSearchEntry(
+                title="Audio & DSP",
+                subtitle="Equalizer, presets & dynamism enhancement",
+                category="CUSTOMISATION",
+                subpage_name="Audio & DSP",
+                icon=ft.Icons.GRAPHIC_EQ_ROUNDED,
+                on_select=lambda: self._show_sub_page("Audio & DSP", self._build_audio_dsp_group()),
+                keywords=[
+                    "eq", "equalizer", "bands", "gain", "dynamism", "preset", "acoustic",
+                    "flat", "bass", "treble", "dsp", "loudness", "boost", "audio",
+                    "frequency", "sound", "volume", "curve", "enhancement", "headroom",
+                    "preamp", "decibel", "db"
+                ]
+            ),
+            SettingSearchEntry(
+                title="Haptic Feedback",
+                subtitle="Vibration settings and intensity controls",
+                category="CUSTOMISATION",
+                subpage_name="Haptic Feedback",
+                icon=ft.Icons.VIBRATION_ROUNDED,
+                on_select=lambda: self._show_sub_page("Haptic Feedback", self._build_haptics_group()),
+                keywords=[
+                    "vibration", "haptic", "intensity", "feedback", "touch", "tactile",
+                    "drag", "swipe", "vibrate", "motor", "click"
+                ]
+            ),
+            SettingSearchEntry(
+                title="Metadata",
+                subtitle="Fix artist tags that power Auto-Play recommendations",
+                category="LIBRARY INTELLIGENCE",
+                subpage_name="Metadata Workbench",
+                icon=ft.Icons.LABEL_IMPORTANT_ROUNDED,
+                on_select=self._on_open_metadata_workbench_click,
+                keywords=[
+                    "metadata", "artist", "tags", "workbench", "wizard", "enrichment",
+                    "genre", "cleaning", "auto-play", "recommendations", "tagger", "id3",
+                    "album artist", "mbid", "musicbrainz", "canonical", "cleaner"
+                ]
+            ),
+            SettingSearchEntry(
+                title="Permissions",
+                subtitle="Notifications, audio, and file access",
+                category="DEVELOPER TOOLS",
+                subpage_name="Permissions",
+                icon=ft.Icons.SHIELD_OUTLINED,
+                on_select=lambda: self._show_sub_page("Permissions", self._build_permissions_group()),
+                keywords=[
+                    "permissions", "audio", "mic", "microphone", "record",
+                    "storage permission", "notification", "android", "macos", "access",
+                    "privacy", "security", "record_audio", "grant", "allow"
+                ]
+            ),
+            SettingSearchEntry(
+                title="Database Management",
+                subtitle="Wipe database, compute DSP & PCA",
+                category="DEVELOPER TOOLS",
+                subpage_name="Database Management",
+                icon=ft.Icons.DNS_ROUNDED,
+                on_select=lambda: self._show_sub_page("Database Management", self._build_database_management_group()),
+                keywords=[
+                    "database", "db", "wipe", "reset", "pca", "dsp computation",
+                    "cache", "clear", "sqlite", "index", "rebuild", "features",
+                    "tracks.db", "downloads.db", "purge"
+                ]
+            ),
+            SettingSearchEntry(
+                title="Advanced",
+                subtitle="Edit TOML config and data maintenance",
+                category="DEVELOPER TOOLS",
+                subpage_name="Advanced",
+                icon=ft.Icons.TERMINAL_ROUNDED,
+                on_select=lambda: self._show_sub_page("Advanced", self._build_advanced_group()),
+                keywords=[
+                    "toml", "config", "advanced", "raw", "editor", "maintenance",
+                    "configuration", "config.toml", "file", "text editor", "export",
+                    "backup", "import", "developer"
+                ]
+            ),
+            SettingSearchEntry(
+                title="About",
+                subtitle="App version and developer info",
+                category="ABOUT",
+                subpage_name="About",
+                icon=ft.Icons.INFO_OUTLINE_ROUNDED,
+                on_select=lambda: self._show_sub_page("About", self._build_about_group()),
+                keywords=[
+                    "about", "version", "developer", "info", "github", "release",
+                    "credits", "license", "update", "mai an lab", "streamrip", "build"
+                ]
+            ),
+        ]
+
+    def _get_semantic_matches(self, query: str) -> list[tuple[float, SettingSearchEntry]]:
+        """On-device WordPiece Vector Space Model (VSM) classifier for semantic search fallback."""
+        try:
+            from utils.semantic_intent import WordPieceTokenizer, levenshtein_distance
+            if not hasattr(self, "_wp_tokenizer"):
+                self._wp_tokenizer = WordPieceTokenizer()
+
+            q_clean = query.strip().lower()
+            q_words = [w for w in q_clean.split() if len(w) > 1]
+            q_tokens = self._wp_tokenizer.tokenize(q_clean)
+            if not q_tokens:
+                return []
+
+            weights = {
+                "disable": 3.0, "enable": 3.0, "turn": 2.0, "off": 2.5, "on": 2.5,
+                "change": 2.0, "set": 2.0, "boost": 2.5, "wipe": 3.0, "clear": 2.5,
+                "path": 2.5, "folder": 2.5, "bass": 3.0, "treble": 3.0, "eq": 3.0,
+                "equalizer": 3.0, "jarvis": 3.0, "qobuz": 3.0, "key": 2.5, "token": 2.5,
+                "vibration": 2.8, "haptic": 2.8, "metadata": 3.0, "database": 2.8
+            }
+
+            q_vec = {}
+            for t in q_tokens:
+                w = weights.get(t, 1.0)
+                q_vec[t] = q_vec.get(t, 0.0) + w
+            q_norm = math.sqrt(sum(v**2 for v in q_vec.values())) or 1.0
+
+            scores = []
+            for entry in self._search_registry:
+                doc_text = f"{entry.title} {entry.subtitle} {' '.join(entry.keywords)}".lower()
+                doc_tokens = self._wp_tokenizer.tokenize(doc_text)
+                d_vec = {}
+                for t in doc_tokens:
+                    w = weights.get(t, 1.0)
+                    d_vec[t] = d_vec.get(t, 0.0) + w
+                d_norm = math.sqrt(sum(v**2 for v in d_vec.values())) or 1.0
+
+                dot = sum(q_vec[t] * d_vec.get(t, 0.0) for t in q_vec)
+                cos_sim = dot / (q_norm * d_norm)
+
+                fuzzy_bonus = 0.0
+                for qw in q_words:
+                    if len(qw) >= 4:
+                        for kw in entry.keywords:
+                            if levenshtein_distance(qw, kw.lower()) <= 1:
+                                fuzzy_bonus += 0.15
+                                break
+
+                final_score = cos_sim + fuzzy_bonus
+                if final_score >= 0.15:
+                    scores.append((final_score, entry))
+
+            scores.sort(key=lambda x: x[0], reverse=True)
+            return scores
+        except Exception as err:
+            logger.debug("Semantic settings search fallback skipped: %s", err)
+            return []
+
+    def _on_search_change(self):
+        query = (self._search_input.value or "").strip().lower()
+        self._clear_btn.visible = bool(query)
+        self._render_hub_or_search(query)
+
+    def _clear_search(self):
+        self._search_input.value = ""
+        self._clear_btn.visible = False
+        self._render_hub_or_search("")
+
+    def _render_hub_or_search(self, query: str):
+        if not query:
+            controls = [
+                ft.Text("Settings", size=32, weight=ft.FontWeight.W_900, color=TEXT),
+                ft.Container(height=12),
+                self._search_bar_container,
+                ft.Container(height=16),
+                
+                # Set-up Section
+                ft.Text("SET-UP", size=11, color=CYAN, weight=ft.FontWeight.W_800),
+                HubSettingItem(ft.Icons.SMART_TOY_ROUNDED, "AI Assistant (Jarvis)", "Google Gemini API key, providers & LLM settings",
+                               on_tap=lambda _: self._show_sub_page("AI Assistant", self._build_assistant_group())),
+                HubSettingItem(ft.Icons.LOCK_PERSON_ROUNDED, "Authentication", "Qobuz credentials & tokens", 
+                               on_tap=lambda _: self._show_sub_page("Account", self._build_auth_group())),
+                HubSettingItem(ft.Icons.STORAGE_ROUNDED, "Storage & Paths", "Library and download locations", 
+                               on_tap=lambda _: self._show_sub_page("Storage", self._build_storage_group())),
+                
+                ft.Divider(color=BORDER, height=30),
+                
+                # Customisation Section
+                ft.Text("CUSTOMISATION", size=11, color=CYAN, weight=ft.FontWeight.W_800),
+                HubSettingItem(ft.Icons.PALETTE_ROUNDED, "Appearance", "Accent colors and UI behavior",
+                               on_tap=lambda _: self._show_sub_page("Appearance", self._build_appearance_group())),
+                HubSettingItem(ft.Icons.GRAPHIC_EQ_ROUNDED, "Audio & DSP", "Equalizer, presets & dynamism enhancement",
+                               on_tap=lambda _: self._show_sub_page("Audio & DSP", self._build_audio_dsp_group())),
+                HubSettingItem(ft.Icons.VIBRATION_ROUNDED, "Haptic Feedback", "Vibration settings and intensity controls",
+                               on_tap=lambda _: self._show_sub_page("Haptic Feedback", self._build_haptics_group())),
+
+                ft.Divider(color=BORDER, height=30),
+
+                # Library Intelligence Section — curation, not a dev chore.
+                ft.Text("LIBRARY INTELLIGENCE", size=11, color=CYAN, weight=ft.FontWeight.W_800),
+                HubSettingItem(ft.Icons.LABEL_IMPORTANT_ROUNDED, "Metadata",
+                               "Fix artist tags that power Auto-Play recommendations",
+                               on_tap=self._on_open_metadata_workbench_click),
+                
+                ft.Divider(color=BORDER, height=30),
+                
+                # Developer Tools Section
+                ft.Text("DEVELOPER TOOLS", size=11, color=CYAN, weight=ft.FontWeight.W_800),
+                HubSettingItem(ft.Icons.SHIELD_OUTLINED, "Permissions", "Notifications, audio, and file access",
+                               on_tap=lambda _: self._show_sub_page("Permissions", self._build_permissions_group())),
+                HubSettingItem(ft.Icons.DNS_ROUNDED, "Database Management", "Wipe database, compute DSP & PCA",
+                               on_tap=lambda _: self._show_sub_page("Database Management", self._build_database_management_group())),
+                HubSettingItem(ft.Icons.TERMINAL_ROUNDED, "Advanced", "Edit TOML config and data maintenance", 
+                               on_tap=lambda _: self._show_sub_page("Advanced", self._build_advanced_group())),
+                
+                ft.Divider(color=BORDER, height=30),
+                
+                # About Section
+                HubSettingItem(ft.Icons.INFO_OUTLINE_ROUNDED, "About", "App version and developer info", 
+                               on_tap=lambda _: self._show_sub_page("About", self._build_about_group())),
+            ]
+        else:
+            t0 = time.perf_counter()
+            q_clean = query.strip().lower()
+            q_terms = [t for t in q_clean.split() if len(t) > 1]
+            
+            # Direct exact/substring matches
+            direct_matches = []
+            for entry in self._search_registry:
+                title_lower = entry.title.lower()
+                sub_lower = entry.subtitle.lower()
+                cat_lower = entry.category.lower()
+                kw_lowers = [k.lower() for k in entry.keywords]
+                
+                if (q_clean in title_lower 
+                    or q_clean in sub_lower 
+                    or q_clean in cat_lower
+                    or any(q_clean in kw for kw in kw_lowers)
+                    or any(kw in q_clean for kw in kw_lowers)):
+                    direct_matches.append(entry)
+                elif q_terms and all(
+                    t in title_lower or t in sub_lower or t in cat_lower or any(t in kw for kw in kw_lowers)
+                    for t in q_terms
+                ):
+                    direct_matches.append(entry)
+
+            # Fallback/hybrid semantic matches via Jarvis on-device WordPiece VSM
+            semantic_scored_matches = self._get_semantic_matches(query)
+            
+            matched_ids = set()
+            matches = []
+            for m in direct_matches:
+                if id(m) not in matched_ids:
+                    matched_ids.add(id(m))
+                    matches.append(m)
+            for score, m in semantic_scored_matches:
+                if id(m) not in matched_ids:
+                    matched_ids.add(id(m))
+                    matches.append(m)
+
+            elapsed_ms = (time.perf_counter() - t0) * 1000.0
+            dur_str = f" in {elapsed_ms:.1f}ms"
+
+            # Determine Stage 1 (Direct) & Stage 2 (VLM Semantic) status badges
+            if direct_matches:
+                s1_text = f"Stage 1: Direct (Matched: {len(direct_matches)}{dur_str})"
+                s1_icon = ft.Icons.CHECK_CIRCLE_OUTLINE
+                s1_color = "#81C784"
+                
+                s2_text = "Stage 2: VLM (Skipped)"
+                s2_icon = ft.Icons.REMOVE_CIRCLE_OUTLINE
+                s2_color = DIM
+            elif semantic_scored_matches:
+                s1_text = "Stage 1: Direct (No Match)"
+                s1_icon = ft.Icons.CANCEL_OUTLINED
+                s1_color = "#E57373"
+                
+                top_score = semantic_scored_matches[0][0]
+                top_name = semantic_scored_matches[0][1].subpage_name
+                s2_text = f"Stage 2: VLM (Matched: {top_name} @ {top_score:.2f}{dur_str})"
+                s2_icon = ft.Icons.CHECK_CIRCLE_OUTLINE
+                s2_color = "#81C784"
+            else:
+                s1_text = "Stage 1: Direct (No Match)"
+                s1_icon = ft.Icons.CANCEL_OUTLINED
+                s1_color = "#E57373"
+                
+                s2_text = f"Stage 2: VLM (No Match{dur_str})"
+                s2_icon = ft.Icons.CANCEL_OUTLINED
+                s2_color = "#E57373"
+
+            stage_status_bar = ft.Container(
+                content=ft.Row([
+                    ft.Row([
+                        ft.Icon(s1_icon, color=s1_color, size=13),
+                        ft.Text(s1_text, color=s1_color, size=11, weight=ft.FontWeight.W_500),
+                    ], spacing=4, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                    ft.Row([
+                        ft.Icon(s2_icon, color=s2_color, size=13),
+                        ft.Text(s2_text, color=s2_color, size=11, weight=ft.FontWeight.W_500),
+                    ], spacing=4, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                ], spacing=16, vertical_alignment=ft.CrossAxisAlignment.CENTER, wrap=True),
+                bgcolor=SURFACE2,
+                padding=ft.Padding.symmetric(horizontal=12, vertical=6),
+                border_radius=8,
+                border=ft.Border.all(1, BORDER),
+            )
+
+            controls = [
+                ft.Text("Settings", size=32, weight=ft.FontWeight.W_900, color=TEXT),
+                ft.Container(height=12),
+                self._search_bar_container,
+                ft.Container(height=8),
+                stage_status_bar,
+                ft.Container(height=14),
+            ]
+
+            if matches:
+                controls.append(
+                    ft.Text(f"SEARCH RESULTS ({len(matches)})", size=11, color=CYAN, weight=ft.FontWeight.W_800)
+                )
+                for m in matches:
+                    controls.append(
+                        HubSettingItem(
+                            m.icon,
+                            m.title,
+                            f"[{m.category}] {m.subtitle}",
+                            on_tap=m.on_select,
+                        )
+                    )
+            else:
+                controls.append(
+                    ft.Container(
+                        content=ft.Column(
+                            [
+                                ft.Icon(ft.Icons.SEARCH_OFF_ROUNDED, color=DIM, size=36),
+                                ft.Text(f"No settings found matching '{query}'", color=DIM, size=13),
+                                ft.Container(height=8),
+                                OnyxButton("CLEAR SEARCH", icon=ft.Icons.CLEAR_ROUNDED, on_tap=lambda _: self._clear_search(), text_size=12, height=38),
+                            ],
+                            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                            spacing=6,
+                        ),
+                        padding=ft.Padding.symmetric(vertical=30, horizontal=16),
+                        alignment=ft.Alignment(0, 0),
+                    )
+                )
+
+        self._scroll_column.controls = controls
+        self.app.safe_update(lambda: None)
+
     def _show_hub(self):
         """Displays the main settings menu (the 'hub')."""
         if getattr(self, "_enrichment_wizard_pane", None) and self._enrichment_wizard_pane.step == 5:
             self._enrichment_wizard_pane = None
-        self._apply_visuals_btn.visible = False
-        self._scroll_column.controls = [
-            ft.Text("Settings", size=32, weight=ft.FontWeight.W_900, color=TEXT),
-            ft.Container(height=16),
-            
-            # Set-up Section
-            ft.Text("SET-UP", size=11, color=CYAN, weight=ft.FontWeight.W_800),
-            HubSettingItem(ft.Icons.SMART_TOY_ROUNDED, "AI Assistant (Jarvis)", "Google Gemini API key, providers & LLM settings",
-                           on_tap=lambda _: self._show_sub_page("AI Assistant", self._build_assistant_group())),
-            HubSettingItem(ft.Icons.LOCK_PERSON_ROUNDED, "Authentication", "Qobuz credentials & tokens", 
-                           on_tap=lambda _: self._show_sub_page("Account", self._build_auth_group())),
-            HubSettingItem(ft.Icons.STORAGE_ROUNDED, "Storage & Paths", "Library and download locations", 
-                           on_tap=lambda _: self._show_sub_page("Storage", self._build_storage_group())),
-            
-            ft.Divider(color=BORDER, height=30),
-            
-            # Customisation Section
-            ft.Text("CUSTOMISATION", size=11, color=CYAN, weight=ft.FontWeight.W_800),
-            HubSettingItem(ft.Icons.PALETTE_ROUNDED, "Appearance", "Accent colors and UI behavior",
-                           on_tap=lambda _: self._show_sub_page("Appearance", self._build_appearance_group())),
-            HubSettingItem(ft.Icons.GRAPHIC_EQ_ROUNDED, "Audio & DSP", "Equalizer, presets & dynamism enhancement",
-                           on_tap=lambda _: self._show_sub_page("Audio & DSP", self._build_audio_dsp_group())),
-            HubSettingItem(ft.Icons.VIBRATION_ROUNDED, "Haptic Feedback", "Vibration settings and intensity controls",
-                           on_tap=lambda _: self._show_sub_page("Haptic Feedback", self._build_haptics_group())),
-
-            ft.Divider(color=BORDER, height=30),
-
-            # Library Intelligence Section — curation, not a dev chore.
-            ft.Text("LIBRARY INTELLIGENCE", size=11, color=CYAN, weight=ft.FontWeight.W_800),
-            HubSettingItem(ft.Icons.LABEL_IMPORTANT_ROUNDED, "Metadata",
-                           "Fix artist tags that power Auto-Play recommendations",
-                           on_tap=self._on_open_metadata_workbench_click),
-            
-            ft.Divider(color=BORDER, height=30),
-            
-            # Developer Tools Section
-            ft.Text("DEVELOPER TOOLS", size=11, color=CYAN, weight=ft.FontWeight.W_800),
-            HubSettingItem(ft.Icons.SHIELD_OUTLINED, "Permissions", "Notifications, audio, and file access",
-                           on_tap=lambda _: self._show_sub_page("Permissions", self._build_permissions_group())),
-            HubSettingItem(ft.Icons.DNS_ROUNDED, "Database Management", "Wipe database, compute DSP & PCA",
-                           on_tap=lambda _: self._show_sub_page("Database Management", self._build_database_management_group())),
-            HubSettingItem(ft.Icons.TERMINAL_ROUNDED, "Advanced", "Edit TOML config and data maintenance", 
-                           on_tap=lambda _: self._show_sub_page("Advanced", self._build_advanced_group())),
-            
-            ft.Divider(color=BORDER, height=30),
-            
-            # About Section
-            HubSettingItem(ft.Icons.INFO_OUTLINE_ROUNDED, "About", "App version and developer info", 
-                           on_tap=lambda _: self._show_sub_page("About", self._build_about_group())),
-        ]
+        self._hide_save_bar()
+        query = (self._search_input.value or "").strip().lower()
+        self._render_hub_or_search(query)
         self.app.safe_update(lambda: None)
 
     def _show_sub_page(self, title: str, content_control: ft.Control):
         """Swaps the hub for a specific settings group."""
-        if title != "Appearance":
-            self._apply_visuals_btn.visible = False
+        self._current_subpage_name = title
+        self._baseline_subpage_state = self._get_subpage_state(title)
+        self._hide_save_bar()
         self._scroll_column.controls = [
             ft.Row([
                 ft.IconButton(ft.Icons.ARROW_BACK_IOS_NEW_ROUNDED, icon_color=CYAN, icon_size=16, 
                               on_click=lambda _: self._show_hub()),
                 ft.Text(title, size=18, weight=ft.FontWeight.W_700, color=TEXT, overflow=ft.TextOverflow.ELLIPSIS, max_lines=1, expand=True),
-            ], spacing=10),
+            ], spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER),
             ft.Container(height=15),
             content_control
         ]
@@ -804,25 +1280,145 @@ class SettingsView:
     # --- Sub-Page Builders ---
 
     def _build_auth_group(self):
+        # Attach dirty listeners
+        save_cb = lambda _e=None: self._check_dirty("Account", self._save_qobuz_credentials, label="SAVE CREDENTIALS", icon=ft.Icons.KEY_ROUNDED)
+        for field in [self._qobuz_user_id_field, self._qobuz_token_field, self._qobuz_app_id_field, self._qobuz_app_secret_field]:
+            field.on_change = save_cb
+        self._qobuz_use_token_switch.on_change = save_cb
+
         return ft.Column([
-            ft.Text("Enter your Qobuz credentials, App ID, and App Secret.", color=DIM, size=12),
-            self._qobuz_user_id_field,
-            self._qobuz_token_field,
-            self._qobuz_app_id_field,
-            self._qobuz_app_secret_field,
-            ft.Row([self._qobuz_use_token_switch, ft.Text("Use Auth Token", color=TEXT, size=12)], spacing=10),
-            OnyxButton("SAVE CREDENTIALS", ft.Icons.SAVE, on_tap=lambda _: self._save_qobuz_credentials())
-        ], spacing=20)
+            ft.Container(
+                content=ft.Row([
+                    ft.Icon(ft.Icons.LOCK_PERSON_ROUNDED, color=CYAN, size=24),
+                    ft.Column([
+                        ft.Text("Qobuz Credentials & API Keys", weight=ft.FontWeight.BOLD, color=TEXT, size=15),
+                        ft.Text("Manage your user login tokens and developer API keys for high-resolution streaming.", color=DIM, size=12),
+                    ], spacing=2, expand=True),
+                ], vertical_alignment=ft.CrossAxisAlignment.CENTER, spacing=14),
+                padding=16,
+                bgcolor=SURFACE2,
+                border_radius=12,
+                border=ft.Border.all(1, BORDER),
+            ),
+            ft.Container(
+                content=ft.Column([
+                    ft.Row([
+                        ft.Icon(ft.Icons.ACCOUNT_CIRCLE_ROUNDED, color=CYAN, size=18),
+                        ft.Text("User Account", weight=ft.FontWeight.BOLD, color=TEXT, size=13),
+                    ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                    ft.Text("Authentication details used to generate valid Qobuz user sessions.", color=DIM, size=11),
+                    ft.Container(height=4),
+                    self._qobuz_user_id_field,
+                    ft.Text("Your registered Qobuz email address or numeric User ID.", color=DIM, size=11),
+                    ft.Container(height=4),
+                    self._qobuz_token_field,
+                    ft.Text("Pre-hashed MD5 password string or session token.", color=DIM, size=11),
+                    ft.Container(height=4),
+                    ft.Row([
+                        self._qobuz_use_token_switch,
+                        ft.Column([
+                            ft.Text("Use Session Token Authentication", color=TEXT, size=12, weight=ft.FontWeight.W_600),
+                            ft.Text("Bypasses password authentication when a valid token is present.", color=DIM, size=11),
+                        ], spacing=1, expand=True)
+                    ], spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                ], spacing=10),
+                padding=16,
+                bgcolor=SURFACE2,
+                border_radius=12,
+                border=ft.Border.all(1, BORDER),
+            ),
+            ft.Container(
+                content=ft.Column([
+                    ft.Row([
+                        ft.Icon(ft.Icons.KEY_ROUNDED, color=CYAN, size=18),
+                        ft.Text("Developer API Keys", weight=ft.FontWeight.BOLD, color=TEXT, size=13),
+                    ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                    ft.Text("Qobuz Application ID and Secret required to negotiate API sessions.", color=DIM, size=11),
+                    ft.Container(height=4),
+                    self._qobuz_app_id_field,
+                    ft.Text("Application Identifier registered with the Qobuz developer portal.", color=DIM, size=11),
+                    ft.Container(height=4),
+                    self._qobuz_app_secret_field,
+                    ft.Text("Application Secret key paired with your App ID.", color=DIM, size=11),
+                ], spacing=10),
+                padding=16,
+                bgcolor=SURFACE2,
+                border_radius=12,
+                border=ft.Border.all(1, BORDER),
+            ),
+        ], spacing=16)
 
     def _build_storage_group(self):
+        # Attach dirty listeners
+        save_cb = lambda _e=None: self._check_dirty("Storage", self._save_paths, label="SAVE PATHS", icon=ft.Icons.FOLDER_ROUNDED)
+        self._dl_path_field.on_change = save_cb
+        self._lib_path_field.on_change = save_cb
+
         return ft.Column([
-            ft.Text("Define where your music is indexed and downloaded.", color=DIM, size=12),
-            ft.Row([self._dl_path_field, ft.IconButton(ft.Icons.FOLDER_OPEN, icon_color=CYAN, on_click=self._browse_download_folder)]),
-            ft.Row([self._lib_path_field, ft.IconButton(ft.Icons.FOLDER_OPEN, icon_color=CYAN, on_click=self._browse_library_folder)]),
-            OnyxButton("SAVE PATHS", ft.Icons.SAVE, on_tap=lambda _: self._save_paths())
-        ], spacing=20)
+            ft.Container(
+                content=ft.Row([
+                    ft.Icon(ft.Icons.STORAGE_ROUNDED, color=CYAN, size=24),
+                    ft.Column([
+                        ft.Text("Storage Locations & Directories", weight=ft.FontWeight.BOLD, color=TEXT, size=15),
+                        ft.Text("Configure filesystem paths for downloading audio files and scanning your local music collection.", color=DIM, size=12),
+                    ], spacing=2, expand=True),
+                ], vertical_alignment=ft.CrossAxisAlignment.CENTER, spacing=14),
+                padding=16,
+                bgcolor=SURFACE2,
+                border_radius=12,
+                border=ft.Border.all(1, BORDER),
+            ),
+            ft.Container(
+                content=ft.Column([
+                    ft.Row([
+                        ft.Icon(ft.Icons.DOWNLOAD_ROUNDED, color=CYAN, size=18),
+                        ft.Text("Downloads Directory", weight=ft.FontWeight.BOLD, color=TEXT, size=13),
+                    ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                    ft.Text("Destination folder where downloaded tracks, albums, and Hi-Res FLAC files are saved.", color=DIM, size=11),
+                    ft.Container(height=4),
+                    ft.Row([
+                        self._dl_path_field,
+                        ft.IconButton(ft.Icons.FOLDER_OPEN_ROUNDED, icon_color=CYAN, tooltip="Browse folder", on_click=self._browse_download_folder)
+                    ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                ], spacing=8),
+                padding=16,
+                bgcolor=SURFACE2,
+                border_radius=12,
+                border=ft.Border.all(1, BORDER),
+            ),
+            ft.Container(
+                content=ft.Column([
+                    ft.Row([
+                        ft.Icon(ft.Icons.LIBRARY_MUSIC_ROUNDED, color=CYAN, size=18),
+                        ft.Text("Local Music Library", weight=ft.FontWeight.BOLD, color=TEXT, size=13),
+                    ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                    ft.Text("Root folder scanned by Streamrip to index your local audio files, tags, and album artwork.", color=DIM, size=11),
+                    ft.Container(height=4),
+                    ft.Row([
+                        self._lib_path_field,
+                        ft.IconButton(ft.Icons.FOLDER_OPEN_ROUNDED, icon_color=CYAN, tooltip="Browse folder", on_click=self._browse_library_folder)
+                    ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                ], spacing=8),
+                padding=16,
+                bgcolor=SURFACE2,
+                border_radius=12,
+                border=ft.Border.all(1, BORDER),
+            ),
+        ], spacing=16)
 
     def _build_appearance_group(self):
+        save_cb = lambda _e=None: self._check_dirty("Appearance", self._save_appearance_settings, label="SAVE APPEARANCE SETTINGS", icon=ft.Icons.PALETTE_ROUNDED)
+        self._startup_page_dropdown.on_select = save_cb
+        self._default_sort_dropdown.on_select = save_cb
+        self._show_most_listened_switch.on_change = save_cb
+        self._show_library_stats_switch.on_change = save_cb
+        self._show_jarvis_switch.on_change = save_cb
+        self._show_network_switch.on_change = save_cb
+        self._show_playlists_switch.on_change = save_cb
+        self._show_artists_switch.on_change = save_cb
+        self._show_albums_switch.on_change = save_cb
+        self._show_tracks_switch.on_change = save_cb
+
         return ft.Column([
             ft.Text("Customize how the app looks and behaves on startup.", color=DIM, size=12),
             self._startup_page_dropdown,
@@ -1072,42 +1668,6 @@ class SettingsView:
                 ),
             ]),
             ft.Divider(color=BORDER, height=40),
-            ft.Text("Play Similar / Discovery Settings", weight=ft.FontWeight.BOLD, color=CYAN),
-            ft.Text(
-                "These two dials shape every similarity walk — Play Similar, "
-                "autoplay continuation and the Network view all read them.",
-                color=DIM, size=12,
-            ),
-            ft.Container(height=8),
-            ft.Text("Avoid Near-Duplicates (MMR)", weight=ft.FontWeight.BOLD, color=lerp_hex(*MMR_RAMP, 1.0), size=14),
-            ft.Text(
-                "Discounts a candidate the more it sounds like a track already in "
-                "the queue, so remixes, alternate mixes and the same song on "
-                "another release stop chaining. This is the recommended way to add "
-                "variety — it spreads the queue out without wandering off-genre. "
-                "Default 0.15.",
-                color=DIM, size=12,
-            ),
-            ft.Row([
-                ft.Container(content=self._mmr_slider, expand=True),
-                ft.Container(content=self._mmr_value_text, margin=ft.Margin.only(right=10)),
-            ], vertical_alignment=ft.CrossAxisAlignment.CENTER),
-            ft.Container(height=10),
-            ft.Text("Variety (Temperature)", weight=ft.FontWeight.BOLD, color=lerp_hex(*TEMP_RAMP, 1.0), size=14),
-            ft.Text(
-                "At 0 the walk is deterministic — it always steps to the closest "
-                "match, so the same seed returns the same queue every time (and "
-                "stays reproducible for debugging). Higher values sample among the "
-                "top few matches, so repeat plays vary — but the queue drifts "
-                "further from the seed and quality falls off. Keep it low unless "
-                "you specifically want shuffle-on-repeat.",
-                color=DIM, size=12,
-            ),
-            ft.Row([
-                ft.Container(content=self._temp_slider, expand=True),
-                ft.Container(content=self._temp_value_text, margin=ft.Margin.only(right=10)),
-            ], vertical_alignment=ft.CrossAxisAlignment.CENTER),
-            ft.Divider(color=BORDER, height=40),
             ft.Text("Cache Maintenance", weight=ft.FontWeight.BOLD, color=DIM),
             ft.Row([
                 ft.TextButton("Album Cache", icon=ft.Icons.IMAGE_ROUNDED, on_click=lambda _: self.app.clear_album_artwork_cache()),
@@ -1123,6 +1683,33 @@ class SettingsView:
         ], spacing=15)
 
     def _build_about_group(self):
+        feature_items = [
+            ("High-Fidelity Audio & Streaming", "Seamless Qobuz integration supporting Hi-Res FLAC streaming, metadata fetching, cover art caching, and track downloading.", ft.Icons.HIGH_QUALITY_ROUNDED),
+            ("DSP & Similarity Engine", "Native audio analysis (spectral centroid, RMS energy, rhythm/tempo, timbre vectors) powering intelligent Auto-Play queues and track similarity matching.", ft.Icons.GRAPHIC_EQ_ROUNDED),
+            ("Jarvis AI Assistant", "Natural language voice & text control powered by Google Gemini or local LLM servers (Ollama, LM Studio) for queue, playback, and discovery management.", ft.Icons.SMART_TOY_ROUNDED),
+            ("Parametric Equalizer & DSP", "Interactive 5-band equalizer with real-time curve rendering, custom preset saving, and audio dynamism enhancement.", ft.Icons.TUNE_ROUNDED),
+            ("Metadata Workbench", "Advanced tag cleaning, canonical artist normalization, and MusicBrainz metadata enrichment to optimize library intelligence.", ft.Icons.LABEL_IMPORTANT_ROUNDED),
+            ("Library & Playback Analytics", "Track play history, listener statistics, most listened breakdown, and local cache management.", ft.Icons.ANALYTICS_ROUNDED),
+        ]
+
+        feature_rows = []
+        for title, desc, icon in feature_items:
+            feature_rows.append(
+                ft.Container(
+                    content=ft.Row([
+                        ft.Icon(icon, color=CYAN, size=20),
+                        ft.Column([
+                            ft.Text(title, weight=ft.FontWeight.BOLD, color=TEXT, size=13),
+                            ft.Text(desc, color=DIM, size=12),
+                        ], spacing=2, expand=True),
+                    ], vertical_alignment=ft.CrossAxisAlignment.START, spacing=12),
+                    bgcolor=SURFACE2,
+                    padding=12,
+                    border_radius=10,
+                    border=ft.Border.all(1, BORDER),
+                )
+            )
+
         return ft.Column([
             ft.Container(
                 content=ft.Column([
@@ -1130,19 +1717,19 @@ class SettingsView:
                     ft.Text("Version 1.3.0", color=DIM, size=14),
                 ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=4),
                 alignment=ft.Alignment(0, 0),
-                padding=ft.Padding.only(bottom=20),
+                padding=ft.Padding.only(bottom=10),
             ),
             ft.Text("Summary", weight=ft.FontWeight.BOLD, color=TEXT),
-            ft.Text("A deployment friendly restructure of Streamrip (Qobuz only), packaged with Flet alongside custom Flutter (audio engine) extensions.", color=DIM, size=12),
-            ft.Divider(color=BORDER, height=30),
-            ft.Text("What's New in 1.3.0", weight=ft.FontWeight.BOLD, color=TEXT),
-            ft.Column([
-                ft.Text("• EQ coupled with DSP optimisation", color=DIM, size=12),
-                ft.Text("• UI improvements / simplifications", color=DIM, size=12),
-                ft.Text("• Qobuz connection improvements + UI", color=DIM, size=12),
-                ft.Text("• Better search capabilities", color=DIM, size=12),
-                ft.Text("• Improvements to track similarity search", color=DIM, size=12),
-            ], spacing=4),
+            ft.Text(
+                "Mai An Lab is a modern high-fidelity audio player and streaming application. "
+                "Built with Flet and custom Flutter audio engine extensions, it pairs audiophile-grade playback "
+                "with intelligent DSP similarity search, AI assistant controls, and comprehensive library tools.",
+                color=DIM,
+                size=12,
+            ),
+            ft.Container(height=5),
+            ft.Text("Core Features", weight=ft.FontWeight.BOLD, color=TEXT),
+            ft.Column(feature_rows, spacing=8),
             ft.Divider(color=BORDER, height=30),
             ft.Text("Developer", weight=ft.FontWeight.BOLD, color=TEXT),
             ft.Text("Christophoros Mitsakopoulos", color=DIM, size=13),
@@ -1162,7 +1749,7 @@ class SettingsView:
             ], alignment=ft.MainAxisAlignment.CENTER),
             ft.Container(height=20),
             ft.Text("2026 Mai An Lab", color=DIM, size=11, italic=True, text_align=ft.TextAlign.CENTER, width=float("inf")),
-        ], spacing=15)
+        ], spacing=12)
 
     def _on_wipe_db_click(self):
         self.app.open_wipe_confirmation()
@@ -1425,9 +2012,10 @@ class SettingsView:
 
         bs_holder = [None]
         path_state = [None]
+        picked_action = [None]
 
-        title_text = ft.Text("", color=TEXT, weight=ft.FontWeight.W_700, size=14)
-        path_text  = ft.Text("", color=DIM, size=10, italic=True)
+        title_text = ft.Text("", color=TEXT, weight=ft.FontWeight.W_700, size=14, overflow=ft.TextOverflow.ELLIPSIS, max_lines=1)
+        path_text  = ft.Text("", color=DIM, size=10, italic=True, overflow=ft.TextOverflow.ELLIPSIS, max_lines=1)
         dir_list   = ft.Column(tight=True, spacing=0, scroll=ft.ScrollMode.AUTO)
 
         def _close():
@@ -1439,12 +2027,21 @@ class SettingsView:
             bs_holder[0] = None
 
         def _confirm_dir(path):
+            picked_action[0] = ("dir", path)
             _close()
-            self.page.run_task(self._do_export_state, path)
 
         def _confirm_file(path):
+            picked_action[0] = ("file", path)
             _close()
-            self.page.run_task(self._do_import_state, path)
+
+        def _on_bs_dismiss(e):
+            if picked_action[0]:
+                action_type, path = picked_action[0]
+                picked_action[0] = None
+                if action_type == "dir":
+                    self.page.run_task(self._do_export_state, path)
+                elif action_type == "file":
+                    self.page.run_task(self._do_import_state, path)
 
         def _render(directory):
             path_state[0] = directory
@@ -1462,7 +2059,7 @@ class SettingsView:
                             size=20,
                         ),
                         title=ft.Text(bname, color=TEXT if exists else DIM, size=13),
-                        subtitle=ft.Text(bpath, color=DIM, size=10),
+                        subtitle=ft.Text(bpath, color=DIM, size=10, overflow=ft.TextOverflow.ELLIPSIS, max_lines=1),
                         on_click=_nav_to(bpath),
                     ))
                 return
@@ -1474,7 +2071,7 @@ class SettingsView:
                 dir_list.controls.append(
                     ft.Container(
                         content=ft.Button(
-                            f"Export here",
+                            content=ft.Text("Export here", overflow=ft.TextOverflow.ELLIPSIS, max_lines=1),
                             icon=ft.Icons.IOS_SHARE_ROUNDED,
                             on_click=lambda _: _confirm_dir(directory),
                             bgcolor=CYAN,
@@ -1502,7 +2099,7 @@ class SettingsView:
                 full = os.path.join(directory, entry)
                 dir_list.controls.append(ft.ListTile(
                     leading=ft.Icon(ft.Icons.ARCHIVE_ROUNDED, color=CYAN, size=18),
-                    title=ft.Text(entry, color=TEXT, size=13),
+                    title=ft.Text(entry, color=TEXT, size=13, overflow=ft.TextOverflow.ELLIPSIS, max_lines=1),
                     subtitle=ft.Text(f"{os.path.getsize(full)/1024:.0f} KB", color=DIM, size=10),
                     on_click=lambda _e, p=full: _confirm_file(p),
                 ))
@@ -1511,7 +2108,7 @@ class SettingsView:
                 full = os.path.join(directory, entry)
                 dir_list.controls.append(ft.ListTile(
                     leading=ft.Icon(ft.Icons.FOLDER_OUTLINED, color=CYAN, size=18),
-                    title=ft.Text(entry, color=TEXT, size=13),
+                    title=ft.Text(entry, color=TEXT, size=13, overflow=ft.TextOverflow.ELLIPSIS, max_lines=1),
                     on_click=_nav_to(full),
                 ))
 
@@ -1576,6 +2173,7 @@ class SettingsView:
             ),
             use_safe_area=True,
             bgcolor=SURFACE,
+            on_dismiss=_on_bs_dismiss,
         )
         bs_holder[0] = bs
         if self.app.page:
@@ -1595,17 +2193,6 @@ class SettingsView:
             self._startup_page_dropdown.value = gen.get("startup_page", "Library")
             self._default_sort_dropdown.value = gen.get("library_sort", "date")
             
-            temp_val = gen.get("walk_temperature")
-            if temp_val is None:
-                temp_val = gen.get("play_similar_temperature", 0.0)
-            self._temp_slider.value = float(temp_val)
-            self._temp_value_text.value = f"{self._temp_slider.value:.2f}"
-            self._recolor_walk_slider(self._temp_slider, self._temp_value_text, TEMP_RAMP, self._TEMP_MAX)
-
-            self._mmr_slider.value = float(gen.get("walk_mmr_lambda", 0.15))
-            self._mmr_value_text.value = f"{self._mmr_slider.value:.2f}"
-            self._recolor_walk_slider(self._mmr_slider, self._mmr_value_text, MMR_RAMP, self._MMR_MAX)
-
             qobuz = cfg.get("qobuz", {})
             self._qobuz_user_id_field.value = str(qobuz.get("email_or_userid", ""))
             self._qobuz_token_field.value   = str(qobuz.get("password_or_token", ""))
@@ -1652,6 +2239,8 @@ class SettingsView:
             self._assistant_model_dropdown.value = str(assistant_cfg.get("gemini_model", "gemini-3.5-flash-lite"))
             self._assistant_ollama_url_field.value = str(assistant_cfg.get("ollama_endpoint", "http://localhost:11434/v1"))
             self._assistant_ollama_model_field.value = str(assistant_cfg.get("ollama_model", "llama3.2"))
+            self._assistant_personality_field.value = str(assistant_cfg.get("personality_prompt", ""))
+            self._update_assistant_provider_visibility()
             active_p = dsp.get("active_preset", "Flat")
             self._refresh_eq_presets_dropdown(active_value=active_p)
             self._update_eq_sliders_from_active_preset()
@@ -1715,15 +2304,11 @@ class SettingsView:
 
     def _on_color_click(self, hex, mode):
         self._selected_accent_color = hex
-        self._apply_visuals_btn.visible = True
-        self.app.safe_update(lambda: None)
         self._show_sub_page("Appearance", self._build_appearance_group())
+        self._mark_dirty(self._save_appearance_settings, label="SAVE APPEARANCE SETTINGS", icon=ft.Icons.PALETTE_ROUNDED)
 
     def _on_appearance_change(self, e=None):
-        if not self._apply_visuals_btn.visible:
-            def _mutate():
-                self._apply_visuals_btn.visible = True
-            self.app.safe_update(_mutate)
+        self._mark_dirty(self._save_appearance_settings, label="SAVE APPEARANCE SETTINGS", icon=ft.Icons.PALETTE_ROUNDED)
 
     def _save_appearance_settings(self):
         from utils.streamrip_api import update_config_params
@@ -1740,6 +2325,10 @@ class SettingsView:
             "landing": {
                 "show_search_history": self._show_most_listened_switch.value,
                 "show_library_stats": self._show_library_stats_switch.value
+            },
+            "general": {
+                "startup_page": self._startup_page_dropdown.value,
+                "default_sort": self._default_sort_dropdown.value,
             }
         })
         self.app.show_snackbar("Appearance and interface settings saved.")
@@ -1782,40 +2371,6 @@ class SettingsView:
             lib_view.sort_mode = sort
             if hasattr(lib_view, "load_library"):
                 self.page.run_task(lib_view.load_library)
-
-    def _recolor_walk_slider(self, slider, value_text, ramp, max_val):
-        """Keep a walk-parameter slider's fill, thumb and numeric readout on the
-        same semantic colour as its value. Callers update `.value` first."""
-        c = lerp_hex(*ramp, (slider.value or 0.0) / max_val)
-        slider.active_color = c
-        slider.thumb_color = c
-        value_text.color = c
-
-    def _on_temp_change(self, e):
-        val = round(self._temp_slider.value, 2)
-        self._temp_value_text.value = f"{val:.2f}"
-        self._recolor_walk_slider(self._temp_slider, self._temp_value_text, TEMP_RAMP, self._TEMP_MAX)
-        self._temp_value_text.update()
-        self._temp_slider.update()
-        from utils.streamrip_api import update_config_params
-        update_config_params({
-            "general": {
-                "walk_temperature": val
-            }
-        })
-
-    def _on_mmr_change(self, e):
-        val = round(self._mmr_slider.value, 2)
-        self._mmr_value_text.value = f"{val:.2f}"
-        self._recolor_walk_slider(self._mmr_slider, self._mmr_value_text, MMR_RAMP, self._MMR_MAX)
-        self._mmr_value_text.update()
-        self._mmr_slider.update()
-        from utils.streamrip_api import update_config_params
-        update_config_params({
-            "general": {
-                "walk_mmr_lambda": val
-            }
-        })
 
     def _save_config(self):
         try:
@@ -1870,9 +2425,10 @@ class SettingsView:
 
         bs_holder  = [None]
         path_state = [None]
+        picked_path = [None]
 
-        title_text = ft.Text("", color=TEXT, weight=ft.FontWeight.W_700, size=14)
-        path_text  = ft.Text("", color=DIM, size=10, italic=True)
+        title_text = ft.Text("", color=TEXT, weight=ft.FontWeight.W_700, size=14, overflow=ft.TextOverflow.ELLIPSIS, max_lines=1)
+        path_text  = ft.Text("", color=DIM, size=10, italic=True, overflow=ft.TextOverflow.ELLIPSIS, max_lines=1)
         dir_list   = ft.Column(tight=True, spacing=0, scroll=ft.ScrollMode.AUTO)
 
         def _close(do_update=True):
@@ -1884,8 +2440,14 @@ class SettingsView:
             bs_holder[0] = None
 
         def _confirm(path):
+            picked_path[0] = path
             _close(do_update=False)
-            self._handle_folder_picked(path, target)
+
+        def _on_bs_dismiss(e):
+            if picked_path[0]:
+                p = picked_path[0]
+                picked_path[0] = None
+                self._handle_folder_picked(p, target)
 
         def _render(directory):
             path_state[0] = directory
@@ -1903,7 +2465,7 @@ class SettingsView:
                             size=20,
                         ),
                         title=ft.Text(bname, color=TEXT if exists else DIM, size=13),
-                        subtitle=ft.Text(bpath, color=DIM, size=10),
+                        subtitle=ft.Text(bpath, color=DIM, size=10, overflow=ft.TextOverflow.ELLIPSIS, max_lines=1),
                         on_click=_nav_to(bpath),
                     ))
             else:
@@ -1913,7 +2475,7 @@ class SettingsView:
                 dir_list.controls.append(
                     ft.Container(
                         content=ft.Button(
-                            f"Use \"{os.path.basename(directory) or directory}\"",
+                            content=ft.Text(f"Use \"{os.path.basename(directory) or directory}\"", overflow=ft.TextOverflow.ELLIPSIS, max_lines=1),
                             icon=ft.Icons.CHECK_ROUNDED,
                             on_click=lambda _: _confirm(directory),
                             bgcolor=CYAN,
@@ -1940,7 +2502,7 @@ class SettingsView:
                     full = os.path.join(directory, entry)
                     dir_list.controls.append(ft.ListTile(
                         leading=ft.Icon(ft.Icons.FOLDER_OUTLINED, color=CYAN, size=18),
-                        title=ft.Text(entry, color=TEXT, size=13),
+                        title=ft.Text(entry, color=TEXT, size=13, overflow=ft.TextOverflow.ELLIPSIS, max_lines=1),
                         on_click=_nav_to(full),
                     ))
 
@@ -2002,6 +2564,7 @@ class SettingsView:
             ),
             use_safe_area=True,
             bgcolor=SURFACE,
+            on_dismiss=_on_bs_dismiss,
         )
         bs_holder[0] = bs
         if self.app.page:
@@ -2042,6 +2605,11 @@ class SettingsView:
             self._handle_folder_picked(e.path, self._picking_target)
         self._picking_target = None
 
+    async def _apply_folder_pick(self, path: str, target: str):
+        """Apply a folder pick one event-loop tick after the picker sheet popped,
+        so refresh()'s page.update() never races the sheet's dismissal."""
+        self._handle_folder_picked(path, target)
+
     def _handle_folder_picked(self, path: str, target: str):
         if not path:
             return
@@ -2062,13 +2630,32 @@ class SettingsView:
             self.app._save_pref("library_path", path)
 
         self.refresh()
+        self._check_dirty("Storage", self._save_paths, label="SAVE PATHS", icon=ft.Icons.FOLDER_ROUNDED)
 
         label = "Download" if target == "download" else "Library"
         self.app.show_snackbar(f"{label} folder set: {path}")
 
+    def _save_dsp_settings(self):
+        from utils.streamrip_api import update_config_params
+        active_p = self._eq_preset_dropdown.value or "Flat"
+        update_config_params({
+            "dsp": {
+                "equalizer_enabled": self._equaliser_switch.value,
+                "dynamism_enabled": self._dynamism_switch.value,
+                "active_preset": active_p,
+            }
+        })
+        self.app.show_snackbar("Audio & DSP settings saved.")
+        self.app.safe_update(lambda: None)
+
     def _build_audio_dsp_group(self):
         # Trigger background load of equalizer parameters
         self.page.run_task(self._load_equalizer_bands)
+        dsp_save_cb = lambda _e=None: self._check_dirty("Audio & DSP", self._save_dsp_settings, label="SAVE AUDIO & DSP", icon=ft.Icons.GRAPHIC_EQ_ROUNDED)
+        self._dynamism_switch.on_change = lambda e: (self._on_dynamism_change(e), dsp_save_cb())
+        self._equaliser_switch.on_change = lambda e: (self._on_equaliser_change(e), dsp_save_cb())
+        self._eq_preset_type_radio.on_change = lambda e: (self._on_preset_type_change(e), dsp_save_cb())
+        self._eq_preset_dropdown.on_select = lambda e: (self._on_eq_preset_select(e), dsp_save_cb())
         
         return ft.Column([
             ft.Text("Real-time digital signal processing adjustments.", color=DIM, size=12),
@@ -2077,12 +2664,12 @@ class SettingsView:
                     ft.Row([
                         ft.Icon(ft.Icons.GRAPHIC_EQ_ROUNDED, color=CYAN, size=20),
                         ft.Text("Dynamic Punchiness", weight=ft.FontWeight.BOLD, color=TEXT, size=14),
-                    ], spacing=10),
+                    ], spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER),
                     ft.Text("Automatically enhance output gain based on track energy and beat strength to increase dynamic punchiness of rhythmic tracks.", color=DIM, size=12),
                     ft.Row([
                         self._dynamism_switch,
                         ft.Text("Enable Dynamism Enhancement", color=TEXT, size=12)
-                    ], spacing=10),
+                    ], spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER),
                     self._dynamism_unavailable_text,
                     self._dynamism_boost_card,
                 ], spacing=10),
@@ -2096,12 +2683,12 @@ class SettingsView:
                     ft.Row([
                         ft.Icon(ft.Icons.TUNE_ROUNDED, color=CYAN, size=20),
                         ft.Text("Equalizer", weight=ft.FontWeight.BOLD, color=TEXT, size=14),
-                    ], spacing=10),
+                    ], spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER),
                     ft.Text("Boost or cut specific frequency bands to match your headphones or genre preferences.", color=DIM, size=12),
                     ft.Row([
                         self._equaliser_switch,
                         ft.Text("Enable 5-Band Equalizer", color=TEXT, size=12)
-                    ], spacing=10),
+                    ], spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER),
                     ft.Container(height=5),
                     self._eq_preset_type_radio,
                     ft.Container(height=5),
@@ -2281,6 +2868,7 @@ class SettingsView:
             })
             
         self._save_current_slider_gains_to_preset("Custom")
+        self._check_dirty("Audio & DSP", self._save_dsp_settings, label="SAVE AUDIO & DSP", icon=ft.Icons.GRAPHIC_EQ_ROUNDED)
 
     def _on_gain_text_field_submit(self, idx, text_value, text_control):
         s = text_value.strip()
@@ -2538,6 +3126,7 @@ class SettingsView:
                 "gemini_model": self._assistant_model_dropdown.value or "gemini-3.5-flash-lite",
                 "ollama_endpoint": self._assistant_ollama_url_field.value.strip() or "http://localhost:11434/v1",
                 "ollama_model": self._assistant_ollama_model_field.value.strip() or "llama3.2",
+                "personality_prompt": self._assistant_personality_field.value.strip(),
             }
         })
         self.app.show_snackbar("Jarvis AI Assistant settings saved successfully.")
@@ -2569,7 +3158,79 @@ class SettingsView:
         else:
             self.app.show_snackbar(f"✗ Connection failed: {res.error_message}")
 
+    def _update_assistant_provider_visibility(self, e=None):
+        if not hasattr(self, "_gemini_group_container") or not hasattr(self, "_ollama_group_container"):
+            return
+        provider = (self._assistant_provider_dropdown.value or "gemini").lower()
+        is_gemini = (provider == "gemini")
+        self._gemini_group_container.visible = is_gemini
+        self._ollama_group_container.visible = not is_gemini
+        if self.page:
+            self.app.safe_update(lambda: None)
+
     def _build_assistant_group(self):
+        def save_cb(e=None):
+            if e and hasattr(e, "control") and hasattr(e, "data") and e.data is not None:
+                e.control.value = e.data
+            self._check_dirty("AI Assistant", self._save_assistant_settings, label="SAVE ASSISTANT SETTINGS", icon=ft.Icons.SMART_TOY_ROUNDED)
+
+        self._assistant_llm_switch.on_change = save_cb
+        self._assistant_provider_dropdown.on_select = lambda e: (self._update_assistant_provider_visibility(e), save_cb(e))
+        self._assistant_api_key_field.on_change = save_cb
+        self._assistant_model_dropdown.on_select = save_cb
+        self._assistant_ollama_url_field.on_change = save_cb
+        self._assistant_ollama_model_field.on_change = save_cb
+        self._assistant_personality_field.on_change = save_cb
+
+        self._gemini_group_container = ft.Column([
+            self._assistant_api_key_field,
+            ft.Text("• Free tier API keys can be generated at aistudio.google.com with 0 cost & 0 credit card.", color=DIM, size=11),
+            ft.Container(height=5),
+            self._assistant_model_dropdown,
+        ], spacing=10)
+
+        self._ollama_group_container = ft.Column([
+            self._assistant_ollama_url_field,
+            ft.Container(height=5),
+            self._assistant_ollama_model_field,
+        ], spacing=10)
+
+        def _set_personality_preset(preset_text: str):
+            self._assistant_personality_field.value = preset_text
+            save_cb()
+            if self.page:
+                self.app.safe_update(lambda: None)
+
+        preset_chips = [
+            ft.OutlinedButton(
+                "Default Jarvis",
+                style=ft.ButtonStyle(color=CYAN, side=ft.BorderSide(1, apply_opacity(0.4, CYAN))),
+                on_click=lambda _: _set_personality_preset("You are Jarvis, a concise, sophisticated AI assistant embedded in the Mai An Lab high-fidelity music app. Address the user as 'sir'."),
+            ),
+            ft.OutlinedButton(
+                "Casual Mate",
+                style=ft.ButtonStyle(color=CYAN, side=ft.BorderSide(1, apply_opacity(0.4, CYAN))),
+                on_click=lambda _: _set_personality_preset("You are a chill, passionate music enthusiast mate who loves introducing hidden gems. Speak casually and address the user as 'mate'."),
+            ),
+            ft.OutlinedButton(
+                "Sarcastic Critic",
+                style=ft.ButtonStyle(color=CYAN, side=ft.BorderSide(1, apply_opacity(0.4, CYAN))),
+                on_click=lambda _: _set_personality_preset("You are a witty, slightly sarcastic audiophile and music critic. Give funny commentary on tracks and address the user as 'chief'."),
+            ),
+            ft.OutlinedButton(
+                "ZAX AI (NCR)",
+                style=ft.ButtonStyle(color=CYAN, side=ft.BorderSide(1, apply_opacity(0.4, CYAN))),
+                on_click=lambda _: _set_personality_preset("You are a ZAX AI Supercomputer from the Fallout universe. You are an unwavering patriot of the New California Republic (NCR), delivering music analysis with wasteland analytical precision and NCR civic pride. Address the user as 'Citizen'."),
+            ),
+            ft.OutlinedButton(
+                "Reset to Default",
+                style=ft.ButtonStyle(color=DIM, side=ft.BorderSide(1, apply_opacity(0.2, DIM))),
+                on_click=lambda _: _set_personality_preset(""),
+            ),
+        ]
+
+        self._update_assistant_provider_visibility()
+
         return ft.Column([
             ft.Text("Configure Large Language Model integration for your voice/chat assistant Jarvis.", color=DIM, size=12),
             ft.Container(
@@ -2577,30 +3238,23 @@ class SettingsView:
                     ft.Row([
                         ft.Icon(ft.Icons.SMART_TOY_ROUNDED, color=CYAN, size=20),
                         ft.Text("Jarvis AI Intelligence", weight=ft.FontWeight.BOLD, color=TEXT, size=14),
-                    ], spacing=10),
+                    ], spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER),
                     ft.Text("Enable conversational AI, smart playlist curation, and deep library analysis.", color=DIM, size=12),
                     ft.Row([
                         self._assistant_llm_switch,
                         ft.Text("Enable LLM Agent Intelligence", color=TEXT, size=12)
-                    ], spacing=10),
+                    ], spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER),
                     ft.Container(height=5),
                     self._assistant_provider_dropdown,
                     ft.Container(height=5),
-                    self._assistant_api_key_field,
-                    ft.Text("• Free tier API keys can be generated at aistudio.google.com with 0 cost & 0 credit card.", color=DIM, size=11),
-                    ft.Container(height=5),
-                    self._assistant_model_dropdown,
-                    ft.Container(height=5),
-                    self._assistant_ollama_url_field,
-                    ft.Container(height=5),
-                    self._assistant_ollama_model_field,
+                    self._gemini_group_container,
+                    self._ollama_group_container,
+                    ft.Divider(color=BORDER, height=1),
+                    ft.Text("Jarvis Personality & System Directive", weight=ft.FontWeight.BOLD, color=TEXT, size=13),
+                    ft.Text("Customize how Jarvis addresses you, speaks, or behaves. Standard tool-calling directives remain active.", color=DIM, size=11),
+                    self._assistant_personality_field,
+                    ft.Row(preset_chips, wrap=True, spacing=6, run_spacing=6),
                     ft.Container(height=10),
-                    OnyxButton(
-                        text="Save AI Assistant Settings",
-                        icon=ft.Icons.SAVE_ROUNDED,
-                        on_tap=lambda _: self._save_assistant_settings()
-                    ),
-                    ft.Container(height=4),
                     ft.OutlinedButton(
                         "Test Connection",
                         icon=ft.Icons.WIFI_TETHERING_ROUNDED,

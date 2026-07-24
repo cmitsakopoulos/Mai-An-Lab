@@ -1,57 +1,55 @@
 """
-Track graph: sparse k-NN adjacency over the music library.
+Track graph: acoustic geometry + metadata edges over the music library.
 
-Two tiers of edges:
+Two things live here:
 
-  • acoustic  — Euclidean k-NN over the z-scored, PCA-reduced DSP feature
-                vectors persisted by dsp.analyze_track(), reweighted by a
-                Zelnik-Manor self-tuning Gaussian kernel. Top-K-per-source
-                candidates are pruned by strict mutual-kNN intersection (keep
-                edge i→j iff j ∈ topK(i) AND i ∈ topK(j)) so cluster-centroid
-                "hub" tracks don't dominate every walk. The same affinity
-                graph is the substrate for Louvain community detection
-                (cluster_id), so walk and clustering share one geometry.
-  • metadata  — same-artist and same-album co-occurrence (edge_kind 'artist'
-                / 'album'). Weight is fixed at 1.0; ordering inside a tier
-                falls back to library order.
+  • acoustic  — a continuous Zr coordinate space: the z-scored, Kaiser-truncated
+                PCA projection of the DSP feature vectors persisted by
+                dsp.analyze_track(). Proximity is COSINE over those coordinates
+                (which are centred, so it is effectively a correlation). There
+                is no persisted edge table any more — `build_acoustic_edges`
+                writes coordinates, and the walk ranks against them live.
+  • metadata  — same-artist co-occurrence (edge_kind 'artist'). Weight is fixed
+                at 1.0; ordering falls back to library order.
 
 The graph is the navigation backbone for the assistant: it routes 'play
-something similar' to a seed-anchored trajectory walk over the acoustic graph
-(see `walk`), and 'more by this artist' to artist neighbours. Provides the
-continuous proximity the assistant needs instead of discrete buckets.
+something similar' to a seed-ranked queue over the acoustic geometry (see
+`walk`), and 'more by this artist' to artist neighbours. Provides the continuous
+proximity the assistant needs instead of discrete buckets.
 
-The walk (`walk`, "Seed-Anchored Smooth Flow"):
+The walk (`walk`, "Seed-Anchored Similarity Queue"):
   • METADATA DEFINES THE POOL, ACOUSTICS ORDER IT. `_pool_foreign` decides
     membership from the tags (genre boundary, plus a country boundary for
     regional seeds and for seeds with no tags at all); everything inside the
-    pool is then ranked by proximity;
-  • deterministic greedy trajectory — at each step pick the unvisited in-pool
-    acoustic neighbour maximising 0.7·Sim(current) + 0.3·Sim(seed), so the queue
-    flows forward while staying anchored to the seed (no random teleports);
-  • a small additive shared-country bonus (`_meta_score`) as a tiebreaker
-    between tracks the acoustics rate equally. Genre similarity deliberately
-    does NOT appear in the score — it already decided pool membership, and
-    spending it twice let a tag resemblance outrank a closer-sounding track;
-  • graceful degradation — with no enrichment nothing is foreign and the bonus
-    is 0, so it collapses to the pure acoustic dual-similarity flow. That is the
-    intended behaviour for an untagged library, not a fallback: with no
-    metadata, DSP proximity is the whole signal.
+    pool is then ranked by proximity to the SEED;
+  • it RANKS, it does not chain. A greedy trajectory (step to the best
+    neighbour of the current track, repeat) measured strictly worse than plain
+    seed-ranking on purity, artist diversity AND closeness to the seed, because
+    each wrong step became the next step's anchor;
+  • NO metadata term in the score, at all. Membership is the whole of its job;
+    the additive genre-continuity and shared-country bonuses that used to sit
+    here were measured to add +0.4 points of on-family purity over the gate
+    alone while costing diversity, seed anchoring, and biasing hard toward
+    artists MusicBrainz happens to have tagged;
+  • per-artist / per-album repeat caps bound how much of a queue one act or
+    release may take (this replaced an MMR term that moved 2.5% of picks);
+  • graceful degradation — with no enrichment nothing is foreign, so the queue
+    is pure DSP proximity. That is the intended behaviour for an untagged
+    library, not a fallback: with no metadata, proximity is the whole signal.
 
-(A stochastic Personalised-PageRank walker previously lived here; it was removed
-in favour of this single, metadata-aware walker.)
+(Two earlier walkers lived here and were removed: a stochastic
+Personalised-PageRank sampler, then the greedy seed-anchored trajectory above.)
 
 All builders are async (DB-bound) but the numpy work runs synchronously —
-no off-thread call is necessary for libraries up to ~20K tracks; Euclidean kNN
-over the PCA-reduced vectors is bandwidth-limited and finishes in under a second.
-For very large libraries the caller should wrap build_acoustic_edges in
-asyncio.to_thread.
+no off-thread call is necessary for libraries up to ~20K tracks; the SVD and the
+σ pass are bandwidth-limited and finish in under a second. For very large
+libraries the caller should wrap build_acoustic_edges in asyncio.to_thread.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import random
 from typing import Optional
 
 import numpy as np
@@ -62,15 +60,14 @@ from utils.dsp import (
     analyze_track,
     unpack_graph_embedding,
 )
-from utils.harmonic import key_index_to_camelot
 
 logger = logging.getLogger(__name__)
 
 # ── Coordinate-graph cache ───────────────────────────────────────────────────
 # The walk's similarity oracle is the coordinate graph (persisted Zr coords +
-# self-tuning σ/threshold matrices). Building it does three O(N²) passes
+# the self-tuning σ vector). Building it does one O(N²) pass
 # (load_live_coordinate_graph); without a cache that ran on *every* walk() call
-# — i.e. every Play-Similar press recomputed global bandwidths for the whole
+# — i.e. every Play-Similar press recomputed local bandwidths for the whole
 # library. We cache it for the process lifetime, keyed on the db_manager
 # identity, and invalidate whenever build_acoustic_edges rewrites the geometry.
 _COORD_GRAPH_CACHE: dict = {"key": None, "graph": None}
@@ -99,10 +96,6 @@ async def _coord_graph_cached(db_manager):
     return graph
 
 
-# Top-K acoustic neighbours stored per track. 20 is enough for both 'most
-# similar' lookups and short random walks; bigger K eats DB rows without
-# adding signal.
-DEFAULT_K_ACOUSTIC = 20
 # Top-K metadata neighbours stored per track per kind. Albums rarely have
 # more than ~15 tracks; artists can have hundreds, but the assistant only
 # samples a handful at a time.
@@ -116,60 +109,55 @@ KIND_ALBUM = "album"
 
 # ── Builders ─────────────────────────────────────────────────────────────────
 
-# ── Builders ─────────────────────────────────────────────────────────────────
-
 
 # Canonical order of the scalar descriptors appended to the timbre block
 # (EMBED_DIMS floats: mfcc mean/std/delta + chroma + rhythm, see dsp.py).
-# `bpm` denotes the log2(bpm) column; cos_h/sin_h are the Camelot unit-circle
-# coords (structural — never cleaved by the covariance analysis).
+# `bpm` denotes the log2(bpm) column.
+#
+# ── Why the Camelot key coords are NOT here ──────────────────────────────────
+# Three harmonic columns (cos_h, sin_h, key_mode) used to be appended, held out
+# of the SVD and late-fused back at weight 1.5 so PCA could not rotate the rigid
+# Camelot-wheel geometry. They were deleted: key carries no genre information,
+# and spending ~3 of 21 Zr dimensions (amplified 1.5×) on it measurably blurred
+# the metric. Leave-one-artist-out same-family purity over the real library, by
+# harmonic weight:
+#
+#     weight   top-1    top-5    top-10
+#     0.00     86.5%    86.0%    85.1%     <- deleted
+#     0.50     86.5%    86.1%    84.9%
+#     1.00     85.2%    85.9%    84.6%
+#     1.50     85.1%    84.9%    83.7%     <- what shipped
+#     2.00     85.5%    84.0%    82.9%
+#
+# Monotone. Confirmed independently on held-out artist splits (Zr with the block
+# 86.4%/85.2% top-1/top-10, without it 88.4%/86.2%). If harmonic mixing ever
+# becomes a real feature, reintroduce key as its OWN ranking pass rather than as
+# dimensions inside the similarity metric — weight ≤0.5 is free but also does
+# nothing, which is the worst of both.
 _SCALAR_ORDER = (
     "bpm", "brightness", "energy", "rolloff", "beat_strength",
-    "spectral_flatness", "spectral_contrast", "cos_h", "sin_h", "key_mode",
+    "spectral_flatness", "spectral_contrast",
 )
-_STRUCTURAL_SCALARS = frozenset({"cos_h", "sin_h", "key_mode"})
-# Harmonic columns excluded from SVD and late-fused after PCA projection.
-# Their rigid Camelot-wheel geometry must not be rotated by PCA.
-_HARMONIC_SCALARS = frozenset({"cos_h", "sin_h", "key_mode"})
 
 
 def _all_scalars(row: dict) -> dict[str, float]:
     """Every scalar descriptor for one track row, keyed by `_SCALAR_ORDER`.
-    `bpm` is returned as log2(bpm); the Camelot key is encoded as
-    (cos_h, sin_h, key_mode)."""
+    `bpm` is returned as log2(bpm)."""
     bpm_raw = float(row.get("bpm", 0) or 0)
-    log_bpm = float(np.log2(max(bpm_raw, 1.0)))
-    ki = row.get("key_index", 0) or 0
-    cam = key_index_to_camelot(ki)
-    if cam is None:
-        cos_h, sin_h, key_mode = 0.0, 0.0, 0.0
-    else:
-        hour, ring = cam
-        theta = 2.0 * np.pi * (hour - 1) / 12.0
-        cos_h = float(np.cos(theta))
-        sin_h = float(np.sin(theta))
-        key_mode = 1.0 if ring == "B" else 0.0
     return {
-        "bpm": log_bpm,
+        "bpm": float(np.log2(max(bpm_raw, 1.0))),
         "brightness": float(row.get("brightness", 0) or 0),
         "energy": float(row.get("energy", 0) or 0),
         "rolloff": float(row.get("rolloff", 0) or 0),
         "beat_strength": float(row.get("beat_strength", 0) or 0),
         "spectral_flatness": float(row.get("spectral_flatness", 0) or 0),
         "spectral_contrast": float(row.get("spectral_contrast", 0) or 0),
-        "cos_h": cos_h,
-        "sin_h": sin_h,
-        "key_mode": key_mode,
     }
 
 
 def _surviving_scalars(redundant: set[str]) -> list[str]:
-    """Scalar names that survive covariance cleaving, in canonical order.
-    Structural/harmonic coords (cos_h/sin_h/key_mode) are always kept."""
-    return [
-        s for s in _SCALAR_ORDER
-        if s in _STRUCTURAL_SCALARS or s not in redundant
-    ]
+    """Scalar names that survive covariance cleaving, in canonical order."""
+    return [s for s in _SCALAR_ORDER if s not in redundant]
 
 
 def _feature_vector(row: dict, timbre: np.ndarray, surviving: list[str]) -> np.ndarray:
@@ -178,24 +166,23 @@ def _feature_vector(row: dict, timbre: np.ndarray, surviving: list[str]) -> np.n
     sc = _all_scalars(row)
     scalars = np.array([sc[s] for s in surviving], dtype=np.float32)
     return np.concatenate([timbre.astype(np.float32), scalars])
+
+
 async def build_acoustic_edges(
     db_manager,
-    k: int = DEFAULT_K_ACOUSTIC,
     features_version: int = FEATURES_VERSION,
     z_score: bool = True,
     scalar_weight: float = 1.5,
-    harmonic_weight: float = 1.5,
 ) -> int:
-    """Recompute the acoustic tier of the graph from scratch.
+    """Recompute the acoustic geometry from scratch.
 
-    Loads every track that has a current-version feature BLOB, optionally
-    z-scores the vectors (or centers them if z_score=False), and writes the
-    top-K neighbours per track back to `track_neighbors`. Returns the edge
-    count written.
+    Loads every track that has a current-version feature BLOB, z-scores the
+    vectors (or merely centres them if z_score=False), Kaiser-truncates them
+    with an SVD, and persists the resulting Zr coordinates. Returns the number
+    of tracks projected.
 
     Coverage degrades gracefully: tracks without features are simply absent
-    from the acoustic graph. The assistant falls back to metadata edges for
-    those.
+    from the geometry. The assistant falls back to metadata edges for those.
     """
     rows = await db_manager.get_tracks_with_features(features_version)
     if len(rows) < 2:
@@ -213,12 +200,11 @@ async def build_acoustic_edges(
     # hot path.
 
     # ── Feature selection: drop covariance-redundant scalars ──────────────
-    # The graph — and the Louvain communities + similarity walk built on it —
-    # uses every feature that survives the unsupervised PCA / Pearson-covariance
-    # analysis. Collinear scalars (e.g. rolloff ↔ brightness) are cleaved so
-    # they don't double-count toward distance. The 68-D graph embedding timbre block and the
-    # harmonic unit-circle coords (cos_h/sin_h) are structural and always kept;
-    # only the raw scalar descriptors are subject to cleaving.
+    # The geometry uses every feature that survives the unsupervised PCA /
+    # Pearson-covariance analysis. Collinear scalars (e.g. rolloff ↔ brightness)
+    # are cleaved so they don't double-count toward distance. The 68-D graph
+    # embedding timbre block is structural and always kept; only the raw scalar
+    # descriptors are subject to cleaving.
     from utils.pca_engine import redundant_raw_features
     redundant = redundant_raw_features(rows)
     if redundant:
@@ -255,107 +241,58 @@ async def build_acoustic_edges(
 
     X = np.stack(vectors, axis=0)  # (N, EMBED_DIMS + len(surviving))
 
-    # ── Late Fusion split: separate harmonic columns from continuous ──────
-    # The harmonic unit-circle coords (cos_h, sin_h, key_mode) encode the
-    # rigid Camelot wheel geometry. SVD rotates *all* axes into mixed PCs,
-    # which destroys that geometric integrity. Late Fusion keeps them out of
-    # the PCA entirely: the SVD denoises only the ~75-D timbre+dynamics, and
-    # the raw harmonic coordinates are concatenated back after projection.
-    harmonic_names_in_surviving = [s for s in surviving if s in _HARMONIC_SCALARS]
-    harm_col_indices = []   # column indices in X that are harmonic
-    cont_col_indices = list(range(GRAPH_EMBED_DIMS))  # timbre block is always continuous
-    for i, s in enumerate(surviving):
-        col = GRAPH_EMBED_DIMS + i
-        if s in _HARMONIC_SCALARS:
-            harm_col_indices.append(col)
-        else:
-            cont_col_indices.append(col)
-
-    X_cont = X[:, cont_col_indices]   # (N, D_cont)
-    X_harm = X[:, harm_col_indices]   # (N, n_harm)  — typically 3
-
-    # z-score the continuous block.
-    mu_cont = X_cont.mean(axis=0)
+    # z-score the feature matrix (or merely centre it when z_score=False).
+    mu = X.mean(axis=0)
     if z_score:
-        sd_cont = X_cont.std(axis=0)
-        sd_cont = np.where(sd_cont < 1e-8, 1.0, sd_cont)
+        sd = X.std(axis=0)
+        sd = np.where(sd < 1e-8, 1.0, sd)
     else:
-        sd_cont = np.ones(X_cont.shape[1], dtype=X_cont.dtype)
-    Z_cont = (X_cont - mu_cont) / sd_cont
+        sd = np.ones(X.shape[1], dtype=X.dtype)
+    Z = (X - mu) / sd
 
-    # z-score the harmonic block separately (preserves circle geometry).
-    mu_harm = X_harm.mean(axis=0)
-    if z_score:
-        sd_harm = X_harm.std(axis=0)
-        sd_harm = np.where(sd_harm < 1e-8, 1.0, sd_harm)
-    else:
-        sd_harm = np.ones(X_harm.shape[1], dtype=X_harm.dtype)
-    Z_harm = (X_harm - mu_harm) / sd_harm
+    # Boost the non-timbre scalars AFTER z-scoring so tempo/dynamics carry
+    # weight comparable to the individual timbre axes.
+    n_scalars = Z.shape[1] - GRAPH_EMBED_DIMS
+    if scalar_weight != 1.0 and n_scalars > 0:
+        Z[:, GRAPH_EMBED_DIMS:] *= scalar_weight
 
-    # Boost the non-timbre continuous scalars AFTER z-scoring so tempo/dynamics
-    # carry weight comparable to the individual timbre axes.
-    n_cont_scalars = Z_cont.shape[1] - GRAPH_EMBED_DIMS
-    if scalar_weight != 1.0 and n_cont_scalars > 0:
-        Z_cont[:, GRAPH_EMBED_DIMS:] *= scalar_weight
-
-    # ── PCA reduction (Kaiser-truncated SVD on the *continuous* matrix) ─────
-    # Only the timbre + continuous dynamics enter the SVD; the harmonic columns
-    # are fused back afterwards. This ensures the Camelot wheel's cos/sin
-    # geometry is 100% preserved in the final affinity calculation.
-    Zr_cont = Z_cont.astype(np.float32)
-    N = Z_cont.shape[0]
-    V_keep = np.eye(Z_cont.shape[1], dtype=np.float32)
-    eigenvalues = np.zeros(Z_cont.shape[1], dtype=np.float32)
-    if Z_cont.shape[1] >= 4 and N > 1:
+    # ── PCA reduction (Kaiser-truncated SVD) ────────────────────────────────
+    # Everything enters the SVD now. There used to be a "late fusion" split
+    # holding the 3 Camelot columns out of the PCA and concatenating them back
+    # afterwards, to protect the wheel's rigid geometry from being rotated into
+    # mixed PCs. Those columns are gone entirely (see `_SCALAR_ORDER`), and with
+    # them the split — the PCA is measurably NOT the problem it was protecting
+    # against: held-out purity is 86.4% through the PCA vs 86.6% on the raw
+    # 76-D matrix, and better than raw once the harmonic block is dropped.
+    Zr = Z.astype(np.float32)
+    N = Z.shape[0]
+    V_keep = np.eye(Z.shape[1], dtype=np.float32)
+    eigenvalues = np.zeros(Z.shape[1], dtype=np.float32)
+    if Z.shape[1] >= 4 and N > 1:
         # SVD is the single heaviest op in the build; run it off the loop
         # (LAPACK releases the GIL) so it can't freeze the UI.
         _U, _S, _Vt = await asyncio.to_thread(
-            np.linalg.svd, Z_cont, full_matrices=False,
+            np.linalg.svd, Z, full_matrices=False,
         )
         eigenvalues = (_S ** 2) / float(N - 1)
         kaiser_k = int((eigenvalues > 1.0).sum())
         kaiser_k = max(3, min(kaiser_k, _Vt.shape[0]))
-        V_keep = _Vt[:kaiser_k].T.astype(np.float32)     # (D_cont, kaiser_k)
-        Zr_cont = (Z_cont @ V_keep).astype(np.float32)   # (N, kaiser_k)
+        V_keep = _Vt[:kaiser_k].T.astype(np.float32)     # (D, kaiser_k)
+        Zr = (Z @ V_keep).astype(np.float32)             # (N, kaiser_k)
         cum_var = float(eigenvalues[:kaiser_k].sum() / eigenvalues.sum()) if eigenvalues.sum() > 0 else 0.0
         logger.info(
-            "track_graph: PCA-reduced continuous dims from %d to %d "
+            "track_graph: PCA-reduced %d dims to %d "
             "(Kaiser λ>1; %.1f%% variance retained)",
             int(_Vt.shape[1]), V_keep.shape[1], cum_var * 100.0,
         )
 
-    # ── Late Fusion: concatenate the raw harmonic coords onto Zr ───────────
-    H_fused = (Z_harm * harmonic_weight).astype(np.float32)  # (N, n_harm)
-    Zr = np.concatenate([Zr_cont, H_fused], axis=1)          # (N, kaiser_k + n_harm)
-    logger.info(
-        "track_graph: late-fused %d harmonic dims (weight=%.2f) → "
-        "final Zr %d-D",
-        H_fused.shape[1], harmonic_weight, Zr.shape[1],
-    )
-
-    # ── Persist the unified geometry (projection + per-track Zr coords) ────
-    # Single source of the graph's Zr space: any on-demand
-    # projection of new tracks reads it back via load_pca_space() /
-    # project_to_zr(). The stored means/stds correspond to the *continuous*
-    # columns only; harmonic stats are stored separately in feature_spec so
-    # project_to_zr can replicate the same late-fusion split.
-    if hasattr(db_manager, "save_pca_space"):
+    # ── Persist the per-track Zr coordinates ────────────────────────────────
+    # The coordinates ARE the geometry — there is nothing else to store. (A
+    # `pca_space` table used to persist means/stds/V_keep alongside them for an
+    # on-demand projection of new tracks that was never built; it is gone, and
+    # `db_manager.GEOMETRY_VERSION` now handles invalidating stale coords.)
+    if hasattr(db_manager, "update_tracks_pca_coords_batch"):
         try:
-            feature_spec = {
-                "surviving": surviving,
-                "scalar_weight": float(scalar_weight),
-                "embed_dims": int(GRAPH_EMBED_DIMS),
-                "z_score": bool(z_score),
-                "harmonic_names": harmonic_names_in_surviving,
-                "harmonic_weight": float(harmonic_weight),
-                "harmonic_means": mu_harm.astype(np.float32).tolist(),
-                "harmonic_stds": sd_harm.astype(np.float32).tolist(),
-                "k_neighbors": int(k),
-            }
-            await db_manager.save_pca_space(
-                mu_cont.astype(np.float32), sd_cont.astype(np.float32),
-                V_keep, eigenvalues.astype(np.float32), feature_spec,
-            )
             await db_manager.update_tracks_pca_coords_batch(
                 [(paths[i], Zr[i]) for i in range(Zr.shape[0])]
             )
@@ -374,6 +311,14 @@ async def build_acoustic_edges(
         await build_genre_affinity(db_manager)
     except Exception as gerr:
         logger.warning("track_graph: genre affinity build skipped (%s)", gerr)
+
+    # Genre-adjacency graph for the journey walk. Rides here because the Zr
+    # coords it reads are now current. Non-fatal: on failure the walk falls back
+    # to the pure-radius ranking.
+    try:
+        await build_journey_graph(db_manager)
+    except Exception as jerr:
+        logger.warning("track_graph: journey graph build skipped (%s)", jerr)
 
     # The persisted Zr coords / clusters just changed, so any cached coordinate
     # graph the walk is holding is stale — force the next walk to reload it.
@@ -402,6 +347,52 @@ async def build_genre_affinity(db_manager) -> int:
         len(model), len(token_sets),
     )
     return len(model)
+
+
+async def build_journey_graph(db_manager) -> int:
+    """(Re)build + persist the genre-adjacency graph the journey walk traverses:
+    regional-aware PAGA nodes (coarse family + country split, untagged tracks
+    placed by label-propagation) plus their kNN-connectivity adjacency.
+
+    Rides the same rebuild path as `build_genre_affinity` — the Zr coords it
+    reads are already current — and is cheap (block-chunked kNN + one
+    connectivity pass). Returns the placed-track count; a graceful 0 when the
+    backend lacks the accessors (test fakes) or there are no coordinates yet, in
+    which case the walk falls back to the pure-radius ranking."""
+    if not (
+        hasattr(db_manager, "save_journey_graph")
+        and hasattr(db_manager, "get_artist_meta_for_paths")
+    ):
+        return 0
+    from utils import genre_graph as gg
+
+    graph = await load_live_coordinate_graph(db_manager)
+    if not graph or not graph.get("paths"):
+        await db_manager.save_journey_graph({})
+        return 0
+
+    paths = graph["paths"]
+    meta_map = await db_manager.get_artist_meta_for_paths(paths)
+    meta = [
+        {
+            "genres": (meta_map.get(p) or {}).get("genres"),
+            "country": (meta_map.get(p) or {}).get("country"),
+        }
+        for p in paths
+    ]
+    g = gg.build_genre_graph(graph["X_unit"], meta)
+    payload = {
+        "version": 1,
+        "nodes": {paths[i]: g["nodes"][i] for i in range(len(paths))},
+        "adj": {n: [[b, float(l)] for b, l in v] for n, v in g["adj"].items()},
+    }
+    await db_manager.save_journey_graph(payload)
+    logger.info(
+        "track_graph: journey graph built (%d tracks, %d nodes, %d edges, %d inferred)",
+        len(paths), len(g["sizes"]),
+        sum(len(v) for v in g["adj"].values()), sum(g["inferred"]),
+    )
+    return len(paths)
 
 
 async def build_metadata_edges(
@@ -473,21 +464,6 @@ async def neighbors(
     """
     return await db_manager.get_neighbors(track_path, k=k, edge_kind=edge_kind)
 
-def _unpack_embedding(blob: bytes | None) -> Optional[np.ndarray]:
-    """Unpack a timbre BLOB to an L2-normalised float32 vector suitable for
-    cosine on the graph timbre sub-space (mfcc mean/std + chroma + rhythm; delta
-    excluded, matching the geometry). Returns None when the blob is absent or
-    malformed. Cosine helper for embedding-space scoring (e.g. a negative-taste
-    centroid); callers fetch BLOBs via db_manager.get_embeddings_for_paths."""
-    v = unpack_graph_embedding(blob)
-    if v is None:
-        return None
-    n = float(np.linalg.norm(v))
-    if n < 1e-9:
-        return None
-    return (v / n).astype(np.float32)
-
-
 # ── Regional scenes (the ONE genre-taxonomy fact the walk still needs) ────────
 # A regional scene travels with a country/language, so for such a seed a foreign
 # country IS foreign — even a moderate cross-country genre overlap (laiko↔
@@ -496,7 +472,7 @@ def _unpack_embedding(blob: bytes | None) -> Optional[np.ndarray]:
 # `_pool_foreign` therefore treats country as a HARD pool constraint for regional
 # seeds. Everything else (Hip-Hop, Rock, Pop, Metal, Electronic, Jazz, …) is a
 # borderless/international scene where nationality says little, so country there
-# is only the soft ordering bonus in `_meta_score`.
+# is simply not consulted.
 #
 # The membership test is per-TAG (`genre_taxonomy.is_regional_tag`), not per
 # coarse bucket: Folk/Cntry holds laiko/rebetiko (regional) AND blues, country,
@@ -504,33 +480,34 @@ def _unpack_embedding(blob: bytes | None) -> Optional[np.ndarray]:
 # roots artists apart by nationality — Fleetwood Mac against essentially the
 # whole library, 4.9% of all enriched pairs in the audit.
 
-# Weight of the step-to-step genre-continuity term (`_genre_flow`) in the walk's
-# ordering. Deliberately a CONSTANT rather than a config key: unlike temperature
-# and mmr_lambda it is not a taste dial, it is a correction for a specific defect
-# — with metadata removed from `_meta_score`, ordering inside a broad pool had
-# nothing but timbre to go on, and a Depeche Mode seed drifted from The Smiths
-# into Pitbull and Calvin Harris because modern EDM shares its production
-# signature. Exposing it would invite tuning a value that has one right answer.
+# ── Why metadata NEVER enters the ordering score ─────────────────────────────
+# Two additive metadata terms used to sit alongside the acoustic score: a
+# seed-anchored shared-country bonus (`_meta_score`, λ=0.35) and a
+# current-anchored NPMI genre-continuity term (`_genre_flow`, λ=0.30). Both are
+# deleted. Measured over 80 seeds on the real library, against the pool gate
+# that was already running:
 #
-# 0.30 chosen by sweep over 15 seeds (0.15 / 0.30 / 0.45), scored on distinct
-# artists, longest same-artist run, and share of the queue sharing a coarse
-# family with the seed:
-#     off    artists 6.5   run 1.7   on-genre  82%
-#     0.15   artists 6.3   run 1.2   on-genre  92%
-#     0.30   artists 6.5   run 1.1   on-genre  97%   <-- peak, diversity intact
-#     0.45   artists 5.7   run 1.1   on-genre  97%   (diversity starts to go)
+#     greedy, acoustic only            on-family 84.5%  artists 8.0  seed-aff .275
+#     greedy + `_pool_foreign` only    on-family 99.6%  artists 7.8  seed-aff .270
+#     + both metadata score terms      on-family 100.0% artists 7.6  seed-aff .246
 #
-# KNOWN COST: within a dominant genre whose tags are generic, tag-similarity is
-# uninformative and displaces the acoustically precise pick — a Playboi Carti
-# seed loses its rage cluster (Yeat, Lil Uzi Vert) to tag-generic mainstream rap
-# (Gang Starr, Pop Smoke). Hip-Hop is the majority of this library, so that is a
-# real and recurring cost, accepted because the aggregate is clearly better.
-DEFAULT_GENRE_FLOW = 0.30
-
-# Flat weight of a shared artist-country in the `_meta_score` ordering bonus.
-# One constant (was a 3-tier γ keyed on genre_bucket): the regional/borderless
-# distinction now lives entirely in the pool constraint, not the score.
-_COUNTRY_W = 0.15
+# The gate does the genre work (84.5% → 99.6%). The score terms bought +0.4
+# points for a measurable loss of diversity and seed anchoring, while deciding
+# 43% (genre) and 16% (country) of all picks.
+#
+# They were also actively biased. `_genre_flow` returned 0.0 when either side
+# lacked tags — intended as graceful degradation, but under an arg-max 0.0 is
+# not neutral, it is last place. 27% of candidate evaluations scored 0 and 66%
+# of those zeros were an UNTAGGED candidate rather than a different genre, so
+# the tagged share of picks ran at 93% against an 80% tagged pool. With 60% of
+# the GR catalogue untagged, the term fenced out the very scene the country
+# rule in `_pool_foreign` exists to protect.
+#
+# The deeper reason no λ could have worked: the acoustic term is
+# exp(-d²/(σᵢσⱼ)), self-tuning, so its spread across a candidate pool scales
+# with local density, while λ·gx is fixed on [0,1]. In the dense hip-hop
+# majority the acoustic spread compresses and the fixed term wins; in sparse
+# regions it is noise. Metadata now does exactly one job: pool membership.
 
 
 def _is_regional(genres) -> bool:
@@ -563,8 +540,22 @@ def _is_regional(genres) -> bool:
 
 
 # Cache of credit-string → member-key frozenset. The walk asks the same-act
-# question once per candidate per step, and decomposition is pure string work.
+# question once per candidate, and decomposition is pure string work.
 _CREDIT_KEY_CACHE: dict[str, frozenset] = {}
+
+
+def _credit_key_set(name) -> frozenset:
+    """Member keys of one artist CREDIT STRING, memoised. '21 Savage & Metro
+    Boomin' decomposes to both members, so the walk's per-artist cap counts a
+    collab against each act it names rather than treating it as a new artist."""
+    if not name:
+        return frozenset()
+    keys = _CREDIT_KEY_CACHE.get(name)
+    if keys is None:
+        from utils.metadata_enrich import credit_keys
+        keys = credit_keys(name)
+        _CREDIT_KEY_CACHE[name] = keys
+    return keys
 
 
 def _same_act(a_name, b_name) -> bool:
@@ -579,99 +570,15 @@ def _same_act(a_name, b_name) -> bool:
     collab track could be scored as a stranger — and, when its enrichment
     resolved to the wrong entity, vetoed out of that artist's own queue.
 
-    Membership overlap fixes it in the safe direction: the guards it feeds
-    (`_meta_score` zeroing, `_pool_foreign` exemption) only ever ADMIT a track or
-    decline to bonus it, so a false positive costs one loosely-related track
-    while a false negative fences out a genuine one."""
+    Membership overlap fixes it in the safe direction: the guard it feeds (the
+    `_pool_foreign` exemption) only ever ADMITS a track, so a false positive
+    costs one loosely-related track while a false negative fences out a genuine
+    one."""
     if not a_name or not b_name:
         return False
     if a_name == b_name:
         return True
-    from utils.metadata_enrich import credit_keys
-    ka = _CREDIT_KEY_CACHE.get(a_name)
-    if ka is None:
-        ka = credit_keys(a_name)
-        _CREDIT_KEY_CACHE[a_name] = ka
-    kb = _CREDIT_KEY_CACHE.get(b_name)
-    if kb is None:
-        kb = credit_keys(b_name)
-        _CREDIT_KEY_CACHE[b_name] = kb
-    return bool(ka & kb)
-
-
-def _meta_score(a_path: str, b_path: str, meta_map: dict) -> float:
-    """Seed-anchored provenance bonus: a flat _COUNTRY_W for a shared artist
-    country, and nothing else. Returns 0 when either track lacks enrichment, or
-    when they're the same act (that coherence is already carried by the artist
-    edge tier).
-
-    ── Why genre similarity is NOT in here ──────────────────────────────────
-    It used to return `gx + _COUNTRY_W·same_cty`, where gx is the same NPMI
-    soft-set similarity that `_pool_foreign` uses to decide pool MEMBERSHIP. So
-    one signal did two jobs: it admitted the candidate, then re-scored its rank.
-    The division of labour this walk is built on is metadata defines the pool,
-    acoustics order it — gx in the score quietly broke that, letting a tag
-    resemblance outrank a genuinely closer-sounding track that was already in
-    the pool on the same evidence.
-
-    The family backstop made it worse rather than better: `soft_set_sim` now
-    floors same-family pairs at FAMILY_FLOOR, so gx is pinned to a constant for
-    a large share of in-pool pairs. As an ordering term it had become mostly
-    noise around a flat value while still outweighing the country signal.
-
-    Country stays because it is genuinely orthogonal — it is not what the pool
-    gate tested (except for regional seeds, where it is a hard constraint rather
-    than a score), and shared provenance is a real tiebreaker between two tracks
-    the acoustics rate equally.
-
-    Step-to-step genre continuity is still available deliberately, via
-    `_genre_flow` under `genre_flow_lambda` — that one is anchored to the
-    CURRENT track rather than the seed, so it shapes the trajectory instead of
-    re-litigating admission.
-    """
-    ma = meta_map.get(a_path)
-    mb = meta_map.get(b_path)
-    if not ma or not mb:
-        return 0.0
-    if _same_act(ma.get("artist"), mb.get("artist")):
-        return 0.0  # same-artist coherence already carried by the artist edge tier
-
-    ca, cb = ma.get("country"), mb.get("country")
-    return _COUNTRY_W if (ca and cb and ca == cb) else 0.0
-
-
-def _genre_flow(a_path: str, b_path: str, meta_map: dict, genre_model: dict) -> float:
-    """NPMI soft-set genre similarity between two tracks, anchored to the CURRENT
-    track rather than the seed. Powers the within-pool *genre-continuity*
-    gradient: it rewards a smooth step-to-step genre trajectory inside the pool
-    (grime → grime → grime before broadening to trap) and never changes pool
-    membership. Orthogonal to the acoustic flow term by design — it carries the
-    tag signal the timbre metric can't see.
-
-    Returns 0 for the SAME ACT, which is not a nicety but the thing that makes
-    this term usable at all. Two tracks by one artist carry identical tags, so
-    gx = 1.0 — the maximum possible bonus. Anchored to the current track, that is
-    a positive feedback loop: the instant the walk steps onto an artist, that
-    artist's whole catalogue outscores every alternative and the queue locks on.
-    Measured over 15 seeds at lambda 0.30 it collapsed the queue to 3.4 distinct
-    artists with runs of 4.2 (a The Cure seed returned eight consecutive Twin
-    Tribes tracks; a Nipsey Hussle seed, six A$AP Rocky). Zeroing same-act keeps
-    the genre signal and drops the artist lock-in: 6.5 distinct artists, longest
-    run 1.1 — better than with the term switched off entirely.
-
-    Returns 0 when either track lacks tags."""
-    from utils.genre_similarity import soft_set_sim
-    ma = meta_map.get(a_path)
-    mb = meta_map.get(b_path)
-    if not ma or not mb:
-        return 0.0
-    if _same_act(ma.get("artist"), mb.get("artist")):
-        return 0.0
-    ga = ma.get("genres") or frozenset()
-    gb = mb.get("genres") or frozenset()
-    if not ga or not gb:
-        return 0.0
-    return soft_set_sim(ga, gb, genre_model)
+    return bool(_credit_key_set(a_name) & _credit_key_set(b_name))
 
 
 def _pool_foreign(
@@ -738,19 +645,76 @@ def _pool_foreign(
     return False
 
 
+async def _journey_queue(
+    db_manager, coord_graph, seed_idx, seed_path, length, exclude,
+    max_per_artist, max_per_album,
+):
+    """Build the queue by traversing the persisted genre-adjacency graph: a leg
+    in the seed's genre, then a hop into an adjacent genre through its interface
+    tracks (see `genre_graph.journey`). Returns None — so `walk` falls back to
+    the pure radius — when no genre graph is built yet, the seed can't be placed,
+    or anything goes wrong. Repeat caps are enforced inside the traversal, not
+    after it, so a leg never truncates on a dominant artist."""
+    if not hasattr(db_manager, "get_journey_graph"):
+        return None
+    payload = await db_manager.get_journey_graph()
+    nodes_by_path = (payload or {}).get("nodes") or {}
+    adj_raw = (payload or {}).get("adj") or {}
+    if not nodes_by_path or not adj_raw:
+        return None
+
+    from utils import genre_graph as gg
+
+    paths = coord_graph["paths"]
+    nodes = [nodes_by_path.get(p, gg.UNKNOWN_NODE) for p in paths]
+    adj = {n: [(b, float(l)) for b, l in v] for n, v in adj_raw.items()}
+    display = coord_graph["meta_map"]
+    artist_keys = [_credit_key_set((display.get(p) or {}).get("artist")) for p in paths]
+    album_keys = [(display.get(p) or {}).get("album") for p in paths]
+    p2i = coord_graph["path_to_idx"]
+    excl_idx = {p2i[p] for p in exclude if p in p2i}
+
+    # journey counts the seed at index 0, so ask for length+1 and drop it.
+    order = gg.journey(
+        seed_idx, coord_graph["X_unit"], nodes, adj,
+        length=length + 1, hops=1,
+        exclude=excl_idx,
+        artist_keys=artist_keys, album_keys=album_keys,
+        max_per_artist=max_per_artist, max_per_album=max_per_album,
+    )
+    out = [paths[i] for i in order if paths[i] != seed_path]
+    return out[:length] or None
+
+
 async def load_live_coordinate_graph(db_manager):
-    """Load all PCA coordinates, cluster IDs, and metadata from SQLite to build
-    a coordinates-only graph representation in RAM for on-the-fly walk traversal.
+    """Load the persisted Zr coordinates + display metadata into RAM and
+    L2-normalise them. This is the walk's similarity oracle.
+
+    NO O(N²) pass. Two used to live here:
+      • the mutual-kNN affinity thresholds, which existed to stop
+        cluster-centroid "hub" tracks dominating a greedy chain — deleted with
+        the chain (see `walk`);
+      • the Zelnik-Manor self-tuning bandwidths σ, needed by the
+        exp(-d²/(σᵢσⱼ)) affinity — deleted with the affinity itself.
+
+    The walk ranks by COSINE now, which needs no bandwidth: Zr is already
+    centred (V comes from the SVD of centred data), so cosine here is
+    effectively a correlation. Measured on two independent library images,
+    leave-one-artist-out same-family purity:
+
+        library A   affinity  top-1 87.7  top-5 85.9  top-10 85.1  top-20 83.6
+                    cosine    top-1 88.3  top-5 87.2  top-10 86.1  top-20 85.1
+        library B   affinity  top-1 87.6  top-5 86.0  top-10 84.5  top-20 83.4
+                    cosine    top-1 87.7  top-5 86.2  top-10 85.6  top-20 84.9
+
+    Same direction on both, and the margin GROWS with k — i.e. it is largest
+    over the span a real queue actually occupies. Self-tuning σ was meant to
+    stop dense regions dominating; normalising the vectors turns out to do that
+    job better here, and reduces graph load from O(N²) to O(N·D).
     """
     rows = await db_manager.get_tracks_pca_coords()
     if not rows:
         return None
-
-    # Load space projection parameters for K-neighbors.
-    proj = await db_manager.load_pca_space()
-    k_neighbors = 50
-    if proj:
-        k_neighbors = proj.get("k_neighbors", 50)
 
     paths = [r["path"] for r in rows if r.get("pca_coords") is not None]
     if not paths:
@@ -759,53 +723,20 @@ async def load_live_coordinate_graph(db_manager):
     path_to_idx = {p: i for i, p in enumerate(paths)}
     X_zr = np.array([r["pca_coords"] for r in rows if r.get("pca_coords") is not None], dtype=np.float32)
 
-    # meta_map for genre/country checks
+    # Display metadata (title/artist/album/genre) — feeds the walk's repeat caps
+    # and the network view. NOT enrichment: the pool gate reads genres/country
+    # from get_artist_meta_for_paths instead.
     meta_map = {r["path"]: r for r in rows}
 
-    def _compute_graph_matrices():
-        N = X_zr.shape[0]
-        k_eff = min(k_neighbors, N - 1)
-        X_zr_sq = np.sum(X_zr ** 2, axis=1)
-
-        # 1. Compute sigmas
-        LOCAL_K = 7
-        chunk = 1024
-        sigmas = np.ones(N, dtype=np.float32)
-        for i in range(0, N, chunk):
-            block = X_zr[i:i + chunk]
-            c = block.shape[0]
-            d2 = X_zr_sq[i:i + c, None] - 2.0 * (block @ X_zr.T) + X_zr_sq[None, :]
-            for j in range(c):
-                d2[j, i + j] = np.inf
-            piv = np.partition(d2, LOCAL_K - 1, axis=1)[:, LOCAL_K - 1]
-            sigmas[i:i + c] = np.sqrt(np.maximum(piv, 0.0))
-        sigmas = np.maximum(sigmas, 1e-3)
-
-        # 2. Compute top-K affinity thresholds (for mutual-kNN membership).
-        thresholds = np.zeros(N, dtype=np.float32)
-        for i in range(0, N, chunk):
-            block = X_zr[i:i + chunk]
-            c = block.shape[0]
-            d2 = X_zr_sq[i:i + c, None] - 2.0 * (block @ X_zr.T) + X_zr_sq[None, :]
-            for j in range(c):
-                d2[j, i + j] = np.inf
-            A = np.exp(-d2 / (sigmas[i:i + c, None] * sigmas[None, :]))
-            piv_sel = np.partition(A, N - k_eff, axis=1)[:, N - k_eff]
-            thresholds[i:i + c] = piv_sel
-
-        return sigmas, thresholds, X_zr_sq, k_eff
-
-    sigmas, thresholds, X_zr_sq, k_eff = await asyncio.to_thread(_compute_graph_matrices)
+    norms = np.linalg.norm(X_zr, axis=1, keepdims=True)
+    X_unit = (X_zr / np.maximum(norms, 1e-9)).astype(np.float32)
 
     return {
         "X_zr": X_zr,
-        "X_zr_sq": X_zr_sq,
+        "X_unit": X_unit,
         "paths": paths,
         "path_to_idx": path_to_idx,
         "meta_map": meta_map,
-        "sigmas": sigmas,
-        "thresholds": thresholds,
-        "k_eff": k_eff,
     }
 
 
@@ -814,184 +745,166 @@ async def walk(
     seed_path: str,
     length: int = 10,
     avoid: Optional[set[str]] = None,
-    meta_lambda: float = 0.35,
-    genre_flow_lambda: float = DEFAULT_GENRE_FLOW,
-    mmr_lambda: float = 0.0,
-    temperature: float = 0.0,
-    rng_seed: int | None = None,
     veto_genre_floor: float = 0.06,
+    max_per_artist: int = 2,
+    max_per_album: int = 1,
 ) -> list[str]:
-    """Seed-anchored trajectory walk over the track graph.
+    """Seed-anchored similarity queue: rank the library by acoustic proximity to
+    the seed, keep what metadata admits, cap repeats, take the top `length`.
 
-    This is *the* walk. The candidate POOL is defined by metadata and only then
-    ORDERED by acoustics — the inversion that replaced a stack of acoustic
-    correction terms (cross-cluster penalty, multiplicative genre nudge) with one
-    membership rule:
+        pool(Seed) = every track NOT `_pool_foreign` to the Seed (genre
+                     boundary, or country boundary for regional scenes and
+                     untagged seeds), minus `avoid` and the seed itself
+        rank(C)    = cosine(Zr_Seed, Zr_C)               # Zr is centred, so
+                                                        # this is a correlation
 
-        pool(Seed)  = unvisited acoustic neighbours of T_i that are NOT
-                      `_pool_foreign` to the Seed (genre boundary, or country
-                      boundary for regional scenes and untagged seeds)
-        Score(C)    = 0.7·Sim(T_i, C) + 0.3·Sim(Seed, C)   # acoustic (dual)
-                    + meta_lambda·meta(Seed, C)            # shared-country tiebreak
-                    + genre_flow_lambda·gx(T_i, C)         # genre continuity (current-anchored)
+    Metadata decides membership and NOTHING else — see the comment above
+    `_is_regional` for the measurements that removed it from the score.
 
-    Note what is NOT in Score: the genre similarity that `_pool_foreign` used to
-    admit C. Membership and rank are separate jobs; gx did both until it was
-    removed from `_meta_score` (see that docstring).
+    ── Why this no longer chains ────────────────────────────────────────────
+    This used to be a greedy trajectory: step to the best neighbour of the
+    CURRENT track under 0.7·Sim(current) + 0.3·Sim(seed), repeat. That was
+    measured to be strictly worse than not chaining at all. Over 80 seeds on the
+    real library, 10-track queues:
 
-    Why a metadata pool instead of acoustic corrections: a timbre bridge puts a
-    laiko ballad next to a trap track (same acoustic neighbourhood, even the same
-    Louvain community), so no acoustic penalty can be trusted to stop the jump —
-    only the tags reveal it. `_pool_foreign` is that categorical gate, and for a
-    regional-scene seed it also treats a foreign country as foreign (the coherent
-    same-country continuation is often untagged, so genre similarity alone can't
-    rank it above an acoustically-near foreign-pop track). Within the pool the
-    acoustics do what they're good at: order by proximity, anchored to the seed
-    for both the flow term Sim(T_i,·) and the tether Sim(Seed,·).
+        greedy chain (acoustic only)   on-family 84.5%  artists 8.0  seed-aff .275
+        beam-8       (acoustic only)   on-family 86.6%  artists 7.6  seed-aff .292
+        seed-ranked  (this)            on-family 87.1%  artists 8.3  seed-aff .380
 
-    Everything degrades gracefully: with no coordinate graph the anchor falls
-    back to the stored top-K; with no enrichment nothing is `_pool_foreign` and
-    the meta term is 0 (evidence-gated), so the walk is the pure acoustic
-    dual-similarity flow — exactly what the test fakes exercise.
+    Ranking wins on purity, diversity AND closeness to the seed simultaneously.
+    The reason is compounding: the top acoustic neighbour shares a coarse genre
+    family 86% of the time, so a 10-step chain holds the genre only 0.86¹⁰ ≈ 23%
+    of the time — and each wrong step became the new anchor, so one timbre bridge
+    took the whole rest of the queue with it. Beam search landing in between is
+    the tell that the trajectory OBJECTIVE was the problem, not the search over
+    it. With no chain there is nothing to compound, which also deletes the
+    machinery that existed only to contain the drift: mutual-kNN hub pruning,
+    the dead-end fallback, and the re-anchor fallback.
 
-    Optional refinements — all off / deterministic by default, so the contract
-    above is unchanged unless a caller opts in:
-      • genre_flow_lambda rewards NPMI genre continuity to the CURRENT track
-        (`_genre_flow`), so the queue prefers a smooth step-to-step genre
-        trajectory *inside* the pool (grime → grime → grime before broadening to
-        trap) instead of subgenre pinball. Never changes pool membership — the
-        veto still fences the genre; this only shapes the path within it. ON by
-        default at DEFAULT_GENRE_FLOW (see that constant for the sweep and the
-        known cost); pass 0.0 to disable.
-      • mmr_lambda>0 adds a Maximal-Marginal-Relevance diversity penalty: a
-        candidate is discounted by its timbre cosine to the tracks already
-        emitted, so the queue stops chaining remixes / alternate mixes / the
-        same song on another release.
-      • temperature>0 samples among the top candidates (scale-invariant
-        score**(1/T) weights) instead of taking the arg-max, so repeated walks
-        from one seed vary rather than returning an identical queue; T->0 is the
-        arg-max. rng_seed makes a stochastic walk reproducible.
+    It also costs less: one similarity pass instead of `length` of them, and
+    `load_live_coordinate_graph` needs no O(N²) pass at all any more (see there
+    for why cosine replaced the self-tuning affinity kernel).
+
+    ── Repeat capping (replaces MMR) ────────────────────────────────────────
+    `max_per_artist` / `max_per_album` bound how much of the queue one act or one
+    release may occupy. This is what the MMR term was reaching for — stop chaining
+    remixes, alternate mixes and the same song on another release — done exactly
+    rather than approximately: near-duplicates are overwhelmingly same-album, and
+    MMR's timbre cosine could not see it (measured, it changed 2.5% of picks,
+    because cosine over the raw, NON-CENTRED timbre block spans only 0.56–0.97 —
+    note the ranking cosine below is over centred Zr, which does not have that
+    compressed-range problem).
+    Artist counting goes through `credit_keys`, so '21 Savage' and
+    '21 Savage & Metro Boomin' count as one act. Pass 0 to disable either cap.
+
+    Degrades gracefully at every layer: no coordinate graph → rank the seed's
+    stored acoustic edges instead; no enrichment → nothing is foreign and the
+    queue is pure DSP proximity; no display metadata → no caps.
     """
-    visited: set[str] = set(avoid or set())
-    visited.add(seed_path)
-    path_seq: list[str] = []
+    exclude: set[str] = set(avoid or set())
+    exclude.add(seed_path)
 
-    # The coordinate graph is the walk's similarity oracle: it lets us compute
-    # the seed-anchor affinity for ANY candidate (not just the seed's stored
-    # top-K), which is what keeps the queue tethered to the seed. It's cached
-    # across walks (build invalidates it). A backend without coordinates (the
-    # test fakes, or a library that hasn't been built) returns None and the walk
-    # falls back to the persisted edge table + the top-K seed_sim_map.
+    # The coordinate graph is the similarity oracle: it holds the persisted Zr
+    # coords + self-tuning σ, which is what lets us rank the WHOLE library by
+    # seed affinity rather than just the seed's stored top-K. Cached across walks
+    # (a rebuild invalidates it). A backend without coordinates (the test fakes,
+    # or a library that hasn't been built) returns None and we fall back to the
+    # persisted edge table.
     coord_graph = None
     try:
         coord_graph = await _coord_graph_cached(db_manager)
     except Exception as exc:
         logger.warning("track_graph.walk: no coordinate graph, using edge table: %s", exc)
 
-    def _get_live_neighbors(path: str, k: int = 40) -> list[dict]:
-        if coord_graph is None:
-            return []
-        src_idx = coord_graph["path_to_idx"].get(path)
-        if src_idx is None:
-            return []
-        X_zr = coord_graph["X_zr"]
-        X_zr_sq = coord_graph["X_zr_sq"]
-        sigmas = coord_graph["sigmas"]
-        thresholds = coord_graph["thresholds"]
-        paths = coord_graph["paths"]
-        d2 = X_zr_sq[src_idx] - 2.0 * (X_zr[src_idx] @ X_zr.T) + X_zr_sq
-        d2[src_idx] = np.inf
-        A = np.exp(-d2 / (sigmas[src_idx] * sigmas))
-        mutual_mask = (A >= np.maximum(thresholds[src_idx], thresholds) - 1e-5)
-        mutual_mask[src_idx] = False
-        nbr_indices = np.where(mutual_mask)[0]
-        if len(nbr_indices) == 0:
-            return []
-        nbr_affinities = A[nbr_indices]
-        sort_order = np.argsort(-nbr_affinities)
-        sorted_indices = nbr_indices[sort_order]
-        res = []
-        for idx in sorted_indices:
-            p = paths[idx]
-            m = coord_graph["meta_map"].get(p, {})
-            res.append({
-                "path": p,
-                "weight": float(A[idx]),
-                "edge_kind": KIND_ACOUSTIC,
-                "title": m.get("title"),
-                "artist": m.get("artist"),
-                "album": m.get("album"),
-            })
-        return res[:k]
+    # ── Journey: the primary queue builder ───────────────────────────────────
+    # When a genre-adjacency graph has been built, the queue TRAVELS from the
+    # seed's genre into an adjacent one rather than staying in a single-genre
+    # radius. This is the queue the app ships; the seed-affinity ranking below is
+    # now the FALLBACK for when no graph exists yet (fresh library, unbuilt
+    # on-device geometry, test fakes) or the seed can't be placed. Any failure
+    # inside the journey falls through to that radius — degradation is mandatory
+    # (see graph_status: an unbuilt graph must still return a queue, not []).
+    seed_idx = coord_graph["path_to_idx"].get(seed_path) if coord_graph else None
+    if coord_graph is not None and seed_idx is not None:
+        try:
+            journeyed = await _journey_queue(
+                db_manager, coord_graph, seed_idx, seed_path, length,
+                exclude, max_per_artist, max_per_album,
+            )
+        except Exception as exc:
+            logger.warning("track_graph.walk: journey failed, using radius: %s", exc)
+            journeyed = None
+        if journeyed:
+            return journeyed
 
-    # ── Neighbour access: one batched prefetch, then an in-memory cache ──────
-    # The walk is greedy (each step depends on the previous choice), but the
-    # early steps almost always land inside the seed's own neighbourhood. We
-    # warm a cache with the seed's neighbours' acoustic neighbours in ONE
-    # batched query and serve per-step lookups from it, collapsing the old
-    # O(length) sequential round-trips to ~2. A cache miss (a step that wandered
-    # past the prefetched horizon) does a single live fetch; a backend without
-    # the batch accessor (the test fakes) just uses live fetches throughout.
-    # Either way the rows — and therefore the walk's output — are identical.
-    async def _neighbors_of(path: str) -> list[dict]:
-        if coord_graph is not None:
-            return _get_live_neighbors(path, k=40)
-        # Test-support fallback when coord_graph is None:
+    # ── Radius fallback: rank every candidate by seed affinity ────────────────
+    ranked: list[str] = []
+    display: dict[str, dict] = {}
+    if coord_graph is not None and seed_idx is not None:
+        X_unit = coord_graph["X_unit"]
+        all_paths = coord_graph["paths"]
+        sim = X_unit @ X_unit[seed_idx]        # cosine to the seed, one matvec
+        sim[seed_idx] = -np.inf
+        display = coord_graph["meta_map"]
+        ranked = [
+            all_paths[j] for j in np.argsort(-sim)
+            if all_paths[j] not in exclude
+        ]
+    else:
+        # Test-support / unbuilt-library fallback: the seed's stored acoustic
+        # edges, already weight-ordered by the accessor.
+        rows: list[dict] = []
         if hasattr(db_manager, "get_neighbors_multi"):
-            return await db_manager.get_neighbors_multi(path, (KIND_ACOUSTIC,), k=40)
-        if hasattr(db_manager, "get_neighbors"):
-            return await db_manager.get_neighbors(path, k=40, edge_kind=KIND_ACOUSTIC)
+            rows = await db_manager.get_neighbors_multi(seed_path, (KIND_ACOUSTIC,), k=200)
+        elif hasattr(db_manager, "get_neighbors"):
+            rows = await db_manager.get_neighbors(seed_path, k=200, edge_kind=KIND_ACOUSTIC)
+        for r in rows:
+            p = r.get("path")
+            if not p or p in exclude:
+                continue
+            ranked.append(p)
+            display[p] = r
+
+    if not ranked:
         return []
 
-    # Seed's acoustic neighbours (k=50) drive the seed-anchor term and the
-    # dead-end fallback.
-    if coord_graph is not None:
-        seed_nbrs = _get_live_neighbors(seed_path, k=50)
-    else:
-        # Test-support fallback when coord_graph is None:
-        if hasattr(db_manager, "get_neighbors_multi"):
-            seed_nbrs = await db_manager.get_neighbors_multi(seed_path, (KIND_ACOUSTIC,), k=50)
-        elif hasattr(db_manager, "get_neighbors"):
-            seed_nbrs = await db_manager.get_neighbors(seed_path, k=50, edge_kind=KIND_ACOUSTIC)
-        else:
-            seed_nbrs = []
+    # ── Node fence: float the seed's genre-node + its adjacencies to the front ─
+    # The radius ranks by pure cosine, and the acoustic geometry places foreign
+    # genres right next to a seed — measured on the real library, Electronic,
+    # Metal and Rock all sit inside Hip-Hop seeds' nearest neighbours (production-
+    # timbre bridges). The tag gate below CANNOT fence an untagged candidate (it
+    # needs genres on both sides), so ~22% of tagged and ~48% of untagged Hip-Hop
+    # seeds leaked a foreign node into the fallback queue. The genre-adjacency
+    # partition places EVERY track — untagged ones by label-propagation — so we
+    # reuse it: a stable sort floats candidates in the seed's node ∪ its adjacent
+    # nodes ahead of foreign ones, which then only appear as padding if the
+    # in-genre pool can't fill the queue. This is the same coherence the journey
+    # gets for free (its legs are node-restricted); the radius had none.
+    # Inactive when no partition is built (seed_node is None) — then the tag gate
+    # is the only fence, exactly as before, so an unenriched library still walks
+    # on pure acoustics.
+    if hasattr(db_manager, "get_journey_graph"):
+        try:
+            _jpayload = await db_manager.get_journey_graph()
+        except Exception:
+            _jpayload = None
+        _nodes_by_path = (_jpayload or {}).get("nodes") or {}
+        _seed_node = _nodes_by_path.get(seed_path)
+        if _seed_node:
+            _adj = (_jpayload or {}).get("adj") or {}
+            _allowed = {_seed_node} | {b for b, _ in _adj.get(_seed_node, [])}
+            # Stable sort: False (0) for in-fence keeps them first in cosine order,
+            # True (1) sinks foreign nodes to the tail as padding.
+            ranked.sort(key=lambda p: _nodes_by_path.get(p) not in _allowed)
 
-    seed_sim_map: dict[str, float] = {
-        n["path"]: float(n.get("weight", 0.5)) for n in seed_nbrs if n.get("path")
-    }
-
-    # ── Seed-anchor affinity for ANY candidate (not just the seed's top-K) ────
-    # The fix for anchor evaporation: the old walk read the 0.3·seed term from
-    # seed_sim_map, which only held the seed's top-50 neighbours and defaulted to
-    # 0.0 beyond them — so the moment the greedy walk stepped outside that
-    # neighbourhood the anchor silently vanished and the queue drifted off-seed.
-    # With the coordinate graph we compute the self-tuning affinity
-    # exp(-d²/(σ_seed·σ_c)) against the seed for every candidate, so the tether
-    # never dies. Falls back to the top-K seed_sim_map with no coord graph.
-    _seed_idx = coord_graph["path_to_idx"].get(seed_path) if coord_graph else None
-    _seed_d2 = None
-    if coord_graph is not None and _seed_idx is not None:
-        _X = coord_graph["X_zr"]
-        _Xsq = coord_graph["X_zr_sq"]
-        _seed_d2 = _Xsq[_seed_idx] - 2.0 * (_X[_seed_idx] @ _X.T) + _Xsq
-
-    def _seed_affinity(path: str) -> float:
-        if _seed_d2 is not None:
-            j = coord_graph["path_to_idx"].get(path)
-            if j is not None:
-                sig = coord_graph["sigmas"]
-                return float(np.exp(-_seed_d2[j] / (sig[_seed_idx] * sig[j])))
-        return seed_sim_map.get(path, 0.0)
-
-    # ── Metadata context (genre-NPMI + country) ──────────────────────────
-    # meta_map is filled lazily as candidates are seen; the genre model loads
-    # once. If the backend can't serve enrichment, meta_active latches off and
-    # the metadata factor is 1.0 for the rest of the walk.
-    meta_active = meta_lambda > 0.0 and hasattr(db_manager, "get_artist_meta_for_paths")
+    # ── Metadata context (genre-NPMI + country), for the POOL GATE only ──────
+    # Fetched per scanned block, not for the whole ranked library. If the backend
+    # can't serve enrichment, meta_active latches off and nothing is foreign.
+    meta_active = hasattr(db_manager, "get_artist_meta_for_paths")
     meta_map: dict[str, dict] = {}
     genre_model: dict = {}
     # NB: meta_map is filled ONLY from get_artist_meta_for_paths (the
-    # {artist, country, genres} shape _meta_score/the veto need). We do NOT seed
+    # {artist, country, genres} shape `_pool_foreign` needs). We do NOT seed
     # it from coord_graph["meta_map"] — those rows carry album-level display
     # fields, not enrichment genres/country, and pre-seeding them made
     # _ensure_meta treat every path as "already present" and skip the real
@@ -1014,142 +927,46 @@ async def walk(
         except Exception:
             meta_active = False
 
-    # ── Diversity context (MMR) ───────────────────────────────────────────
-    # Penalise a candidate that is near-identical (high timbre cosine) to a
-    # track already emitted, so the queue stops chaining remixes / alternate
-    # mixes / the same song on another release. Uses the persisted graph
-    # embeddings; degrades to off when mmr_lambda == 0 or the backend can't
-    # serve embeddings (e.g. the test fakes).
-    mmr_active = mmr_lambda > 0.0 and hasattr(db_manager, "get_embeddings_for_paths")
-    emb_cache: dict[str, np.ndarray] = {}
-    selected_embs: list[np.ndarray] = []
+    # ── Scan the ranking in blocks until the queue fills ─────────────────────
+    # Bounds the enrichment fetch: a queue of 10 almost always fills inside the
+    # first block, so a 20K-track library costs the same two queries as a 1K one.
+    selected: list[str] = []
+    artist_hits: dict[str, int] = {}
+    album_hits: dict[str, int] = {}
+    gate_on = meta_active and veto_genre_floor > 0.0
+    block = max(200, 20 * length)
 
-    async def _ensure_emb(paths: list[str]) -> None:
-        nonlocal mmr_active
-        if not mmr_active:
-            return
-        missing = [p for p in paths if p not in emb_cache]
-        if not missing:
-            return
-        try:
-            blobs = await db_manager.get_embeddings_for_paths(missing)
-        except Exception:
-            mmr_active = False
-            return
-        for p in missing:
-            v = _unpack_embedding(blobs.get(p))
-            if v is not None:
-                emb_cache[p] = v
-
-    await _ensure_meta([seed_path, *seed_sim_map.keys()])
-
-    rng = random.Random(rng_seed) if temperature > 0.0 else None
-    _TEMP_TOP_N = 6
-
-    current = seed_path
-    for _step in range(length):
-        raw_nbrs = await _neighbors_of(current)
-        candidates = [n for n in raw_nbrs if n.get("path") and n["path"] not in visited]
-
-        # Fallback to seed's acoustic neighbors if current node hits a dead end
-        if not candidates and current != seed_path:
-            candidates = [n for n in seed_nbrs if n.get("path") and n["path"] not in visited]
-
-        if not candidates:
+    for start in range(0, len(ranked), block):
+        if len(selected) >= length:
             break
-
-        await _ensure_meta([c["path"] for c in candidates])
-
-        # ── Metadata pool (anchored to the seed) ──────────────────────────────
-        # Restrict the pool to candidates that are NOT `_pool_foreign` to the
-        # seed: a strong timbre bridge can never carry the queue across a genre
-        # boundary (Carti→laiko), nor — for a regional-scene seed — across a
-        # country boundary. Evidence-gated, so unenriched candidates survive.
-        if meta_active and veto_genre_floor > 0.0:
-            kept = [
-                c for c in candidates
-                if not _pool_foreign(
-                    seed_path, c["path"], meta_map, genre_model, veto_genre_floor,
-                )
-            ]
-            if not kept:
-                # Every neighbour of `current` is foreign to the seed. Do NOT
-                # admit a foreign track (the old behaviour silently broke the
-                # guarantee). RE-ANCHOR to the seed's own unvisited, in-pool
-                # neighbours and continue from the seed's vicinity instead. Their
-                # meta is already loaded (see the _ensure_meta on seed_sim_map).
-                kept = [
-                    n for n in seed_nbrs
-                    if n.get("path") and n["path"] not in visited
-                    and not _pool_foreign(
-                        seed_path, n["path"], meta_map, genre_model, veto_genre_floor,
-                    )
-                ]
-            if not kept:
-                # Nothing in-genre is reachable anywhere — end the queue rather
-                # than step foreign. Lowering veto_genre_floor is the escape
-                # valve for callers who prefer length over strict purity.
+        chunk = ranked[start:start + block]
+        if gate_on:
+            await _ensure_meta([seed_path, *chunk])
+        for path in chunk:
+            if len(selected) >= length:
                 break
-            candidates = kept
+            if gate_on and _pool_foreign(
+                seed_path, path, meta_map, genre_model, veto_genre_floor,
+            ):
+                continue
+            row = display.get(path) or {}
+            # Artist cap, keyed on credit-string membership so a collab credit
+            # counts against the artist it names.
+            keys = _credit_key_set(row.get("artist"))
+            if max_per_artist > 0 and keys and any(
+                artist_hits.get(k, 0) >= max_per_artist for k in keys
+            ):
+                continue
+            album = row.get("album")
+            if max_per_album > 0 and album and album_hits.get(album, 0) >= max_per_album:
+                continue
+            selected.append(path)
+            for k in keys:
+                artist_hits[k] = artist_hits.get(k, 0) + 1
+            if album:
+                album_hits[album] = album_hits.get(album, 0) + 1
 
-        if mmr_active:
-            await _ensure_emb([c["path"] for c in candidates])
-
-        # Order the pool: additive acoustic-dual + seed-anchored metadata bonus
-        # + (opt) current-anchored genre-continuity, then the MMR-diversity haircut.
-        scored: list[tuple[float, dict]] = []
-        for c in candidates:
-            w_curr = max(0.0, float(c.get("weight", 0.5)))
-            w_seed = _seed_affinity(c["path"])
-            score = 0.7 * w_curr + 0.3 * w_seed
-            if meta_active:
-                score += meta_lambda * _meta_score(
-                    seed_path, c["path"], meta_map,
-                )
-                if genre_flow_lambda > 0.0:
-                    score += genre_flow_lambda * _genre_flow(
-                        current, c["path"], meta_map, genre_model,
-                    )
-            if mmr_active and selected_embs:
-                ev = emb_cache.get(c["path"])
-                if ev is not None:
-                    sim = max(float(ev @ s) for s in selected_embs)
-                    score *= 1.0 - mmr_lambda * min(1.0, max(0.0, sim))
-            scored.append((score, c))
-
-        # Selection: deterministic arg-max by default; when temperature > 0,
-        # sample among the top candidates (scale-invariant score**(1/T) weights)
-        # so repeated walks from one seed vary. T -> 0 reproduces the arg-max.
-        best_cand = None
-        if rng is not None and len(scored) > 1:
-            ranked = sorted(scored, key=lambda t: t[0], reverse=True)
-            top = [(s, c) for s, c in ranked[:_TEMP_TOP_N] if s > 0.0]
-            if len(top) > 1:
-                inv_t = 1.0 / max(temperature, 1e-6)
-                weights = [s ** inv_t for s, _ in top]
-                best_cand = rng.choices([c for _, c in top], weights=weights, k=1)[0]
-            elif top:
-                best_cand = top[0][1]
-        if best_cand is None:
-            best_score = -1.0
-            for score, c in scored:
-                if score > best_score:
-                    best_score = score
-                    best_cand = c
-
-        if not best_cand:
-            break
-
-        next_path = best_cand["path"]
-        path_seq.append(next_path)
-        visited.add(next_path)
-        if mmr_active:
-            ev = emb_cache.get(next_path)
-            if ev is not None:
-                selected_embs.append(ev)
-        current = next_path
-
-    return path_seq
+    return selected
 
 
 async def bulk_analyze_library(

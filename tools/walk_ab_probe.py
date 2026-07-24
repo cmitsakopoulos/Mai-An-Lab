@@ -31,7 +31,7 @@ async def main(db_path):
     await db.initialize()
     genre_model = await db.get_genre_affinity()
     for label, seed in SEEDS:
-        q = await tg.walk(db, seed, length=LEN, meta_lambda=0.35,
+        q = await tg.walk(db, seed, length=LEN,
                           mmr_lambda=0.0, temperature=0.0)
         allp = [seed] + q
         meta = await db.get_artist_meta_for_paths(allp)

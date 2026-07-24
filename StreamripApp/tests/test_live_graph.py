@@ -50,14 +50,24 @@ class TestLiveGraphCoordinatesWalk(unittest.IsolatedAsyncioTestCase):
         
         # Save tracks to db
         conn = await self.db.get_connection()
-        await conn.execute("INSERT OR IGNORE INTO artists (id, name) VALUES (1, 'Fake Artist')")
-        await conn.execute("INSERT OR IGNORE INTO albums (id, artist_id, title, genre) VALUES (1, 1, 'Fake Album', 'Electronic')")
+        # One artist + album PER TRACK. A shared album would (correctly) trip
+        # the walk's per-album repeat cap and truncate every queue to one track.
+        for i in range(self.num_tracks):
+            await conn.execute(
+                "INSERT OR IGNORE INTO artists (id, name) VALUES (?, ?)",
+                (i + 1, f"Fake Artist {i}"),
+            )
+            await conn.execute(
+                "INSERT OR IGNORE INTO albums (id, artist_id, title, genre) "
+                "VALUES (?, ?, ?, 'Electronic')",
+                (i + 1, i + 1, f"Fake Album {i}"),
+            )
         for i in range(self.num_tracks):
             path = self.paths[i]
             # Write to tracks
             await conn.execute(
-                "INSERT INTO tracks (path, title, duration, album_id) VALUES (?, ?, ?, 1)",
-                (path, f"Track {i}", 180.0)
+                "INSERT INTO tracks (path, title, duration, album_id) VALUES (?, ?, ?, ?)",
+                (path, f"Track {i}", 180.0, i + 1)
             )
             # Write to play_counts (which holds pca_coords, cluster_id, etc.)
             await conn.execute(
@@ -66,47 +76,20 @@ class TestLiveGraphCoordinatesWalk(unittest.IsolatedAsyncioTestCase):
             )
         await conn.commit()
 
-        # Build acoustic edges (this saves V_keep, means, stds, feature_spec to pca_space)
-        # We manually update pca_space feature spec so that load_pca_space works
-        spec = {
-            "surviving": [],
-            "scalar_weight": 1.0,
-            "embed_dims": 10,
-            "z_score": True,
-            "harmonic_names": [],
-            "harmonic_weight": 1.5,
-            "harmonic_means": [],
-            "harmonic_stds": [],
-            "k_neighbors": 5,
-        }
-        means = np.zeros(10, dtype=np.float32)
-        stds = np.ones(10, dtype=np.float32)
-        V_keep = np.eye(10, dtype=np.float32)
-        eigenvalues = np.ones(10, dtype=np.float32)
-        await self.db.save_pca_space(means, stds, V_keep, eigenvalues, spec)
-
     async def asyncTearDown(self):
         await self.db.close()
         self._cleanup_db_files()
         tg.invalidate_coord_graph_cache()
 
     async def test_coordinate_graph_walk_runs_and_is_deterministic(self):
-        # The walk is now always served by the in-RAM coordinate graph (the
-        # walk_coordinates_only toggle is gone). Verify it produces a valid queue
-        # and that the deterministic (temperature=0) walk is reproducible.
+        # The walk is served by the in-RAM coordinate graph and has no
+        # stochastic mode at all now, so repeat calls must be byte-identical.
         seed = self.paths[0]
-        walk_a = await tg.walk(self.db, seed, length=6, temperature=0.0)
-        walk_b = await tg.walk(self.db, seed, length=6, temperature=0.0)
-        self.assertEqual(walk_a, walk_b, "Deterministic coordinate-graph walk is not reproducible!")
+        walk_a = await tg.walk(self.db, seed, length=6)
+        walk_b = await tg.walk(self.db, seed, length=6)
+        self.assertEqual(walk_a, walk_b, "Coordinate-graph walk is not reproducible!")
         self.assertEqual(len(walk_a), 6)
         self.assertNotIn(seed, walk_a)
-
-    async def test_coordinate_graph_walk_temperature(self):
-        # Stochastic walk with a fixed rng_seed must be reproducible.
-        seed = self.paths[0]
-        walk_1 = await tg.walk(self.db, seed, length=6, temperature=0.4, rng_seed=42)
-        walk_2 = await tg.walk(self.db, seed, length=6, temperature=0.4, rng_seed=42)
-        self.assertEqual(walk_1, walk_2, "Stochastic walks with identical rng_seed differ!")
 
 if __name__ == "__main__":
     unittest.main()

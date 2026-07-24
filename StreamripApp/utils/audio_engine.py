@@ -920,6 +920,57 @@ class AudioEngine:
             await self._audio.remove_queue_item(index, epoch=epoch, request_id=rid)
         await self._run_native_mutation(epoch, send)
 
+    def remove_indices(self, indices: list[int]):
+        """Remove several queue slots as ONE logical mutation: one local edit,
+        one on_queue_mutated dispatch (one sheet rebuild, one coalesced save) and
+        one serialized task that replays the removals on Dart. The currently
+        playing slot is never removed, so the live source is not reloaded and
+        playback continues uninterrupted. Used by Auto-play to drop its pending
+        'up next' buffer when the mode is switched off."""
+        targets = sorted(
+            {i for i in indices if 0 <= i < len(self.queue) and i != self.current_index},
+            reverse=True,
+        )
+        if not targets:
+            return
+        for i in targets:
+            self.queue.pop(i)
+        # Callers only drop tracks AHEAD of current, but stay correct anyway.
+        shift = sum(1 for i in targets if i < self.current_index)
+        if shift:
+            self.current_index = max(0, self.current_index - shift)
+        if not self.queue:
+            self.stop()
+            return
+        self.dispatch("on_queue_mutated")
+        if self._page:
+            ep = self._next_epoch()
+            self._page.run_task(self._native_remove_queue_items, targets, ep)
+
+    async def _native_remove_queue_items(self, indices: list[int], epoch: int):
+        """Replay a block removal against the live ConcatenatingAudioSource.
+        Dart has no batch remove, so the (already DESCENDING) logical indices are
+        sent one at a time and awaited in order — descending order is what keeps
+        each index valid, since an earlier removal only shifts the slots above it.
+        They share one epoch: the block is a single generation, and one failure
+        falls back to a single full re-push."""
+        self._ensure_audio()
+        if not self._audio:
+            return
+        for idx in indices:
+            async def send(rid, i=idx):
+                await self._audio.remove_queue_item(i, epoch=epoch, request_id=rid)
+            ack = await self._dispatch_op(send)
+            if not ack.get("ok", False):
+                logger.warning(
+                    "ADB_AUDIO: batch remove failed at %d; full re-push fallback", idx
+                )
+                await self._push_queue_native_unlocked(
+                    start_index=self.current_index, autoplay=False, epoch=epoch
+                )
+                return
+            self._apply_ack(ack)
+
     def move_queue_item(self, old_index: int, new_index: int):
         if not (0 <= old_index < len(self.queue) and 0 <= new_index < len(self.queue)):
             return

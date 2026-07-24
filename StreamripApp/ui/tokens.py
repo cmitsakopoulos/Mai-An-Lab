@@ -44,13 +44,6 @@ def lerp_hex(c0: str, c1: str, ratio: float) -> str:
     bl = int(int(a[4:6], 16) + (int(b[4:6], 16) - int(a[4:6], 16)) * ratio)
     return f"#{r:02x}{g:02x}{bl:02x}"
 
-# Semantic ramps for the two walk-parameter sliders. MMR is the *safe* variety
-# lever (spreads the queue without wandering off-genre), so it warms from teal
-# to green — "more of a good thing". Temperature trades queue quality for
-# randomness, so it warms from amber to red — "more adventurous / higher risk".
-MMR_RAMP  = ("#2DD4BF", "#00FF88")   # teal → green
-TEMP_RAMP = ("#FFBF00", "#FF4444")   # amber → red
-
 
 def apply_opacity(opacity: float, hex_color: str) -> str:
     if hex_color == "white": hex_color = "#FFFFFF"

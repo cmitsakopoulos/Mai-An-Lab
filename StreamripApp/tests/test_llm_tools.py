@@ -342,3 +342,43 @@ async def test_play_album_busy_queue_is_gated():
     assert res.get("awaiting_confirmation") is True
     assert runner._pending is not None
     eng.set_queue.assert_not_called()
+
+
+# ── search_by_acoustic_profile & upgraded steer_mood ──────────────────────────
+
+@pytest.mark.asyncio
+async def test_search_by_acoustic_profile():
+    db = AsyncMock()
+    t1 = _track(path="/high.flac", title="High Energy", genre="Rock")
+    t1["energy"] = 0.9
+    t1["brightness"] = 0.8
+    t1["bpm"] = 140.0
+    t2 = _track(path="/low.flac", title="Low Energy", genre="Ambient")
+    t2["energy"] = 0.2
+    t2["brightness"] = 0.2
+    t2["bpm"] = 70.0
+    db.get_all_tracks.return_value = [t1, t2]
+
+    runner = _runner(db=db)
+    res = await execute_tool("search_by_acoustic_profile", {"min_energy": 0.8, "min_bpm": 120}, runner)
+    assert res["success"] is True
+    assert res["count"] == 1
+    assert res["tracks"][0]["path"] == "/high.flac"
+
+
+@pytest.mark.asyncio
+async def test_steer_mood_melancholic():
+    db = AsyncMock()
+    t1 = _track(path="/sad.flac", title="Dark Melancholy", genre="Post-Rock")
+    t1["energy"] = 0.25
+    t1["brightness"] = 0.2
+    t1["bpm"] = 80.0
+    db.get_all_tracks.return_value = [t1]
+    eng = _fake_engine(queue=[])
+    runner = _runner(db=db, engine=eng)
+
+    res = await execute_tool("steer_mood", {"mood": "melancholic"}, runner)
+    assert res["success"] is True
+    eng.set_queue.assert_called()
+    assert runner._agent_deferred_play is True
+

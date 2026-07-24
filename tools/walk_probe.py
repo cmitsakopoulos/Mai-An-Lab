@@ -14,7 +14,7 @@ rails. Your ear is the real judge.
 It runs two walks from each seed, all same length, so you can see what the
 metadata term buys you:
 
-  • smooth+meta      the shipping walk    (metadata pool on, meta_lambda=0.35)
+  • smooth+meta      the shipping walk    (metadata pool gate on)
   • smooth-acoustic  metadata OFF         (== the pure acoustic dual-similarity flow)
 
 Readiness / build
@@ -34,7 +34,7 @@ An unenriched image walks on pure acoustics, and the metadata gate stays dark.
 To enrich a throwaway image first, run `utils.metadata_enrich.enrich_library`
 against it (StreamripApp/tools/enrich_artists.py wraps it).
 
-Both --build modes MUTATE the --db file (edges, clusters, pca_space,
+Both --build modes MUTATE the --db file (Zr coords,
 genre_affinity). Point it at a throwaway image, not your live app DB.
 
 Usage
@@ -160,9 +160,8 @@ async def _edge_weight(db, a, b):
     ib = graph["path_to_idx"].get(b)
     if ia is None or ib is None:
         return None
-    X, sig = graph["X_zr"], graph["sigmas"]
-    d2 = float(np.sum((X[ia] - X[ib]) ** 2))
-    return float(np.exp(-d2 / (sig[ia] * sig[ib])))
+    U = graph["X_unit"]
+    return float(U[ia] @ U[ib])
 
 
 def _jaccard(a, b) -> float:
@@ -405,11 +404,10 @@ async def _run_with_db(db, args):
         # A/B the metadata contribution: the shipping walk (metadata pool on)
         # vs the same walk with metadata off (== pure acoustic flow).
         smooth_meta = await tg.walk(db, path, length=args.length,
-                                    meta_lambda=0.35,
                                     mmr_lambda=mmr, temperature=temp,
                                     rng_seed=rng_seed)
         smooth_aco = await tg.walk(db, path, length=args.length,
-                                   meta_lambda=0.0, veto_genre_floor=0.0,
+                                   veto_genre_floor=0.0,
                                    mmr_lambda=mmr, temperature=temp,
                                    rng_seed=rng_seed)
 

@@ -1005,21 +1005,33 @@ class AssistantRunner:
         self.agent_reset()
         from utils.llm_tools import get_agent_tools, execute_tool
 
-        system_prompt = (
+        default_persona = (
             "You are Jarvis, a concise, sophisticated AI assistant embedded in the Mai An Lab "
-            "high-fidelity music app. Address the user as 'sir'. You can both KNOW and ACT on the "
-            "user's library via tools: read tools (library overview & stats, top-played, artists, "
+            "high-fidelity music app. Address the user as 'sir'."
+        )
+        custom_persona = (
+            acfg.personality_prompt.strip()
+            if (acfg and getattr(acfg, "personality_prompt", None))
+            else ""
+        )
+        persona = custom_persona if custom_persona else default_persona
+
+        tool_directives = (
+            "You can both KNOW and ACT on the "
+            "user's library via tools: read tools (library overview & stats, search_by_acoustic_profile, top-played, artists, "
             "an artist's albums, an album's tracks, playlists and their contents, recently played, "
             "and rich per-track details incl. bpm/energy) and action tools (search, play/enqueue/"
-            "play-next, play whole albums or playlists, the DSP similarity walk, mood steering, "
+            "play-next, play whole albums or playlists, the DSP similarity walk, mood steering (steer_mood), "
             "transport control, saving playlists, and Qobuz online search). "
-            "Answer library questions by calling the read tools and reasoning over the results — "
-            "e.g. counts, 'most played', 'how many by X', 'what's on this album'. Chain tools when "
-            "needed (look up, then act). Only reference tracks the tools actually return — never "
-            "invent library paths. When a tool reports it is awaiting the user's confirmation or "
-            "choice, stop and let the user answer. Keep spoken replies short and natural (read aloud "
-            "by text-to-speech)."
+            "When users ask for specific acoustic properties (energy, brightness, tempo) or vibe requests, "
+            "use search_by_acoustic_profile or steer_mood. Answer library questions by calling the read tools and "
+            "reasoning over the results — e.g. counts, 'most played', 'how many by X', 'what's on this album'. "
+            "Chain tools when needed (look up, then act). Only reference tracks the tools actually return — never "
+            "invent library paths. When a tool reports it is awaiting the user's confirmation or choice, "
+            "stop and let the user answer. Keep spoken replies short and natural (read aloud by text-to-speech)."
         )
+
+        system_prompt = f"{persona}\n\n{tool_directives}"
         ctx = await self._agent_context_line()
         if ctx:
             system_prompt = f"{system_prompt}\n\nLive context — {ctx}"
@@ -1852,18 +1864,13 @@ class AssistantRunner:
         # Save the original seed track on the engine for subsequent continuation walks
         self.engine.play_similar_seed_path = seed_path
  
-        # Seed-anchored smooth walk over the acoustic graph. The 0.3·seed term
-        # keeps it anchored, and the metadata/cluster factors keep it in the
-        # seed's genre/community; dead-end steps fall back to seed neighbours.
+        # Seed-anchored similarity queue over the acoustic graph: the library
+        # ranked by proximity to the seed, gated by metadata, repeat-capped.
         try:
-            from utils.streamrip_api import get_walk_params
-            temp, mmr = get_walk_params()
             walk_paths = await track_graph.walk(
                 self.db, seed_path,
                 length=12,
                 avoid=avoid,
-                mmr_lambda=mmr,   # suppress remix / alt-mix chaining
-                temperature=temp,   # vary the queue across repeat requests
             )
         except Exception as exc:
             logger.warning("track_graph.walk failed: %s", exc)
@@ -2062,28 +2069,29 @@ class AssistantRunner:
     async def _handle_help(self, _intent: ai.Intent) -> AssistantResponse:
         spoken_msg = (
             "I can manage your playback, curate playlists, edit the active queue, "
-            "steer the music mood, or look up track trivia, sir. Ask me 'what can you do' "
+            "steer the music mood, query library analytics, or search online, sir. Ask me 'what can you do' "
             "or type 'help' anytime."
         )
         displayed_msg = (
-            "### Jarvis Protocol & Capabilities\n\n"
-            "**Playback & Search**\n"
-            "• `play [song/artist/album]` — Search & play immediately (asks if multiple matches)\n"
-            "• `1`, `2`, or `option [N]` — Select a choice during multi-match prompts\n"
-            "• `pause` | `resume` | `skip` | `previous` | `shuffle` | `mute` | `unmute` | `stop`\n\n"
-            "**Queue & Playlist Curation**\n"
+            "### 🤖 Jarvis Intelligence & Capability Matrix\n\n"
+            "**🎵 Smart Curation & Mood Steering**\n"
+            "• `play something chill` | `play something melancholic` | `play energetic workout mix` — DSP-backed acoustic mood steering\n"
+            "• `play similar` | `more like this` — Walk local acoustic similarity graph\n"
+            "• `play more by this artist` | `play the usual` | `surprise me` — Personal recommendations\n\n"
+            "**📊 Library Analytics & Knowledge**\n"
+            "• `how big is my library?` | `what are my top genres?` | `my most played tracks` — Quantitative statistics\n"
+            "• `list tracks on album [Album]` | `how many tracks by [Artist]?` — Metadata lookups\n"
+            "• `tell me about this track` | `what bpm is this?` — Audio trivia & DSP features\n\n"
+            "**🔀 Queue Management & Playlists**\n"
             "• `add [song] to queue` | `play [song] next` — Append or insert tracks\n"
-            "• `remove track [N]` | `remove [song]` — Drop item from active queue\n"
-            "• `move [song/N] to top` — Reorder queue tracks\n"
-            "• `save queue as playlist [Name]` — Export current queue to a local playlist\n\n"
-            "**Discovery & Mood Steering**\n"
-            "• `play similar` | `more like this` — Walk acoustic similarity graph\n"
-            "• `play more by this artist` | `play the usual` | `surprise me`\n"
-            "• `play something chill` | `make queue energetic` — Mood/Vibe steering\n\n"
-            "**Context & Utility**\n"
-            "• `tell me about this track` | `track info` — Metadata & acoustic details\n"
-            "• `who made you` | `system status` | `what time is it` | `rescan dsp`\n"
-            "• Anaphora memory: `play their top songs`, `queue that album`"
+            "• `remove track [N]` | `move [song/N] to top` — Queue editing\n"
+            "• `save queue as playlist [Name]` — Export current walk to playlist\n\n"
+            "**🌐 Online Search & Downloads**\n"
+            "• `search Qobuz for [Query]` | `search online for [Track]` — Cloud search\n"
+            "• `download top match` — Fetch online track (with user confirmation)\n\n"
+            "**💬 Natural Conversation & Context Memory**\n"
+            "• Pronoun tracking: `play their top songs`, `queue that album`, `play it again`\n"
+            "• `system status` | `what time is it` | `who made you` | `give me a quote`"
         )
         return AssistantResponse(spoken=spoken_msg, displayed=displayed_msg)
 
@@ -2375,7 +2383,7 @@ class AssistantRunner:
         )
 
     async def _handle_mood_steer(self, intent: ai.Intent) -> AssistantResponse:
-        mood = (intent.query or "chill").lower()
+        mood = (intent.query or "chill").lower().strip()
         tracks = await self.db.get_all_tracks()
         if not tracks:
             return AssistantResponse(
@@ -2384,33 +2392,57 @@ class AssistantRunner:
                 success=False,
             )
 
+        # Profile definition: (target_energy, target_brightness, target_bpm, keywords)
+        profiles = {
+            "chill": (0.25, 0.35, 85.0, ("chill", "lo-fi", "lofi", "ambient", "acoustic", "piano", "jazz", "downtempo", "sleep", "calm", "relax", "mellow")),
+            "relaxing": (0.25, 0.35, 85.0, ("chill", "relax", "calm", "ambient", "piano", "acoustic", "sleep")),
+            "calm": (0.2, 0.3, 80.0, ("calm", "relax", "quiet", "ambient", "sleep")),
+            "energetic": (0.85, 0.75, 130.0, ("energetic", "rock", "metal", "dance", "electronic", "house", "techno", "pop", "workout", "energy", "hype", "fast")),
+            "upbeat": (0.8, 0.8, 125.0, ("upbeat", "happy", "pop", "dance", "disco", "funk", "party")),
+            "workout": (0.9, 0.7, 135.0, ("workout", "metal", "rock", "techno", "electronic", "hype", "intense")),
+            "melancholic": (0.3, 0.2, 90.0, ("melancholy", "melancholic", "dark", "sad", "synthwave", "post-rock", "doom", "blues", "minor")),
+            "nostalgic": (0.4, 0.4, 100.0, ("nostalgic", "retro", "80s", "synthwave", "indie", "oldies")),
+            "rainy": (0.25, 0.25, 85.0, ("rainy", "jazz", "piano", "lo-fi", "acoustic", "ambient", "blues")),
+            "dark": (0.4, 0.15, 105.0, ("dark", "goth", "synthwave", "metal", "ambient", "industrial")),
+            "heavy": (0.95, 0.6, 140.0, ("heavy", "metal", "hardcore", "punk", "thrash", "rock")),
+            "euphoric": (0.85, 0.85, 128.0, ("euphoric", "trance", "dance", "pop", "edm")),
+            "focus": (0.3, 0.4, 90.0, ("ambient", "classical", "instrumental", "piano", "soundtrack", "study", "focus", "work")),
+            "ambient": (0.15, 0.3, 75.0, ("ambient", "drone", "space", "atmospheric", "meditation")),
+        }
+
+        matched_profile = None
+        for key, prof in profiles.items():
+            if key in mood:
+                matched_profile = prof
+                break
+
+        if not matched_profile:
+            target_e, target_b, target_bpm = 0.5, 0.5, 110.0
+            kws = (mood,)
+        else:
+            target_e, target_b, target_bpm, kws = matched_profile
+
         def mood_score(t: dict) -> float:
             score = 0.0
-            tempo = float(t.get("bpm") or t.get("tempo") or 0.0)
+            bpm = float(t.get("bpm") or t.get("tempo") or 0.0)
+            energy = float(t.get("energy", 0.5) or 0.5)
+            brightness = float(t.get("brightness", 0.5) or 0.5)
+
+            # DSP acoustic distance penalty (closer = higher score)
+            e_dist = abs(energy - target_e)
+            b_dist = abs(brightness - target_b)
+            bpm_dist = abs(bpm - target_bpm) / 100.0 if bpm > 0 else 0.5
+            dsp_penalty = (e_dist * 4.0) + (b_dist * 3.0) + (bpm_dist * 2.0)
+            score += max(0.0, 10.0 - dsp_penalty)
+
+            # Text keyword match bonus
             genre = (t.get("genre") or "").lower()
             title = (t.get("title") or t.get("track_title") or "").lower()
             album = (t.get("album") or t.get("album_title") or "").lower()
             text = f"{genre} {title} {album}"
-
-            if mood in ("chill", "relaxing", "calm", "quiet", "slow", "mellow"):
-                if tempo > 0:
-                    score += max(0.0, (120.0 - tempo) / 10.0)
-                chill_keywords = ("chill", "lo-fi", "lofi", "ambient", "acoustic", "piano", "jazz", "downtempo", "sleep", "calm", "relax")
-                for kw in chill_keywords:
-                    if kw in text:
-                        score += 5.0
-            elif mood in ("energetic", "upbeat", "fast", "intense", "workout", "party", "hype"):
-                if tempo > 0:
-                    score += max(0.0, (tempo - 100.0) / 10.0)
-                hype_keywords = ("rock", "metal", "dance", "electronic", "house", "techno", "pop", "hip hop", "rap", "punk", "workout", "energy")
-                for kw in hype_keywords:
-                    if kw in text:
-                        score += 5.0
-            elif mood in ("focus", "study", "work", "instrumental"):
-                focus_keywords = ("ambient", "classical", "instrumental", "piano", "soundtrack", "study", "chill")
-                for kw in focus_keywords:
-                    if kw in text:
-                        score += 5.0
+            for kw in kws:
+                if kw and kw in text:
+                    score += 4.0
 
             score += random.random() * 2.0
             return score

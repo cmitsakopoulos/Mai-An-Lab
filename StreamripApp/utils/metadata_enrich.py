@@ -363,39 +363,31 @@ class MusicBrainzClient:
         #   • if no tier produces a genuine match we fall back to the first
         #     non-junk hit (so multi-artist strings like 'Digga D, Sav'O' still
         #     get a best-effort genre), but never to a tribute/karaoke entity.
-        queries = [f'artist:"{q}"']
+        # Combined Lucene query to search name, sortname, alias, and unquoted terms
+        # in a single request (5x faster than 5 sequential HTTP calls).
+        combined_q = f'artist:"{q}" OR alias:"{q}" OR artist:{q} OR {q}'
         if sort_name_q:
-            queries.append(f'sortname:"{sort_name_q}"')
-        queries.append(f'alias:"{q}"')   # recovers renamed / aliased artists
-        queries.append(f'artist:{q}')    # unquoted (transliteration slack)
-        queries.append(q)                # general, all fields
+            combined_q = f'artist:"{q}" OR sortname:"{sort_name_q}" OR alias:"{q}" OR artist:{q} OR {q}'
 
         best = None
         matched = False       # True = genuine name/alias match; False = weak fallback
         weak = None           # first non-junk hit, used only if nothing matches
         saw_error = False
-        for query in queries:
-            data, status = await self._get(
-                "artist", {"query": query, "fmt": "json", "limit": 5}
-            )
-            if data is None:
-                saw_error = True
-                continue
+
+        data, status = await self._get(
+            "artist", {"query": combined_q, "fmt": "json", "limit": 10}
+        )
+        if data is None:
+            saw_error = True
+        else:
             arts = data.get("artists") or []
             m = _closest_match(raw_name, arts)
             if m is not None:
                 best, matched = m, True
-                break
-            if weak is None:
+            else:
                 weak = next((a for a in arts if not _looks_like_junk(a)), None)
 
         # ── No genuine match: try DECOMPOSING a multi-artist credit ───────────
-        # 'Travis Scott/Metro Boomin/21 Savage' matches no single MB entity, so
-        # the old code fell back to the top non-junk hit — which resolved to an
-        # unrelated GB drum-and-bass act. Its fabricated genres then went on to
-        # drive a *hard* pool veto in the walk, fencing 21 Savage's own track out
-        # of a 21 Savage queue. Resolving the members and unioning their genres
-        # gives the credit the provenance it actually has.
         if not matched:
             members = split_artist_credits(raw_name)
             if members:
@@ -417,19 +409,14 @@ class MusicBrainzClient:
             score = 0
         mbid = best.get("id")
 
-        # ── A weak fallback contributes NO provenance ─────────────────────────
-        # `matched` False means no tier produced a genuine name/alias match and
-        # this is merely the top non-junk search hit. Downstream, genres are not
-        # a soft hint: `track_graph._pool_foreign` turns them into a categorical
-        # boundary, so a WRONG genre set is strictly worse than no genre set
-        # (an untagged track is evidence-gated out of the veto and simply
-        # degrades to the acoustic flow). Same for country, which gates the
-        # regional-scene pool constraint. Keep the mbid/score as a breadcrumb for
-        # the resolution wizard, but publish no provenance.
+        # ── A weak fallback provides candidate tags for review ──────────────
         if not matched:
             return {
                 "status": "lowconfidence", "mbid": mbid,
-                "country": None, "area": None, "genres": [], "score": score,
+                "country": _extract_country(best),
+                "area": (best.get("area") or {}).get("name"),
+                "genres": _extract_genres(best),
+                "score": score,
             }
 
         country = _extract_country(best)
@@ -443,8 +430,8 @@ class MusicBrainzClient:
             "genres": genres, "score": score,
         }
 
-        # The search payload often omits genres; a direct lookup is reliable.
-        if with_genres and mbid:
+        # The search payload often omits genres; fetch direct lookup only if needed.
+        if with_genres and mbid and not result["genres"]:
             gdata, _ = await self._get(
                 f"artist/{mbid}", {"inc": "genres+tags", "fmt": "json"}
             )

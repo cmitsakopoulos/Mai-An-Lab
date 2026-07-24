@@ -147,8 +147,8 @@ def _build_patterns() -> list[tuple[str, re.Pattern]]:
         # ── Similarity / Mood / Curation ────────────────────────────────────────
         (INTENT_MOOD_STEER,   re.compile(
             r"^\s*(?:play|make|set)\s+(?:something\s+|the\s+queue\s+|a\s+|some\s+)?"
-            r"(?P<q>chill|relaxing|calm|quiet|energetic|upbeat|fast|slow|intense|focus|workout)\s*"
-            r"(?:music|tracks?|songs?|vibes?|for\s+reading|for\s+studying)?\s*$",
+            r"(?P<q>chill|relaxing|calm|quiet|energetic|upbeat|fast|slow|intense|focus|workout|melancholic|nostalgic|rainy|dark|heavy|euphoric|mellow|party|hype|ambient)\s*"
+            r"(?:music|tracks?|songs?|vibes?|mix|for\s+reading|for\s+studying|for\s+running|for\s+working)?\s*$",
             re.I
         )),
         (INTENT_PLAY_SIMILAR, re.compile(

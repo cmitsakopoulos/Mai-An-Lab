@@ -76,9 +76,9 @@ class TestFamilyBackstop(unittest.TestCase):
 
     def test_families_use_primary_label_not_substring_matches(self):
         """'alternative hip hop' arrives separator-stripped, so the multi-label
-        view matched 'alternative' -> Rock/Alt and linked Kendrick Lamar to
+        view matched 'alternative' -> Alt and linked Kendrick Lamar to
         Slipknot. The priority-ordered primary label resists that."""
-        self.assertIn("Rock/Alt", genre_tokens("alternativehiphop"))   # the trap
+        self.assertIn("Alt", genre_tokens("alternativehiphop"))   # the trap
         self.assertEqual(genre_bucket("alternativehiphop"), "Hip-Hop")
         kendrick = {"hiphop", "conscioushiphop", "jazzrap", "westcoasthiphop"}
         slipknot = {"numetal", "alternativemetal", "metal", "heavymetal"}
@@ -222,7 +222,7 @@ class TestOmissionVsAddition(unittest.TestCase):
         """Documents why the display must not use genre_bucket alone: two
         orderings of one semantic set are fine, but 'Rock' vs 'Hard Rock' —
         an ordinary source disagreement — flips the family outright."""
-        self.assertEqual(genre_bucket("Rock"), "Rock/Alt")
+        self.assertEqual(genre_bucket("Rock"), "Rock")
         self.assertEqual(genre_bucket("Hard Rock"), "Metal")
         self.assertTrue(genre_tokens("Rock") & genre_tokens("Hard Rock"))
 

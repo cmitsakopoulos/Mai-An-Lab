@@ -34,6 +34,8 @@ class DatabaseManager:
         # Load-once cache for the persisted NPMI genre-similarity model so the
         # walk reads it from memory after a single DB hit (rebuilt at graph gen).
         self._genre_affinity_cache: dict | None = None
+        # Load-once cache for the persisted genre-adjacency graph (journey walk).
+        self._genre_graph_cache: dict | None = None
 
     def clear_caches(self):
         """Clears the in-memory metadata caches. Call when DB state changes significantly."""
@@ -1584,29 +1586,6 @@ class DatabaseManager:
                     out.setdefault(d.pop("src"), []).append(d)
         return out
 
-    async def get_embeddings_for_paths(
-        self, paths: list[str]
-    ) -> dict[str, bytes]:
-        """Bulk-load timbre BLOBs for an arbitrary path list. Used by the
-        walk's MMR diversity term to compute candidate-to-visited similarity
-        without N round-trips. Missing rows are simply absent from the map."""
-        if not paths:
-            return {}
-        conn = await self.get_connection()
-        # SQLite parameter limit is ~999; chunk to be safe at large libraries.
-        out: dict[str, bytes] = {}
-        for i in range(0, len(paths), 500):
-            chunk = paths[i:i + 500]
-            placeholders = ",".join("?" * len(chunk))
-            sql = (
-                "SELECT track_path, timbre FROM play_counts "
-                f"WHERE track_path IN ({placeholders}) AND timbre IS NOT NULL"
-            )
-            async with conn.execute(sql, chunk) as cursor:
-                for r in await cursor.fetchall():
-                    out[r[0]] = r[1]
-        return out
-
     # ── Playback history (long-term avoid + listen feedback) ────────────────
 
     async def record_playback(
@@ -1810,108 +1789,54 @@ class DatabaseManager:
             ''', data)
             await conn.commit()
 
-    # ─── PCA Schema Migration & Helpers ───────────────────────────────────────
+    # ─── Acoustic geometry schema ─────────────────────────────────────────────
+
+    # Bump when the Zr geometry changes shape or meaning, so an upgrading DB
+    # discards coordinates that were built by the old pipeline. Stored in
+    # SQLite's built-in PRAGMA user_version.
+    #   1 — unified graph Zr (~20-D) replacing the original 3-D PCA coords
+    #   2 — harmonic late-fusion block deleted (Zr ~21-D → ~17-D)
+    GEOMETRY_VERSION = 2
 
     async def _migrate_pca(self, conn):
+        """Idempotent: ensure play_counts.pca_coords exists, and drop stored
+        coordinates whenever GEOMETRY_VERSION has moved past what built them.
+
+        There used to be a `pca_space` table persisting the projection matrix,
+        means/stds and a feature spec so a new track could be projected into the
+        existing Zr space without a rebuild. Nothing ever read it back — the
+        `project_to_zr` function its docstring referenced was never written — so
+        it was a write-only table, and the geometry bump rode on a side effect of
+        ALTER TABLE failing the second time. Both are gone; the version stamp
+        below does that job explicitly.
         """
-        Idempotent migration: creates the pca_space table and adds columns for
-        3D PCA coordinates to play_counts.
-        """
-        await conn.execute('''
-            CREATE TABLE IF NOT EXISTS pca_space (
-                id           INTEGER PRIMARY KEY CHECK (id = 1),
-                means        BLOB NOT NULL,
-                stds         BLOB NOT NULL,
-                projection   BLOB NOT NULL,
-                eigenvalues  BLOB,
-                feature_spec TEXT,
-                updated_at   REAL NOT NULL
-            )
-        ''')
         try:
             await conn.execute("ALTER TABLE play_counts ADD COLUMN pca_coords BLOB")
-            await conn.commit()
         except Exception:
-            pass # Column already exists
-        # One-time geometry bump: upgrading a DB whose pca_space predates the
-        # unified graph Zr. Adding feature_spec succeeds once; in the same block
-        # we drop the stale 3-D pca_coords so the next build repopulates them at
-        # the new (~20-D) dimensionality. (Variable projection shape is inferred
-        # from means length on load, so no shape columns are needed.)
-        try:
-            await conn.execute("ALTER TABLE pca_space ADD COLUMN feature_spec TEXT")
-            await conn.execute("UPDATE play_counts SET pca_coords = NULL")
-            await conn.commit()
-        except Exception:
-            pass # feature_spec already present (fresh DB or already migrated)
-        await conn.commit()
+            pass  # Column already exists (or play_counts isn't created yet)
+        await conn.execute("DROP TABLE IF EXISTS pca_space")
 
-    async def save_pca_space(self, means: np.ndarray, stds: np.ndarray, V_keep: np.ndarray, eigenvalues: np.ndarray = None, feature_spec: dict | None = None):
-        """Mutation: Saves the unified graph-Zr projection state.
-
-        `V_keep` is the (D, k) projection matrix (Zr = z @ V_keep); its shape is
-        recovered on load from `len(means)`. `feature_spec` carries the surviving
-        scalar list + scalar_weight + embed_dims needed to project new tracks
-        identically.
-        """
-        import numpy as np
-        means_bytes = means.astype(np.float32).tobytes()
-        stds_bytes = stds.astype(np.float32).tobytes()
-        V_bytes = V_keep.astype(np.float32).tobytes()
-        eig_bytes = eigenvalues.astype(np.float32).tobytes() if eigenvalues is not None else b""
-        spec_text = json.dumps(feature_spec) if feature_spec is not None else None
-
-        async with self._write_lock:
-            conn = await self.get_connection()
-            await conn.execute('''
-                INSERT OR REPLACE INTO pca_space (id, means, stds, projection, eigenvalues, feature_spec, updated_at)
-                VALUES (1, ?, ?, ?, ?, ?, strftime('%s','now'))
-            ''', (means_bytes, stds_bytes, V_bytes, eig_bytes, spec_text))
-            await conn.commit()
-            logger.info("PCA projection space saved (D=%d, proj cols inferred on load).", len(means))
-
-    async def load_pca_space(self) -> dict | None:
-        """Lock-free read. Returns the unified projection as a dict:
-        {means(D,), stds(D,), projection(D,k), eigenvalues, surviving,
-        scalar_weight, embed_dims, z_score}, or None if unset. Projection shape
-        is inferred as (D, len/D) so the dimensionality is not hardcoded."""
-        import numpy as np
-        conn = await self.get_connection()
-        async with conn.execute("SELECT means, stds, projection, eigenvalues, feature_spec FROM pca_space WHERE id = 1") as cursor:
-            row = await cursor.fetchone()
-            if not row:
-                return None
+        async with conn.execute("PRAGMA user_version") as cur:
+            row = await cur.fetchone()
+        current = int(row[0]) if row else 0
+        if current < self.GEOMETRY_VERSION:
+            # NB this migration runs from get_connection(), i.e. BEFORE
+            # initialize() creates the schema, so on a fresh DB there is nothing
+            # to clear — we only stamp the version.
+            cleared = 0
             try:
-                means = np.frombuffer(row['means'], dtype=np.float32)
-                stds = np.frombuffer(row['stds'], dtype=np.float32)
-                D = len(means)
-                projection = np.frombuffer(row['projection'], dtype=np.float32)
-                if D:
-                    projection = projection.reshape(D, -1)
-                eigenvalues = np.frombuffer(row['eigenvalues'], dtype=np.float32) if row['eigenvalues'] else None
-                try:
-                    spec = json.loads(row['feature_spec']) if row['feature_spec'] else {}
-                except Exception:
-                    spec = {}
-                return {
-                    "means": means,
-                    "stds": stds,
-                    "projection": projection,
-                    "eigenvalues": eigenvalues,
-                    "surviving": spec.get("surviving"),
-                    "scalar_weight": float(spec.get("scalar_weight", 1.0)),
-                    "embed_dims": int(spec.get("embed_dims", 52)),
-                    "z_score": bool(spec.get("z_score", True)),
-                    # Late-fusion harmonic metadata (absent in pre-v2 projections).
-                    "harmonic_names": spec.get("harmonic_names"),
-                    "harmonic_weight": float(spec.get("harmonic_weight", 1.5)),
-                    "harmonic_means": spec.get("harmonic_means"),
-                    "harmonic_stds": spec.get("harmonic_stds"),
-                    "k_neighbors": int(spec.get("k_neighbors", 50)),
-                }
-            except Exception as e:
-                logger.error(f"Error decoding PCA space from database: {e}")
-                return None
+                cur = await conn.execute("UPDATE play_counts SET pca_coords = NULL")
+                cleared = cur.rowcount or 0
+            except Exception:
+                pass  # table not created yet
+            await conn.execute(f"PRAGMA user_version = {self.GEOMETRY_VERSION}")
+            if cleared:
+                logger.info(
+                    "db: acoustic geometry v%d -> v%d; cleared %d stored Zr "
+                    "coords, the next graph build will repopulate them.",
+                    current, self.GEOMETRY_VERSION, cleared,
+                )
+        await conn.commit()
 
     async def update_track_pca_coords(self, track_path: str, coords: np.ndarray):
         """Mutation: Caches the 3D PC coordinates for a track in play_counts."""
@@ -2095,11 +2020,23 @@ class DatabaseManager:
         ''')
         # NPMI genre-similarity model, precomputed at graph generation and read
         # by the walk's metadata gate. Single-row JSON blob (small + atomic),
-        # mirroring pca_space. Additive: harmless on a DB that predates it.
+        # Additive: harmless on a DB that predates it.
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS genre_affinity (
                 id         INTEGER PRIMARY KEY CHECK (id = 1),
                 model      TEXT NOT NULL,   -- JSON {"a|b": npmi, ...}, a < b
+                updated_at REAL NOT NULL
+            )
+        ''')
+        # Genre-adjacency graph (PAGA nodes + adjacency) driving the journey
+        # walk, precomputed at graph generation. Single-row JSON blob:
+        # {"version", "nodes": {path: node}, "adj": {node: [[node, lift], ...]}}.
+        # Additive: harmless on a DB that predates it; absent -> walk falls back
+        # to the pure-radius ranking.
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS genre_graph (
+                id         INTEGER PRIMARY KEY CHECK (id = 1),
+                model      TEXT NOT NULL,
                 updated_at REAL NOT NULL
             )
         ''')
@@ -2426,8 +2363,11 @@ class DatabaseManager:
                 logger.warning("bulk manual enrichment failed for %s: %s", name, exc)
         if refresh_model and n:
             try:
-                from utils.track_graph import build_genre_affinity
+                from utils.track_graph import build_genre_affinity, build_journey_graph
                 await build_genre_affinity(self)
+                # Country/genre edits move nodes and regional splits, so refresh
+                # the journey graph too (coords are unchanged, so this is cheap).
+                await build_journey_graph(self)
             except Exception as exc:
                 logger.debug("genre model refresh after bulk override failed: %s", exc)
         return n
@@ -2477,12 +2417,12 @@ class DatabaseManager:
         by hand (source='manual') are never re-fetched. Drives the batch pass."""
         conn = await self.get_connection()
         if include_failed:
+            # Re-fetch artists with no enrichment row OR whose last attempt errored (transient failures).
+            # Processed rows (status='ok', 'lowconfidence', 'notfound') are preserved so sync decreases monotonically.
             sql = (
                 "SELECT a.name FROM artists a "
                 "LEFT JOIN artist_enrichment e ON e.artist_name = a.name "
-                "WHERE (e.artist_name IS NULL "
-                "       OR e.status IN ('error', 'notfound') "
-                "       OR e.genres IS NULL OR e.genres = '' OR e.genres = '[]') "
+                "WHERE (e.artist_name IS NULL OR e.status = 'error') "
                 "  AND (e.source IS NULL OR e.source <> 'manual') "
                 "ORDER BY a.track_count DESC"
             )
@@ -2604,6 +2544,44 @@ class DatabaseManager:
         self._genre_affinity_cache = model
         return model
 
+    async def save_journey_graph(self, payload: dict) -> None:
+        """Mutation: persist the genre-adjacency graph (single-row JSON) + refresh
+        the in-memory cache. Called at graph generation, right after the NPMI
+        model. An empty payload stores an empty object, which the walk reads as
+        'no graph' and falls back to the radius ranking."""
+        payload = payload or {}
+        async with self._write_lock:
+            conn = await self.get_connection()
+            await conn.execute(
+                "INSERT OR REPLACE INTO genre_graph (id, model, updated_at) "
+                "VALUES (1, ?, strftime('%s','now'))",
+                (json.dumps(payload),),
+            )
+            await conn.commit()
+        self._genre_graph_cache = payload
+        n_nodes = len(payload.get("nodes", {})) if payload else 0
+        logger.info("Genre-adjacency graph persisted (%d placed tracks).", n_nodes)
+
+    async def get_journey_graph(self) -> dict:
+        """Lock-free read of the persisted genre-adjacency graph, memoised after
+        the first hit (rebuilt — and the cache refreshed — only at graph gen).
+        Returns {} when unset, which makes the walk degrade to the radius."""
+        if self._genre_graph_cache is not None:
+            return self._genre_graph_cache
+        conn = await self.get_connection()
+        payload: dict = {}
+        async with conn.execute(
+            "SELECT model FROM genre_graph WHERE id = 1"
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row and row[0]:
+            try:
+                payload = json.loads(row[0])
+            except Exception:
+                payload = {}
+        self._genre_graph_cache = payload
+        return payload
+
     async def get_track_clusters_bulk(
         self, paths: list[str]
     ) -> dict[str, int | None]:
@@ -2676,7 +2654,7 @@ class DatabaseManager:
 
         Returns {'scanned', 'genre_rederived', 'bucket_updated', 'consensus_repaired'}.
         """
-        from utils.pca_engine import (
+        from utils.genre_taxonomy import (
             genre_bucket, genre_tokens, genre_display_label, GENRE_BUCKET_LABELS,
         )
         conn = await self.get_connection()
@@ -2827,16 +2805,15 @@ class DatabaseManager:
 
             # ── BUCKET: multi-label, repaired against the artist consensus ────
             own = _real_tokens(curr_genre) or _real_tokens(display)
+            mb_tags = set(mb_by_artist.get(artist) or set())
             if own:
-                # Tagged album: repair omissions from the well-attested core,
+                # Tagged album: repair omissions from the well-attested core & enriched artist tags,
                 # keep any family the album adds on its own.
-                final = own | core_by_artist.get(artist, set())
+                final = own | core_by_artist.get(artist, set()) | mb_tags
             else:
                 # Untagged / placeholder album: inherit whatever the artist
                 # demonstrably is, then trusted MusicBrainz, then the display tag.
-                final = set(union_by_artist.get(artist) or set())
-                if not final:
-                    final = set(mb_by_artist.get(artist) or set())
+                final = set(union_by_artist.get(artist) or set()) | mb_tags
                 if not final and api_consensus:
                     final = {api_consensus}
                 if not final and display:

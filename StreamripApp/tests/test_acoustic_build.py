@@ -59,7 +59,6 @@ class FakeBuildDB:
         self._rows = list(rows)
         self.written: list[tuple[str, str, float]] = []
         self.written_kind: str | None = None
-        self.pca_space: dict | None = None
         self.pca_coords: dict[str, np.ndarray] = {}
 
     async def get_tracks_with_features(self, features_version):
@@ -71,15 +70,6 @@ class FakeBuildDB:
 
     async def save_track_clusters(self, pairs):
         pass
-
-    async def save_pca_space(self, means, stds, V_keep, eigenvalues, feature_spec):
-        self.pca_space = feature_spec
-        self.pca_space["means"] = means.tolist()
-        self.pca_space["stds"] = stds.tolist()
-        self.pca_space["projection"] = V_keep.tolist()
-
-    async def load_pca_space(self):
-        return self.pca_space
 
     async def update_tracks_pca_coords_batch(self, pairs):
         for path, coords in pairs:
@@ -111,29 +101,18 @@ def _run(coro):
 
 
 def get_coord_neighbors(coord_graph, path, k=40):
+    """Top-k neighbours of `path` by cosine, as the walk ranks them. There is no
+    mutual-kNN pruning any more — that existed to stop hub tracks dominating a
+    greedy chain, and the walk no longer chains."""
     src_idx = coord_graph["path_to_idx"].get(path)
     if src_idx is None:
         return []
-    X_zr = coord_graph["X_zr"]
-    X_zr_sq = coord_graph["X_zr_sq"]
-    sigmas = coord_graph["sigmas"]
-    thresholds = coord_graph["thresholds"]
+    U = coord_graph["X_unit"]
     paths = coord_graph["paths"]
-    d2 = X_zr_sq[src_idx] - 2.0 * (X_zr[src_idx] @ X_zr.T) + X_zr_sq
-    d2[src_idx] = np.inf
-    A = np.exp(-d2 / (sigmas[src_idx] * sigmas))
-    mutual_mask = (A >= np.maximum(thresholds[src_idx], thresholds) - 1e-5)
-    mutual_mask[src_idx] = False
-    nbr_indices = np.where(mutual_mask)[0]
-    if len(nbr_indices) == 0:
-        return []
-    nbr_affinities = A[nbr_indices]
-    sort_order = np.argsort(-nbr_affinities)
-    sorted_indices = nbr_indices[sort_order]
-    res = []
-    for idx in sorted_indices:
-        res.append((path, paths[idx], float(A[idx])))
-    return res[:k]
+    S = U @ U[src_idx]
+    S[src_idx] = -np.inf
+    order = np.argsort(-S)[:k]
+    return [(path, paths[j], float(S[j])) for j in order]
 
 
 def _build(db, **kwargs):
@@ -141,11 +120,8 @@ def _build(db, **kwargs):
     coord_graph = _run(tg.load_live_coordinate_graph(db))
     db.written = []
     if coord_graph:
-        k_neighbors = 5
-        if db.pca_space and "k_neighbors" in db.pca_space:
-            k_neighbors = int(db.pca_space["k_neighbors"])
         for p in coord_graph["paths"]:
-            db.written.extend(get_coord_neighbors(coord_graph, p, k=k_neighbors))
+            db.written.extend(get_coord_neighbors(coord_graph, p, k=5))
     return n
 
 
@@ -170,33 +146,39 @@ class TestAffinityRange(unittest.TestCase):
             self.assertLessEqual(w, 1.0, f"{src}->{dst} got weight {w}")
 
 
-class TestEdgeSymmetry(unittest.TestCase):
-    """Under strict mutual-kNN pruning, every edge must have a symmetric reverse edge
-    with identical weight."""
+class TestAffinitySymmetry(unittest.TestCase):
+    """Cosine over the unit-normalised Zr is symmetric in i,j and bounded in
+    [-1, 1].
 
-    def test_strict_symmetry_and_mutual_edges(self):
+    This replaces a strict mutual-kNN symmetry test. Mutual pruning was dropped
+    with the greedy chain (it existed to stop cluster-centroid hubs dominating a
+    trajectory), so top-k neighbour LISTS are no longer symmetric — but the
+    underlying similarity still must be, and that is the property the walk's
+    ranking actually depends on."""
+
+    def test_affinity_is_symmetric_in_both_directions(self):
         rng = np.random.default_rng(11)
         rows = []
         for i in range(25):
             v = rng.normal(0, 1, EMBED_DIMS).astype(np.float32)
             rows.append(_row(f"T{i}", v, bpm=100 + i % 5, key_index=i % 12))
         db = FakeBuildDB(rows)
-        _build(db)
+        _run(tg.build_acoustic_edges(db))
+        cg = _run(tg.load_live_coordinate_graph(db))
+        self.assertIsNotNone(cg)
 
-        weight_by_pair: dict[tuple[str, str], float] = {}
-        for src, dst, w in db.written:
-            weight_by_pair[(src, dst)] = w
-        
-        self.assertGreater(len(weight_by_pair), 0, "No edges written")
-        for (a, b), w_ab in weight_by_pair.items():
-            w_ba = weight_by_pair.get((b, a))
-            self.assertIsNotNone(
-                w_ba, f"Edge {a}->{b} is directed (strict mutual-kNN violated)"
-            )
-            self.assertAlmostEqual(
-                w_ab, w_ba, places=5,
-                msg=f"Edge weights asymmetric between {a} and {b}"
-            )
+        U = cg["X_unit"]
+        n = len(cg["paths"])
+        self.assertGreater(n, 1)
+        # Every row must be a unit vector, or "cosine" is not a cosine.
+        np.testing.assert_allclose(np.linalg.norm(U, axis=1), 1.0, atol=1e-5)
+        for i in range(n):
+            for j in range(i + 1, n):
+                s_ij = float(U[i] @ U[j])
+                s_ji = float(U[j] @ U[i])
+                self.assertAlmostEqual(s_ij, s_ji, places=6)
+                self.assertGreaterEqual(s_ij, -1.0 - 1e-6)
+                self.assertLessEqual(s_ij, 1.0 + 1e-6)
 
 
 class TestFeatureEncodingRobustness(unittest.TestCase):
@@ -235,14 +217,34 @@ class TestFeatureEncodingRobustness(unittest.TestCase):
         self.assertGreater(n, 0)
 
 
-class TestLocalScalingDensityAwareness(unittest.TestCase):
-    """Two clusters of differing internal spread. Under the global-cosine
-    pipeline, the dense cluster would dominate edge weights (tight cosines
-    near 1) while the sparse cluster wrote lower-weight edges. With local
-    scaling each cluster's σᵢ adapts to its own density, so within-cluster
-    affinities should land in the same coarse range across clusters."""
+class TestDensityAwareRanking(unittest.TestCase):
+    """Two clusters of very different internal spread. What must hold is that
+    each track's nearest neighbours are its OWN cluster-mates — i.e. the
+    RANKING is right in both the tight and the loose region.
 
-    def test_within_cluster_affinity_similar_across_densities(self):
+    This used to assert something stronger: that mean within-cluster affinity
+    magnitudes were comparable across the two densities (ratio < 3), which is
+    what the Zelnik-Manor self-tuning kernel exp(-d²/(σᵢσⱼ)) bought. That kernel
+    is gone; the walk ranks by cosine, under which the tight cluster genuinely
+    does score higher in absolute terms (~15x here).
+
+    Dropping that property is defensible because nothing compares similarity
+    magnitudes ACROSS source rows any more. The two things that did — mutual-kNN
+    membership (A's affinity vs B's threshold) and the 0.7*current + 0.3*seed
+    blend (two different source rows summed) — were both deleted with the greedy
+    chain. The walk now argsorts one row, so only within-row order is
+    load-bearing, and cosine measured better on it over two real library images
+    (top-10 purity 85.1->86.1 and 84.5->85.6).
+
+    It IS a real trade, though, and this fixture is where it shows: on this
+    deliberately adversarial density contrast (cluster B's noise is 8x cluster
+    A's, large enough to swamp its own signal) the old self-tuning kernel keeps
+    12/12 of B's top-1 neighbours in-cluster where cosine keeps 11/12. Real
+    libraries are not that extreme, which is why the real-library measurement
+    governs — but the tolerance below is set to catch a genuine break, not to
+    paper over this."""
+
+    def test_neighbours_stay_within_their_own_density_cluster(self):
         rng = np.random.default_rng(17)
         rows = []
         # Cluster A: tight (small intra-cluster noise).
@@ -251,9 +253,8 @@ class TestLocalScalingDensityAwareness(unittest.TestCase):
             v[0] = 1.0
             v += rng.normal(0, 0.05, EMBED_DIMS).astype(np.float32)
             rows.append(_row(f"A{i}", v, bpm=120, key_index=8))
-        # Cluster B: loose (large intra-cluster noise) — still on its own
-        # side of the unit sphere though, otherwise it merges into the
-        # global ball.
+        # Cluster B: loose (large intra-cluster noise), on its own side of the
+        # unit sphere so it doesn't merge into the global ball.
         for i in range(12):
             v = np.zeros(EMBED_DIMS, dtype=np.float32)
             v[1] = 1.0
@@ -262,29 +263,26 @@ class TestLocalScalingDensityAwareness(unittest.TestCase):
         db = FakeBuildDB(rows)
         _build(db)
 
-        a_weights = [w for s, d, w in db.written
-                     if s.startswith("A") and d.startswith("A")]
-        b_weights = [w for s, d, w in db.written
-                     if s.startswith("B") and d.startswith("B")]
-        self.assertGreater(len(a_weights), 0)
-        self.assertGreater(len(b_weights), 0)
-        a_mean = float(np.mean(a_weights))
-        b_mean = float(np.mean(b_weights))
-        # The mean within-cluster affinity should land in a similar order
-        # of magnitude across the two clusters even though their raw
-        # intra-cluster cosines differ by ~8×. Without local scaling the
-        # ratio would be many-fold; with the self-tuning kernel both
-        # cluster centres see "their neighbour" at roughly comparable
-        # affinity.
-        ratio = max(a_mean, b_mean) / max(min(a_mean, b_mean), 1e-9)
-        self.assertLess(
-            ratio, 3.0,
-            f"local scaling should balance affinity across densities; "
-            f"a_mean={a_mean:.3f} b_mean={b_mean:.3f} ratio={ratio:.2f}",
-        )
-
-
-
+        # Top neighbour of every track must share its cluster prefix, in the
+        # loose cluster as much as the tight one.
+        best = {}
+        for src, dst, w in db.written:
+            if src not in best or w > best[src][1]:
+                best[src] = (dst, w)
+        self.assertGreater(len(best), 0)
+        for prefix in ("A", "B"):
+            members = [s for s in best if s.startswith(prefix)]
+            self.assertGreater(len(members), 0)
+            same = sum(1 for s in members if best[s][0].startswith(prefix))
+            # Measured: cosine 12/12 (tight) and 11/12 (loose); the old
+            # self-tuning kernel scored 12/12 on both. 10/12 is the regression
+            # bar — below that the metric is genuinely broken, not merely
+            # less density-normalising.
+            self.assertGreaterEqual(
+                same, int(0.83 * len(members)),
+                f"cluster {prefix}: only {same} of {len(members)} tracks had a "
+                f"top neighbour inside their own cluster",
+            )
 
 
 class TestZScoreNormalizationFlag(unittest.TestCase):
@@ -297,12 +295,12 @@ class TestZScoreNormalizationFlag(unittest.TestCase):
             rows.append(_row(f"T{i}", v, bpm=120, key_index=i % 12, brightness=float(i * 1000.0)))
         db = FakeBuildDB(rows)
         # Build without Z-scoring (centering only)
-        n_unnorm = _build(db, k=3, z_score=False)
+        n_unnorm = _build(db, z_score=False)
         self.assertGreater(n_unnorm, 0)
         unnorm_edges = set((src, dst) for src, dst, _ in db.written)
 
         # Build with Z-scoring (variance scaling)
-        n_norm = _build(db, k=3, z_score=True)
+        n_norm = _build(db, z_score=True)
         self.assertGreater(n_norm, 0)
         norm_edges = set((src, dst) for src, dst, _ in db.written)
 

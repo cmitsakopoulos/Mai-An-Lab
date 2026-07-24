@@ -13,7 +13,7 @@ walk over such an image and asserts:
     genre-cohesive as the acoustic-only walk, and strictly more cohesive on at
     least some seeds.
 
-It needs a *built* image (acoustic edges + clusters + enrichment). Point it with
+It needs a *built* image (Zr coordinates + enrichment). Point it with
 
     MAIANLAB_WALK_TEST_DB=/path/to/library.db
 
@@ -69,27 +69,21 @@ async def _genre_cohesion(db, seed, seq):
     return (sum(sims) / len(sims) if sims else 0.0), len(sims)
 
 
-def _coord_neighbor(graph, a, b) -> bool:
-    """True iff `b` is a genuine mutual-kNN neighbour of `a` in the coordinate
-    graph the walk actually traverses (affinity ≥ both self-tuning thresholds).
-    This replaces the old persisted-edge-table check: the coordinate graph — not
+def _seed_affinity(graph, seed, other) -> float:
+    """The cosine similarity the walk ranks by. The coordinate graph — not
     track_neighbors — is the walk's live similarity oracle."""
-    import numpy as np
-    ia = graph["path_to_idx"].get(a)
-    ib = graph["path_to_idx"].get(b)
+    ia = graph["path_to_idx"].get(seed)
+    ib = graph["path_to_idx"].get(other)
     if ia is None or ib is None:
-        return False
-    X, Xsq = graph["X_zr"], graph["X_zr_sq"]
-    sig, thr = graph["sigmas"], graph["thresholds"]
-    d2 = float(Xsq[ia] - 2.0 * (X[ia] @ X[ib]) + Xsq[ib])
-    A = float(np.exp(-d2 / (sig[ia] * sig[ib])))
-    return A >= max(float(thr[ia]), float(thr[ib]))
+        return -2.0
+    U = graph["X_unit"]
+    return float(U[ia] @ U[ib])
 
 
-async def _has_acoustic_edges(db) -> bool:
+async def _has_coords(db) -> bool:
     conn = await db.get_connection()
     async with conn.execute(
-        "SELECT COUNT(*) FROM track_neighbors WHERE edge_kind='acoustic'"
+        "SELECT COUNT(*) FROM play_counts WHERE pca_coords IS NOT NULL"
     ) as cur:
         return (await cur.fetchone())[0] > 0
 
@@ -97,7 +91,7 @@ async def _has_acoustic_edges(db) -> bool:
 async def _pick_seeds(db, n, rng):
     conn = await db.get_connection()
     async with conn.execute(
-        "SELECT DISTINCT track_path FROM track_neighbors WHERE edge_kind='acoustic'"
+        "SELECT track_path FROM play_counts WHERE pca_coords IS NOT NULL"
     ) as cur:
         paths = [r[0] for r in await cur.fetchall()]
     rng.shuffle(paths)
@@ -116,7 +110,7 @@ class TestWalkOnRealLibrary(unittest.TestCase):
         async def _load():
             db = DatabaseManager(_DB_PATH)
             await db.initialize()
-            if not await _has_acoustic_edges(db):
+            if not await _has_coords(db):
                 await db.close()
                 return None
             rng = random.Random(0)
@@ -124,7 +118,7 @@ class TestWalkOnRealLibrary(unittest.TestCase):
             return db, seeds
         loaded = _run(_load())
         if loaded is None:
-            raise unittest.SkipTest(f"{_DB_PATH} has no acoustic edges (not built)")
+            raise unittest.SkipTest(f"{_DB_PATH} has no Zr coordinates (not built)")
         cls.db, cls.seeds = loaded
 
     @classmethod
@@ -141,16 +135,14 @@ class TestWalkOnRealLibrary(unittest.TestCase):
                 self.assertNotIn(seed, out, f"seed leaked into its own walk: {seed}")
                 self.assertEqual(len(out), len(set(out)), f"duplicate in walk from {seed}")
                 self.assertLessEqual(len(out), WALK_LEN)
-                # Every consecutive pair must be a genuine coordinate-graph
-                # neighbour of the current track (or a seed-neighbour fallback
-                # hop) — never a fabricated jump. The coordinate graph, not the
-                # persisted edge table, is the walk's live oracle.
-                prev = seed
-                for p in out:
-                    ok = _coord_neighbor(graph, prev, p) or \
-                         _coord_neighbor(graph, seed, p)
-                    self.assertTrue(ok, f"non-neighbour hop {prev}->{p} (seed {seed})")
-                    prev = p
+                # The queue is the library RANKED by affinity to the seed, so
+                # it must come back in non-increasing affinity order. (The
+                # repeat caps skip tracks, but never reorder the survivors.)
+                affs = [_seed_affinity(graph, seed, p) for p in out]
+                self.assertTrue(
+                    all(a >= b - 1e-6 for a, b in zip(affs, affs[1:])),
+                    f"queue not in descending seed affinity for {seed}: {affs}",
+                )
         _run(_check())
 
     def test_avoid_set_is_never_emitted(self):
@@ -178,7 +170,7 @@ class TestWalkOnRealLibrary(unittest.TestCase):
             for seed in self.seeds:
                 meta = await tg.walk(self.db, seed, length=WALK_LEN)  # defaults on
                 aco = await tg.walk(self.db, seed, length=WALK_LEN,
-                                    meta_lambda=0.0, veto_genre_floor=0.0)
+                                    veto_genre_floor=0.0)
                 if not meta and not aco:
                     continue
                 nonempty += 1

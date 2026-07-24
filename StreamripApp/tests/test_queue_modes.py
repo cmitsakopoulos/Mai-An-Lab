@@ -165,6 +165,8 @@ class TestQueueModes(unittest.TestCase):
         self.app.toggle_shuffle = main.StreamripFletApp.toggle_shuffle.__get__(self.app, main.StreamripFletApp)
         self.app._toggle_shuffle_async = main.StreamripFletApp._toggle_shuffle_async.__get__(self.app, main.StreamripFletApp)
         self.app.set_play_similar_mode = main.StreamripFletApp.set_play_similar_mode.__get__(self.app, main.StreamripFletApp)
+        self.app._autoplay_buffer_paths = main.StreamripFletApp._autoplay_buffer_paths.__get__(self.app, main.StreamripFletApp)
+        self.app._drop_autoplay_buffer = main.StreamripFletApp._drop_autoplay_buffer.__get__(self.app, main.StreamripFletApp)
         self.app.set_auto_dj_mode = main.StreamripFletApp.set_auto_dj_mode.__get__(self.app, main.StreamripFletApp)
         self.app._initiate_auto_dj_queue_async = main.StreamripFletApp._initiate_auto_dj_queue_async.__get__(self.app, main.StreamripFletApp)
         self.app._auto_dj_auto_continue_queue = main.StreamripFletApp._auto_dj_auto_continue_queue.__get__(self.app, main.StreamripFletApp)
@@ -327,14 +329,78 @@ class TestQueueModes(unittest.TestCase):
         self.assertEqual(audio_engine.current_index, 3)
         self.assertTrue(self.app.play_similar_mode)
 
-        # 6. Toggle Play Similar OFF — nothing to restore; the queue is untouched
-        # (the library tail just continues below the current track).
+        # 6. Toggle Play Similar OFF — nothing to restore, and nothing to drop
+        # either: the only _autoplay track here is the one PLAYING. Toggle-off
+        # clears the buffer queued AHEAD of current, never the live track (that
+        # would cut playback) and never the library tail.
         self.app.set_play_similar_mode(False)
         self.assertFalse(self.app.play_similar_mode)
         self.assertEqual(len(audio_engine.queue), 4)
         self.assertEqual(audio_engine.current_index, 3)
         self.assertEqual(audio_engine.queue[3]["path"], "/music/walk1.mp3")
         self.app.now_playing.update_play_similar.assert_called_with(False)
+
+    def test_toggle_off_drops_pending_autoplay_buffer(self):
+        """Auto-play OFF must take the pending recommendations OUT of the queue.
+
+        Leaving them queued made the toggle look dead — the same up-next list
+        kept playing — and made the NEXT toggle-on look dead too, because the
+        walk is deterministic by default and re-inserted the very block still
+        sitting there. The playing track and the library tail below the buffer
+        are never touched.
+        """
+        run_async(self.app._play_track_core("/music/song1.mp3"))
+        self.app.set_play_similar_mode(True)
+
+        # The walk lands: two recommendations inserted right after current.
+        audio_engine.queue_after_current([
+            {"path": "/music/walk1.mp3", "track_title": "Walk 1", "artist_name": "W", "_autoplay": True},
+            {"path": "/music/walk2.mp3", "track_title": "Walk 2", "artist_name": "W", "_autoplay": True},
+        ])
+        self.assertEqual(
+            [t["path"] for t in audio_engine.queue],
+            ["/music/song1.mp3", "/music/walk1.mp3", "/music/walk2.mp3",
+             "/music/song2.mp3", "/music/song3.mp3"],
+        )
+
+        self.app.set_play_similar_mode(False)
+
+        # Buffer gone; the playing track, the library tail and the index survive.
+        self.assertEqual(
+            [t["path"] for t in audio_engine.queue],
+            ["/music/song1.mp3", "/music/song2.mp3", "/music/song3.mp3"],
+        )
+        self.assertEqual(audio_engine.current_index, 0)
+
+    def test_reenable_does_not_requeue_the_existing_buffer(self):
+        """A walk that returns already-buffered tracks must not queue them twice.
+
+        The walk is deterministic, so an unchanged seed gives an identical
+        walk. Without the buffer in the avoid set, re-enabling inserted a second
+        copy of the block already queued — the queue "not changing" on the press.
+        """
+        run_async(self.app._play_track_core("/music/song1.mp3"))
+        self.app.set_play_similar_mode(True)
+        audio_engine.queue_after_current([
+            {"path": "/music/walk1.mp3", "track_title": "Walk 1", "artist_name": "W", "_autoplay": True},
+        ])
+
+        self.app._initiate_play_similar_queue_async = (
+            main.StreamripFletApp._initiate_play_similar_queue_async.__get__(self.app, main.StreamripFletApp)
+        )
+        async def _get_tf(p):
+            return {"path": p, "title": "T", "artist": "A", "album": "Al"}
+        self.app.db_manager.get_track_full.side_effect = _get_tf
+
+        with patch("utils.track_graph.walk", new_callable=AsyncMock) as mock_walk:
+            mock_walk.return_value = ["/music/walk1.mp3", "/music/walk2.mp3"]
+            run_async(self.app._initiate_play_similar_queue_async(
+                "/music/song1.mp3", self.app._play_similar_gen))
+            self.assertIn("/music/walk1.mp3", mock_walk.call_args.kwargs["avoid"])
+
+        paths = [t["path"] for t in audio_engine.queue]
+        self.assertEqual(paths.count("/music/walk1.mp3"), 1)
+        self.assertIn("/music/walk2.mp3", paths)
 
     def test_play_new_track_in_similar_mode(self):
         # 1. Start sequential play in regular mode (3 tracks)
@@ -477,11 +543,6 @@ class TestQueueModes(unittest.TestCase):
             {"path": "/music/song2.mp3", "title": "Song 2", "artist": "Artist B", "album": "Album 2"},
             {"path": "/music/song3.mp3", "title": "Song 3", "artist": "Artist C", "album": "Album 3"},
         ]
-        self.app.db_manager.load_pca_space.return_value = (
-            np.zeros(8, dtype=np.float32),  # means
-            np.ones(8, dtype=np.float32),   # stds
-            np.eye(8, 3, dtype=np.float32), # projection matrix V_keep
-        )
         self.app.db_manager.get_track_full.side_effect = lambda p: next(
             (t for t in self.sample_tracks if t["path"] == p), None
         )
@@ -530,11 +591,6 @@ class TestQueueModes(unittest.TestCase):
             {"path": "/music/song2.mp3", "title": "Song 2", "artist": "Artist B", "album": "Album 2"},
             {"path": "/music/song3.mp3", "title": "Song 3", "artist": "Artist C", "album": "Album 3"},
         ]
-        self.app.db_manager.load_pca_space.return_value = (
-            np.zeros(8, dtype=np.float32),  # means
-            np.ones(8, dtype=np.float32),   # stds
-            np.eye(8, 3, dtype=np.float32), # projection matrix V_keep
-        )
         async def _get_tf(p):
             return next((t for t in self.sample_tracks if t["path"] == p), None)
         self.app.db_manager.get_track_full.side_effect = _get_tf

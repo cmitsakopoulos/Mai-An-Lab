@@ -159,6 +159,9 @@ class SearchView:
             spacing=8,
             padding=ft.Padding.only(left=12, right=12, top=4, bottom=20),
             on_scroll=self._on_list_scroll,
+            # Android shows no scrollbar unless `scroll` is set (mobile
+            # ScrollBehavior adds none); the page ScrollbarTheme styles it.
+            scroll=ft.ScrollMode.ALWAYS,
         )
 
         self._animated_results_wrapper = ft.Container(
@@ -437,7 +440,7 @@ class SearchView:
         )
 
         # history list
-        self._history_list = ft.ListView(spacing=8, padding=ft.Padding.symmetric(horizontal=12))
+        self._history_list = ft.ListView(spacing=8, padding=ft.Padding.symmetric(horizontal=12), scroll=ft.ScrollMode.ALWAYS)
 
         # Recent searches sheet (instantiated once)
         self._history_sheet = ft.BottomSheet(
@@ -462,6 +465,9 @@ class SearchView:
             spacing=0,
             padding=ft.Padding.only(left=16, right=16, top=10, bottom=100),
             visible=True,
+            # Android shows no scrollbar unless `scroll` is set (mobile
+            # ScrollBehavior adds none); the page ScrollbarTheme styles it.
+            scroll=ft.ScrollMode.ALWAYS,
         )
 
         # ── Root container ─────────────────────────────────────────────────

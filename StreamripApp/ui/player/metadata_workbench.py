@@ -440,7 +440,10 @@ class MetadataWorkbenchPane(ft.Container):
                 if self.expanded == g["artist_name"]:
                     controls.append(self._tag_editor(g, is_review=False))
         self._h_body.content = ft.ListView(controls=controls, expand=True, spacing=0,
-                                            build_controls_on_demand=True)
+                                            build_controls_on_demand=True,
+                                            # Android needs explicit scroll for a
+                                            # visible scrollbar (see library.py).
+                                            scroll=ft.ScrollMode.ALWAYS)
 
     def _render_review_body(self):
         q = self.search.strip().lower()
@@ -467,7 +470,10 @@ class MetadataWorkbenchPane(ft.Container):
             if self.expanded == it["artist_name"]:
                 controls.append(self._tag_editor(it, is_review=True))
         self._h_body.content = ft.ListView(controls=controls, expand=True, spacing=0,
-                                            build_controls_on_demand=True)
+                                            build_controls_on_demand=True,
+                                            # Android needs explicit scroll for a
+                                            # visible scrollbar (see library.py).
+                                            scroll=ft.ScrollMode.ALWAYS)
 
     def _empty_state(self, title: str, sub: str, icon=ft.Icons.CHECK_CIRCLE_ROUNDED) -> ft.Control:
         icon_color = ACCENT_GREEN if icon == ft.Icons.CHECK_CIRCLE_ROUNDED else DIM
@@ -836,6 +842,7 @@ class MetadataWorkbenchPane(ft.Container):
                     genres=genres, status="ok", score=cand.get("score") or 100,
                 )
                 try:
+                    await self.db.fix_and_normalize_track_genres()
                     from utils.track_graph import build_genre_affinity
                     await build_genre_affinity(self.db)
                 except Exception:
@@ -941,6 +948,7 @@ class MetadataWorkbenchPane(ft.Container):
                     genres=genres, status="ok", score=100,
                 )
                 try:
+                    await self.db.fix_and_normalize_track_genres()
                     from utils.track_graph import build_genre_affinity
                     await build_genre_affinity(self.db)
                 except Exception:
@@ -1041,6 +1049,7 @@ class MetadataWorkbenchPane(ft.Container):
             try:
                 await self.db.set_manual_artist_enrichment(name, country=country, genres=genres)
                 try:
+                    await self.db.fix_and_normalize_track_genres()
                     from utils.track_graph import build_genre_affinity
                     await build_genre_affinity(self.db)
                 except Exception:
@@ -1095,6 +1104,10 @@ class MetadataWorkbenchPane(ft.Container):
 
             async def _do():
                 n = await self.db.set_manual_artist_enrichment_bulk(names, country=country, genres=genres)
+                try:
+                    await self.db.fix_and_normalize_track_genres()
+                except Exception:
+                    pass
                 if self.app.page:
                     self.app.page.pop_dialog()
                 self.app.show_snackbar(f"Tagged {n} artists", icon=ft.Icons.CHECK_CIRCLE, color=CYAN)

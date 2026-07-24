@@ -128,6 +128,9 @@ class AssistantView:
             spacing=8,
             padding=ft.Padding.symmetric(horizontal=12, vertical=8),
             auto_scroll=False,
+            # Android shows no scrollbar unless `scroll` is set (mobile
+            # ScrollBehavior adds none); the page ScrollbarTheme styles it.
+            scroll=ft.ScrollMode.ALWAYS,
         )
 
         self._input = ft.TextField(
@@ -908,41 +911,58 @@ class AssistantView:
         )
 
     def _build_empty_state(self) -> ft.Container:
-        sample_prompts = [
-            "play something chill",
-            "play similar",
-            "tell me about this track",
-            "save queue as playlist Favorites",
-            "help",
+        prompts = [
+            ("[>] Play something chill", "play something chill"),
+            ("[*] Play similar tracks", "play similar"),
+            ("[#] Library stats", "how big is my library?"),
+            ("[?] What can you do?", "help"),
         ]
+
         chips = [
-            ft.OutlinedButton(
-                p,
-                style=ft.ButtonStyle(
-                    color=CYAN,
-                    side=ft.BorderSide(1, CYAN),
-                ),
-                on_click=lambda _e, text=p: self.page.run_task(self._handle_user_text, text),
+            ft.Container(
+                content=ft.Text(label, color=CYAN, size=12, weight=ft.FontWeight.W_600),
+                padding=ft.Padding.symmetric(horizontal=14, vertical=8),
+                border_radius=20,
+                bgcolor=SURFACE2,
+                border=ft.Border.all(1, apply_opacity(0.3, CYAN)),
+                ink=True,
+                on_click=lambda _e, q=query: self.page.run_task(self._handle_user_text, q),
             )
-            for p in sample_prompts
+            for label, query in prompts
         ]
+
         return ft.Container(
             content=ft.Column(
                 [
-                    ft.Icon(ft.Icons.AUTO_AWESOME_ROUNDED, color=CYAN, size=42),
-                    ft.Text("JARVIS", color=TEXT, size=20,
-                            weight=ft.FontWeight.W_900,
-                            text_align=ft.TextAlign.CENTER),
+                    ft.Container(height=16),
+                    ft.Icon(ft.Icons.AUTO_AWESOME_ROUNDED, color=CYAN, size=38),
                     ft.Text(
-                        "At your service, sir. Speak or tap a command below:",
-                        color=DIM, size=12, text_align=ft.TextAlign.CENTER,
+                        "JARVIS",
+                        color=TEXT,
+                        size=18,
+                        weight=ft.FontWeight.W_900,
+                        text_align=ft.TextAlign.CENTER,
                     ),
-                    ft.Row(chips, wrap=True, alignment=ft.MainAxisAlignment.CENTER, spacing=6),
+                    ft.Text(
+                        "At your service, sir. Select a suggestion or speak a directive:",
+                        color=DIM,
+                        size=12,
+                        text_align=ft.TextAlign.CENTER,
+                    ),
+                    ft.Container(height=6),
+                    ft.Row(
+                        chips,
+                        wrap=True,
+                        alignment=ft.MainAxisAlignment.CENTER,
+                        spacing=8,
+                        run_spacing=8,
+                    ),
                 ],
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                spacing=12,
+                spacing=8,
             ),
-            padding=ft.Padding.all(24),
+            padding=ft.Padding.symmetric(horizontal=20, vertical=20),
+            alignment=ft.Alignment(0, 0),
         )
 
     def clear_chat_manually(self):

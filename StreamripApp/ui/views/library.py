@@ -1,7 +1,6 @@
 import os
 import sys
 import math
-import hashlib
 import logging
 import asyncio
 from collections import Counter
@@ -10,7 +9,7 @@ import flet.canvas as cv
 from ui.tokens import (
     BG, SURFACE, SURFACE2, CYAN, AMBER, TEXT, DIM, BORDER,
     SOURCE_COLORS, LIB_ARTIST_COLOR, LIB_ALBUM_COLOR, LIB_TRACK_COLOR,
-    LIB_PLAYLIST_COLOR, apply_opacity, lerp_hex, MMR_RAMP, TEMP_RAMP
+    LIB_PLAYLIST_COLOR, apply_opacity, lerp_hex
 )
 from ui.widgets import AnimatedEntry, AccordionCard, src_color
 
@@ -98,7 +97,7 @@ _GENRE_ALIASES: dict[str, tuple[str, str]] = {
     "greekfolk":      ("Folk/Cntry", "Folk/Cntry"),
     "entechno":       ("Folk/Cntry", "Folk/Cntry"),
     "rebetiko":       ("Folk/Cntry", "Folk/Cntry"),
-    "postpunk":       ("Rock/Alt",   "Rock/Alt"),
+    "postpunk":       ("Alt",        "Alt"),
     "rhythmandblues": ("Soul/R&B",   "Soul/R&B"),
     "randb":          ("Soul/R&B",   "Soul/R&B"),
     "triphop":        ("Trip-Hop",   "Trip-Hop"),
@@ -468,6 +467,16 @@ class LibraryView:
             # Build a screenful either side of the viewport ahead of time so a
             # fast fling doesn't reveal unbuilt rows.
             cache_extent=800,
+            # MUST be set or Android shows NO scrollbar. Flet only wraps a
+            # scrollable in its own Scrollbar widget when `scroll` is non-null
+            # (see flet ScrollableControl.build); with scroll=None it hands the
+            # bare ListView to Flutter's MaterialScrollBehavior, which adds a
+            # Scrollbar on desktop platforms (macOS/Windows/Linux) but NOT on
+            # Android/iOS. That is the entire desktop-vs-phone discrepancy: the
+            # page-level ScrollbarTheme is correct, but on mobile there was no
+            # Scrollbar for it to style. Setting scroll here instantiates one on
+            # every platform; the global theme still supplies its colour/margins.
+            scroll=ft.ScrollMode.ALWAYS,
         )
 
         self._animated_list_wrapper = ft.Container(
@@ -614,16 +623,6 @@ class LibraryView:
         self.page.run_task(self.load_library)
 
     # ── Walk overlay: resolving the ordered sequence under the graph ─────────
-    @staticmethod
-    def _walk_rng_seed(path: str) -> int:
-        """Stable per-track RNG seed. `hash()` is salted per process, so it would
-        give a different walk for the same track after every restart; blake2b is
-        reproducible across runs."""
-        return int.from_bytes(
-            hashlib.blake2b(path.encode("utf-8", "surrogateescape"), digest_size=4).digest(),
-            "big",
-        )
-
     def _live_autoplay_buffer(self) -> list[str]:
         """The real `_autoplay` buffer queued ahead of the current track, in
         play order. Mirrors _replenish_similar_queue_if_needed's definition:
@@ -655,14 +654,12 @@ class LibraryView:
         claims about the future, and the user could not tell which was on screen.
 
           • live    → the REAL queue ahead. Never resampled: a fresh walk uses a
-            different avoid set and temperature>0 makes it stochastic, so it
-            would disagree with what is actually about to play. A plausible
-            trajectory contradicting the real queue is the exact failure the old
-            Walk tab shipped.
+            different avoid set, so it would disagree with what is actually
+            about to play. A plausible trajectory contradicting the real queue is
+            the exact failure the old Walk tab shipped.
           • explore → a speculative "what if I started here" walk from the
-            selection, seeded deterministically so the tuning sliders are
-            readable: the same node must give the same walk, or a slider change
-            is indistinguishable from the RNG.
+            selection. The walk is deterministic, so the same node always gives
+            the same result.
 
         Returns the paths only. It used to also return an `is_live` flag that
         callers cached on the view — but the flag was never anything other than
@@ -679,15 +676,10 @@ class LibraryView:
             return []
 
         from utils import track_graph as tg
-        from utils.streamrip_api import get_walk_params
-        temp, mmr = get_walk_params()
         paths = await tg.walk(
             self.app.db_manager,
             seed_path,
             length=self._net_walk_length,
-            mmr_lambda=mmr,
-            temperature=temp,
-            rng_seed=self._walk_rng_seed(seed_path),
         )
         return list(paths or [])
 
@@ -1466,18 +1458,6 @@ class LibraryView:
         )
         self._net_mode_btn = mode_chip
 
-        # Walk Tuning parameters chip
-        tune_icon = ft.Icon(ft.Icons.TUNE_ROUNDED, color=CYAN, size=13)
-        tune_chip = ft.Container(
-            content=tune_icon,
-            bgcolor=apply_opacity(0.85, SURFACE2),
-            border=ft.Border.all(1, apply_opacity(0.22, CYAN)),
-            border_radius=8,
-            padding=ft.Padding.all(5),
-            tooltip="Tune Walk Parameters",
-            on_click=self._show_tuning_popup,
-        )
-
         # Fit-to-view: snap the InteractiveViewer's pan/zoom back to the seed-
         # centred default. Native reset() — no rebuild, no DB, no bridge churn.
         fit_chip = ft.Container(
@@ -1498,7 +1478,7 @@ class LibraryView:
             content=ft.Row(
                 [
                     ft.Row([mode_chip, density_chip], spacing=3, tight=True),
-                    ft.Row([tune_chip, fit_chip], spacing=3, tight=True),
+                    ft.Row([fit_chip], spacing=3, tight=True),
                 ],
                 alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -2007,6 +1987,8 @@ class LibraryView:
             spacing=4,
             expand=True,
             padding=ft.Padding.only(left=4, right=4, bottom=12),
+            # Android shows no scrollbar unless `scroll` is set — see _library_list.
+            scroll=ft.ScrollMode.ALWAYS,
         )
 
         # NB: the ListView must be a DIRECT child of an expanding Column so it
@@ -2421,151 +2403,6 @@ class LibraryView:
         # Both directions re-resolve the sequence: the SOURCE just changed, so
         # the list underneath is now showing the wrong kind of future.
         self._schedule_net_walk_refresh(self._net_selected_path or cur, delay=0.0)
-
-    def _show_tuning_popup(self, e):
-        from utils.streamrip_api import get_walk_params, update_config_params
-        temp_val, mmr_val = get_walk_params()
-
-        MMR_MAX, TEMP_MAX = 0.4, 0.8
-
-        def _mmr_color(val):
-            return lerp_hex(*MMR_RAMP, val / MMR_MAX)
-
-        def _temp_color(val):
-            return lerp_hex(*TEMP_RAMP, val / TEMP_MAX)
-
-        # A coloured value badge sits at the end of each heading row: it reads
-        # out the live value and its colour tracks the slider, so the number
-        # and the fill always agree.
-        def _badge(val, color):
-            return ft.Container(
-                content=ft.Text(f"{val:.2f}", size=12, weight=ft.FontWeight.W_800, color=color),
-                bgcolor=apply_opacity(0.14, color),
-                border_radius=6,
-                padding=ft.Padding.symmetric(horizontal=8, vertical=2),
-            )
-
-        mmr_badge = _badge(mmr_val, _mmr_color(mmr_val))
-        temp_badge = _badge(temp_val, _temp_color(temp_val))
-
-        def _on_mmr_change(e):
-            val = float(e.control.value)
-            c = _mmr_color(val)
-            mmr_badge.content.value = f"{val:.2f}"
-            mmr_badge.content.color = c
-            mmr_badge.bgcolor = apply_opacity(0.14, c)
-            e.control.active_color = c
-            e.control.thumb_color = c
-            mmr_badge.update()
-            e.control.update()
-
-        def _on_mmr_change_end(e):
-            val = float(e.control.value)
-            update_config_params({"general": {"walk_mmr_lambda": val}})
-            self.page.run_task(self.load_library)
-
-        def _on_temp_change(e):
-            val = float(e.control.value)
-            c = _temp_color(val)
-            temp_badge.content.value = f"{val:.2f}"
-            temp_badge.content.color = c
-            temp_badge.bgcolor = apply_opacity(0.14, c)
-            e.control.active_color = c
-            e.control.thumb_color = c
-            temp_badge.update()
-            e.control.update()
-
-        def _on_temp_change_end(e):
-            val = float(e.control.value)
-            update_config_params({"general": {"walk_temperature": val}})
-            self.page.run_task(self.load_library)
-
-        mmr_slider = ft.Slider(
-            min=0.0, max=MMR_MAX, value=mmr_val,
-            divisions=40,
-            active_color=_mmr_color(mmr_val),
-            thumb_color=_mmr_color(mmr_val),
-            on_change=_on_mmr_change,
-            on_change_end=_on_mmr_change_end,
-        )
-
-        temp_slider = ft.Slider(
-            min=0.0, max=TEMP_MAX, value=temp_val,
-            divisions=80,
-            active_color=_temp_color(temp_val),
-            thumb_color=_temp_color(temp_val),
-            on_change=_on_temp_change,
-            on_change_end=_on_temp_change_end,
-        )
-
-        def _heading(text, badge):
-            return ft.Row(
-                [
-                    ft.Text(text, color=TEXT, size=13, weight=ft.FontWeight.W_700),
-                    badge,
-                ],
-                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-                vertical_alignment=ft.CrossAxisAlignment.CENTER,
-            )
-
-        def _caption(text):
-            return ft.Text(text, color=DIM, size=11)
-
-        def _close_dialog(_e):
-            self.page.pop_dialog()
-
-        dlg = ft.AlertDialog(
-            title=ft.Row(
-                [
-                    ft.Icon(ft.Icons.TUNE_ROUNDED, color=CYAN, size=18),
-                    ft.Text("Walk Parameters", size=14, weight=ft.FontWeight.W_800, color=TEXT),
-                ],
-                spacing=8,
-            ),
-            content=ft.Container(
-                content=ft.Column(
-                    [
-                        ft.Text(
-                            "How the next track in the walk is chosen. Changes apply immediately.",
-                            color=DIM, size=11,
-                        ),
-                        ft.Container(height=10),
-                        _heading("Avoid Near-Duplicates", mmr_badge),
-                        mmr_slider,
-                        _caption(
-                            "Discounts a track the more it sounds like one already "
-                            "in the queue — so remixes, alternate mixes and the same "
-                            "song on another release stop chaining. The safe way to "
-                            "add variety: it spreads the queue out without wandering "
-                            "off-genre."
-                        ),
-                        ft.Container(height=14),
-                        _heading("Variety (Temperature)", temp_badge),
-                        temp_slider,
-                        _caption(
-                            "At 0 the walk is deterministic — it always steps to the "
-                            "closest match, so the same seed gives the same queue. "
-                            "Higher rolls the dice among the top few matches, so "
-                            "repeat plays differ — but the queue drifts further from "
-                            "the seed. Keep it low unless you want shuffle-on-repeat."
-                        ),
-                    ],
-                    spacing=2,
-                    tight=True,
-                ),
-                width=300,
-            ),
-            actions=[
-                ft.TextButton(
-                    "Dismiss",
-                    style=ft.ButtonStyle(color=CYAN),
-                    on_click=_close_dialog,
-                )
-            ],
-            actions_alignment=ft.MainAxisAlignment.END,
-            bgcolor=SURFACE2,
-        )
-        self.page.show_dialog(dlg)
 
     async def _run_net_pulse(self, token: int):
         """Pulse the now-playing ring until a newer build supersedes this token.
@@ -4142,7 +3979,7 @@ class LibraryView:
                     self.app.show_snackbar(f"Failed to add track: {exc}")
             self.page.run_task(_do)
 
-        lv = ft.ListView(spacing=2, height=300)
+        lv = ft.ListView(spacing=2, height=300, scroll=ft.ScrollMode.ALWAYS)
         lv.controls.append(
             ft.ListTile(
                 leading=ft.Icon(ft.Icons.ADD_ROUNDED, color=CYAN),

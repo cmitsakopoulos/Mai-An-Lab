@@ -19,7 +19,7 @@ class TestAssistantHelp(unittest.TestCase):
         intent = ai.Intent(name="help", query="help", raw="help")
         resp = _run(self.runner._handle_help(intent))
         self.assertTrue(resp.success)
-        self.assertIn("Playback", resp.displayed)
+        self.assertIn("Smart Curation", resp.displayed)
         self.assertIn("Queue", resp.displayed)
 
 if __name__ == "__main__":
