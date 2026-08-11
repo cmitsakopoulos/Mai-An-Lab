@@ -4,7 +4,6 @@ import platform
 import logging
 import asyncio
 import math
-import time
 from dataclasses import dataclass, field
 import flet as ft
 import flet.canvas as cv
@@ -1002,15 +1001,21 @@ class SettingsView:
         ]
 
     def _get_semantic_matches(self, query: str) -> list[tuple[float, SettingSearchEntry]]:
-        """On-device WordPiece Vector Space Model (VSM) classifier for semantic search fallback."""
+        """Weighted-cosine + typo-tolerant fallback for the settings search bar.
+
+        Used to run on a WordPiece tokenizer backed by a 30,522-token BERT
+        vocabulary; that was retired (deprecated_feature/README.md). Whole-word
+        splitting is not just cheaper, it is more *correct* here: the weights
+        table below is keyed on whole words, and WordPiece was silently
+        shattering six of them — including `equalizer`, `eq`, `qobuz`, `haptic`,
+        `treble` and `disable` — so their weights never applied at all.
+        """
         try:
-            from utils.semantic_intent import WordPieceTokenizer, levenshtein_distance
-            if not hasattr(self, "_wp_tokenizer"):
-                self._wp_tokenizer = WordPieceTokenizer()
+            from utils.text_match import levenshtein_distance
 
             q_clean = query.strip().lower()
             q_words = [w for w in q_clean.split() if len(w) > 1]
-            q_tokens = self._wp_tokenizer.tokenize(q_clean)
+            q_tokens = q_clean.split()
             if not q_tokens:
                 return []
 
@@ -1031,7 +1036,7 @@ class SettingsView:
             scores = []
             for entry in self._search_registry:
                 doc_text = f"{entry.title} {entry.subtitle} {' '.join(entry.keywords)}".lower()
-                doc_tokens = self._wp_tokenizer.tokenize(doc_text)
+                doc_tokens = doc_text.split()
                 d_vec = {}
                 for t in doc_tokens:
                     w = weights.get(t, 1.0)
@@ -1056,7 +1061,7 @@ class SettingsView:
             scores.sort(key=lambda x: x[0], reverse=True)
             return scores
         except Exception as err:
-            logger.debug("Semantic settings search fallback skipped: %s", err)
+            logger.debug("Fuzzy settings search fallback skipped: %s", err)
             return []
 
     def _on_search_change(self):
@@ -1123,7 +1128,6 @@ class SettingsView:
                                on_tap=lambda _: self._show_sub_page("About", self._build_about_group())),
             ]
         else:
-            t0 = time.perf_counter()
             q_clean = query.strip().lower()
             q_terms = [t for t in q_clean.split() if len(t) > 1]
             
@@ -1147,74 +1151,26 @@ class SettingsView:
                 ):
                     direct_matches.append(entry)
 
-            # Fallback/hybrid semantic matches via Jarvis on-device WordPiece VSM
-            semantic_scored_matches = self._get_semantic_matches(query)
-            
+            # Typo-tolerant fallback, appended after the direct hits.
+            fuzzy_scored_matches = self._get_semantic_matches(query)
+
             matched_ids = set()
             matches = []
             for m in direct_matches:
                 if id(m) not in matched_ids:
                     matched_ids.add(id(m))
                     matches.append(m)
-            for score, m in semantic_scored_matches:
+            for score, m in fuzzy_scored_matches:
                 if id(m) not in matched_ids:
                     matched_ids.add(id(m))
                     matches.append(m)
 
-            elapsed_ms = (time.perf_counter() - t0) * 1000.0
-            dur_str = f" in {elapsed_ms:.1f}ms"
-
-            # Determine Stage 1 (Direct) & Stage 2 (VLM Semantic) status badges
-            if direct_matches:
-                s1_text = f"Stage 1: Direct (Matched: {len(direct_matches)}{dur_str})"
-                s1_icon = ft.Icons.CHECK_CIRCLE_OUTLINE
-                s1_color = "#81C784"
-                
-                s2_text = "Stage 2: VLM (Skipped)"
-                s2_icon = ft.Icons.REMOVE_CIRCLE_OUTLINE
-                s2_color = DIM
-            elif semantic_scored_matches:
-                s1_text = "Stage 1: Direct (No Match)"
-                s1_icon = ft.Icons.CANCEL_OUTLINED
-                s1_color = "#E57373"
-                
-                top_score = semantic_scored_matches[0][0]
-                top_name = semantic_scored_matches[0][1].subpage_name
-                s2_text = f"Stage 2: VLM (Matched: {top_name} @ {top_score:.2f}{dur_str})"
-                s2_icon = ft.Icons.CHECK_CIRCLE_OUTLINE
-                s2_color = "#81C784"
-            else:
-                s1_text = "Stage 1: Direct (No Match)"
-                s1_icon = ft.Icons.CANCEL_OUTLINED
-                s1_color = "#E57373"
-                
-                s2_text = f"Stage 2: VLM (No Match{dur_str})"
-                s2_icon = ft.Icons.CANCEL_OUTLINED
-                s2_color = "#E57373"
-
-            stage_status_bar = ft.Container(
-                content=ft.Row([
-                    ft.Row([
-                        ft.Icon(s1_icon, color=s1_color, size=13),
-                        ft.Text(s1_text, color=s1_color, size=11, weight=ft.FontWeight.W_500),
-                    ], spacing=4, vertical_alignment=ft.CrossAxisAlignment.CENTER),
-                    ft.Row([
-                        ft.Icon(s2_icon, color=s2_color, size=13),
-                        ft.Text(s2_text, color=s2_color, size=11, weight=ft.FontWeight.W_500),
-                    ], spacing=4, vertical_alignment=ft.CrossAxisAlignment.CENTER),
-                ], spacing=16, vertical_alignment=ft.CrossAxisAlignment.CENTER, wrap=True),
-                bgcolor=SURFACE2,
-                padding=ft.Padding.symmetric(horizontal=12, vertical=6),
-                border_radius=8,
-                border=ft.Border.all(1, BORDER),
-            )
-
+            # The Stage 1 / Stage 2 VLM badge bar that sat here was retired with
+            # the semantic engine (deprecated_feature/README.md).
             controls = [
                 ft.Text("Settings", size=32, weight=ft.FontWeight.W_900, color=TEXT),
                 ft.Container(height=12),
                 self._search_bar_container,
-                ft.Container(height=8),
-                stage_status_bar,
                 ft.Container(height=14),
             ]
 
@@ -2019,11 +1975,9 @@ class SettingsView:
         dir_list   = ft.Column(tight=True, spacing=0, scroll=ft.ScrollMode.AUTO)
 
         def _close():
-            if self.app.page:
-                try:
-                    self.app.page.pop_dialog()
-                except Exception:
-                    pass
+            # Named rather than popped: pop_dialog() closes whichever dialog is
+            # topmost, and a toast from background work counts as one.
+            self.app.dismiss_dialog(bs_holder[0])
             bs_holder[0] = None
 
         def _confirm_dir(path):
@@ -2432,11 +2386,9 @@ class SettingsView:
         dir_list   = ft.Column(tight=True, spacing=0, scroll=ft.ScrollMode.AUTO)
 
         def _close(do_update=True):
-            if self.app.page:
-                try:
-                    self.app.page.pop_dialog()
-                except Exception:
-                    pass
+            # Named rather than popped: pop_dialog() closes whichever dialog is
+            # topmost, and a toast from background work counts as one.
+            self.app.dismiss_dialog(bs_holder[0])
             bs_holder[0] = None
 
         def _confirm(path):

@@ -166,7 +166,7 @@ from ui.player.mini_player import MiniPlayerBar
 from ui.player.now_playing import NowPlayingSheet
 from ui.player.queue_sheet import QueueSheet
 from ui.player.quality_selector import QualitySelectorSheet
-from ui.player.dialogs import PlaylistEditorDialog, MetadataEditorDialog
+from ui.player.dialogs import PlaylistEditorDialog
 debug_log("importing queue_controller and error_boundary")
 from utils.queue_controller import QueueController
 from utils.error_boundary import ErrorBoundary
@@ -435,7 +435,6 @@ class StreamripFletApp:
         self.now_playing         = NowPlayingSheet(self)
         self.queue_sheet         = QueueSheet(self)
         self.quality_selector_sheet = QualitySelectorSheet(self)
-        self.metadata_editor     = MetadataEditorDialog(self)
         self.playlist_editor     = PlaylistEditorDialog(self)
         self.notifications       = NotificationSystem(self)
         self.assistant_view      = AssistantView(self)
@@ -655,13 +654,11 @@ class StreamripFletApp:
     def open_wipe_confirmation(self):
         """Opens a confirmation dialog before wiping the database."""
         def on_confirm(e):
-            if self.page:
-                self.page.pop_dialog()
+            self.dismiss_dialog(self.wipe_dialog)
             self.page.run_task(self.wipe_database)
-            
+
         def on_cancel(e):
-            if self.page:
-                self.page.pop_dialog()
+            self.dismiss_dialog(self.wipe_dialog)
 
         self.wipe_dialog = ft.AlertDialog(
             modal=True,
@@ -702,9 +699,8 @@ class StreamripFletApp:
     def show_onboarding_guide(self):
         """Presents a clean, high-fidelity setup guide to the user."""
         def close_guide(e):
-            self.onboarding_dlg.open = False
-            self.page.update()
-            
+            self.dismiss_dialog(self.onboarding_dlg)
+
             # Write the marker file so they don't see this again
             try:
                 marker_path = os.path.join(DATA_DIR, ".onboarded")
@@ -2748,9 +2744,6 @@ class StreamripFletApp:
         self.search_view.refresh_queue_ui(self.queue.download_queue)
 
     # ── metadata editor ──────────────────────────────────────────────────────
-    def open_metadata_editor(self, edit_type: str, meta: dict):
-        self.metadata_editor.open(edit_type, meta)
-
     def open_artist_metadata_editor(self, artist_name: str, on_saved=None):
         from ui.player.dialogs import ArtistMetadataDialog
         dlg = ArtistMetadataDialog(self)
@@ -2759,40 +2752,6 @@ class StreamripFletApp:
     def open_metadata_enrichment_wizard(self):
         self.switch_tab(3)
         self.settings_view._on_launch_enrichment_wizard_click()
-
-    async def apply_metadata_edit(self, edit_type: str, meta: dict,
-                              new_title: str, new_artist: str, new_album: str):
-        self.show_snackbar("Saving metadata…")
-
-        tag_data = {"artist": new_artist, "album": new_album}
-        path     = meta.get("path", "")
-        if edit_type == "track":
-            tag_data["title"] = new_title
-            paths = [path] if path else []
-        else:
-            # bulk-edit all tracks for this album
-            items = await self.db_manager.get_tracks_by_album(
-                meta.get("album_title", ""), meta.get("artist_name", ""))
-            paths = [t.get("path") for t in items if t.get("path")]
-
-        from utils.metadata_editor import update_physical_metadata
-        count = 0
-        for p in paths:
-            # Update physical tags in a thread to avoid blocking the event loop
-            success = await asyncio.to_thread(update_physical_metadata, p, tag_data)
-            if success is True:
-                await self.db_manager.update_track_metadata(p, tag_data)
-                count += 1
-            elif success == "PERMISSION_DENIED":
-                self.show_snackbar("Permission denied: Android requires 'Manage All Files' access to modify tags.", color="#FF4444")
-                return
-
-        if count > 0:
-            self.show_snackbar(f"Successfully updated {count} tracks.")
-        else:
-            self.show_snackbar("Failed to update metadata. Check file permissions.")
-        
-        await self.library_view.load_library()
 
     def show_play_similar_dialog(self):
         def close_dialog(e):
@@ -2869,12 +2828,39 @@ class StreamripFletApp:
         if self.page:
             self.page.show_dialog(dlg)
 
+    def dismiss_dialog(self, dialog) -> bool:
+        """Close ONE specific dialog. Returns False if it was already closed.
+
+        page.pop_dialog() closes whichever entry in page._dialogs still has
+        open=True and sits highest in the stack — and NotificationSystem.show()
+        pushes every toast into that same stack (ft.SnackBar is a DialogControl
+        on Flet 0.86). Background work here raises toasts at arbitrary times, so
+        a toast alive when the user taps a dialog button eats the pop: the
+        dialog stays up, and tapping again just eats the next toast. Naming the
+        dialog runs the identical teardown — Flutter pops the route and reports
+        `dismiss`, whose wrapper unmounts the stack entry — without the guess.
+        """
+        if not self.page or dialog is None or not getattr(dialog, "open", False):
+            return False
+        dialog.open = False
+        try:
+            dialog.update()
+        except Exception:
+            logger.exception("Failed to dismiss dialog")
+            return False
+        return True
+
     def confirm_delete_track(self, path: str, title: str):
         def execute(_e):
-            if self.page:
-                self.page.pop_dialog()
+            self.dismiss_dialog(dlg)
             self.page.run_task(self._delete_track, path)
 
+        def cancel(_e):
+            self.dismiss_dialog(dlg)
+
+        # Deliberately left non-modal: the barrier stays tappable so there is
+        # always a way out of a destructive confirmation even if a button
+        # handler misfires.
         dlg = ft.AlertDialog(
             title=ft.Text("Delete Track?", color=TEXT),
             bgcolor=SURFACE,
@@ -2883,7 +2869,7 @@ class StreamripFletApp:
                 color=DIM, size=13,
             ),
             actions=[
-                ft.TextButton("Cancel", on_click=lambda _e: self.page.pop_dialog() if self.page else None),
+                ft.TextButton("Cancel", on_click=cancel),
                 ft.Button(
                     content=ft.Text("Delete"),
                     style=ft.ButtonStyle(bgcolor="#FF2222", color=TEXT),
@@ -3103,13 +3089,11 @@ class StreamripFletApp:
     def open_maintenance_confirmation(self, title: str, description: str, button_text: str, action_coro):
         """Generic confirmation dialog for maintenance tasks."""
         def on_confirm(e):
-            if self.page:
-                self.page.pop_dialog()
+            self.dismiss_dialog(dialog)
             self.page.run_task(action_coro)
-            
+
         def on_cancel(e):
-            if self.page:
-                self.page.pop_dialog()
+            self.dismiss_dialog(dialog)
 
         dialog = ft.AlertDialog(
             modal=True,

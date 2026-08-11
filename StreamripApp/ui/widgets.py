@@ -104,6 +104,47 @@ def strip_markup(text: str) -> str:
     return re.sub(r"\[/?[^\]]*\]", "", str(text))
 
 
+def dialog_handoff(app, get_dialog):
+    """Close a dialog, then open the next one only once the first is really gone.
+
+    Returns `(on_dismiss, close)`. Wire `on_dismiss` into the dialog's
+    `on_dismiss` and call `close(follow_up)` instead of `page.pop_dialog()`;
+    `follow_up` runs when Flutter reports the dismissal, or immediately if there
+    was nothing to close.
+
+    Both halves exist because of Flet 0.86 route handling. `BottomSheetControl`
+    closes itself with a bare `Navigator.pop()` and `AlertDialogControl` pops the
+    topmost route once its own is active, so NEITHER can be trusted to take down
+    the route it means to. Close a dialog and push another in the same Flutter
+    frame — which `page.run_task` does NOT escape — and the outgoing dialog's pop
+    takes the incoming one's route instead: Flutter keeps rendering the dialog
+    Python has already recorded as closed, so `pop_dialog()` finds nothing open
+    and nothing on screen can be dismissed again. Only `on_dismiss`, which
+    `show_dialog()` fires after Flutter confirms the route is gone and unmounts
+    the stack entry, gives a guaranteed ordering.
+
+    `get_dialog` is a callable so callers can wire this up before the dialog
+    itself is constructed.
+    """
+    pending = {"run": None}
+
+    def on_dismiss(_e=None):
+        follow_up = pending["run"]
+        pending["run"] = None
+        if follow_up:
+            follow_up()
+
+    def close(follow_up=None):
+        pending["run"] = follow_up
+        # dismiss_dialog() names the dialog rather than popping whatever sits on
+        # top, so a toast raised by background work can't absorb the close.
+        if not app.dismiss_dialog(get_dialog()):
+            # Already gone, so on_dismiss will never arrive — run it now.
+            on_dismiss()
+
+    return on_dismiss, close
+
+
 class NotificationSystem:
     def __init__(self, app):
         self.app = app

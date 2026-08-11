@@ -71,25 +71,119 @@ async def test_easter_egg_dispatch_responses():
     assert len(res_quote.displayed) > 0
 
 
-@pytest.mark.asyncio
-async def test_metadata_editor_dialog_lifecycle():
-    """Verify MetadataEditorDialog page binding and overlay open/close lifecycle."""
+def _context_menu_view():
+    """A LibraryView stub whose app.dismiss_dialog reports a real close."""
+    from ui.views.library import LibraryView
+
     mock_app = MagicMock()
     mock_page = MagicMock()
-    mock_page.overlay = []
     mock_app.page = mock_page
+    # The real helper returns True when it actually closed something; the sheet
+    # only defers its follow-up to on_dismiss when that is the case.
+    mock_app.dismiss_dialog.return_value = True
 
-    from ui.player.dialogs import MetadataEditorDialog
-    editor = MetadataEditorDialog(mock_app)
+    view = LibraryView.__new__(LibraryView)
+    view.app = mock_app
+    view.page = mock_page
+    return view, mock_app, mock_page
 
-    # Dynamic page property resolves live page
-    assert editor.page == mock_page
 
-    meta = {"path": "/test/song.mp3", "track_title": "Test Title", "artist_name": "Test Artist", "album_title": "Test Album"}
-    editor.open("track", meta)
+def _delete_tile(sheet):
+    return next(
+        t for t in sheet.content.content.controls
+        if getattr(getattr(t, "title", None), "value", None) == "Delete Track"
+    )
 
-    mock_page.show_dialog.assert_called_once_with(editor._dlg)
 
-    # Closing dialog cleans up dialog
-    editor._close()
-    mock_page.pop_dialog.assert_called_once()
+@pytest.mark.asyncio
+async def test_track_context_menu_delete_flow():
+    """Delete Track must close its own sheet and raise the confirm dialog only
+    from the sheet's on_dismiss — never in the same frame.
+
+    BottomSheetControl closes itself with an unguarded Navigator.pop(), so a
+    dialog route pushed before the sheet's route is really gone gets popped
+    instead of the sheet. Flutter then keeps rendering the sheet while Python
+    has already recorded it as closed, and nothing on screen can be dismissed
+    again — the app has to be force-stopped. show_dialog() fires on_dismiss only
+    after Flutter reports the sheet gone and unmounts its stack entry, so that
+    handler is the one ordering that is actually guaranteed.
+    """
+    view, mock_app, mock_page = _context_menu_view()
+
+    meta = {"path": "/test/song.mp3", "track_title": "Test Title"}
+    view._open_track_context_menu(meta)
+
+    # The sheet is presented through the dialog stack, not page.overlay.
+    mock_page.show_dialog.assert_called_once()
+    sheet = mock_page.show_dialog.call_args[0][0]
+
+    _delete_tile(sheet).on_click(None)
+
+    # The sheet is named explicitly, so a toast sitting on top of the dialog
+    # stack cannot absorb the close the way page.pop_dialog() would let it.
+    mock_app.dismiss_dialog.assert_called_once_with(sheet)
+    mock_page.pop_dialog.assert_not_called()
+    mock_app.confirm_delete_track.assert_not_called()
+
+    # Only once Flutter reports the sheet dismissed does the dialog go up.
+    sheet.on_dismiss(None)
+    mock_app.confirm_delete_track.assert_called_once_with("/test/song.mp3", "Test Title")
+
+    # And exactly once: a second dismiss must not re-raise it.
+    sheet.on_dismiss(None)
+    assert mock_app.confirm_delete_track.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_track_context_menu_close_runs_inline_when_sheet_already_gone():
+    """A sheet that is already closed will never emit on_dismiss, so the
+    follow-up has to run immediately rather than be stranded."""
+    view, mock_app, mock_page = _context_menu_view()
+    mock_app.dismiss_dialog.return_value = False
+
+    view._open_track_context_menu({"path": "/test/song.mp3", "track_title": "T"})
+    sheet = mock_page.show_dialog.call_args[0][0]
+    _delete_tile(sheet).on_click(None)
+
+    mock_app.confirm_delete_track.assert_called_once_with("/test/song.mp3", "T")
+
+
+@pytest.mark.asyncio
+async def test_track_context_menu_delete_requires_path():
+    """A track row with no path must close the sheet but raise no confirmation."""
+    view, mock_app, mock_page = _context_menu_view()
+
+    view._open_track_context_menu({"track_title": "Orphan", "path": ""})
+    sheet = mock_page.show_dialog.call_args[0][0]
+    _delete_tile(sheet).on_click(None)
+
+    mock_app.dismiss_dialog.assert_called_once_with(sheet)
+    sheet.on_dismiss(None)
+    mock_app.confirm_delete_track.assert_not_called()
+
+
+def test_dismiss_dialog_closes_the_named_dialog():
+    """dismiss_dialog must close the dialog it is handed, not consult the stack.
+
+    page.pop_dialog() closes the topmost entry that is still open, and every
+    toast goes into that same stack (SnackBar is a DialogControl on 0.86), so a
+    toast raised by background work while a confirmation is up would eat the
+    close and leave the dialog stranded on screen.
+    """
+    import main as m
+
+    app = MagicMock()
+    app.page = MagicMock()
+    dialog = MagicMock()
+    dialog.open = True
+
+    assert m.StreamripFletApp.dismiss_dialog(app, dialog) is True
+    assert dialog.open is False
+    dialog.update.assert_called_once()
+    app.page.pop_dialog.assert_not_called()
+
+    # Already closed: nothing to do, and no neighbouring dialog gets touched.
+    assert m.StreamripFletApp.dismiss_dialog(app, dialog) is False
+    dialog.update.assert_called_once()
+
+    assert m.StreamripFletApp.dismiss_dialog(app, None) is False

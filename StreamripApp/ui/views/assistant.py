@@ -5,7 +5,7 @@ import asyncio
 import hashlib
 import flet as ft
 
-from ui.tokens import BG, SURFACE, SURFACE2, CYAN, TEXT, DIM, BORDER, apply_opacity
+from ui.tokens import SURFACE2, CYAN, TEXT, DIM, BORDER, apply_opacity
 
 if sys.platform == "darwin":
     from utils.audio_engine_macos import audio_engine
@@ -13,66 +13,6 @@ else:
     from utils.audio_engine import audio_engine
 
 logger = logging.getLogger(__name__)
-
-
-class ModelModePill(ft.Container):
-    """Sleek radio-pill toggle on the Jarvis header bar allowing the user to
-    switch between the AI Agent (LLM tool-calling) and the classic Semantic model."""
-
-    def __init__(self, is_llm: bool = True, on_change=None):
-        super().__init__()
-        self.is_llm = is_llm
-        self.on_change = on_change
-
-        self.border_radius = 18
-        self.bgcolor = SURFACE2
-        self.border = ft.Border.all(1, BORDER)
-        self.padding = ft.Padding.all(3)
-
-        self._llm_icon = ft.Container(
-            width=6, height=6, border_radius=3, bgcolor=CYAN, margin=ft.Margin.only(right=4)
-        )
-        self._llm_text = ft.Text("AI Agent", size=11, weight=ft.FontWeight.W_700)
-        self._llm_item = ft.Container(
-            content=ft.Row([self._llm_icon, self._llm_text], spacing=0, tight=True),
-            padding=ft.Padding.symmetric(horizontal=10, vertical=4),
-            border_radius=14,
-            on_click=lambda _: self._toggle(True),
-        )
-
-        self._semantic_text = ft.Text("Semantic", size=11, weight=ft.FontWeight.W_700)
-        self._semantic_item = ft.Container(
-            content=self._semantic_text,
-            padding=ft.Padding.symmetric(horizontal=10, vertical=4),
-            border_radius=14,
-            on_click=lambda _: self._toggle(False),
-        )
-
-        self.content = ft.Row([self._llm_item, self._semantic_item], spacing=2, tight=True)
-        self._apply_styles()
-
-    def _apply_styles(self):
-        if self.is_llm:
-            self._llm_item.bgcolor = CYAN
-            self._llm_text.color = BG
-            self._llm_icon.bgcolor = BG
-            self._semantic_item.bgcolor = ft.Colors.TRANSPARENT
-            self._semantic_text.color = DIM
-        else:
-            self._semantic_item.bgcolor = CYAN
-            self._semantic_text.color = BG
-            self._llm_item.bgcolor = ft.Colors.TRANSPARENT
-            self._llm_text.color = DIM
-            self._llm_icon.bgcolor = DIM
-
-    def _toggle(self, enable_llm: bool):
-        if self.is_llm != enable_llm:
-            self.is_llm = enable_llm
-            self._apply_styles()
-            if self.page:
-                self.update()
-            if self.on_change:
-                self.on_change(self.is_llm)
 
 
 class AssistantView:
@@ -108,16 +48,6 @@ class AssistantView:
         from utils.chat_memory import ChatMemoryManager
         self.chat_memory = ChatMemoryManager()
         self._history_list = []
-
-    def _on_mode_toggle(self, is_llm: bool):
-        from utils.streamrip_api import update_config_params
-        update_config_params({
-            "assistant": {
-                "llm_enabled": is_llm
-            }
-        })
-        label = "AI Agent" if is_llm else "Semantic Parser"
-        self.app.show_snackbar(f"Jarvis engine mode set to: {label}")
 
     def _ensure_initialized(self):
         if self._initialized:
@@ -191,19 +121,9 @@ class AssistantView:
             on_click=lambda _e: self.clear_chat_manually(),
         )
 
-        # Radio pill mode toggle (AI Agent vs Semantic model)
-        is_llm_active = True
-        try:
-            from utils.streamrip_api import load_config
-            cfg = load_config()
-            is_llm_active = bool(cfg.get("assistant", {}).get("llm_enabled", True))
-        except Exception:
-            pass
-
-        self._mode_pill = ModelModePill(
-            is_llm=is_llm_active,
-            on_change=self._on_mode_toggle,
-        )
+        # The AI Agent / Semantic mode pill lived here. The semantic engine was
+        # retired (deprecated_feature/README.md), leaving Settings → AI Assistant
+        # as the single control over `assistant.llm_enabled`.
 
         # Load session history
         session = self.chat_memory.load_session()
@@ -228,8 +148,6 @@ class AssistantView:
                             ft.Text("JARVIS", color=TEXT, size=13,
                                     weight=ft.FontWeight.W_700),
                             ft.Container(expand=True),
-                            self._mode_pill,
-                            ft.Container(width=4),
                             self._clear_btn,
                             self._tts_toggle,
                         ],
@@ -795,70 +713,22 @@ class AssistantView:
                 auto_follow_links=True,
             )
 
+        # The Stage 1/2/3 routing trace that used to render under each reply
+        # went with the semantic engine (deprecated_feature/README.md). The
+        # disambiguation option buttons below are functional, not diagnostic,
+        # and stay.
         intent = msg.get("intent")
-        if not is_user and intent:
-            intent_name = intent.get("name", "unknown")
-            extras = intent.get("extras") or {}
-            is_semantic = extras.get("semantic", False)
+        extras = (intent.get("extras") or {}) if intent else {}
+        options = extras.get("options") if not is_user else None
 
-            # Stage 1: Regex
-            if intent_name != "unknown" and not is_semantic:
-                s1_text = f"Stage 1: Regex (Matched: {intent_name})"
-                s1_icon = ft.Icons.CHECK_CIRCLE_OUTLINE
-                s1_color = "#81C784"
-                
-                s2_text = "Stage 2: VLM (Skipped)"
-                s2_icon = ft.Icons.REMOVE_CIRCLE_OUTLINE
-                s2_color = DIM
-            elif is_semantic:
-                s1_text = "Stage 1: Regex (No Match)"
-                s1_icon = ft.Icons.CANCEL_OUTLINED
-                s1_color = "#E57373"
-                
-                score = extras.get("score")
-                score_str = f" @ {score:.2f}" if score is not None else ""
-                duration = extras.get("compute_time_windows_ms")
-                dur_str = f" in {duration:.1f}ms" if duration is not None else ""
-                s2_text = f"Stage 2: VLM (Matched: {intent_name}{score_str}{dur_str})"
-                s2_icon = ft.Icons.CHECK_CIRCLE_OUTLINE
-                s2_color = "#81C784"
-            else:
-                s1_text = "Stage 1: Regex (No Match)"
-                s1_icon = ft.Icons.CANCEL_OUTLINED
-                s1_color = "#E57373"
-
-                s2_text = "Stage 2: VLM (No Match)"
-                s2_icon = ft.Icons.CANCEL_OUTLINED
-                s2_color = "#E57373"
-
-            # Stage 3: AI Agent. When the LLM tool-calling agent handled the turn
-            # it supersedes the semantic stage (which is bypassed in agent mode).
-            agent = extras.get("agent") if isinstance(extras, dict) else None
-            s3 = None
-            if agent and agent.get("used_llm"):
-                s2_text = "Stage 2: VLM (Skipped)"
-                s2_icon = ft.Icons.REMOVE_CIRCLE_OUTLINE
-                s2_color = DIM
-                seen_tools = []
-                for t in (agent.get("tools") or []):
-                    if t not in seen_tools:
-                        seen_tools.append(t)
-                tool_str = (" · " + ", ".join(seen_tools)) if seen_tools else ""
-                s3 = (ft.Icons.AUTO_AWESOME_ROUNDED, f"Stage 3: AI Agent (Handled{tool_str})", "#81C784")
-
-            column_children = [
-                bubble_content,
-                ft.Container(height=1, bgcolor="#262626", margin=ft.Margin.symmetric(vertical=6)),
-            ]
-
-            options = extras.get("options")
-            if options and not is_user:
-                option_controls = []
-                for opt in options:
-                    opt_id = str(opt.get("id", ""))
-                    opt_title = str(opt.get("title", ""))
-                    opt_sub = str(opt.get("subtitle", ""))
-                    btn = ft.OutlinedButton(
+        if options:
+            option_controls = []
+            for opt in options:
+                opt_id = str(opt.get("id", ""))
+                opt_title = str(opt.get("title", ""))
+                opt_sub = str(opt.get("subtitle", ""))
+                option_controls.append(
+                    ft.OutlinedButton(
                         f"{opt_id}. {opt_title}",
                         tooltip=opt_sub if opt_sub else None,
                         style=ft.ButtonStyle(
@@ -867,30 +737,13 @@ class AssistantView:
                         ),
                         on_click=lambda _e, tid=opt_id: self.page.run_task(self._handle_user_text, tid),
                     )
-                    option_controls.append(btn)
-                column_children.append(ft.Column(option_controls, spacing=4))
-                column_children.append(ft.Container(height=1, bgcolor="#262626", margin=ft.Margin.symmetric(vertical=6)))
-
-            stage_specs = [
-                (s1_icon, s1_text, s1_color),
-                (s2_icon, s2_text, s2_color),
-            ]
-            if s3 is not None:
-                stage_specs.append(s3)
-            column_children.extend([
-                ft.Row(
-                    [
-                        ft.Icon(ic, color=col, size=11),
-                        ft.Text(tx, color=col, size=10, weight=ft.FontWeight.W_500),
-                    ],
-                    spacing=6,
-                    alignment=ft.MainAxisAlignment.START,
                 )
-                for (ic, tx, col) in stage_specs
-            ])
-
             bubble_content = ft.Column(
-                column_children,
+                [
+                    bubble_content,
+                    ft.Container(height=1, bgcolor="#262626", margin=ft.Margin.symmetric(vertical=6)),
+                    ft.Column(option_controls, spacing=4),
+                ],
                 spacing=4,
                 tight=True,
             )
@@ -900,7 +753,10 @@ class AssistantView:
             padding=ft.Padding.symmetric(horizontal=14, vertical=10),
             bgcolor=CYAN if is_user else SURFACE2,
             border_radius=14,
-            width=290 if (len(text) > 25 or intent) else None,
+            # Was `or intent` — every dispatched reply carried an intent, so
+            # that widened bubbles to fit the stage trace. With the trace gone,
+            # only the option buttons need the extra width.
+            width=290 if (len(text) > 25 or options) else None,
         )
         return ft.Row(
             [bubble],
