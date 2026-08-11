@@ -324,17 +324,12 @@ def _clean_query(q: str) -> str:
     return q
 
 
-def parse(text: str, semantic_fallback: bool = True) -> Intent:
+def parse(text: str) -> Intent:
     """Parse one user utterance into a typed Intent.
 
     Returns Intent(name=INTENT_UNKNOWN, raw=...) when nothing matches; the
-    runner uses that as the cue to either ask for clarification or to
-    fall back to a free-text library search.
-
-    ``semantic_fallback`` gates the local BGE Vector Space Model stage. When the
-    AI agent is active the runner passes False: a regex miss goes straight to
-    the LLM, so paying for an embedding classify we'll discard is wasted work
-    (and battery). Fast deterministic controls come from regex either way."""
+    runner uses that as the cue to hand the turn to the LLM agent, or — with
+    the agent off — to fall back to a free-text library search."""
     raw = text or ""
     
     # Direct raw match for greetings/wake-word-only prompts to prevent _normalise from tearing them apart
@@ -369,64 +364,11 @@ def parse(text: str, semantic_fallback: bool = True) -> Intent:
             extras=extras,
         )
 
-    # --- SEMANTIC FALLBACK GATEWAY ---
-    # If the syntactic regex loop misses, we fall back to our local BGE Vector Space Model!
-    # Skipped entirely when the AI agent is active (the LLM handles regex misses),
-    # so we don't pay for an embedding classify whose result we'd throw away.
-    if not semantic_fallback:
-        return Intent(name=INTENT_UNKNOWN, raw=raw)
-    # Bypassing semantic fallback for purely numeric parameters or very short utterances
-    # to prevent structural misclassification of dialog slot-filling parameters (like '5').
-    if normalised.isdigit() or len(normalised) < 3:
-        return Intent(name=INTENT_UNKNOWN, raw=raw)
-
-    import time
-    start_time = time.perf_counter()
-    try:
-        classifier = get_semantic_classifier()
-        match = classifier.classify(normalised, threshold=0.50)
-        duration_ms = (time.perf_counter() - start_time) * 1000.0
-        
-        # Calculate simulated Android bounds
-        # Fast Android (2x faster due to a modern octa-core mobile CPU vs older PC CPU)
-        # Slow Android (2x slower due to standard mobile power-throttling/emulation overhead)
-        android_fast_ms = duration_ms / 2.0
-        android_slow_ms = duration_ms * 2.0
-        
-        if match:
-            intent_name, anchor_phrase, score = match
-            extracted_query = classifier.extract_slots(raw, intent_name)
-            
-            return Intent(
-                name=intent_name,
-                query=extracted_query,
-                raw=raw,
-                extras={
-                    "semantic": True,
-                    "score": score,
-                    "anchor": anchor_phrase,
-                    "compute_time_windows_ms": round(duration_ms, 2),
-                    "simulated_android_fast_ms": round(android_fast_ms, 2),
-                    "simulated_android_slow_ms": round(android_slow_ms, 2),
-                }
-            )
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        logger.error(f"Semantic fallback failed: {e}", exc_info=True)
-
+    # A regex miss ends the parse. There used to be a WordPiece VSM "Stage 2"
+    # here; it was retired (see deprecated_feature/README.md) because every
+    # intent it could emit already has a pattern above, and the runner's
+    # unknown handler — a fuzzy library search — beats a threshold guess.
     return Intent(name=INTENT_UNKNOWN, raw=raw)
-
-
-_SEMANTIC_CLASSIFIER = None
-
-def get_semantic_classifier():
-    """Lazy-loaded module-level singleton for the semantic classifier."""
-    global _SEMANTIC_CLASSIFIER
-    if _SEMANTIC_CLASSIFIER is None:
-        from utils.semantic_intent import SemanticIntentClassifier
-        _SEMANTIC_CLASSIFIER = SemanticIntentClassifier()
-    return _SEMANTIC_CLASSIFIER
 
 
 __all__ = [

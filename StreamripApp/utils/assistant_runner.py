@@ -369,7 +369,7 @@ class AssistantRunner:
             "Syntax mismatch. Could you express your intent differently?",
             "Pardon me, sir. I cannot map that statement to an action.",
             "I didn't grasp that command, sir. Could you clarify?",
-            "Semantic analysis yielded zero high-confidence matches, sir.",
+            "Pattern analysis yielded zero high-confidence matches, sir.",
             "That query is outside my operational directives.",
             "Command context unclear, sir. Please rephrase.",
             "Unrecognized phrasing. Awaiting a different instruction, sir.",
@@ -380,10 +380,10 @@ class AssistantRunner:
             "I couldn't parse your last prompt, sir.",
             "Could you use a different phrasing, sir?",
             "Input patterns are outside my instruction matrix, sir.",
-            "Parser error: Semantic intent remains highly ambiguous.",
+            "Parser error: that intent remains highly ambiguous.",
             "Pardon me, sir, but that command is outside my syntax definitions.",
             "I didn't capture the intent behind that phrasing, sir.",
-            "Semantic intent parsing returned low confidence.",
+            "Intent parsing returned low confidence.",
             "Could you clarify that, sir? Unable to map action.",
             "Command unrecognized, sir. No matches.",
             "I cannot match that request to my registered routines.",
@@ -392,14 +392,14 @@ class AssistantRunner:
             "Apologies, sir. Phrasing is not in my database.",
             "I didn't catch the action key in that, sir.",
             "I couldn't identify operational parameters in your request, sir.",
-            "Semantic parsing failed. Try a simpler command structure, sir.",
+            "Parsing failed. Try a simpler command structure, sir.",
             "My processor couldn't resolve that prompt, sir.",
             "That query exceeds my standard instruction protocol, sir.",
             "Could you restate your instruction, sir?",
             "I'm at your disposal, sir, but I didn't recognize that command.",
             "Command context is ambiguous. Please use clearer terms.",
             "Could not map that input to audio controller functions.",
-            "That directive doesn't match any registered semantic flows, sir.",
+            "That directive doesn't match any registered command flows, sir.",
             "Pardon me, sir. I am unable to decode that specific command."
         ],
         "playback_control": [
@@ -1108,12 +1108,8 @@ class AssistantRunner:
     async def dispatch_text(self, text: str,
                             history_provider: Optional[Callable[[], list]] = None,
                             ) -> AssistantResponse:
-        """Convenience: parse + dispatch in one call. When the AI agent is
-        enabled, skip the BGE semantic stage on a regex miss — the LLM handles
-        those turns, so an embedding classify would be wasted work."""
-        cfg = self._load_assistant_cfg()
-        agent_on = bool(cfg.assistant.llm_enabled) if (cfg and hasattr(cfg, "assistant")) else False
-        intent = ai.parse(text, semantic_fallback=not agent_on)
+        """Convenience: parse + dispatch in one call."""
+        intent = ai.parse(text)
         return await self.dispatch(intent, history_provider=history_provider)
 
     # ── Recent-playback tracking ────────────────────────────────────────────

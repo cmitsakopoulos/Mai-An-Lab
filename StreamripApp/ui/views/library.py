@@ -11,7 +11,7 @@ from ui.tokens import (
     SOURCE_COLORS, LIB_ARTIST_COLOR, LIB_ALBUM_COLOR, LIB_TRACK_COLOR,
     LIB_PLAYLIST_COLOR, apply_opacity, lerp_hex
 )
-from ui.widgets import AnimatedEntry, AccordionCard, src_color
+from ui.widgets import AnimatedEntry, AccordionCard, src_color, dialog_handoff
 
 if sys.platform == "darwin":
     from utils.audio_engine_macos import audio_engine
@@ -2105,10 +2105,10 @@ class LibraryView:
         meta = self._node_to_track(nd)
 
         # Flet 0.86 dialog-stack presentation — see _open_track_context_menu for
-        # why the legacy overlay+`.open` path leaves the modal barrier stuck.
-        def _close():
-            if self.page:
-                self.page.pop_dialog()
+        # why the legacy overlay+`.open` path leaves the modal barrier stuck,
+        # and dialog_handoff for why "Add to Playlist" can't push its sheet
+        # until this one is really gone.
+        _on_sheet_dismissed, _close = dialog_handoff(self.app, lambda: bs)
 
         def _play_from_here(_e):
             # Slice the WALK, not _net_nodes. `index` is the row's position in the
@@ -2156,8 +2156,7 @@ class LibraryView:
             self._schedule_net_walk_refresh(path, delay=0.0)
 
         def _add_to_playlist(_e):
-            _close()
-            self.page.run_task(self._open_add_to_playlist_sheet, meta)
+            _close(lambda: self.page.run_task(self._open_add_to_playlist_sheet, meta))
 
         bs = ft.BottomSheet(
             content=ft.Container(
@@ -2194,6 +2193,7 @@ class LibraryView:
                 padding=16,
             ),
             bgcolor=SURFACE,
+            on_dismiss=_on_sheet_dismissed,
         )
         self.page.show_dialog(bs)
 
@@ -2552,7 +2552,7 @@ class LibraryView:
         def pick(val):
             self.sort_mode = val
             self._sort_icon_btn.tooltip = f"Sort: {val.capitalize()}"
-            self.page.pop_dialog()
+            self.app.dismiss_dialog(self._sort_bs)
             self.page.run_task(self.load_library)
 
         self._sort_bs = ft.BottomSheet(
@@ -3322,7 +3322,7 @@ class LibraryView:
             subtitle=ft.Text(sub, color=DIM, size=12, max_lines=2),
             trailing=ft.Row(
                 [
-                    self._edit_btn("artist", {"artist_name": name}),
+                    self._edit_btn(name),
                     Che,
                 ],
                 tight=True, spacing=0,
@@ -3346,7 +3346,6 @@ class LibraryView:
             animate_rotation=ft.Animation(200, ft.AnimationCurve.DECELERATE),
             data="chevron"
         )
-        meta = {"artist_name": artist, "album_title": album}
         tile = ft.ListTile(
             data={"node_id": node_id, "depth": depth, "type": "album", "album": album, "artist": artist},
             leading=ft.Row(
@@ -3358,13 +3357,9 @@ class LibraryView:
             ),
             title=ft.Text(album, color=TEXT, size=14, weight=ft.FontWeight.W_600, max_lines=3),
             subtitle=ft.Text(f"{artist}  ·  {tc} tracks", color=DIM, size=12, max_lines=2),
-            trailing=ft.Row(
-                [
-                    self._edit_btn("album", meta),
-                    Che,
-                ],
-                tight=True, spacing=0,
-            ),
+            # No album pencil: the track/album tag editor was retired. Album tag
+            # fixes go through the artist row's "Fix artist info".
+            trailing=Che,
             bgcolor=apply_opacity(0.06, accent) if expanded else "transparent",
         )
         tile._chevron = Che
@@ -3396,7 +3391,7 @@ class LibraryView:
             async def _do():
                 name = name_field.value.strip()
                 if not name: return
-                self.page.pop_dialog()
+                self.app.dismiss_dialog(self.dlg)
                 try:
                     await self.app.db_manager.create_playlist(name)
                     await self.load_library()
@@ -3408,7 +3403,7 @@ class LibraryView:
             title=ft.Text("New Playlist"),
             content=ft.Container(content=name_field, padding=ft.Padding.only(top=10)),
             actions=[
-                ft.TextButton("Cancel", on_click=lambda e: self.page.pop_dialog()),
+                ft.TextButton("Cancel", on_click=lambda e: self.app.dismiss_dialog(self.dlg)),
                 ft.TextButton("Create", on_click=on_create),
             ],
             actions_alignment=ft.MainAxisAlignment.END,
@@ -3814,12 +3809,15 @@ class LibraryView:
         tile.on_click = play_partition_track
         return res
 
-    def _edit_btn(self, edit_type: str, meta: dict, color: str = DIM) -> ft.Control:
+    def _edit_btn(self, artist_name: str, color: str = DIM) -> ft.Control:
+        # Artists only. The generic track/album tag editor was retired (see
+        # deprecated_feature/README.md); ArtistMetadataDialog writes country and
+        # genre overrides to the DB and is the one metadata editor that works.
         return ft.IconButton(
             icon=ft.Icons.EDIT_OUTLINED,
             icon_color=apply_opacity(0.6, color), icon_size=20,
-            tooltip="Edit metadata",
-            on_click=lambda e, et=edit_type, m=meta: self.app.open_metadata_editor(et, m),
+            tooltip="Fix artist info",
+            on_click=lambda e, n=artist_name: self.app.open_artist_metadata_editor(n),
         )
 
     def _on_track_long_press(self, meta: dict):
@@ -3834,12 +3832,14 @@ class LibraryView:
         # to take (page.overlay.append + `.open = True`, then `.open = False` to
         # close) renders the sheet but never installs that dismiss lifecycle, so
         # closing leaves the dark barrier stuck over the whole app — the "black
-        # screen". show_dialog/pop_dialog is the supported 0.86 API; it also
-        # never touches page.overlay, so the persistent now-playing / queue /
-        # quality sheets that live there are no longer at risk from this menu.
-        def _close():
-            if self.page:
-                self.page.pop_dialog()
+        # screen". show_dialog is the supported 0.86 API; it also never touches
+        # page.overlay, so the persistent now-playing / queue / quality sheets
+        # that live there are no longer at risk from this menu.
+        #
+        # Anything that opens ANOTHER dialog has to wait for this sheet to be
+        # really gone, not merely for the next event-loop turn — see
+        # dialog_handoff for why that distinction is what strands the app.
+        _on_sheet_dismissed, _close = dialog_handoff(self.app, lambda: bs)
 
         def _play_next(_e):
             # Feedback is a haptic tick, not a toast: the custom snackbar overlay
@@ -3855,13 +3855,16 @@ class LibraryView:
             self.app.trigger_haptic("swipe_queue")
 
         def _add_to_playlist(_e):
-            # Pop this menu, then present the playlist picker as its own dialog.
-            _close()
-            self.page.run_task(self._open_add_to_playlist_sheet, meta)
+            # Picker goes up as its own dialog, once this menu is really gone.
+            _close(lambda: self.page.run_task(self._open_add_to_playlist_sheet, meta))
 
-        def _edit_meta(_e):
-            _close()
-            self.app.open_metadata_editor("track", meta)
+        def _delete_track(_e):
+            path = meta.get("path", "")
+            if not path:
+                _close()
+                return
+            title = meta.get("track_title", "this track")
+            _close(lambda: self.app.confirm_delete_track(path, title))
 
         def _redownload(_e):
             _close()
@@ -3912,9 +3915,9 @@ class LibraryView:
                             on_click=_redownload,
                         ),
                         ft.ListTile(
-                            leading=ft.Icon(ft.Icons.EDIT_OUTLINED, color=DIM),
-                            title=ft.Text("Edit Metadata", color=TEXT),
-                            on_click=_edit_meta,
+                            leading=ft.Icon(ft.Icons.DELETE_OUTLINE_ROUNDED, color="#FF4444"),
+                            title=ft.Text("Delete Track", color="#FF4444"),
+                            on_click=_delete_track,
                         ),
                     ],
                     tight=True,
@@ -3924,25 +3927,23 @@ class LibraryView:
                 padding=16,
             ),
             bgcolor=SURFACE,
+            on_dismiss=_on_sheet_dismissed,
         )
         self.page.show_dialog(bs)
 
     async def _open_add_to_playlist_sheet(self, meta: dict):
         # Presented and dismissed through the Flet 0.86 dialog stack
-        # (show_dialog / pop_dialog) for the same reason as the track menu: the
+        # (show_dialog / dismiss_dialog) for the same reason as the track menu: the
         # legacy overlay+`.open` path leaves the modal barrier stuck. This sheet
         # is always its own dialog now — it used to reuse the track menu's sheet
         # in place, which the show_dialog model doesn't support (each dialog is a
         # discrete stack entry).
         playlists = await self.app.db_manager.get_all_playlists(sort_mode="name")
 
-        def _close():
-            if self.page:
-                self.page.pop_dialog()
+        # Same dismiss-then-open handoff as the track context menu.
+        _on_sheet_dismissed, _close = dialog_handoff(self.app, lambda: bs)
 
         def _create_new(_e):
-            _close()
-
             name_field = ft.TextField(label="Playlist Name", autofocus=True)
 
             async def _submit(_e2):
@@ -3951,8 +3952,7 @@ class LibraryView:
                 try:
                     pl_id = await self.app.db_manager.create_playlist(name)
                     await self.app.db_manager.add_track_to_playlist(pl_id, meta["path"])
-                    if self.page:
-                        self.page.pop_dialog()
+                    self.app.dismiss_dialog(dlg)
                     if self.view_mode == "playlists":
                         await self.load_library()
                 except Exception as exc:
@@ -3962,11 +3962,11 @@ class LibraryView:
                 title=ft.Text("New Playlist"),
                 content=name_field,
                 actions=[
-                    ft.TextButton("Cancel", on_click=lambda _: self.page.pop_dialog()),
+                    ft.TextButton("Cancel", on_click=lambda _: self.app.dismiss_dialog(dlg)),
                     ft.Button("Create", on_click=_submit, bgcolor=CYAN, color=BG),
                 ],
             )
-            self.page.show_dialog(dlg)
+            _close(lambda: self.page.show_dialog(dlg))
 
         def _add_to_existing(pl_id, pl_name):
             async def _do():
@@ -4014,6 +4014,7 @@ class LibraryView:
         bs = ft.BottomSheet(
             content=container_content,
             bgcolor=SURFACE,
+            on_dismiss=_on_sheet_dismissed,
         )
         self.page.show_dialog(bs)
 

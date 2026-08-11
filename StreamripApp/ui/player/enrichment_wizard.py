@@ -449,11 +449,7 @@ class MetadataEnrichmentWizardPane(ft.Container):
                                 status="ok",
                                 score=c_obj.get("score", 100),
                             )
-                            if self.app.page:
-                                try:
-                                    self.app.page.pop_dialog()
-                                except Exception:
-                                    pass
+                            self.app.dismiss_dialog(sub_dlg)
                             self._load_low_confidence_data()
 
                         self.app.page.run_task(_save_cand)
@@ -483,7 +479,7 @@ class MetadataEnrichmentWizardPane(ft.Container):
 
         search_field.on_submit = _do_search
         sub_dlg.actions = [
-            ft.TextButton("Cancel", on_click=lambda e: self.app.page.pop_dialog() if self.app.page else None),
+            ft.TextButton("Cancel", on_click=lambda e: self.app.dismiss_dialog(sub_dlg)),
             ft.Button("Search", on_click=_do_search),
         ]
         if self.app.page:

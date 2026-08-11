@@ -11,7 +11,7 @@
 
 Mai-An Lab is a dual-platform music player and streamrip download client for Android and macOS. It embeds the streamrip download toolset in an interactive interface built with Flet.
 
-The player implements native engine fallbacks; background services and hardware speech engines on mobile, and an Apple `AVAudioPlayer` loop on desktop. It features a Jarvis styled voice assistant, SQLite library search, and an auto-playlist engine based on $k$-NN acoustic similarity.
+The player implements native engine fallbacks; background services and hardware speech engines on mobile, and an Apple `AVAudioPlayer` loop on desktop. It features an LLM-powered Jarvis assistant, SQLite library search, and an auto-playlist engine based on seed-anchored acoustic similarity.
 
 ## Developer Note
 
@@ -20,81 +20,62 @@ The player implements native engine fallbacks; background services and hardware 
 
 ## Interactive UI Panes
 
-### Search & Downloader
+### Search, Direct Streaming & Downloader
 
-Search across streaming endpoints, preview snippets, and download albums or tracks to your system directory. Features an interactive connection progress card showing real-time query states, paired with visual download progress tracking.
+Search the entire Qobuz streaming catalog across Artists, Albums, and Tracks with responsive skeleton loading and paginated results. Designed for seamless on-the-fly streaming and studio-grade music acquisition:
 
-<p align="center">
-  <img src="assets/search_example.gif" width="48%" alt="Search & Download Pane" style="border-radius: 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); border: 1px solid rgba(255, 255, 255, 0.1);">
-</p>
-
----
-
-### Music Library & Playback Controls
-
-Browse your catalog by artist, album, or track through SQL joins. The playback pane sits alongside the library, providing full queue management, scrubbing, and volume control.
-
-- **Acoustic Similarity Walks**: Generate adaptive playlists on the fly seeded from a single track. The player traverses the unified $Z_r$ similarity network using a personalized-PageRank random walk with self-tuning Gaussian kernel affinities, MMR diversity checks, and Louvain community boundaries for cohesive transitions.
+- **Direct Network Audio Streaming**: Resolves authenticated stream URLs on the fly to play full-length track previews directly over the network with zero disk overhead. Includes interactive connection cards displaying real-time stream resolution and granular cancellation.
+- **High-Fidelity Streamrip Acquisition**: Download albums or individual tracks directly to your system directory in user-selected formats ranging from **High (320kbps MP3/AAC)** and **CD Quality (16-bit FLAC)** to uncompressed **Hi-Res (24-bit FLAC)** with embedded tags and artwork.
 
 <p align="center">
-  <img src="assets/library_example.gif" width="48%" alt="Music Library Pane" style="border-radius: 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); border: 1px solid rgba(255, 255, 255, 0.1);">
+  <img src="assets/search_query.png" width="31%" alt="Real-time Query & Skeleton Loading" style="border-radius: 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); border: 1px solid rgba(255, 255, 255, 0.1);">
   &nbsp;
-  <img src="assets/playback_pane_example.gif" width="48%" alt="Playback Controls Pane" style="border-radius: 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); border: 1px solid rgba(255, 255, 255, 0.1);">
+  <img src="assets/search_stream.png" width="31%" alt="Direct Network Streaming & Progress" style="border-radius: 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); border: 1px solid rgba(255, 255, 255, 0.1);">
+  &nbsp;
+  <img src="assets/search_quality.png" width="31%" alt="Download Quality Selection" style="border-radius: 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); border: 1px solid rgba(255, 255, 255, 0.1);">
 </p>
 
 ---
 
-### Interactive Acoustic Network Graph *(v1.3.0)*
+### Music Library & Interactive Acoustic Network
 
-Explore your music library mapped as an interactive 2D force-directed similarity graph. Includes two visualization modes: **Local** (plots the seed track and its 1-hop nearest neighbors) and **Walk** (visualizes the active similarity walk path), colored by Louvain genre communities. Double-clicking any node starts playback immediately.
+Browse catalog tracks, albums, and artists through SQL joins with integrated queue management, scrubbing, volume control, and a persistent mini-player. Toggling the Network view opens an interactive force-directed similarity graph mapped across your library.
+
+- **Seed-Anchored Similarity Walks**: Generates adaptive playlists directly from any seed track. Metadata defines the candidate pool through genre taxonomy boundaries (and regional bounds for untagged tracks), while acoustic cosine proximity across the continuous $Z_r$ coordinate space ranks tracks without chaining drift. Repetition is bounded by per-artist and per-album caps.
+- **Interactive Force-Directed Canvas**: Renders a live 2D similarity graph color-coded by Louvain genre communities across a 24-color dark-theme palette. Tapping nodes displays instant playback controls, exploration actions, and draws directed similarity walk trajectories directly over the canvas with step badges.
 
 <p align="center">
-  <img src="assets/network_pane.gif" width="55%" alt="Interactive Acoustic Network Graph" style="border-radius: 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); border: 1px solid rgba(255, 255, 255, 0.1);">
+  <img src="assets/library_look.png" width="45%" alt="Music Library & Mini-Player" style="border-radius: 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); border: 1px solid rgba(255, 255, 255, 0.1);">
+  &nbsp;
+  <img src="assets/network_look.png" width="45%" alt="Interactive Acoustic Network Graph" style="border-radius: 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); border: 1px solid rgba(255, 255, 255, 0.1);">
 </p>
 
 ---
 
-### Audio Equalizer & Real-time DSP *(v1.2.0)*
+### Jarvis Voice & LLM Assistant
+
+Interact via voice controls or conversational LLM chat to walk similarity graphs, search tracks, query Qobuz archives, manage queues, make playlists, and trigger downloads — powered by LLM agent intelligence, local keyword parsing, and audio focus ducking.
+
+<p align="center">
+  <img src="assets/jarvis_welcome.png" width="45%" alt="Jarvis Directive Suggestions" style="border-radius: 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); border: 1px solid rgba(255, 255, 255, 0.1);">
+  &nbsp;
+  <img src="assets/Jarvis_LLM.png" width="45%" alt="Jarvis LLM Conversational Intelligence" style="border-radius: 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); border: 1px solid rgba(255, 255, 255, 0.1);">
+</p>
+
+---
+
+### Audio Equalizer & Real-time DSP
 
 Fine-tune your listening experience via a manual 5-band Equalizer and real-time DSP settings. Toggles between System and Custom presets, features precise keyboard-editable gains, and incorporates Dynamism Enhancement to automatically boost rhythmic track punchiness with a live decibel boost monitor.
 
-<p align="center">
-  <img src="assets/EQ.gif" width="55%" alt="Audio Equalizer & DSP Panel" style="border-radius: 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); border: 1px solid rgba(255, 255, 255, 0.1);">
-</p>
-
----
-
-### Jarvis Voice Assistant
-
-Use voice controls or chat to walk similarity graphs, search tracks, manage queues, make playlists, queue recommendations, and trigger downloads — all via local keyword parsing and audio focus ducking. Say "Hello" and see what happens.
+- **Dynamic Punchiness (DSP)**: Automatically enhances output gain based on track energy and beat strength to increase dynamic punchiness of rhythmic tracks.
+- **5-Band Equalizer & Frequency Curve**: Boost or cut specific frequency bands (60Hz, 230Hz, 910Hz, 4kHz, 14kHz) with filtered System presets (Flat, Rock, Pop, Jazz, Classical, Electronic, Bass Booster, Vocal Booster) or custom response curves.
 
 <p align="center">
-  <img src="assets/idiot_example.gif" width="48%" alt="Jarvis Voice Assistant" style="border-radius: 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); border: 1px solid rgba(255, 255, 255, 0.1);">
-</p>
-
----
-
-### PCA & Covariance Analysis *(v1.1.0)*
-
-After every library rebuild the PCA engine generates four diagnostic figures (written to `<library>/pca_report/`) showing the full and pruned feature spaces. These plots expose which acoustic features survive the unsupervised Pearson correlation cleaving pass ($|r| \ge 0.85$) and how the surviving dimensions separate your tracks in the orthogonal projection.
-
-**Correlation Heatmaps** — Pearson $r$ across all 8 raw features (left: full space, right: after redundant-feature pruning):
-
-<p align="center">
-  <img src="assets/covariance_heatmap_full.png" width="48%" alt="Covariance Heatmap — Full 8-Feature Space" style="border-radius: 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); border: 1px solid rgba(255, 255, 255, 0.1);">
+  <img src="assets/eq_dsp.png" width="45%" alt="Dynamism Enhancement & Graphic EQ Curve" style="border-radius: 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); border: 1px solid rgba(255, 255, 255, 0.1);">
   &nbsp;
-  <img src="assets/covariance_heatmap_pruned.png" width="48%" alt="Covariance Heatmap — Pruned Feature Space" style="border-radius: 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); border: 1px solid rgba(255, 255, 255, 0.1);">
+  <img src="assets/eq_presets.png" width="45%" alt="5-Band Sliders & System Presets" style="border-radius: 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); border: 1px solid rgba(255, 255, 255, 0.1);">
 </p>
-
-**PCA Biplots** — Tracks projected onto PC1/PC2; arrows are feature loading vectors coloured by energy (left: full, right: pruned after cleaving):
-
-<p align="center">
-  <img src="assets/pca_scatter_full.png" width="48%" alt="PCA Biplot — Full 8-Feature Space" style="border-radius: 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); border: 1px solid rgba(255, 255, 255, 0.1);">
-  &nbsp;
-  <img src="assets/pca_scatter_pruned.png" width="48%" alt="PCA Biplot — Pruned Feature Space" style="border-radius: 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); border: 1px solid rgba(255, 255, 255, 0.1);">
-</p>
-
-See [PCA Engine & Unsupervised Feature Cleaving](./docs/Auto_Playlist_Engine.md#8-pca-engine--unsupervised-feature-redundancy-cleaving-v110) for the double-pass SVD implementation details.
 
 ---
 
@@ -122,10 +103,10 @@ Desktop playback uses Apple `AVAudioPlayer` (`AVFoundation` via dynamic `pyobjc-
 > [!IMPORTANT]
 > **Portability & Build Parity**; this project contains a modified port of `streamrip 2.1.0`. All native C-extension compilation dependencies are removed, allowing the same Python codebase to target Android (ARM64) and macOS (Intel & Apple Silicon) with zero-configuration build compatibility. ONLY Qobuz is supported.
 
-- **Acoustic Auto-Playlists**; extracts a 68-D graph embedding timbre representation (from the 88-D sound profile) combined with 10-D structural attributes. Built on a unified z-scored Euclidean space with Kaiser-truncated SVD, self-tuning Gaussian affinity reweighting, and Louvain community detection for partition constraint.
+- **Acoustic Auto-Playlists**; continuous $Z_r$ coordinate geometry derived from Kaiser-truncated SVD of 68-D timbre embeddings and scalar audio features. Candidate generation combines metadata taxonomy gating with live cosine proximity ranking to the seed track, bounded by per-artist and per-album repetition caps for cohesive, drift-free queue generation.
+- **Interactive Acoustic Network Canvas** *(v1.3.0)*; force-directed similarity graph embedded directly in the Library view with Louvain genre community clustering, density tuning, real-time speculative walk overlay trajectories, and instant queue enqueuing.
+- **Jarvis Voice & LLM Assistant**; combines offline keyword intent parsing and conversational LLM intelligence with tool-calling capabilities to search tracks, query Qobuz archives, manage queues, and trigger similarity walks.
 - **Advanced Equalizer & Real-time DSP** *(v1.2.0)*; features a manual 5-band manual equalizer with filtered System/Custom preset types, keyboard-editable gain values with validation and range clamping, and a live decibel boost monitor badge/card for real-time track Dynamism levels.
-- **Unsupervised PCA Engine** *(v1.1.0)*; double-pass SVD with automatic Pearson correlation cleaving prunes acoustically redundant scalar features before the projection is committed. The projection geometry adapts to each library. After every rebuild, five diagnostic PNG figures (full and pruned correlation heatmaps, scatter by energy, scatter by Louvain clusters) are written to `<library>/pca_report/`.
-- **Jarvis Voice Control**; parses spoken intent with boundary-anchored patterns and voice hesitation stripping to trigger similarity walks and downloads.
 - **Glassmorphic UI**; a responsive interface leveraging Flet containers, backdrop filters, custom color palettes, and transitions.
 - **SQLite Indexing**; uses an `aiosqlite` connection with WAL journaling and a 64 MB page cache to index tracks without blocking the UI thread.
 - **App Configuration**; edit Streamrip TOML settings, manage startup views, and configure theme colors directly in the application.
@@ -136,6 +117,7 @@ Desktop playback uses Apple `AVAudioPlayer` (`AVFoundation` via dynamic `pyobjc-
 
 For information on the internals of Mai-An Lab, refer to the following documentation:
 
+- [Release Notes (v1.3.0)](./docs/release_notes_v1.3.0.md)
 - [Release Notes (v1.2.0)](./docs/release_notes_v1.2.0.md)
 - [System Architecture & Database Design](./docs/Development_Reference.md#6-database-design--schema)
 - [Bridges, Pipelines & Deletion Internals](./docs/Development_Reference.md)

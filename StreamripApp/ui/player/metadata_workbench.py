@@ -777,7 +777,7 @@ class MetadataWorkbenchPane(ft.Container):
                 results,
             ], tight=True, spacing=10, width=dlg_w),
             actions=[
-                ft.TextButton("Close", on_click=lambda _e: self.app.page.pop_dialog() if self.app.page else None),
+                ft.TextButton("Close", on_click=lambda _e: self.app.dismiss_dialog(dlg)),
                 self._filled_btn("Search", lambda _e: _search()),
             ],
         )
@@ -858,11 +858,7 @@ class MetadataWorkbenchPane(ft.Container):
             except Exception as exc:
                 logger.exception("use_mb_candidate failed: %s", exc)
                 self.app.show_snackbar(f"Match failed: {exc}", color=ACCENT_RED)
-            if dlg is not None and self.app.page:
-                try:
-                    self.app.page.pop_dialog()
-                except Exception:
-                    pass
+            self.app.dismiss_dialog(dlg)
             self.expanded = None
             self.selected.discard(artist)
             self.source_cache.pop(artist, None)
@@ -1108,8 +1104,7 @@ class MetadataWorkbenchPane(ft.Container):
                     await self.db.fix_and_normalize_track_genres()
                 except Exception:
                     pass
-                if self.app.page:
-                    self.app.page.pop_dialog()
+                self.app.dismiss_dialog(dlg)
                 self.app.show_snackbar(f"Tagged {n} artists", icon=ft.Icons.CHECK_CIRCLE, color=CYAN)
                 self.selected.clear()
                 await self._reload_async()
@@ -1127,7 +1122,7 @@ class MetadataWorkbenchPane(ft.Container):
                 chips_row,
             ], tight=True, spacing=10, scroll=ft.ScrollMode.AUTO, width=360),
             actions=[
-                ft.TextButton("Cancel", on_click=lambda _e: self.app.page.pop_dialog() if self.app.page else None),
+                ft.TextButton("Cancel", on_click=lambda _e: self.app.dismiss_dialog(dlg)),
                 self._filled_btn("Apply to All", _apply),
             ],
         )

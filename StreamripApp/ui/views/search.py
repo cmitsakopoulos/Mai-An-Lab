@@ -439,22 +439,6 @@ class SearchView:
             animate_opacity=ft.Animation(250, ft.AnimationCurve.EASE_OUT),
         )
 
-        # history list
-        self._history_list = ft.ListView(spacing=8, padding=ft.Padding.symmetric(horizontal=12), scroll=ft.ScrollMode.ALWAYS)
-
-        # Recent searches sheet (instantiated once)
-        self._history_sheet = ft.BottomSheet(
-            content=ft.Container(
-                content=ft.Column([], tight=True, spacing=0),
-                padding=20,
-                bgcolor=SURFACE,
-            ),
-        )
-        self.page.overlay.append(self._history_sheet)
-
-        self._history_expanded = False
-        self._history_section = ft.Container()
-
         self._search_indicator = ft.ProgressRing(width=16, height=16, stroke_width=2, color=CYAN, visible=False)
         self._view_tabs_row = ft.Row(spacing=8)
         self._update_view_tabs()
@@ -814,29 +798,55 @@ class SearchView:
         self.app.safe_update(_mutate)
 
     def _show_recent_searches(self, e):
+        # Presented through the Flet 0.86 dialog stack (show_dialog)
+        # rather than the legacy page.overlay + `.open = True` path. The legacy
+        # path never installs the dismiss lifecycle, so a scrim tap closed the
+        # sheet in Flutter while leaving `.open` True on the Python side — and
+        # the next open, setting an already-true flag, was a silent no-op.
         from utils.search_history import load_searches
         searches = load_searches()
         if not searches: return
-        
-        def _mutate():
-            self._history_sheet.content.content.controls = [
-                ft.Text("Recent Searches", color=TEXT, size=15, weight=ft.FontWeight.W_700),
-                ft.Divider(color=BORDER),
-                *[
-                    ft.ListTile(
-                        title=ft.Text(s, color=TEXT),
-                        on_click=lambda _, q=s: self._recent_clicked(q),
-                    ) for s in searches
-                ]
-            ]
-            self._history_sheet.open = True
-        self.app.safe_update(_mutate)
+
+        # Built fresh per invocation rather than held as a long-lived field, so
+        # the control is never re-parented into a second sheet. `scroll` is
+        # mandatory here: Android's mobile ScrollBehavior renders no scrollbar
+        # without it, which is what made the list look uncollapsibly clipped.
+        self._history_list = ft.ListView(
+            spacing=2,
+            height=300,
+            padding=ft.Padding.symmetric(horizontal=12),
+            scroll=ft.ScrollMode.ALWAYS,
+            controls=[
+                ft.ListTile(
+                    leading=ft.Icon(ft.Icons.HISTORY, color=DIM, size=18),
+                    title=ft.Text(s, color=TEXT, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+                    on_click=lambda _, q=s: self._recent_clicked(q),
+                ) for s in searches
+            ],
+        )
+
+        self._history_sheet = ft.BottomSheet(
+            content=ft.Container(
+                content=ft.Column(
+                    [
+                        ft.Text("Recent Searches", color=TEXT, size=15, weight=ft.FontWeight.W_700),
+                        ft.Divider(color=BORDER),
+                        self._history_list,
+                    ],
+                    tight=True,
+                    spacing=0,
+                ),
+                padding=16,
+                bgcolor=SURFACE,
+            ),
+            bgcolor=SURFACE,
+        )
+        self.page.show_dialog(self._history_sheet)
 
     def _recent_clicked(self, query):
-        if hasattr(self, "_history_sheet"):
-            def _mutate():
-                self._history_sheet.open = False
-            self.app.safe_update(_mutate)
+        # Name the sheet: pop_dialog() would close whichever dialog is topmost,
+        # and a toast from background work counts as one.
+        self.app.dismiss_dialog(self._history_sheet)
         self._do_recent(query)
 
     def _do_recent(self, query):
