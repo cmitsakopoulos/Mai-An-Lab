@@ -1212,6 +1212,12 @@ class SettingsView:
         """Displays the main settings menu (the 'hub')."""
         if getattr(self, "_enrichment_wizard_pane", None) and self._enrichment_wizard_pane.step == 5:
             self._enrichment_wizard_pane = None
+        # Leaving a subpage has to clear the marker _show_sub_page sets, or
+        # "am I inside a subpage?" reads True forever after the first visit —
+        # which would trap back-navigation on this rung and never let it fall
+        # through to leaving the Settings tab.
+        self._current_subpage_name = None
+        self._baseline_subpage_state = None
         self._hide_save_bar()
         query = (self._search_input.value or "").strip().lower()
         self._render_hub_or_search(query)

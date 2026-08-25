@@ -20,6 +20,7 @@ StreamripApp/binaries/
 # Runtime Data and Sensitive Config
 StreamripApp/history.json
 StreamripApp/recent_searches.json
+StreamripApp/chat_history.json
 StreamripApp/storage/
 StreamripApp/requirements.txt.bak
 *.log

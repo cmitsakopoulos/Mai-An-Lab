@@ -885,6 +885,7 @@ class StreamripFletApp:
                 "eq_drag": "light",
                 "swipe_queue": "medium",
                 "swipe_dismiss": "medium",
+                "swipe_back": "light",
                 "long_press": "heavy",
                 "network_tap": "selection",
                 "network_reseed": "medium",
@@ -1007,6 +1008,13 @@ class StreamripFletApp:
             if not self._show_jarvis and self._current_tab == 0:
                 self._current_tab = 2 # Fallback to Library if Jarvis is disabled
 
+        # Where back-navigation out of Settings returns to. Settings (tab 3) is
+        # entered from every other tab but has no NavigationBar destination of
+        # its own — _switch_tab even blanks the nav indicator while it's open —
+        # so the originating tab has to be remembered or there is no way back.
+        # Never point this at Settings itself, or back becomes a no-op.
+        self._previous_tab = self._current_tab if self._current_tab != 3 else 2
+
         # Build views (Jarvis, Search, Library, Settings)
         view_builders = [
             self.assistant_view.build,
@@ -1126,37 +1134,95 @@ class StreamripFletApp:
         else:
             self.haptic = None
             
+        # ── System back navigation ───────────────────────────────────────────
+        # Flet 0.86 wraps EVERY view — the automatic root view included — in a
+        # Flutter PopScope. With can_pop left at its default True, Android back
+        # pops the only route and kills the app from anywhere, including halfway
+        # down the Settings hierarchy. Setting can_pop=False makes Flutter fire
+        # on_confirm_pop instead, letting _on_confirm_pop decide whether the
+        # gesture means "go up one level" or "leave the app".
+        #
+        # This is why no page.views migration is needed: the root view already
+        # has the hook. Side effect: can_pop=False opts this view out of the
+        # Android 14+ predictive-back preview animation.
+        try:
+            root_view = self.page.views[0]
+            root_view.can_pop = False
+            root_view.on_confirm_pop = self._on_confirm_pop
+        except Exception:
+            # Never let back-wiring failure block the UI from rendering.
+            logger.exception("Failed to wire system back navigation")
+
+        # Desktop has no back gesture; Escape is the equivalent affordance.
+        if sys.platform == "darwin":
+            self.page.on_keyboard_event = self._on_keyboard
+
         # Clean up splash logo reference so the background pulsing task exits immediately
         self._splash_logo = None
-        
+
         # Initial render
         self.page.update()
 
-    def _on_swipe(self, e):
-        """Switch tabs on horizontal swipe. Negative velocity = swipe left = next tab."""
-        # FIX: Extract primary_velocity natively to prevent AttributeError
-        vx = getattr(e, "primary_velocity", 0) or 0
-        
-        # Increased threshold to 1000 to make swiping less aggressive
-        if abs(vx) < 1000:
-            return
-            
-        new_tab = self._current_tab
-        if self._show_jarvis:
-            if vx < 0 and self._current_tab < 1:
-                new_tab += 1
-            elif vx > 0 and self._current_tab > 0:
-                new_tab -= 1
-        else:
-            if vx < 0 and self._current_tab == 1:
-                new_tab = 2
-            elif vx > 0 and self._current_tab == 2:
-                new_tab = 1
-        
-        if new_tab != self._current_tab:
-            self._switch_tab(new_tab)
-            # Let safe_update handle the page.update()
-            self.safe_update(lambda: setattr(self._nav, 'selected_index', self._get_nav_index(new_tab)))
+    # ── back navigation ──────────────────────────────────────────────────────
+    def navigate_back(self) -> bool:
+        """Resolve ONE level of back-navigation. Returns True if consumed.
+
+        Single source of truth for "go up one level", so the Android system
+        back gesture and the desktop Escape key resolve identically. Any future
+        gesture affordance must call this rather than re-deriving the hierarchy.
+
+        Ordered most-nested first. Sheets and dialogs are deliberately absent:
+        Flutter already pops its own dialog/bottom-sheet routes on system back,
+        and reaching for page.pop_dialog() here would re-introduce the toast-eats
+        -the-pop hazard documented on dismiss_dialog().
+        """
+        # Settings subpage → hub. The hub is a content swap inside the Settings
+        # tab, not a separate tab, so this rung has to come first.
+        if self._current_tab == 3:
+            sv = getattr(self, "settings_view", None)
+            if sv is not None and getattr(sv, "_current_subpage_name", None):
+                sv._show_hub()
+                self.trigger_haptic("swipe_back")
+                return True
+
+            # Settings hub → whichever tab opened it.
+            target = getattr(self, "_previous_tab", 2)
+            if target == 3:
+                target = 2  # never bounce back into Settings
+            self._switch_tab(target)
+            self.trigger_haptic("swipe_back")
+            return True
+
+        # A main tab is the top of the hierarchy — nothing to go back to.
+        return False
+
+    async def _on_confirm_pop(self, e):
+        """Android system back / gesture, delivered via the root view's PopScope.
+
+        The root view is set can_pop=False so Flutter routes the gesture here
+        instead of tearing the app down. confirm_pop(False) keeps the app open
+        (we handled it); confirm_pop(True) lets Android background us normally.
+
+        confirm_pop() MUST be answered on every path: the Dart side parks on a
+        completer with a 5-minute timeout and cancels the pop if nothing arrives,
+        which would leave the user unable to leave the app at all. Hence the
+        finally, and hence the broad except.
+        """
+        consumed = False
+        try:
+            consumed = self.navigate_back()
+        except Exception:
+            logger.exception("navigate_back failed; deferring to system back")
+        finally:
+            try:
+                await self.page.views[0].confirm_pop(not consumed)
+            except Exception:
+                logger.exception("confirm_pop failed")
+
+    def _on_keyboard(self, e):
+        """Desktop equivalent of system back. Escape resolves one level."""
+        if getattr(e, "key", None) == "Escape":
+            self.navigate_back()
 
     def _get_nav_index(self, tab_index: int) -> int:
         if self._show_jarvis:
@@ -1185,6 +1251,13 @@ class StreamripFletApp:
         self._switch_tab(abs_index)
 
     def _switch_tab(self, index: int):
+        # Remember where we came from *before* the overwrite, so back-navigation
+        # out of Settings can return there. Guarded on the outgoing tab not
+        # already being Settings: re-entering Settings from Settings (a deep
+        # link like library.py's Storage jump) must not make this self-referential.
+        if index == 3 and self._current_tab != 3:
+            self._previous_tab = self._current_tab
+
         self._current_tab = index
 
         if index == 0:
