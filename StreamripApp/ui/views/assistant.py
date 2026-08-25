@@ -107,6 +107,13 @@ class AssistantView:
         self._stt_listening = False
         self._mic_pressed = False
 
+        self._settings_btn = ft.IconButton(
+            icon=ft.Icons.SETTINGS_OUTLINED,
+            icon_color=CYAN,
+            tooltip="Settings",
+            on_click=lambda _e: self.app._switch_tab(3),
+        )
+
         self._tts_toggle = ft.IconButton(
             icon=ft.Icons.VOLUME_UP_ROUNDED,
             icon_color=CYAN,
@@ -148,6 +155,7 @@ class AssistantView:
                             ft.Text("JARVIS", color=TEXT, size=13,
                                     weight=ft.FontWeight.W_700),
                             ft.Container(expand=True),
+                            self._settings_btn,
                             self._clear_btn,
                             self._tts_toggle,
                         ],
