@@ -31,12 +31,15 @@
 # the library since then, launch the app once before rebuilding so it re-exports.
 # ==============================================================================
 
+set -o pipefail
+
 PACKAGE="com.mitsakopoulos.maianlab.mai_an_lab"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DL_DIR="/sdcard/Download"
 IMPORT_ZIP="$DL_DIR/mai_an_lab_state_import.zip"
 BACKUP_DIR="$SCRIPT_DIR/../tools/state_backups"
 APPRAISE="$SCRIPT_DIR/../tools/appraise_state_bundle.py"
+APK="$SCRIPT_DIR/build/apk/mai-an-lab.apk"
 
 FORCE=0
 for arg in "$@"; do
@@ -49,25 +52,24 @@ for arg in "$@"; do
 done
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
-require_device() {
-    if [ "$(adb get-state 2>/dev/null)" != "device" ]; then
-        echo "ERROR: no Android device in 'device' state (check 'adb devices')."
-        exit 1
-    fi
-}
+# require_device(), die() and $ADB resolution live in _adb_common.sh, shared with
+# build_android.sh so both scripts pin the same adb binary and diagnose a missing
+# phone identically (cable vs. unauthorised vs. offline vs. wireless).
+# shellcheck source=_adb_common.sh
+source "$SCRIPT_DIR/_adb_common.sh"
 
 # Newest state snapshot on the device, wherever the app wrote it (Downloads OR
 # the user's music/library folder). Searches shared storage shallowly, sorts by
 # mtime, prints the winning path (empty if none). `while read` + IFS handles the
 # rare spaced library-folder path; toybox find/stat ship the flags used here.
 discover_snapshot() {
-    adb shell 'find /storage/emulated/0 -maxdepth 4 -name mai_an_lab_state_latest.zip 2>/dev/null | while IFS= read -r f; do stat -c "%Y %n" "$f" 2>/dev/null; done' \
+    "$ADB" shell 'find /storage/emulated/0 -maxdepth 4 -name mai_an_lab_state_latest.zip 2>/dev/null | while IFS= read -r f; do stat -c "%Y %n" "$f" 2>/dev/null; done' \
         | tr -d '\r' | sort -rn | head -1 | cut -d' ' -f2-
 }
 
 snapshot_mtime() {
     # Epoch mtime of a device file, or 0 if absent/unreadable.
-    adb shell "stat -c %Y \"$1\" 2>/dev/null" | tr -d '\r' | head -1 | grep -E '^[0-9]+$' || echo 0
+    "$ADB" shell "stat -c %Y \"$1\" 2>/dev/null" | tr -d '\r' | head -1 | grep -E '^[0-9]+$' || echo 0
 }
 
 confirm_or_force() {
@@ -94,7 +96,7 @@ else
     mkdir -p "$BACKUP_DIR"
     TS="$(date +%Y%m%d_%H%M%S)"
     HOST_SNAP="$BACKUP_DIR/mai_an_lab_state_$TS.zip"
-    if ! adb pull "$SNAP" "$HOST_SNAP" >/dev/null 2>&1; then
+    if ! "$ADB" pull "$SNAP" "$HOST_SNAP" >/dev/null 2>&1; then
         echo "WARNING: failed to pull snapshot to host for appraisal."
         HOST_SNAP=""
     fi
@@ -110,7 +112,7 @@ else
     if [ "$APPRAISE_RC" -eq 0 ]; then
         # Good bundle → stage as the auto-import in Downloads (the app's import
         # hook looks there, and Downloads survives uninstall wherever SNAP was).
-        adb shell cp "$SNAP" "$IMPORT_ZIP"
+        "$ADB" shell "cp \"$SNAP\" \"$IMPORT_ZIP\"" || die "failed to stage the snapshot; aborting before the destructive uninstall."
         STAGED=1
         echo "Staged snapshot -> $IMPORT_ZIP (DSP features reinjected after reinstall)."
     else
@@ -122,13 +124,14 @@ else
 fi
 
 # ── 2. Resolve local paths ───────────────────────────────────────────────────
-python3 configure_paths.py
+python3 configure_paths.py || die "configure_paths.py failed — pyproject.toml may still point at a stale extension path."
 
 # ── 3. Recompile the APK from scratch ────────────────────────────────────────
 echo "Starting fresh Flet build..."
 
-# Kill any hung java/gradle processes (Android build locks)
-pkill -9 java || true
+# Kill hung Gradle daemons holding the Android build locks. Scoped to Gradle:
+# a blanket `pkill -9 java` also takes out unrelated IDEs and language servers.
+pkill -9 -f "GradleDaemon" 2>/dev/null || true
 
 # Clean the previous build output. `flet clean` is the 0.86 replacement for the
 # deprecated `flet build --clear-cache`; it removes the whole build/ dir
@@ -138,27 +141,54 @@ echo "Cleaning previous build output (flet clean)..."
 flet clean || rm -rf build
 rm -rf .gradle
 
+# Stamp the build start so the apk can be proven fresh by mtime below.
+STAMP="$(mktemp -t maianlab_build_stamp)"
+
 # Execute Flet build (release APK by default — see `libapp.so` AOT in the apk).
 export SERIOUS_PYTHON_VERSION=3.12
 flet build apk -v --yes
+BUILD_RC=$?
 
-# ── 4. Reinstall (uninstall = clean slate; public snapshot copies untouched) ──
-adb uninstall "$PACKAGE" || true
-adb install build/apk/mai-an-lab.apk
+# ── 4. Gate the DESTRUCTIVE step on a build that actually produced an apk ────
+# Step 5 uninstalls the app, which erases its private DB. Previously nothing
+# checked the build first, so a failed build still ran the uninstall and then
+# failed to install anything — leaving the phone with NO app at all and the
+# state surviving only as the staged zip. Refuse to cross that line without a
+# verified-fresh apk in hand.
+if [ "$BUILD_RC" -ne 0 ]; then
+    rm -f "$STAMP"
+    die "flet build failed (exit $BUILD_RC). The app on your phone is untouched."
+fi
+if [ ! -f "$APK" ]; then
+    rm -f "$STAMP"
+    die "build reported success but $APK does not exist. App untouched."
+fi
+if [ ! "$APK" -nt "$STAMP" ]; then
+    rm -f "$STAMP"
+    die "$APK predates this build — refusing to wipe the app for stale code."
+fi
+rm -f "$STAMP"
 
-# ── 5. Reinject: grant permissions + relaunch to auto-import ─────────────────
+# ── 5. Reinstall (uninstall = clean slate; public snapshot copies untouched) ──
+# Re-check the device: the build takes minutes and a link that drops in that
+# window turned the whole reinstall into a silent no-op.
+require_device
+"$ADB" uninstall "$PACKAGE" || true
+"$ADB" install "$APK" || die "install FAILED after uninstall — the phone now has no app. Re-run once the device is stable; your state is safe in $IMPORT_ZIP and $BACKUP_DIR."
+
+# ── 6. Reinject: grant permissions + relaunch to auto-import ─────────────────
 # A fresh install resets runtime permissions. All-files access is required for
 # the first boot to read the staged bundle from /sdcard/Download; the rest are
 # dev quality-of-life so you skip the on-device permission prompts.
-adb shell appops set "$PACKAGE" MANAGE_EXTERNAL_STORAGE allow || true
-adb shell pm grant "$PACKAGE" android.permission.READ_EXTERNAL_STORAGE 2>/dev/null || true
-adb shell pm grant "$PACKAGE" android.permission.POST_NOTIFICATIONS 2>/dev/null || true
-adb shell pm grant "$PACKAGE" android.permission.RECORD_AUDIO 2>/dev/null || true
+"$ADB" shell appops set "$PACKAGE" MANAGE_EXTERNAL_STORAGE allow || true
+"$ADB" shell pm grant "$PACKAGE" android.permission.READ_EXTERNAL_STORAGE 2>/dev/null || true
+"$ADB" shell pm grant "$PACKAGE" android.permission.POST_NOTIFICATIONS 2>/dev/null || true
+"$ADB" shell pm grant "$PACKAGE" android.permission.RECORD_AUDIO 2>/dev/null || true
 
 # Launch; the startup hook imports mai_an_lab_state_import.zip (replacing
 # library.db, so DSP features + coords ride back in), rebuilds the similarity
 # graph, then deletes the bundle.
-adb shell monkey -p "$PACKAGE" -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1
+"$ADB" shell monkey -p "$PACKAGE" -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1
 echo "Relaunched."
 
 if [ "$STAGED" -ne 1 ]; then
@@ -168,7 +198,7 @@ fi
 
 echo "The app is reinjecting your state + rebuilding the graph on boot."
 
-# ── 6. Verify: confirm the features/graph actually landed ────────────────────
+# ── 7. Verify: confirm the features/graph actually landed ────────────────────
 # Wait for a FRESH snapshot (newer than the pre-rebuild one) — it only appears
 # once the reinstalled app has booted, imported, and re-exported.
 echo "Waiting for the app to re-export a post-import snapshot (up to ~150s)..."
@@ -187,7 +217,7 @@ done
 
 if [ -n "$NEW_SNAP" ] && [ -f "$APPRAISE" ]; then
     VERIFY="$BACKUP_DIR/mai_an_lab_state_postimport.zip"
-    if adb pull "$NEW_SNAP" "$VERIFY" >/dev/null 2>&1; then
+    if "$ADB" pull "$NEW_SNAP" "$VERIFY" >/dev/null 2>&1; then
         echo "--- post-import appraisal (on the freshly-built app) -------------------"
         python3 "$APPRAISE" "$VERIFY"
         echo "------------------------------------------------------------------------"
