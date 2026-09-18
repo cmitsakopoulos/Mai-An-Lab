@@ -121,9 +121,10 @@ logger = logging.getLogger(__name__)
 
 import ui.tokens as _tokens
 from ui.tokens import (
-    BG, SURFACE, SURFACE2, CYAN, AMBER, TEXT, DIM, BORDER, SOURCE_COLORS,
+    BG, SURFACE, SURFACE2, SURFACE_ELEVATED, CYAN, AMBER, TEXT, DIM, BORDER,
+    BORDER_SUBTLE, RADIUS_CARD, RADIUS_PILL, SOURCE_COLORS,
     LIB_ARTIST_COLOR, LIB_ALBUM_COLOR, LIB_TRACK_COLOR, LIB_PLAYLIST_COLOR, LIB_PARTITION_COLOR,
-    apply_opacity
+    apply_opacity, LEGACY_ACCENT_MAP
 )
 
 def _apply_accent(color: str) -> None:
@@ -315,8 +316,9 @@ class StreamripFletApp:
 
     async def _pulse_splash(self):
         """Triggers a smooth opacity pulse on the splash logo."""
-        while getattr(self, '_splash_logo', None) is not None and self._splash_logo.page:
+        while getattr(self, '_splash_logo', None) is not None:
             try:
+                _ = self._splash_logo.page
                 self._splash_logo.opacity = 0.3 if self._splash_logo.opacity == 1.0 else 1.0
                 self._splash_logo.update()
                 await asyncio.sleep(0.8)
@@ -350,7 +352,8 @@ class StreamripFletApp:
                 
             cfg = load_config()
             appearance = cfg.get("appearance", {})
-            acc_color = appearance.get("accent_color", "#FFD600")
+            raw_color = appearance.get("accent_color", "#FFD60A")
+            acc_color = LEGACY_ACCENT_MAP.get(raw_color.upper(), raw_color)
             self.nav_indicator_color = appearance.get("nav_indicator_color", acc_color + "33")
             _apply_accent(acc_color)
         except: pass
@@ -809,7 +812,10 @@ class StreamripFletApp:
             except: pass
             
             # Clear in-memory caches
-            self.db_manager.clear_caches()
+            if hasattr(self, "db_manager") and self.db_manager:
+                res = self.db_manager.clear_caches()
+                if asyncio.iscoroutine(res):
+                    await res
             if hasattr(self, "library_view") and self.library_view:
                 self.library_view._tracks_cache = None
                 self.library_view._tracks_cache_key = None
@@ -1054,22 +1060,24 @@ class StreamripFletApp:
             )
         destinations.extend([
             ft.NavigationBarDestination(
-                icon=ft.Icons.SEARCH_OUTLINED,
-                selected_icon=ft.Icons.SEARCH,
+                icon=ft.Icons.SEARCH_ROUNDED,
+                selected_icon=ft.Icons.SEARCH_ROUNDED,
                 label="Search",
             ),
             ft.NavigationBarDestination(
                 icon=ft.Icons.LIBRARY_MUSIC_OUTLINED,
-                selected_icon=ft.Icons.LIBRARY_MUSIC,
+                selected_icon=ft.Icons.LIBRARY_MUSIC_ROUNDED,
                 label="Library",
             ),
         ])
 
-        # Navigation bar
+        # Navigation bar - Apple style tab bar (no M3 capsule pill, subtle border)
         self._nav = ft.NavigationBar(
             selected_index=self._get_nav_index(self._current_tab),
             bgcolor=SURFACE,
-            indicator_color=CYAN + "55",
+            indicator_color="transparent",
+            elevation=0,
+            border=ft.Border(top=ft.BorderSide(0.5, BORDER_SUBTLE)),
             label_behavior=ft.NavigationBarLabelBehavior.ALWAYS_SHOW,
             destinations=destinations,
             on_change=self._on_nav_change,
@@ -1979,14 +1987,20 @@ class StreamripFletApp:
         dur = audio_engine.duration
         pct = (position / dur * 100) if dur > 0 else 0
 
-        if self.mini_player.container and self.mini_player.container.page:
-            self.mini_player.update_progress(pct)
-            self.mini_player.container.update()
+        try:
+            if self.mini_player.container and self.mini_player.container.page:
+                self.mini_player.update_progress(pct)
+                self.mini_player.container.update()
+        except Exception:
+            pass
 
-        if self.now_playing.container and self.now_playing.container.open:
-            self.now_playing.update_progress(position, dur)
-            if self.now_playing.container.page:
-                self.now_playing.container.update()
+        try:
+            if self.now_playing.container and self.now_playing.container.open:
+                self.now_playing.update_progress(position, dur)
+                if self.now_playing.container.page:
+                    self.now_playing.container.update()
+        except Exception:
+            pass
 
     def _on_duration(self, _instance, duration: float):
         # Duration is invariant during playback of a single track, so the
@@ -2002,9 +2016,12 @@ class StreamripFletApp:
             self._last_play_duration = dur_f
         if self.is_background:
             return
-        self.now_playing.update_duration(duration)
-        if self.now_playing.container and self.now_playing.container.open and self.now_playing.container.page:
-            self.now_playing.container.update()
+        try:
+            self.now_playing.update_duration(duration)
+            if self.now_playing.container and self.now_playing.container.open and self.now_playing.container.page:
+                self.now_playing.container.update()
+        except Exception:
+            pass
 
     def _on_is_playing(self, _instance, is_playing: bool):
         if self.is_background:
@@ -3309,22 +3326,24 @@ async def main(page: ft.Page):
     
     # Configure custom fonts
     font_path = "assets/Outfit-Regular.ttf"
+    nav_bar_theme = ft.NavigationBarTheme(
+        bgcolor=SURFACE,
+        indicator_color="transparent",
+        elevation=0,
+        label_text_style=ft.TextStyle(size=11, weight=ft.FontWeight.W_500),
+    )
     if os.path.exists(font_path):
         page.fonts = {"Outfit": font_path}
         page.theme = ft.Theme(
             font_family="Outfit",
             scrollbar_theme=scrollbar_theme,
-            navigation_bar_theme=ft.NavigationBarTheme(
-                label_text_style=ft.TextStyle(size=12),
-            )
+            navigation_bar_theme=nav_bar_theme,
         )
     else:
         logger.warning("Font asset missing, using system default")
         page.theme = ft.Theme(
             scrollbar_theme=scrollbar_theme,
-            navigation_bar_theme=ft.NavigationBarTheme(
-                label_text_style=ft.TextStyle(size=12),
-            )
+            navigation_bar_theme=nav_bar_theme,
         )
     
     try:

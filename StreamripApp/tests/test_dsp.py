@@ -374,11 +374,11 @@ class TestSettingsEqualizerUI(unittest.TestCase):
         
         class DummyControl:
             def __init__(self, *args, **kwargs):
-                self.visible = True
-                self.value = ""
-                self.content = MagicMock()
-                self.controls = MagicMock()
-                self.options = []
+                self.visible = kwargs.get("visible", True)
+                self.value = kwargs.get("value", "")
+                self.content = kwargs.get("content", MagicMock())
+                self.controls = kwargs.get("controls", MagicMock())
+                self.options = kwargs.get("options", [])
             def update(self):
                 pass
             def __getattr__(self, name):

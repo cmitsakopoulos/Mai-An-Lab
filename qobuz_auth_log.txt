@@ -1,0 +1,10 @@
+Login Attempt Started (endpoint=user/get)
+Config path: /Users/chrismitsacopoulos/Desktop/Mai-An-Lab/StreamripApp/.flet/storage/data/Library/Application Support/streamrip/config.toml
+use_auth_token: True
+email_or_userid: 2759740
+password_or_token length: 86
+app_id: 950096963
+
+API Response from user/get:
+Status: 401
+Body: {'status': 'error', 'code': 401, 'message': 'User authentication is required (Root=1-6aad9f51-5e06790b61df586549af0d6c)'}

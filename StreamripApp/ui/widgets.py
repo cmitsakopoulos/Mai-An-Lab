@@ -6,7 +6,10 @@ import platform
 import threading
 import subprocess
 import flet as ft
-from ui.tokens import BG, SURFACE, SURFACE2, CYAN, AMBER, TEXT, DIM, BORDER, SOURCE_COLORS, apply_opacity
+from ui.tokens import (
+    BG, SURFACE, SURFACE2, SURFACE_ELEVATED, CYAN, AMBER, TEXT, DIM, TEXT_TERTIARY,
+    BORDER, BORDER_SUBTLE, RADIUS_CARD, RADIUS_PILL, RADIUS_THUMB, SOURCE_COLORS, apply_opacity
+)
 
 logger = logging.getLogger(__name__)
 
@@ -67,15 +70,11 @@ def pick_folder(title="Select Folder") -> str | None:
     system = platform.system()
     
     if system == "Darwin":  # macOS
-        script = f'''
-        tell application "System Events" to activate
-        set f to choose folder with prompt "{title}"
-        return POSIX path of f
-        '''
+        script = f'POSIX path of (choose folder with prompt "{title}")'
         try:
             result = subprocess.run(
                 ["osascript", "-e", script],
-                capture_output=True, text=True, timeout=30
+                capture_output=True, text=True, timeout=20
             )
             if result.returncode == 0:
                 return result.stdout.strip() or None
@@ -187,14 +186,14 @@ class NotificationSystem:
                     spacing=12, tight=True,
                     vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 ),
-                bgcolor=SURFACE2,
+                bgcolor=SURFACE,
                 behavior=ft.SnackBarBehavior.FLOATING,
                 show_close_icon=True,
                 close_icon_color=DIM,
                 duration=3000,
                 margin=ft.Margin.all(12),
-                padding=ft.Padding.symmetric(horizontal=14, vertical=10),
-                shape=ft.RoundedRectangleBorder(radius=12),
+                padding=ft.Padding.symmetric(horizontal=16, vertical=12),
+                shape=ft.RoundedRectangleBorder(radius=RADIUS_PILL, side=ft.BorderSide(1, BORDER_SUBTLE)),
             )
             self._current = sb
             try:
@@ -234,7 +233,7 @@ class ScaleButton(ft.GestureDetector):
         self._inner = ft.Container(
             content=content,
             scale=ft.Scale(1.0),
-            animate_scale=ft.Animation(50, ft.AnimationCurve.EASE_OUT_QUAD),
+            animate_scale=ft.Animation(70, ft.AnimationCurve.EASE_OUT),
             expand_loose=False,   # prevent size collapsing
         )
         super().__init__(
@@ -249,17 +248,21 @@ class ScaleButton(ft.GestureDetector):
 
     def _press(self, e):
         self._inner.scale = ft.Scale(self.scale_to)
-        if self.page:
-            self.page.update()
+        try:
+            self._inner.update()
+        except Exception:
+            pass
 
     def _release(self, e):
         self._inner.scale = ft.Scale(1.0)
-        if self.page:
-            self.page.update()
+        try:
+            self._inner.update()
+        except Exception:
+            pass
 
 
 class OnyxButton(ScaleButton):
-    def __init__(self, text: str, icon: str = None, on_tap=None, height=50, width=None, text_size=14, padding=None, **kwargs):
+    def __init__(self, text: str, icon: str = None, on_tap=None, height=44, width=None, text_size=13, padding=None, **kwargs):
         content_row = ft.Row(
             [
                 ft.Icon(icon, color=BG, size=16 if text_size < 13 else 18 if text_size < 14 else 20) if icon else ft.Container(),
@@ -276,7 +279,7 @@ class OnyxButton(ScaleButton):
                 height=height,
                 width=width,
                 padding=padding or (ft.Padding.symmetric(horizontal=16, vertical=8) if width is None else None),
-                border_radius=12,
+                border_radius=RADIUS_PILL,
                 alignment=ft.Alignment(0, 0),
             ),
             on_tap=on_tap,
@@ -288,10 +291,10 @@ class GlassCard(ft.Container):
     def __init__(self, content, **kwargs):
         super().__init__(
             content=content,
-            bgcolor="#0DFFFFFF",
-            border_radius=16,
+            bgcolor=SURFACE,
+            border_radius=RADIUS_CARD,
             padding=20,
-            border=ft.Border.all(1, "#1AFFFFFF"),
+            border=ft.Border.all(1, BORDER_SUBTLE),
             **kwargs
         )
 
@@ -334,7 +337,7 @@ class AppSearchBar(ft.Container):
             bgcolor=SURFACE2,
             border_radius=12,
             padding=ft.Padding.symmetric(horizontal=12),
-            border=ft.Border.all(1, BORDER),
+            border=ft.Border.all(1, BORDER_SUBTLE),
             animate=ft.Animation(200, ft.AnimationCurve.EASE_OUT),
         )
     def _clear(self, callback):
@@ -350,19 +353,104 @@ class AppSearchBar(ft.Container):
         self._clear_btn.visible = bool(val)
 
 
+class CupertinoSegmentedBar(ft.Container):
+    """Apple-style unified segmented control capsule."""
+    def __init__(self, segments: list[tuple[str, str, str | None, str | None]], 
+                 selected_key: str, on_change, height: int = 42, **kwargs):
+        """
+        segments: list of (key, label, icon_name, opt_color)
+        """
+        self.segments = segments
+        self.selected_key = selected_key
+        self.on_change = on_change
+        self._buttons = []
+        
+        button_controls = []
+        for key, label, icon, col in segments:
+            is_active = (key == selected_key)
+            accent = col or CYAN
+            
+            icon_ctrl = ft.Icon(icon, color=accent if is_active else DIM, size=15) if icon else None
+            text_ctrl = ft.Text(
+                label,
+                size=11,
+                weight=ft.FontWeight.W_600 if is_active else ft.FontWeight.W_500,
+                color=TEXT if is_active else DIM,
+                no_wrap=True,
+            )
+            
+            inner_row = ft.Row(
+                [icon_ctrl, text_ctrl] if icon_ctrl else [text_ctrl],
+                spacing=4,
+                alignment=ft.MainAxisAlignment.CENTER,
+                tight=True,
+            )
+            
+            btn = ft.Container(
+                content=inner_row,
+                bgcolor=apply_opacity(0.14, accent) if is_active else "transparent",
+                border=ft.Border.all(1, apply_opacity(0.35, accent)) if is_active else None,
+                border_radius=RADIUS_PILL - 4,
+                padding=ft.Padding.symmetric(horizontal=10, vertical=6),
+                alignment=ft.Alignment(0, 0),
+                expand=True,
+                animate=ft.Animation(140, ft.AnimationCurve.EASE_OUT),
+                on_click=lambda e, k=key: self._select(k),
+            )
+            self._buttons.append((key, btn, inner_row, col))
+            button_controls.append(btn)
+            
+        super().__init__(
+            content=ft.Row(button_controls, spacing=2, expand=True),
+            bgcolor=SURFACE,
+            border=ft.Border.all(1, BORDER_SUBTLE),
+            border_radius=RADIUS_PILL,
+            padding=3,
+            height=height,
+            **kwargs
+        )
+        
+    def _apply_styles(self):
+        for k, btn, row, col in self._buttons:
+            active = (k == self.selected_key)
+            accent = col or CYAN
+            btn.bgcolor = apply_opacity(0.14, accent) if active else "transparent"
+            btn.border = ft.Border.all(1, apply_opacity(0.35, accent)) if active else None
+            for c in row.controls:
+                if isinstance(c, ft.Icon):
+                    c.color = accent if active else DIM
+                elif isinstance(c, ft.Text):
+                    c.color = TEXT if active else DIM
+                    c.weight = ft.FontWeight.W_600 if active else ft.FontWeight.W_500
+
+    def _select(self, key: str):
+        if key == self.selected_key:
+            return
+        self.selected_key = key
+        self._apply_styles()
+        self.update()
+        if self.on_change:
+            self.on_change(key)
+            
+    def set_selected(self, key: str):
+        self.selected_key = key
+        self._apply_styles()
+        self.update()
+
+
 class SourceSegment(ScaleButton):
     def __init__(self, text: str, selected=False, on_tap=None, **kwargs):
         self.selected = selected
         self.text_control = ft.Text(
-            text.upper(), color=BG if selected else TEXT, weight=ft.FontWeight.W_700, size=11
+            text.upper(), color=TEXT if selected else DIM, weight=ft.FontWeight.W_700 if selected else ft.FontWeight.W_500, size=11
         )
         super().__init__(
             content=ft.Container(
                 content=self.text_control,
-                bgcolor=CYAN if selected else "transparent",
-                border=ft.Border.all(1, CYAN if selected else BORDER),
-                border_radius=8,
-                padding=ft.Padding.symmetric(horizontal=12, vertical=8),
+                bgcolor=SURFACE_ELEVATED if selected else "transparent",
+                border=ft.Border.all(1, CYAN if selected else BORDER_SUBTLE),
+                border_radius=RADIUS_PILL,
+                padding=ft.Padding.symmetric(horizontal=12, vertical=6),
                 alignment=ft.Alignment(0, 0),
             ),
             on_tap=on_tap,
@@ -370,9 +458,10 @@ class SourceSegment(ScaleButton):
         )
     def update_state(self, selected: bool):
         self.selected = selected
-        self.content.bgcolor = CYAN if selected else "transparent"
-        self.content.border = ft.Border.all(1, CYAN if selected else BORDER)
-        self.text_control.color = BG if selected else TEXT
+        self.content.bgcolor = SURFACE_ELEVATED if selected else "transparent"
+        self.content.border = ft.Border.all(1, CYAN if selected else BORDER_SUBTLE)
+        self.text_control.color = TEXT if selected else DIM
+        self.text_control.weight = ft.FontWeight.W_700 if selected else ft.FontWeight.W_500
         self.update()
 
 
@@ -380,10 +469,11 @@ class SettingsHeader(ft.Row):
     def __init__(self, title: str, on_back=None):
         super().__init__(
             controls=[
-                ft.IconButton(icon=ft.Icons.ARROW_BACK, icon_color=CYAN, on_click=on_back),
-                ft.Text(title, size=24, weight=ft.FontWeight.W_700, color=TEXT),
+                ft.IconButton(icon=ft.Icons.ARROW_BACK_IOS_NEW_ROUNDED, icon_color=CYAN, icon_size=18, on_click=on_back),
+                ft.Text(title, size=22, weight=ft.FontWeight.W_700, color=TEXT),
             ],
-            spacing=12,
+            spacing=10,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
 
 
@@ -394,14 +484,15 @@ class HubSettingItem(ScaleButton):
                 content=ft.Row([
                     ft.Icon(icon, color=CYAN, size=22),
                     ft.Column([
-                        ft.Text(title, color=TEXT, size=15, weight=ft.FontWeight.W_700),
+                        ft.Text(title, color=TEXT, size=15, weight=ft.FontWeight.W_600),
                         ft.Text(subtitle, color=DIM, size=12),
                     ], spacing=2, expand=True),
-                    ft.Icon(ft.Icons.CHEVRON_RIGHT, color=DIM, opacity=0.25, size=18),
+                    ft.Icon(ft.Icons.CHEVRON_RIGHT_ROUNDED, color=DIM, opacity=0.4, size=18),
                 ], spacing=16),
-                bgcolor="#0DFFFFFF",
+                bgcolor=SURFACE,
+                border=ft.Border.all(1, BORDER_SUBTLE),
                 padding=ft.Padding.symmetric(horizontal=16, vertical=12),
-                border_radius=14,
+                border_radius=RADIUS_CARD,
             ),
             on_tap=on_tap,
         )
@@ -419,14 +510,14 @@ class AccordionCard(ft.Column):
             padding=ft.Padding.only(left=16, right=16, bottom=14, top=4),
         )
         self.chevron = ft.Icon(
-            ft.Icons.KEYBOARD_ARROW_DOWN if initially_open else ft.Icons.CHEVRON_RIGHT,
-            color=DIM, opacity=0.35, size=18
+            ft.Icons.KEYBOARD_ARROW_DOWN_ROUNDED if initially_open else ft.Icons.CHEVRON_RIGHT_ROUNDED,
+            color=DIM, opacity=0.4, size=18
         )
         toggle_zone = ft.Container(
             content=ft.Row([
                 ft.Icon(icon, color=CYAN, size=22),
                 ft.Column([
-                    ft.Text(title, color=TEXT, size=15, weight=ft.FontWeight.W_700),
+                    ft.Text(title, color=TEXT, size=15, weight=ft.FontWeight.W_600),
                     ft.Text(subtitle, color=DIM, size=12),
                 ], spacing=2, expand=True),
                 self.chevron,
@@ -446,14 +537,19 @@ class AccordionCard(ft.Column):
         else:
             header = toggle_zone
         super().__init__(
-            controls=[ft.Container(content=ft.Column([header, self.content_area], spacing=0), bgcolor="#0DFFFFFF", border_radius=14)],
+            controls=[ft.Container(
+                content=ft.Column([header, self.content_area], spacing=0),
+                bgcolor=SURFACE,
+                border=ft.Border.all(1, BORDER_SUBTLE),
+                border_radius=RADIUS_CARD,
+            )],
             spacing=0,
         )
 
     def toggle(self, _e):
         self.is_open = not self.is_open
         self.content_area.visible = self.is_open
-        self.chevron.icon = ft.Icons.KEYBOARD_ARROW_DOWN if self.is_open else ft.Icons.CHEVRON_RIGHT
+        self.chevron.icon = ft.Icons.KEYBOARD_ARROW_DOWN_ROUNDED if self.is_open else ft.Icons.CHEVRON_RIGHT_ROUNDED
         if self.on_toggle:
             self.on_toggle(self.is_open)
         self.update()
@@ -503,8 +599,8 @@ def build_page_ghost_top(on_click) -> ft.Control:
         ),
         height=48,
         alignment=ft.Alignment(0, 0),
-        bgcolor=apply_opacity(0.03, CYAN),
-        border=ft.Border.all(1, apply_opacity(0.08, CYAN)),
+        bgcolor=apply_opacity(0.10, CYAN),
+        border=ft.Border.all(1, apply_opacity(0.25, CYAN)),
         border_radius=12,
         margin=ft.Margin.only(bottom=12),
         on_click=on_click,
@@ -524,8 +620,8 @@ def build_page_ghost_bottom(on_click) -> ft.Control:
         ),
         height=48,
         alignment=ft.Alignment(0, 0),
-        bgcolor=apply_opacity(0.03, CYAN),
-        border=ft.Border.all(1, apply_opacity(0.08, CYAN)),
+        bgcolor=apply_opacity(0.10, CYAN),
+        border=ft.Border.all(1, apply_opacity(0.25, CYAN)),
         border_radius=12,
         margin=ft.Margin.only(top=12),
         on_click=on_click,

@@ -9,7 +9,7 @@ import flet as ft
 import flet.canvas as cv
 from ui.tokens import (
     BG, SURFACE, SURFACE2, CYAN, AMBER, TEXT, DIM, BORDER, apply_opacity,
-    lerp_hex
+    lerp_hex, LEGACY_ACCENT_MAP
 )
 from ui.widgets import OnyxButton, HubSettingItem, pick_folder
 
@@ -472,6 +472,15 @@ class SettingsView:
             on_select=lambda e: (self._save_general_settings(), self._on_appearance_change(e)),
             **common_style
         )
+        self._pill_style_dropdown = ft.Dropdown(
+            label="Library Pill Styling",
+            options=[
+                ft.dropdown.Option(key="category", text="Category Tints (Curated Apple Glow)"),
+                ft.dropdown.Option(key="unified", text="Unified Accent (Monochrome Glow)"),
+            ],
+            on_select=self._on_appearance_change,
+            **common_style
+        )
 
         # Landing Page Customization
         self._show_most_listened_switch = ft.Switch(value=True, active_color=CYAN, on_change=self._on_appearance_change)
@@ -776,28 +785,26 @@ class SettingsView:
             return {
                 "startup_page": getattr(self, "_startup_page_dropdown", None) and self._startup_page_dropdown.value,
                 "default_sort": getattr(self, "_default_sort_dropdown", None) and self._default_sort_dropdown.value,
-                "most_listened": getattr(self, "_show_most_listened_switch", None) and self._show_most_listened_switch.value,
-                "library_stats": getattr(self, "_show_library_stats_switch", None) and self._show_library_stats_switch.value,
-                "jarvis": getattr(self, "_show_jarvis_switch", None) and self._show_jarvis_switch.value,
-                "network": getattr(self, "_show_network_switch", None) and self._show_network_switch.value,
-                "playlists": getattr(self, "_show_playlists_switch", None) and self._show_playlists_switch.value,
-                "artists": getattr(self, "_show_artists_switch", None) and self._show_artists_switch.value,
-                "albums": getattr(self, "_show_albums_switch", None) and self._show_albums_switch.value,
-                "tracks": getattr(self, "_show_tracks_switch", None) and self._show_tracks_switch.value,
+                "pill_style": getattr(self, "_pill_style_dropdown", None) and self._pill_style_dropdown.value,
+                "most_listened": bool(getattr(self, "_show_most_listened_switch", None) and self._show_most_listened_switch.value),
+                "library_stats": bool(getattr(self, "_show_library_stats_switch", None) and self._show_library_stats_switch.value),
+                "jarvis": bool(getattr(self, "_show_jarvis_switch", None) and self._show_jarvis_switch.value),
+                "network": bool(getattr(self, "_show_network_switch", None) and self._show_network_switch.value),
+                "playlists": bool(getattr(self, "_show_playlists_switch", None) and self._show_playlists_switch.value),
+                "artists": bool(getattr(self, "_show_artists_switch", None) and self._show_artists_switch.value),
+                "albums": bool(getattr(self, "_show_albums_switch", None) and self._show_albums_switch.value),
+                "tracks": bool(getattr(self, "_show_tracks_switch", None) and self._show_tracks_switch.value),
                 "accent_color": getattr(self, "_selected_accent_color", None),
             }
-        elif subpage_name == "Audio & DSP":
-            gains = [round(b.get("gain", 0.0), 1) for b in getattr(self, "_eq_bands", [])]
-            return {
-                "dynamism": getattr(self, "_dynamism_switch", None) and self._dynamism_switch.value,
-                "equaliser": getattr(self, "_equaliser_switch", None) and self._equaliser_switch.value,
-                "preset_type": getattr(self, "_eq_preset_type_radio", None) and self._eq_preset_type_radio.value,
-                "preset": getattr(self, "_eq_preset_dropdown", None) and self._eq_preset_dropdown.value,
-                "gains": gains,
-            }
         return {}
-
-    def _check_dirty(self, subpage_name: str, on_save_handler=None, label="SAVE CHANGES", icon=ft.Icons.SAVE_ROUNDED):
+    def _check_dirty(self, subpage_name: str, on_save_handler=None, label="SAVE CHANGES", icon=ft.Icons.SAVE_ROUNDED, event=None):
+        if event and hasattr(event, "control") and hasattr(event, "data") and event.data is not None:
+            if isinstance(event.data, str) and event.data.lower() in ("true", "false"):
+                event.control.value = (event.data.lower() == "true")
+            elif isinstance(event.data, bool):
+                event.control.value = event.data
+            else:
+                event.control.value = event.data
         current_state = self._get_subpage_state(subpage_name)
         baseline_state = getattr(self, "_baseline_subpage_state", None)
         if baseline_state is not None and current_state != baseline_state:
@@ -905,7 +912,7 @@ class SettingsView:
                 keywords=[
                     "accent", "color", "theme", "dark", "light", "visual", "ui",
                     "appearance", "font", "startup", "sort", "landing", "default sort",
-                    "history", "stats", "display", "style"
+                    "history", "stats", "display", "style", "pill", "pills", "tabs", "glow"
                 ]
             ),
             SettingSearchEntry(
@@ -1243,7 +1250,7 @@ class SettingsView:
 
     def _build_auth_group(self):
         # Attach dirty listeners
-        save_cb = lambda _e=None: self._check_dirty("Account", self._save_qobuz_credentials, label="SAVE CREDENTIALS", icon=ft.Icons.KEY_ROUNDED)
+        save_cb = lambda e=None: self._check_dirty("Account", self._save_qobuz_credentials, label="SAVE CREDENTIALS", icon=ft.Icons.KEY_ROUNDED, event=e)
         for field in [self._qobuz_user_id_field, self._qobuz_token_field, self._qobuz_app_id_field, self._qobuz_app_secret_field]:
             field.on_change = save_cb
         self._qobuz_use_token_switch.on_change = save_cb
@@ -1312,7 +1319,7 @@ class SettingsView:
 
     def _build_storage_group(self):
         # Attach dirty listeners
-        save_cb = lambda _e=None: self._check_dirty("Storage", self._save_paths, label="SAVE PATHS", icon=ft.Icons.FOLDER_ROUNDED)
+        save_cb = lambda e=None: self._check_dirty("Storage", self._save_paths, label="SAVE PATHS", icon=ft.Icons.FOLDER_ROUNDED, event=e)
         self._dl_path_field.on_change = save_cb
         self._lib_path_field.on_change = save_cb
 
@@ -1369,9 +1376,10 @@ class SettingsView:
         ], spacing=16)
 
     def _build_appearance_group(self):
-        save_cb = lambda _e=None: self._check_dirty("Appearance", self._save_appearance_settings, label="SAVE APPEARANCE SETTINGS", icon=ft.Icons.PALETTE_ROUNDED)
+        save_cb = lambda e=None: self._check_dirty("Appearance", self._save_appearance_settings, label="SAVE APPEARANCE SETTINGS", icon=ft.Icons.PALETTE_ROUNDED, event=e)
         self._startup_page_dropdown.on_select = save_cb
         self._default_sort_dropdown.on_select = save_cb
+        self._pill_style_dropdown.on_select = save_cb
         self._show_most_listened_switch.on_change = save_cb
         self._show_library_stats_switch.on_change = save_cb
         self._show_jarvis_switch.on_change = save_cb
@@ -1385,6 +1393,7 @@ class SettingsView:
             ft.Text("Customize how the app looks and behaves on startup.", color=DIM, size=12),
             self._startup_page_dropdown,
             self._default_sort_dropdown,
+            self._pill_style_dropdown,
             ft.Divider(color=BORDER, height=20),
             ft.Text("Landing Page Sections", color=CYAN, size=12, weight=ft.FontWeight.BOLD),
             ft.Row([self._show_most_listened_switch, ft.Text("Show Most Listened Tracks", color=TEXT, size=12)], spacing=10),
@@ -1716,7 +1725,10 @@ class SettingsView:
     def _on_wipe_db_click(self):
         self.app.open_wipe_confirmation()
 
-    async def _on_debug_populate_click(self, _e):
+    def _on_debug_populate_click(self, _e):
+        self.page.run_task(self._do_debug_populate)
+
+    async def _do_debug_populate(self):
         self.app.show_snackbar("Populating random play counts...", icon=ft.Icons.STORAGE_ROUNDED)
         await self.app.db_manager.debug_populate_play_counts()
         self.app.show_snackbar("Done! Check your Most Listened Tracks.", icon=ft.Icons.CHECK_CIRCLE, color=CYAN)
@@ -2166,7 +2178,9 @@ class SettingsView:
             self._show_library_stats_switch.value  = bool(landing.get("show_library_stats", True))
 
             appearance = cfg.get("appearance", {})
-            self._selected_accent_color = appearance.get("accent_color", "#FFD600")
+            raw_accent = appearance.get("accent_color", "#FFD60A")
+            self._selected_accent_color = LEGACY_ACCENT_MAP.get(raw_accent.upper(), raw_accent)
+            self._pill_style_dropdown.value = appearance.get("pill_style", "category")
             self._show_jarvis_switch.value = bool(appearance.get("show_jarvis", True))
             self._show_network_switch.value = bool(appearance.get("show_network", False))
             self._show_playlists_switch.value = bool(appearance.get("show_playlists", True))
@@ -2213,8 +2227,8 @@ class SettingsView:
         if self.page: self.page.update()
 
     def _save_landing_settings(self):
-        show_history = self._show_search_history_switch.value
-        show_stats   = self._show_library_stats_switch.value
+        show_history = getattr(self, "_show_most_listened_switch", None) and self._show_most_listened_switch.value
+        show_stats   = getattr(self, "_show_library_stats_switch", None) and self._show_library_stats_switch.value
         
         from utils.streamrip_api import update_config_params
         update_config_params({
@@ -2229,33 +2243,32 @@ class SettingsView:
 
     def _build_color_selector(self, mode="accent"):
         colors = {
-            "Cyan": "#00BFFF",
-            "Deep Blue": "#2979FF",
-            "Purple": "#9B59B6",
-            "Lavender": "#B39DDB",
-            "Pink": "#E91E63",
-            "Red": "#E74C3C",
-            "Crimson": "#DC143C",
-            "Orange": "#E67E22",
-            "Gold": "#FFD700",
-            "Yellow": "#FFD600",
-            "Green": "#2ECC71",
-            "Emerald": "#00FF7F",
-            "Mint": "#69F0AE",
-            "Slate": "#78909C",
+            "Cyan": "#64D2FF",
+            "Blue": "#0A84FF",
+            "Indigo": "#5E5CE6",
+            "Purple": "#BF5AF2",
+            "Lavender": "#D0BCFF",
+            "Pink": "#FF375F",
+            "Red": "#FF453A",
+            "Orange": "#FF9F0A",
+            "Yellow": "#FFD60A",
+            "Green": "#30D158",
+            "Emerald": "#25E89B",
+            "Mint": "#63E6E2",
         }
         
-        target_color_base = self._selected_accent_color
+        raw_target = self._selected_accent_color
+        target_color_base = LEGACY_ACCENT_MAP.get(raw_target.upper(), raw_target)
 
         circles = []
-        for name, hex in colors.items():
-            is_selected = (hex.lower() == target_color_base.lower())
+        for name, hex_code in colors.items():
+            is_selected = (hex_code.lower() == target_color_base.lower())
             circle = ft.Container(
                 width=32, height=32,
-                bgcolor=hex,
+                bgcolor=hex_code,
                 border_radius=16,
-                border=ft.Border.all(2, TEXT if is_selected else "transparent"),
-                on_click=lambda e, h=hex, m=mode: self._on_color_click(h, m),
+                border=ft.Border.all(2.5, TEXT) if is_selected else ft.Border.all(1, "rgba(255,255,255,0.15)"),
+                on_click=lambda e, h=hex_code, m=mode: self._on_color_click(h, m),
                 tooltip=name
             )
             circles.append(circle)
@@ -2264,41 +2277,46 @@ class SettingsView:
 
     def _on_color_click(self, hex, mode):
         self._selected_accent_color = hex
-        self._show_sub_page("Appearance", self._build_appearance_group())
-        self._mark_dirty(self._save_appearance_settings, label="SAVE APPEARANCE SETTINGS", icon=ft.Icons.PALETTE_ROUNDED)
+        if hasattr(self, "_scroll_column") and len(self._scroll_column.controls) > 2:
+            self._scroll_column.controls[2] = self._build_appearance_group()
+        self.app.safe_update(lambda: None)
+        self._check_dirty("Appearance", self._save_appearance_settings, label="SAVE APPEARANCE SETTINGS", icon=ft.Icons.PALETTE_ROUNDED)
 
     def _on_appearance_change(self, e=None):
-        self._mark_dirty(self._save_appearance_settings, label="SAVE APPEARANCE SETTINGS", icon=ft.Icons.PALETTE_ROUNDED)
+        self._check_dirty("Appearance", self._save_appearance_settings, label="SAVE APPEARANCE SETTINGS", icon=ft.Icons.PALETTE_ROUNDED, event=e)
 
     def _save_appearance_settings(self):
         from utils.streamrip_api import update_config_params
         update_config_params({
             "appearance": {
                 "accent_color": self._selected_accent_color,
-                "show_jarvis": self._show_jarvis_switch.value,
-                "show_network": self._show_network_switch.value,
-                "show_playlists": self._show_playlists_switch.value,
-                "show_artists": self._show_artists_switch.value,
-                "show_albums": self._show_albums_switch.value,
-                "show_tracks": self._show_tracks_switch.value,
+                "pill_style": self._pill_style_dropdown.value or "category",
+                "show_jarvis": bool(self._show_jarvis_switch.value),
+                "show_network": bool(self._show_network_switch.value),
+                "show_playlists": bool(self._show_playlists_switch.value),
+                "show_artists": bool(self._show_artists_switch.value),
+                "show_albums": bool(self._show_albums_switch.value),
+                "show_tracks": bool(self._show_tracks_switch.value),
             },
             "landing": {
-                "show_search_history": self._show_most_listened_switch.value,
-                "show_library_stats": self._show_library_stats_switch.value
+                "show_search_history": bool(self._show_most_listened_switch.value),
+                "show_library_stats": bool(self._show_library_stats_switch.value)
             },
             "general": {
                 "startup_page": self._startup_page_dropdown.value,
                 "default_sort": self._default_sort_dropdown.value,
             }
         })
+        if hasattr(self.app, "_show_jarvis"):
+            self.app._show_jarvis = bool(self._show_jarvis_switch.value)
         self.app.show_snackbar("Appearance and interface settings saved.")
         if hasattr(self.app, "search_view"):
             self.app.search_view.refresh_setup_state()
-        self.app.restart_ui(target_tab=2)
+        self.app.restart_ui(target_tab=3)
 
     def _save_paths(self):
-        dl  = self._dl_path_field.value.strip()
-        lib = self._lib_path_field.value.strip()
+        dl  = (self._dl_path_field.value or "").strip()
+        lib = (self._lib_path_field.value or "").strip()
         if not dl or not lib:
             self.app.show_snackbar("Paths cannot be empty.")
             return
@@ -2343,10 +2361,10 @@ class SettingsView:
             self.app.show_snackbar(f"Save failed: {exc}")
 
     def _save_qobuz_credentials(self):
-        uid        = self._qobuz_user_id_field.value.strip()
-        token      = self._qobuz_token_field.value.strip()
-        app_id     = self._qobuz_app_id_field.value.strip() or "312369995"
-        app_secret = self._qobuz_app_secret_field.value.strip() or "e79f8b9be485692b0e5f9dd895826368"
+        uid        = (self._qobuz_user_id_field.value or "").strip()
+        token      = (self._qobuz_token_field.value or "").strip()
+        app_id     = (self._qobuz_app_id_field.value or "").strip() or "312369995"
+        app_secret = (self._qobuz_app_secret_field.value or "").strip() or "e79f8b9be485692b0e5f9dd895826368"
         if not uid or not token:
             self.app.show_snackbar("Credentials cannot be empty.")
             return
@@ -2588,7 +2606,9 @@ class SettingsView:
             self.app._save_pref("library_path", path)
 
         self.refresh()
-        self._check_dirty("Storage", self._save_paths, label="SAVE PATHS", icon=ft.Icons.FOLDER_ROUNDED)
+        if getattr(self, "_current_subpage_name", None) == "Storage":
+            self._baseline_subpage_state = self._get_subpage_state("Storage")
+            self._hide_save_bar()
 
         label = "Download" if target == "download" else "Library"
         self.app.show_snackbar(f"{label} folder set: {path}")
@@ -2609,11 +2629,10 @@ class SettingsView:
     def _build_audio_dsp_group(self):
         # Trigger background load of equalizer parameters
         self.page.run_task(self._load_equalizer_bands)
-        dsp_save_cb = lambda _e=None: self._check_dirty("Audio & DSP", self._save_dsp_settings, label="SAVE AUDIO & DSP", icon=ft.Icons.GRAPHIC_EQ_ROUNDED)
-        self._dynamism_switch.on_change = lambda e: (self._on_dynamism_change(e), dsp_save_cb())
-        self._equaliser_switch.on_change = lambda e: (self._on_equaliser_change(e), dsp_save_cb())
-        self._eq_preset_type_radio.on_change = lambda e: (self._on_preset_type_change(e), dsp_save_cb())
-        self._eq_preset_dropdown.on_select = lambda e: (self._on_eq_preset_select(e), dsp_save_cb())
+        self._dynamism_switch.on_change = self._on_dynamism_change
+        self._equaliser_switch.on_change = self._on_equaliser_change
+        self._eq_preset_type_radio.on_change = self._on_preset_type_change
+        self._eq_preset_dropdown.on_select = self._on_eq_preset_select
         
         return ft.Column([
             ft.Text("Real-time digital signal processing adjustments.", color=DIM, size=12),
@@ -2826,7 +2845,6 @@ class SettingsView:
             })
             
         self._save_current_slider_gains_to_preset("Custom")
-        self._check_dirty("Audio & DSP", self._save_dsp_settings, label="SAVE AUDIO & DSP", icon=ft.Icons.GRAPHIC_EQ_ROUNDED)
 
     def _on_gain_text_field_submit(self, idx, text_value, text_control):
         s = text_value.strip()
@@ -2895,7 +2913,7 @@ class SettingsView:
             logger.error(f"Failed to save preset {preset_name}: {e}")
 
     def _on_eq_preset_select(self, e):
-        preset_name = e.control.value
+        preset_name = e if isinstance(e, str) else (getattr(e, "control", None) and getattr(e.control, "value", None)) or (getattr(self, "_eq_preset_dropdown", None) and self._eq_preset_dropdown.value)
         if not preset_name:
             return
             
@@ -3080,11 +3098,11 @@ class SettingsView:
             "assistant": {
                 "llm_enabled": self._assistant_llm_switch.value,
                 "llm_provider": self._assistant_provider_dropdown.value or "gemini",
-                "gemini_api_key": self._assistant_api_key_field.value.strip(),
+                "gemini_api_key": (self._assistant_api_key_field.value or "").strip(),
                 "gemini_model": self._assistant_model_dropdown.value or "gemini-3.5-flash-lite",
-                "ollama_endpoint": self._assistant_ollama_url_field.value.strip() or "http://localhost:11434/v1",
-                "ollama_model": self._assistant_ollama_model_field.value.strip() or "llama3.2",
-                "personality_prompt": self._assistant_personality_field.value.strip(),
+                "ollama_endpoint": (self._assistant_ollama_url_field.value or "").strip() or "http://localhost:11434/v1",
+                "ollama_model": (self._assistant_ollama_model_field.value or "").strip() or "llama3.2",
+                "personality_prompt": (self._assistant_personality_field.value or "").strip(),
             }
         })
         self.app.show_snackbar("Jarvis AI Assistant settings saved successfully.")
@@ -3110,11 +3128,14 @@ class SettingsView:
             self.app.show_snackbar("Enter your API key or a local endpoint first.")
             return
         self.app.show_snackbar(f"Testing connection to {provider}…")
-        res = await engine.chat_completion([{"role": "user", "content": "Reply with the single word: OK"}])
-        if res.success:
-            self.app.show_snackbar(f"✓ {provider} connection OK.")
-        else:
-            self.app.show_snackbar(f"✗ Connection failed: {res.error_message}")
+        try:
+            res = await engine.chat_completion([{"role": "user", "content": "Reply with the single word: OK"}])
+            if res.success:
+                self.app.show_snackbar(f"✓ {provider} connection OK.")
+            else:
+                self.app.show_snackbar(f"✗ Connection failed: {res.error_message}")
+        except Exception as exc:
+            self.app.show_snackbar(f"✗ Connection failed: {exc}", color="#FF4444")
 
     def _update_assistant_provider_visibility(self, e=None):
         if not hasattr(self, "_gemini_group_container") or not hasattr(self, "_ollama_group_container"):
@@ -3127,10 +3148,7 @@ class SettingsView:
             self.app.safe_update(lambda: None)
 
     def _build_assistant_group(self):
-        def save_cb(e=None):
-            if e and hasattr(e, "control") and hasattr(e, "data") and e.data is not None:
-                e.control.value = e.data
-            self._check_dirty("AI Assistant", self._save_assistant_settings, label="SAVE ASSISTANT SETTINGS", icon=ft.Icons.SMART_TOY_ROUNDED)
+        save_cb = lambda e=None: self._check_dirty("AI Assistant", self._save_assistant_settings, label="SAVE ASSISTANT SETTINGS", icon=ft.Icons.SMART_TOY_ROUNDED, event=e)
 
         self._assistant_llm_switch.on_change = save_cb
         self._assistant_provider_dropdown.on_select = lambda e: (self._update_assistant_provider_visibility(e), save_cb(e))
@@ -3229,7 +3247,7 @@ class SettingsView:
         ], spacing=20)
 
     def _on_save_custom_preset(self, e):
-        name = self._custom_preset_name_field.value.strip()
+        name = (self._custom_preset_name_field.value or "").strip()
         if not name:
             self.app.show_snackbar("Preset name cannot be empty.")
             return
@@ -3252,7 +3270,12 @@ class SettingsView:
         self.app.safe_update(lambda: None)
 
     def _on_preset_type_change(self, e):
-        preset_type = e.control.value
+        if hasattr(e, "control") and hasattr(e.control, "value"):
+            preset_type = e.control.value
+        elif isinstance(e, str):
+            preset_type = e
+        else:
+            preset_type = (getattr(self, "_eq_preset_type_radio", None) and self._eq_preset_type_radio.value) or "system"
         
         try:
             from utils.streamrip_api import load_config

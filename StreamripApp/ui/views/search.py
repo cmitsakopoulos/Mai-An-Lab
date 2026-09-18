@@ -7,11 +7,12 @@ import logging
 import asyncio
 import flet as ft
 from ui.tokens import (
-    BG, SURFACE, SURFACE2, CYAN, AMBER, TEXT, DIM, BORDER, 
+    BG, SURFACE, SURFACE2, SURFACE_ELEVATED, CYAN, AMBER, TEXT, DIM, TEXT_TERTIARY, BORDER, BORDER_SUBTLE, 
+    RADIUS_CARD, RADIUS_PILL, RADIUS_THUMB,
     SOURCE_COLORS, LIB_ARTIST_COLOR, LIB_ALBUM_COLOR, LIB_TRACK_COLOR, 
     apply_opacity
 )
-from ui.widgets import AnimatedEntry, SkeletonRow, src_color, strip_markup, build_page_ghost_top, build_page_ghost_bottom
+from ui.widgets import AnimatedEntry, SkeletonRow, src_color, strip_markup, build_page_ghost_top, build_page_ghost_bottom, CupertinoSegmentedBar
 
 if sys.platform == "darwin":
     from utils.audio_engine_macos import audio_engine
@@ -103,10 +104,10 @@ class SearchView:
         )
 
         self._search_go_btn = ft.Container(
-            content=ft.Icon(ft.Icons.ARROW_FORWARD_ROUNDED, color=BG, size=20),
+            content=ft.Icon(ft.Icons.ARROW_FORWARD_ROUNDED, color=BG, size=18),
             bgcolor=CYAN,
-            width=44, height=44,
-            border_radius=12,
+            width=36, height=36,
+            border_radius=RADIUS_PILL,
             alignment=ft.Alignment(0, 0),
             on_click=lambda e: asyncio.create_task(self.start_search()),
             animate=ft.Animation(120, ft.AnimationCurve.EASE_OUT),
@@ -117,7 +118,7 @@ class SearchView:
         self._search_bar_container = ft.Container(
             content=ft.Row(
                 [
-                    ft.Icon(ft.Icons.SEARCH_ROUNDED, color=CYAN, size=20),
+                    ft.Icon(ft.Icons.SEARCH_ROUNDED, color=CYAN, size=18),
                     self._search_field,
                     self._clear_btn,
                     self._search_go_btn,
@@ -126,9 +127,9 @@ class SearchView:
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
             ),
             bgcolor=SURFACE2,
-            border=ft.Border.all(1.5, BORDER),
-            border_radius=16,
-            padding=ft.Padding.only(left=14, right=8, top=0, bottom=0),
+            border=ft.Border.all(1, BORDER_SUBTLE),
+            border_radius=12,
+            padding=ft.Padding.only(left=12, right=6, top=0, bottom=0),
             expand=True,
         )
 
@@ -744,14 +745,15 @@ class SearchView:
             content=ft.Column([
                 ft.Row([
                     ft.Icon(icon, color=CYAN, size=18),
-                    ft.Text(title, color=TEXT, size=14, weight=ft.FontWeight.W_700),
+                    ft.Text(title, color=TEXT, size=14, weight=ft.FontWeight.W_600),
                 ], spacing=8),
-                ft.Divider(color=BORDER, height=16),
+                ft.Divider(color=BORDER_SUBTLE, height=16),
                 content
             ], spacing=0),
-            bgcolor=SURFACE2,
-            border_radius=12,
-            padding=14,
+            bgcolor=SURFACE,
+            border=ft.Border.all(1, BORDER_SUBTLE),
+            border_radius=RADIUS_CARD,
+            padding=16,
             margin=ft.Margin.only(bottom=16),
         )
 
@@ -1054,43 +1056,45 @@ class SearchView:
             self.app.page.update()
 
     def _update_view_tabs(self):
+        from utils.streamrip_api import load_config
+        try:
+            cfg = load_config()
+            appearance = cfg.get("appearance", {})
+        except Exception:
+            appearance = {}
+        pill_style = str(appearance.get("pill_style", "category")).lower()
         icons = {
             "artists": ft.Icons.PERSON_ROUNDED,
             "albums": ft.Icons.ALBUM_ROUNDED,
             "tracks": ft.Icons.MUSIC_NOTE_ROUNDED,
         }
         accents = {
-            "artists": LIB_ARTIST_COLOR,
-            "albums": LIB_ALBUM_COLOR,
-            "tracks": LIB_TRACK_COLOR,
+            "artists": CYAN if pill_style == "unified" else LIB_ARTIST_COLOR,
+            "albums":  CYAN if pill_style == "unified" else LIB_ALBUM_COLOR,
+            "tracks":  CYAN if pill_style == "unified" else LIB_TRACK_COLOR,
         }
-        tabs = []
-        for mode in ["artists", "albums", "tracks"]:
-            is_active = (self.view_mode == mode)
-            col = accents[mode]
-            label = mode.capitalize()
-            tabs.append(
-                ft.GestureDetector(
-                    content=ft.Container(
-                        content=ft.Column(
-                            [
-                                ft.Icon(icons[mode], color=BG if is_active else col, size=18),
-                                ft.Text(label, size=10, weight=ft.FontWeight.W_700, color=BG if is_active else TEXT),
-                            ],
-                            spacing=2,
-                            alignment=ft.MainAxisAlignment.CENTER,
-                            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                        ),
-                        bgcolor=col if is_active else apply_opacity(0.08, col),
-                        border=ft.Border.all(1, col if is_active else apply_opacity(0.2, col)),
-                        width=88,
-                        height=52,
-                        border_radius=12,
-                    ),
-                    on_tap=lambda e, m=mode: self._set_view_mode(m)
-                )
+        segments = [
+            (mode, mode.capitalize(), icons[mode], accents[mode])
+            for mode in ["artists", "albums", "tracks"]
+        ]
+        if (
+            self._view_tabs_row.controls
+            and isinstance(self._view_tabs_row.controls[0], CupertinoSegmentedBar)
+            and [s[0] for s in self._view_tabs_row.controls[0].segments] == [s[0] for s in segments]
+            and [s[3] for s in self._view_tabs_row.controls[0].segments] == [s[3] for s in segments]
+        ):
+            self._view_tabs_row.controls[0].set_selected(self.view_mode)
+            return
+
+        self._view_tabs_row.controls = [
+            CupertinoSegmentedBar(
+                segments=segments,
+                selected_key=self.view_mode,
+                on_change=lambda m: self._set_view_mode(m),
+                height=40,
+                expand=True,
             )
-        self._view_tabs_row.controls = tabs
+        ]
 
     def _result_card(self, index: int, r: dict, depth: int = 0) -> ft.Control:
         m_type = r.get("media_type", "track")
@@ -1132,18 +1136,18 @@ class SearchView:
         )
 
         is_in_library = r.get("is_in_library", False)
-        download_icon = ft.Icons.CHECK_CIRCLE if is_in_library else ft.Icons.DOWNLOAD_OUTLINED
+        download_icon = ft.Icons.CHECK_CIRCLE_ROUNDED if is_in_library else ft.Icons.ARROW_CIRCLE_DOWN_ROUNDED
         download_color = CYAN if is_in_library else DIM
              
         expand_icon = ft.Icon(
-            ft.Icons.KEYBOARD_ARROW_DOWN if is_expanded else ft.Icons.KEYBOARD_ARROW_RIGHT,
+            ft.Icons.KEYBOARD_ARROW_DOWN_ROUNDED if is_expanded else ft.Icons.CHEVRON_RIGHT_ROUNDED,
             color=accent if is_expanded else DIM,
-            size=20,
+            size=18,
         ) if m_type in ("artist", "album") else None
 
         _prev_state = r.get("preview_state", "idle")
-        _prev_icon  = ft.Icons.PAUSE_CIRCLE if _prev_state == "playing" else (
-                      ft.Icons.SYNC if _prev_state == "loading" else ft.Icons.PLAY_CIRCLE_OUTLINE)
+        _prev_icon  = ft.Icons.PAUSE_CIRCLE_FILLED_ROUNDED if _prev_state == "playing" else (
+                      ft.Icons.SYNC_ROUNDED if _prev_state == "loading" else ft.Icons.PLAY_CIRCLE_FILLED_ROUNDED)
         
         def on_download(_e, data=r):
             self.app.quality_selector_sheet.show(data)
@@ -1170,21 +1174,20 @@ class SearchView:
             await self._toggle_search_node(r, tile)
 
         preview_btn = ft.Container(
-            content=ft.Icon(_prev_icon, color=CYAN if _prev_state != "idle" else DIM, size=20) if _prev_state != "loading" else 
+            content=ft.Icon(_prev_icon, color=CYAN if _prev_state != "idle" else DIM, size=22) if _prev_state != "loading" else 
                     ft.ProgressRing(width=16, height=16, stroke_width=2, color=CYAN),
-            width=40, height=40, alignment=ft.Alignment(0, 0),
+            width=36, height=36, alignment=ft.Alignment(0, 0),
             on_click=preview_click,
             tooltip="Preview",
-            border_radius=20,
+            border_radius=RADIUS_PILL,
         )
-
 
         tile = ft.ListTile(
             leading=ft.Row([
-                ft.Container(width=depth * 20, visible=depth > 0),
-                ft.Icon(icon_map.get(m_type, ft.Icons.MUSIC_NOTE), color=accent),
+                ft.Container(width=depth * 16, visible=depth > 0),
+                ft.Icon(icon_map.get(m_type, ft.Icons.MUSIC_NOTE), color=accent, size=18),
             ], tight=True),
-            title=ft.Text(title, color=TEXT, size=13, weight=ft.FontWeight.W_600, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+            title=ft.Text(title, color=TEXT, size=14, weight=ft.FontWeight.W_600, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
             subtitle=ft.Text(f"{subtitle}{'  ·  ' + detail if detail else ''}", color=DIM, size=12, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
             trailing=ft.Row([
                 preview_btn if m_type == "track" else ft.Container(),
@@ -1197,7 +1200,7 @@ class SearchView:
                 ) if m_type in ("track", "album") else ft.Container(),
                 expand_icon if expand_icon else ft.Container(),
             ], tight=True, spacing=0),
-            bgcolor=apply_opacity(0.12, accent) if is_playing or _prev_state != "idle" else "transparent",
+            bgcolor=apply_opacity(0.1, accent) if is_playing or _prev_state != "idle" else "transparent",
             on_click=preview_click if m_type == "track" else toggle_node,
         )
 

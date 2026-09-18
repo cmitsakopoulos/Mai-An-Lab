@@ -99,7 +99,7 @@ class TestSettingsSearch(unittest.TestCase):
         self.assertFalse(view._apply_visuals_container.visible)
         self.assertIsNone(view._active_save_handler)
 
-    def test_appearance_settings_triggers_save_bar(self):
+    def test_appearance_switch_triggers_and_reverts_save_bar(self):
         class MockApp:
             page = None
             def safe_update(self, fn):
@@ -107,12 +107,18 @@ class TestSettingsSearch(unittest.TestCase):
 
         app = MockApp()
         view = SettingsView(app=app)
-        view._build_appearance_group()
+        view._show_sub_page("Appearance", view._build_appearance_group())
         
-        # Triggering on_change on appearance switch should mark view dirty
+        # Triggering on_change on appearance switch marks view dirty
+        view._show_jarvis_switch.value = not view._show_jarvis_switch.value
         view._on_appearance_change()
         self.assertTrue(view._apply_visuals_container.visible)
         self.assertEqual(view._active_save_handler, view._save_appearance_settings)
+
+        # Reverting switch back to baseline hides save bar
+        view._show_jarvis_switch.value = not view._show_jarvis_switch.value
+        view._on_appearance_change()
+        self.assertFalse(view._apply_visuals_container.visible)
 
     def test_reverting_setting_hides_save_button(self):
         class MockApp:
@@ -161,6 +167,52 @@ class TestSettingsSearch(unittest.TestCase):
         view._assistant_model_dropdown.on_select(e_revert)
         self.assertFalse(view._apply_visuals_container.visible)
 
+    def test_appearance_switch_flet_event(self):
+        import flet as ft
+        class MockApp:
+            page = None
+            def safe_update(self, fn):
+                if fn: fn()
+
+        app = MockApp()
+        view = SettingsView(app=app)
+        view._show_sub_page("Appearance", view._build_appearance_group())
+        self.assertTrue(view._show_jarvis_switch.value)
+
+        # Simulate Flet event turning switch off
+        e_off = ft.ControlEvent(control=view._show_jarvis_switch, name="change", data="false")
+        view._show_jarvis_switch.on_change(e_off)
+        self.assertIs(view._show_jarvis_switch.value, False)
+        self.assertTrue(view._apply_visuals_container.visible)
+
+        # Simulate Flet event turning switch back on
+        e_on = ft.ControlEvent(control=view._show_jarvis_switch, name="change", data="true")
+        view._show_jarvis_switch.on_change(e_on)
+        self.assertIs(view._show_jarvis_switch.value, True)
+        self.assertFalse(view._apply_visuals_container.visible)
+
+    def test_appearance_color_revert(self):
+        class MockApp:
+            page = None
+            def safe_update(self, fn):
+                if fn: fn()
+
+        app = MockApp()
+        view = SettingsView(app=app)
+        view._show_sub_page("Appearance", view._build_appearance_group())
+        initial_color = view._selected_accent_color
+
+        # Select a different accent color
+        view._on_color_click("#9C27B0", "accent")
+        self.assertEqual(view._selected_accent_color, "#9C27B0")
+        self.assertTrue(view._apply_visuals_container.visible)
+
+        # Select the initial accent color back
+        view._on_color_click(initial_color, "accent")
+        self.assertEqual(view._selected_accent_color, initial_color)
+        self.assertFalse(view._apply_visuals_container.visible)
+
 
 if __name__ == "__main__":
     unittest.main()
+
