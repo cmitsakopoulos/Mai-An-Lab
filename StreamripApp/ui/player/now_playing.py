@@ -3,7 +3,10 @@ import sys
 import logging
 import flet as ft
 
-from ui.tokens import BG, SURFACE, SURFACE2, CYAN, AMBER, TEXT, DIM, BORDER, apply_opacity
+from ui.tokens import (
+    BG, SURFACE, SURFACE2, SURFACE_ELEVATED, CYAN, AMBER, TEXT, DIM, BORDER, BORDER_SUBTLE,
+    RADIUS_CARD, RADIUS_PILL, RADIUS_THUMB, apply_opacity
+)
 from ui.widgets import fmt_time
 
 if sys.platform == "darwin":
@@ -25,15 +28,15 @@ class NowPlayingSheet:
         if self._initialized:
             return
 
-        self._title   = ft.Text("Unknown",  color=TEXT, size=18, weight=ft.FontWeight.W_700,
+        self._title   = ft.Text("Unknown",  color=TEXT, size=20, weight=ft.FontWeight.W_700,
                                   text_align=ft.TextAlign.CENTER, max_lines=2,
                                   overflow=ft.TextOverflow.ELLIPSIS, expand=True)
-        self._artist  = ft.Text("Unknown",  color=DIM,  size=13, text_align=ft.TextAlign.CENTER)
-        self._album   = ft.Text("Unknown",  color=DIM + "88", size=11, text_align=ft.TextAlign.CENTER)
+        self._artist  = ft.Text("Unknown",  color=DIM,  size=14, text_align=ft.TextAlign.CENTER)
+        self._album   = ft.Text("Unknown",  color=DIM + "88", size=12, text_align=ft.TextAlign.CENTER)
         
         self._artwork = ft.Image(
             src="", fit="cover",
-            border_radius=ft.BorderRadius.all(20),
+            border_radius=ft.BorderRadius.all(22),
             visible=False,
             expand=True,
             scale=ft.Scale(1.0),
@@ -41,16 +44,16 @@ class NowPlayingSheet:
         )
         self._art_placeholder = ft.Container(
             bgcolor=SURFACE2,
-            border_radius=20,
+            border_radius=22,
             expand=True,
-            content=ft.Icon(ft.Icons.ALBUM, color=CYAN, size=96),
+            content=ft.Icon(ft.Icons.ALBUM_ROUNDED, color=CYAN, size=96),
             alignment=ft.Alignment(0, 0),
             border=None,
         )
         self._artwork_container = ft.Container(
             content=self._artwork,
-            shadow=ft.BoxShadow(blur_radius=30, color=CYAN+"33"),
-            border_radius=20,
+            shadow=ft.BoxShadow(blur_radius=32, spread_radius=-4, color=CYAN + "26"),
+            border_radius=22,
             border=None,
             expand=True,
         )
@@ -63,7 +66,6 @@ class NowPlayingSheet:
                 ft.Container(self._overlay_icon, alignment=ft.Alignment(0, 0), expand=True)
             ], expand=True),
             on_tap=self._toggle_playback,
-            on_horizontal_drag_end=self._handle_swipe
         )
 
         self._scrubber = ft.Slider(
@@ -78,13 +80,13 @@ class NowPlayingSheet:
         self._time_cur = ft.Text("0:00", color=DIM, size=12)
         self._time_tot = ft.Text("0:00", color=DIM, size=12)
         self._play_btn = ft.IconButton(
-            icon=ft.Icons.PLAY_ARROW,
+            icon=ft.Icons.PLAY_ARROW_ROUNDED,
             icon_color=TEXT,
-            icon_size=44,
+            icon_size=38,
             on_click=self._on_play_click,
         )
         self._shuffle_btn = ft.IconButton(
-            icon=ft.Icons.SHUFFLE,
+            icon=ft.Icons.SHUFFLE_ROUNDED,
             icon_color=DIM,
             icon_size=20,
             on_click=lambda e: self.app.toggle_shuffle(),
@@ -107,7 +109,7 @@ class NowPlayingSheet:
             on_click=self._toggle_auto_dj,
         )
         self._repeat_btn = ft.IconButton(
-            icon=ft.Icons.REPEAT,
+            icon=ft.Icons.REPEAT_ROUNDED,
             icon_color=DIM,
             icon_size=20,
             on_click=lambda e: self.app.cycle_repeat(),
@@ -136,31 +138,36 @@ class NowPlayingSheet:
 
         self._root_layout = ft.Column(
             [
+                # Apple-style grab handle
+                ft.Container(
+                    content=ft.Row([ft.Container(width=36, height=5, bgcolor=BORDER, border_radius=3)], alignment=ft.MainAxisAlignment.CENTER),
+                    padding=ft.Padding.only(top=8, bottom=4),
+                ),
                 # Header
                 ft.Container(
                     content=ft.Row(
                         [
                             ft.IconButton(
-                                icon=ft.Icons.KEYBOARD_ARROW_DOWN,
-                                icon_color=DIM, icon_size=32,
+                                icon=ft.Icons.KEYBOARD_ARROW_DOWN_ROUNDED,
+                                icon_color=DIM, icon_size=30,
                                 on_click=lambda e: self.collapse(),
                             ),
                             ft.Container(expand=True),
                             ft.IconButton(
-                                icon=ft.Icons.PLAYLIST_PLAY,
-                                icon_color=DIM, icon_size=26,
+                                icon=ft.Icons.QUEUE_MUSIC_ROUNDED,
+                                icon_color=DIM, icon_size=24,
                                 on_click=lambda e: self.app.queue_sheet.expand(),
                             ),
                         ]
                     ),
-                    padding=ft.Padding.symmetric(horizontal=12),
+                    padding=ft.Padding.symmetric(horizontal=14),
                 ),
                 ft.Container(expand=True),
                 # Artwork - Responsive Aspect Ratio Container
                 ft.Container(
                     content=self._art_stack,
                     aspect_ratio=1.0,
-                    margin=40,
+                    margin=36,
                     clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
                     alignment=ft.Alignment(0, 0)
                 ),
@@ -170,7 +177,7 @@ class NowPlayingSheet:
                     content=ft.Column(
                         [
                             ft.Text("NOW PLAYING", color=CYAN, size=10, weight=ft.FontWeight.W_700,
-                                    opacity=0.65, text_align=ft.TextAlign.CENTER),
+                                    opacity=0.7, text_align=ft.TextAlign.CENTER),
                             ft.Row(
                                 [
                                     self._title,
@@ -224,20 +231,20 @@ class NowPlayingSheet:
                 ft.Container(
                     content=ft.Row(
                         [
-                            ft.IconButton(icon=ft.Icons.REPLAY_10, icon_color=CYAN, icon_size=26,
+                            ft.IconButton(icon=ft.Icons.REPLAY_10_ROUNDED, icon_color=CYAN, icon_size=26,
                                           on_click=lambda _: audio_engine.seek(audio_engine.position - 10)),
-                            ft.IconButton(icon=ft.Icons.SKIP_PREVIOUS, icon_color=TEXT, icon_size=34,
+                            ft.IconButton(icon=ft.Icons.SKIP_PREVIOUS_ROUNDED, icon_color=TEXT, icon_size=34,
                                           on_click=lambda e: audio_engine.previous()),
                             ft.Container(
                                 content=self._play_btn,
-                                bgcolor=SURFACE2,
-                                border_radius=40,
-                                width=72, height=72,
+                                bgcolor=SURFACE_ELEVATED,
+                                border_radius=34,
+                                width=68, height=68,
                                 alignment=ft.Alignment(0, 0),
                             ),
-                            ft.IconButton(icon=ft.Icons.SKIP_NEXT, icon_color=TEXT, icon_size=34,
+                            ft.IconButton(icon=ft.Icons.SKIP_NEXT_ROUNDED, icon_color=TEXT, icon_size=34,
                                           on_click=lambda e: audio_engine.next()),
-                            ft.IconButton(icon=ft.Icons.FORWARD_10, icon_color=CYAN, icon_size=26,
+                            ft.IconButton(icon=ft.Icons.FORWARD_10_ROUNDED, icon_color=CYAN, icon_size=26,
                                           on_click=lambda _: audio_engine.seek(audio_engine.position + 10)),
                         ],
                         alignment=ft.MainAxisAlignment.SPACE_EVENLY,
@@ -305,14 +312,6 @@ class NowPlayingSheet:
                 self._overlay_icon.opacity = 0
             self.app.safe_update(_hide)
         asyncio.create_task(_fade())
-
-    def _handle_swipe(self, e):
-        # FIX: Protect against NoneType comparison crashes
-        velocity = getattr(e, "primary_velocity", 0) or 0
-        if velocity > 0: 
-            audio_engine.previous()
-        elif velocity < 0: 
-            audio_engine.next()
 
     # ── state sync ──────────────────────────────────────────────────────────
     def update_meta(self, title: str, artist: str, album: str):

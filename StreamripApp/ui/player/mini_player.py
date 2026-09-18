@@ -3,7 +3,10 @@ import sys
 import logging
 import flet as ft
 
-from ui.tokens import BG, SURFACE, SURFACE2, CYAN, AMBER, TEXT, DIM, BORDER, apply_opacity
+from ui.tokens import (
+    BG, SURFACE, SURFACE2, CYAN, AMBER, TEXT, DIM, BORDER, BORDER_SUBTLE,
+    RADIUS_CARD, RADIUS_PILL, RADIUS_THUMB, apply_opacity
+)
 
 if sys.platform == "darwin":
     from utils.audio_engine_macos import audio_engine
@@ -18,36 +21,36 @@ class MiniPlayerBar:
         self.app  = app
         self.page = app.page
 
-        self._title     = ft.Text("Not Playing", color=TEXT, size=13, weight=ft.FontWeight.W_700,
+        self._title     = ft.Text("Not Playing", color=TEXT, size=14, weight=ft.FontWeight.W_600,
                                    expand=True, overflow=ft.TextOverflow.ELLIPSIS, max_lines=1)
-        self._artist    = ft.Text("", color=DIM, size=11,
+        self._artist    = ft.Text("", color=DIM, size=12,
                                    expand=True, overflow=ft.TextOverflow.ELLIPSIS, max_lines=1)
-        self._play_icon = ft.Icons.PLAY_ARROW
+        self._play_icon = ft.Icons.PLAY_ARROW_ROUNDED
         self._play_btn  = ft.IconButton(
-            icon=ft.Icons.PLAY_ARROW,
+            icon=ft.Icons.PLAY_ARROW_ROUNDED,
             icon_color=CYAN,
             icon_size=28,
             on_click=self._on_play_click,
         )
         self._artwork = ft.Image(
             src="",
-            width=44, height=44,
+            width=42, height=42,
             fit="cover",
-            border_radius=ft.BorderRadius.all(6),
+            border_radius=ft.BorderRadius.all(RADIUS_THUMB),
             visible=False,
         )
         self._artwork_container = ft.Container(
             content=self._artwork,
-            width=44, height=44,
-            border_radius=6,
+            width=42, height=42,
+            border_radius=RADIUS_THUMB,
             border=None,
         )
-        self._music_icon = ft.Icon(ft.Icons.MUSIC_NOTE, color=CYAN, size=24)
+        self._music_icon = ft.Icon(ft.Icons.MUSIC_NOTE_ROUNDED, color=CYAN, size=22)
         self._music_icon_container = ft.Container(
             content=self._music_icon,
-            width=44, height=44,
+            width=42, height=42,
             bgcolor=SURFACE2,
-            border_radius=6,
+            border_radius=RADIUS_THUMB,
             alignment=ft.Alignment(0, 0),
             border=None,
         )
@@ -60,60 +63,67 @@ class MiniPlayerBar:
         self.container = ft.Container(
             content=ft.Stack(
                 [
-                    # 1. Main interactive content (with padding applied here instead)
+                    # 1. Main interactive content
                     ft.Container(
-                        content=ft.GestureDetector(
-                            content=ft.Row(
-                                [
-                                    ft.Stack(
+                        content=ft.Row(
+                            [
+                                ft.GestureDetector(
+                                    content=ft.Row(
                                         [
-                                            self._music_icon_container,
-                                            self._artwork_container,
-                                        ]
-                                    ),
-                                    ft.Column(
-                                        [
-                                            ft.Row([self._title], spacing=8, alignment=ft.MainAxisAlignment.START),
-                                            ft.Row([self._artist], spacing=8, alignment=ft.MainAxisAlignment.START),
+                                            ft.Stack(
+                                                [
+                                                    self._music_icon_container,
+                                                    self._artwork_container,
+                                                ]
+                                            ),
+                                            ft.Column(
+                                                [
+                                                    ft.Row([self._title], spacing=8, alignment=ft.MainAxisAlignment.START),
+                                                    ft.Row([self._artist], spacing=8, alignment=ft.MainAxisAlignment.START),
+                                                ],
+                                                spacing=2, expand=True,
+                                            ),
                                         ],
-                                        spacing=2, expand=True,
+                                        spacing=8,
                                     ),
-                                    ft.IconButton(
-                                        icon=ft.Icons.SKIP_PREVIOUS,
-                                        icon_color=DIM, icon_size=22,
-                                        on_click=lambda e: audio_engine.previous(),
+                                    on_tap=lambda e: self.app.now_playing.expand(),
+                                    on_vertical_drag_end=lambda e: (
+                                        self.app.now_playing.expand() if (getattr(e, "primary_velocity", 0) or 0) < 0 else None
                                     ),
-                                    self._play_btn,
-                                    ft.IconButton(
-                                        icon=ft.Icons.SKIP_NEXT,
-                                        icon_color=DIM, icon_size=22,
-                                        on_click=lambda e: audio_engine.next(),
-                                    ),
-                                ],
-                                spacing=8,
-                            ),
-                            on_tap=lambda e: self.app.now_playing.expand(),
-                            on_vertical_drag_end=lambda e: (
-                                self.app.now_playing.expand() if (getattr(e, "primary_velocity", 0) or 0) < 0 else None
-                            ),
+                                    expand=True,
+                                ),
+                                ft.IconButton(
+                                    icon=ft.Icons.SKIP_PREVIOUS_ROUNDED,
+                                    icon_color=DIM, icon_size=22,
+                                    on_click=lambda e: audio_engine.previous(),
+                                ),
+                                self._play_btn,
+                                ft.IconButton(
+                                    icon=ft.Icons.SKIP_NEXT_ROUNDED,
+                                    icon_color=DIM, icon_size=22,
+                                    on_click=lambda e: audio_engine.next(),
+                                ),
+                            ],
+                            spacing=8,
                         ),
                         padding=ft.Padding.only(left=10, right=10, top=12, bottom=8),
                     ),
 
-                    # 2. The Progress Bar positioned elegantly at the top
+                    # 2. Progress indicator at top edge
                     ft.Container(
                         content=self._progress,
-                        top=4, left=12, right=12,
+                        top=0, left=14, right=14,
                     ),
                 ]
             ),
             bgcolor=SURFACE,
-            border=ft.Border.all(1, BORDER),
-            border_radius=12,
-            clip_behavior=ft.ClipBehavior.ANTI_ALIAS, # Crucial: clips the progress bar to the rounded corners
-            margin=ft.Margin.only(left=8, right=8, bottom=8),
-            padding=0, # Crucial: Remove padding so the progress bar touches the edges
-            visible=False,   # no layout space until first song; avoids the phantom gap
+            border=ft.Border.all(1, BORDER_SUBTLE),
+            border_radius=18,
+            shadow=ft.BoxShadow(blur_radius=16, spread_radius=-2, color="#4D000000"),
+            clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
+            margin=ft.Margin.only(left=10, right=10, bottom=8),
+            padding=0,
+            visible=False,
             opacity=0,
             animate_opacity=ft.Animation(200, ft.AnimationCurve.EASE_OUT),
         )

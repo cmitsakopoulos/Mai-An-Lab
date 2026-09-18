@@ -2,7 +2,10 @@ import sys
 import logging
 import flet as ft
 
-from ui.tokens import BG, SURFACE, SURFACE2, CYAN, TEXT, DIM, BORDER, LIB_TRACK_COLOR, apply_opacity
+from ui.tokens import (
+    BG, SURFACE, SURFACE2, SURFACE_ELEVATED, CYAN, TEXT, DIM, BORDER,
+    BORDER_SUBTLE, RADIUS_CARD, RADIUS_PILL, LIB_TRACK_COLOR, apply_opacity
+)
 from ui.widgets import AnimatedEntry
 
 if sys.platform == "darwin":
@@ -24,19 +27,19 @@ class QueueSheet:
         if self._initialized:
             return
 
-        self._count_text = ft.Text("", color=DIM, size=11, weight=ft.FontWeight.W_700)
+        self._count_text = ft.Text("", color=DIM, size=12, weight=ft.FontWeight.W_400)
         self._queue_list = ft.ReorderableListView(
             expand=True,
-            spacing=4,
-            padding=ft.Padding.symmetric(horizontal=12),
+            spacing=6,
+            padding=ft.Padding.symmetric(horizontal=12, vertical=6),
             show_default_drag_handles=False,
             on_reorder=self._handle_queue_reorder,
         )
         self._empty_label = ft.Container(
             content=ft.Column(
                 [
-                    ft.Icon(ft.Icons.QUEUE_MUSIC, color=DIM, size=48),
-                    ft.Text("Queue is empty", color=DIM, size=13, text_align=ft.TextAlign.CENTER),
+                    ft.Icon(ft.Icons.QUEUE_MUSIC_ROUNDED, color=DIM, size=48),
+                    ft.Text("Queue is empty", color=DIM, size=14, text_align=ft.TextAlign.CENTER),
                 ],
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,
                 spacing=8,
@@ -51,7 +54,7 @@ class QueueSheet:
             "",
             color=CYAN,
             size=12,
-            weight=ft.FontWeight.W_600,
+            weight=ft.FontWeight.W_500,
             expand=True,
         )
         self._status_notice = ft.Container(
@@ -64,46 +67,50 @@ class QueueSheet:
                 spacing=8,
             ),
             bgcolor=apply_opacity(0.1, CYAN),
+            border=ft.Border.all(1, apply_opacity(0.2, CYAN)),
             padding=ft.Padding.symmetric(vertical=8, horizontal=12),
-            border_radius=8,
-            margin=ft.Margin.symmetric(horizontal=12, vertical=8),
+            border_radius=RADIUS_CARD,
+            margin=ft.Margin.symmetric(horizontal=12, vertical=6),
             visible=False,
         )
 
-        # 1. Migrate to native BottomSheet for reliable mobile expansion
+        # Native BottomSheet for reliable mobile expansion with Apple styling
         self.container = ft.BottomSheet(
             content=ft.Container(
                 content=ft.Column(
                     [
-                        # Re-add custom visual drag handle since show_drag_handle=False
-                        ft.Row([ft.Container(width=40, height=4, bgcolor=BORDER, border_radius=2)],
-                               alignment=ft.MainAxisAlignment.CENTER),
+                        # Apple grab handle pill
+                        ft.Container(
+                            content=ft.Row([ft.Container(width=36, height=5, bgcolor=SURFACE_ELEVATED, border_radius=3)],
+                                           alignment=ft.MainAxisAlignment.CENTER),
+                            padding=ft.Padding.only(top=10, bottom=6),
+                        ),
                         ft.Container(
                             content=ft.Row(
                                 [
                                     ft.Column(
                                         [
-                                            ft.Text("UP NEXT", color=TEXT, size=13, weight=ft.FontWeight.W_700),
+                                            ft.Text("Playing Next", color=TEXT, size=17, weight=ft.FontWeight.W_600),
                                             self._count_text,
                                         ],
-                                        spacing=1,
+                                        spacing=2,
                                     ),
                                     ft.Container(expand=True),
                                     ft.TextButton(
-                                        content=ft.Text("CLEAR ALL", color=CYAN, size=11, weight=ft.FontWeight.W_700),
+                                        content=ft.Text("Clear", color=CYAN, size=13, weight=ft.FontWeight.W_600),
                                         on_click=lambda e: self._clear_all(),
                                     ),
                                     ft.IconButton(
-                                        icon=ft.Icons.CLOSE, icon_color=DIM, icon_size=18,
+                                        icon=ft.Icons.CLOSE_ROUNDED, icon_color=DIM, icon_size=18,
                                         on_click=lambda e: self.collapse(),
                                     ),
                                 ],
                                 alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
                             ),
-                            padding=ft.Padding.symmetric(horizontal=20),
+                            padding=ft.Padding.only(left=20, right=14, top=4, bottom=6),
                         ),
-                        ft.Divider(color=BORDER),
+                        ft.Divider(color=BORDER_SUBTLE, height=1),
                         self._empty_label,
                         self._status_notice,
                         self._queue_list,
@@ -113,11 +120,11 @@ class QueueSheet:
                 ),
                 bgcolor=SURFACE,
                 border_radius=ft.BorderRadius.only(top_left=20, top_right=20),
-                expand=True, # FIX: Expand container to fill the screen
+                expand=True,
             ),
             fullscreen=True,
-            scrollable=False, # CRITICAL FIX: Let the ListView scroll, not the sheet
-            show_drag_handle=False, # CRITICAL FIX: Prevents scroll controller conflict
+            scrollable=False,
+            show_drag_handle=False,
             draggable=True,
             use_safe_area=True, 
             bgcolor=SURFACE,
@@ -163,16 +170,22 @@ class QueueSheet:
                          and t.get("artist_name", "") == cur_artist)
             position  = position_offset  # 0 = now playing, 1+ = up next
 
-            accent = CYAN if is_active else (LIB_TRACK_COLOR if same_art else "transparent")
-            bg     = apply_opacity(0.1, CYAN) if is_active else (
-                     apply_opacity(0.05, LIB_TRACK_COLOR) if same_art else SURFACE)
+            bg = apply_opacity(0.12, CYAN) if is_active else (
+                 apply_opacity(0.06, LIB_TRACK_COLOR) if same_art else SURFACE2)
+            border_color = apply_opacity(0.35, CYAN) if is_active else BORDER_SUBTLE
+
+            if is_active:
+                pos_indicator = ft.Icon(ft.Icons.PLAY_ARROW_ROUNDED, color=CYAN, size=16)
+            else:
+                pos_indicator = ft.Text(
+                    f"{position}",
+                    color=DIM,
+                    size=12,
+                    weight=ft.FontWeight.W_500,
+                )
 
             pos_label = ft.Container(
-                content=ft.Text(
-                    "▶" if is_active else f"+{position}",
-                    color=CYAN if is_active else DIM,
-                    size=10, weight=ft.FontWeight.W_700,
-                ),
+                content=pos_indicator,
                 width=28,
                 alignment=ft.Alignment(0, 0),
             )
@@ -180,32 +193,40 @@ class QueueSheet:
             card = ft.Container(
                 content=ft.Row(
                     [
-                        ft.Container(width=3, bgcolor=accent, border_radius=2),
                         pos_label,
                         ft.Column(
                             [
-                                ft.Text(t.get("track_title", "Unknown"),
-                                        color=CYAN if is_active else TEXT,
-                                        size=13,
-                                        weight=ft.FontWeight.W_700 if is_active else None,
-                                        overflow=ft.TextOverflow.ELLIPSIS, max_lines=1),
+                                ft.Text(
+                                    t.get("track_title", "Unknown"),
+                                    color=CYAN if is_active else TEXT,
+                                    size=13,
+                                    weight=ft.FontWeight.W_600 if is_active else ft.FontWeight.W_500,
+                                    overflow=ft.TextOverflow.ELLIPSIS,
+                                    max_lines=1,
+                                ),
                                 ft.Text(
                                     t.get("artist_name", "Unknown"),
                                     color=CYAN if is_active else (LIB_TRACK_COLOR if same_art else DIM),
                                     size=11,
+                                    overflow=ft.TextOverflow.ELLIPSIS,
+                                    max_lines=1,
                                 ),
                             ],
-                            spacing=1, expand=True,
+                            spacing=2,
+                            expand=True,
                         ),
                         ft.Row(
                             [
                                 ft.ReorderableDragHandle(
-                                    content=ft.Icon(ft.Icons.DRAG_HANDLE_ROUNDED, color=DIM, size=16),
+                                    content=ft.Icon(ft.Icons.REORDER_ROUNDED, color=DIM, size=18),
                                     visible=not is_active and not is_shuffle,
                                 ),
-                                ft.IconButton(icon=ft.Icons.REMOVE_CIRCLE_OUTLINE, icon_color="#FF4444",
-                                              icon_size=16,
-                                              on_click=lambda e, idx=i: self._remove(idx)),
+                                ft.IconButton(
+                                    icon=ft.Icons.REMOVE_CIRCLE_OUTLINE_ROUNDED,
+                                    icon_color="#FF453A",
+                                    icon_size=16,
+                                    on_click=lambda e, idx=i: self._remove(idx),
+                                ),
                             ],
                             spacing=0,
                             vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -215,45 +236,39 @@ class QueueSheet:
                     vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 ),
                 bgcolor=bg,
-                border=ft.Border.all(1, apply_opacity(0.4, CYAN) if is_active else BORDER),
-                border_radius=10,
-                height=60,
-                padding=ft.Padding.only(left=0, right=4, top=4, bottom=4),
+                border=ft.Border.all(1, border_color),
+                border_radius=RADIUS_CARD,
+                height=56,
+                padding=ft.Padding.only(left=8, right=6, top=4, bottom=4),
                 opacity=0.4 if is_repeat_one else 1.0,
             )
 
             return AnimatedEntry(
                 ft.Dismissible(
-                    # Flutter requires a Key on every Dismissible; a keyless one
-                    # asserts at build time and blacks out the render. The key on
-                    # the AnimatedEntry wrapper does NOT satisfy the Dismissible
-                    # itself — it needs its own.
                     key=f"qd_{i}",
                     content=card,
-                    # Background exposed when swiping RIGHT (START_TO_END)
                     background=ft.Container(
                         content=ft.Row(
-                            [ft.Icon(ft.Icons.DELETE_OUTLINE, color=BG, size=20)],
+                            [ft.Icon(ft.Icons.DELETE_OUTLINE_ROUNDED, color="#FFFFFF", size=20)],
                             alignment=ft.MainAxisAlignment.START,
                         ),
-                        bgcolor="#FF4444",
-                        border_radius=10,
+                        bgcolor="#FF453A",
+                        border_radius=RADIUS_CARD,
                         padding=ft.Padding.only(left=20),
                     ),
-                    # Background exposed when swiping LEFT (END_TO_START)
                     secondary_background=ft.Container(
                         content=ft.Row(
-                            [ft.Icon(ft.Icons.DELETE_OUTLINE, color=BG, size=20)],
+                            [ft.Icon(ft.Icons.DELETE_OUTLINE_ROUNDED, color="#FFFFFF", size=20)],
                             alignment=ft.MainAxisAlignment.END,
                         ),
-                        bgcolor="#FF4444",
-                        border_radius=10,
+                        bgcolor="#FF453A",
+                        border_radius=RADIUS_CARD,
                         padding=ft.Padding.only(right=20),
                     ),
-                    dismiss_direction=ft.DismissDirection.HORIZONTAL, # Enables swiping in both directions
+                    dismiss_direction=ft.DismissDirection.HORIZONTAL,
                     on_dismiss=lambda e, idx=i: self._on_dismiss(idx),
                 ),
-                target_height=60,
+                target_height=56,
                 key=f"q_{i}",
             )
 
@@ -314,7 +329,10 @@ class QueueSheet:
 
         # Single synchronous assignment; no async chunking.
         self._queue_list.controls = rows
-        self._queue_list.update()
+        try:
+            self._queue_list.update()
+        except Exception:
+            pass
 
     def _handle_queue_reorder(self, e: ft.OnReorderEvent):
         old_idx = e.old_index

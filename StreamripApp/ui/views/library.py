@@ -7,11 +7,12 @@ from collections import Counter
 import flet as ft
 import flet.canvas as cv
 from ui.tokens import (
-    BG, SURFACE, SURFACE2, CYAN, AMBER, TEXT, DIM, BORDER,
+    BG, SURFACE, SURFACE2, SURFACE_ELEVATED, CYAN, AMBER, TEXT, DIM, TEXT_TERTIARY,
+    BORDER, BORDER_SUBTLE, RADIUS_CARD, RADIUS_PILL, RADIUS_THUMB,
     SOURCE_COLORS, LIB_ARTIST_COLOR, LIB_ALBUM_COLOR, LIB_TRACK_COLOR,
     LIB_PLAYLIST_COLOR, apply_opacity, lerp_hex
 )
-from ui.widgets import AnimatedEntry, AccordionCard, src_color, dialog_handoff
+from ui.widgets import AnimatedEntry, AccordionCard, src_color, dialog_handoff, fmt_time, CupertinoSegmentedBar
 
 if sys.platform == "darwin":
     from utils.audio_engine_macos import audio_engine
@@ -333,8 +334,8 @@ class LibraryView:
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
             ),
             bgcolor=SURFACE2,
-            border=ft.Border.all(1.5, BORDER),
-            border_radius=14,
+            border=ft.Border.all(1, BORDER_SUBTLE),
+            border_radius=12,
             padding=ft.Padding.only(left=12, right=6, top=0, bottom=0),
             expand=True,
             animate=ft.Animation(150, ft.AnimationCurve.EASE_OUT),
@@ -592,7 +593,7 @@ class LibraryView:
 
     def _on_search_blur(self, _e):
         def _mutate():
-            self._search_bar_container.border = ft.Border.all(1.5, BORDER)
+            self._search_bar_container.border = ft.Border.all(1, BORDER_SUBTLE)
             self._search_bar_container.bgcolor = SURFACE2
         self.app.safe_update(_mutate)
 
@@ -2488,14 +2489,14 @@ class LibraryView:
             "tracks":    ft.Icons.MUSIC_NOTE_ROUNDED,
             "network":   ft.Icons.HUB_ROUNDED,
         }
+        pill_style = str(appearance.get("pill_style", "category")).lower()
         accents = {
-            "playlists": LIB_PLAYLIST_COLOR,
-            "artists":   LIB_ARTIST_COLOR,
-            "albums":    LIB_ALBUM_COLOR,
-            "tracks":    LIB_TRACK_COLOR,
+            "playlists": CYAN if pill_style == "unified" else LIB_PLAYLIST_COLOR,
+            "artists":   CYAN if pill_style == "unified" else LIB_ARTIST_COLOR,
+            "albums":    CYAN if pill_style == "unified" else LIB_ALBUM_COLOR,
+            "tracks":    CYAN if pill_style == "unified" else LIB_TRACK_COLOR,
             "network":   CYAN,
         }
-        tabs = []
 
         all_modes = [
             ("network", "Network", show_network),
@@ -2504,36 +2505,31 @@ class LibraryView:
             ("albums", "Albums", show_albums),
             ("tracks", "Tracks", show_tracks),
         ]
-        
+
+        segments = []
         for mode, label, enabled in all_modes:
             if not enabled:
                 continue
-            is_active = (self.view_mode == mode)
-            col = accents[mode]
-            tabs.append(
-                ft.GestureDetector(
-                    content=ft.Container(
-                        content=ft.Column(
-                            [
-                                ft.Icon(icons[mode], color=BG if is_active else col, size=18),
-                                ft.Text(label, size=10, weight=ft.FontWeight.W_700,
-                                        color=BG if is_active else TEXT, no_wrap=True),
-                            ],
-                            spacing=2,
-                            alignment=ft.MainAxisAlignment.CENTER,
-                            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                        ),
-                        bgcolor=col if is_active else apply_opacity(0.08, col),
-                        border=ft.Border.all(1, col if is_active else apply_opacity(0.2, col)),
-                        height=52,
-                        border_radius=12,
-                        padding=ft.Padding.symmetric(horizontal=4),
-                    ),
-                    on_tap=lambda e, m=mode: self._set_view_mode(m),
-                    expand=True,
-                )
+            segments.append((mode, label, icons[mode], accents[mode]))
+
+        if (
+            self._view_tabs_row.controls
+            and isinstance(self._view_tabs_row.controls[0], CupertinoSegmentedBar)
+            and [s[0] for s in self._view_tabs_row.controls[0].segments] == [s[0] for s in segments]
+            and [s[3] for s in self._view_tabs_row.controls[0].segments] == [s[3] for s in segments]
+        ):
+            self._view_tabs_row.controls[0].set_selected(self.view_mode)
+            return
+
+        self._view_tabs_row.controls = [
+            CupertinoSegmentedBar(
+                segments=segments,
+                selected_key=self.view_mode,
+                on_change=lambda m: self._set_view_mode(m),
+                height=40,
+                expand=True,
             )
-        self._view_tabs_row.controls = tabs
+        ]
         self.try_update(self._view_tabs_row)
 
     def _open_sort_menu(self, _e):
@@ -3309,8 +3305,9 @@ class LibraryView:
         sub  = f"{ac} albums  ·  {tc} tracks"
         accent = LIB_ARTIST_COLOR
         Che = ft.Icon(
-            ft.Icons.KEYBOARD_ARROW_RIGHT, 
+            ft.Icons.CHEVRON_RIGHT_ROUNDED, 
             color=accent if expanded else DIM,
+            size=18,
             rotate=ft.Rotate(1.57) if expanded else ft.Rotate(0),
             animate_rotation=ft.Animation(200, ft.AnimationCurve.DECELERATE),
             data="chevron"
@@ -3340,8 +3337,9 @@ class LibraryView:
         accent = LIB_ALBUM_COLOR
 
         Che = ft.Icon(
-            ft.Icons.KEYBOARD_ARROW_RIGHT, 
+            ft.Icons.CHEVRON_RIGHT_ROUNDED, 
             color=accent if expanded else DIM,
+            size=18,
             rotate=ft.Rotate(1.57) if expanded else ft.Rotate(0),
             animate_rotation=ft.Animation(200, ft.AnimationCurve.DECELERATE),
             data="chevron"
@@ -3357,8 +3355,6 @@ class LibraryView:
             ),
             title=ft.Text(album, color=TEXT, size=14, weight=ft.FontWeight.W_600, max_lines=3),
             subtitle=ft.Text(f"{artist}  ·  {tc} tracks", color=DIM, size=12, max_lines=2),
-            # No album pencil: the track/album tag editor was retired. Album tag
-            # fixes go through the artist row's "Fix artist info".
             trailing=Che,
             bgcolor=apply_opacity(0.06, accent) if expanded else "transparent",
         )
@@ -3426,8 +3422,9 @@ class LibraryView:
             self.app.playlist_editor.open(pl_id, name, pl.get("color") or LIB_PLAYLIST_COLOR)
 
         Che = ft.Icon(
-            ft.Icons.KEYBOARD_ARROW_RIGHT,
+            ft.Icons.CHEVRON_RIGHT_ROUNDED,
             color=(pl.get("color") or accent) if expanded else DIM,
+            size=18,
             rotate=ft.Rotate(1.57) if expanded else ft.Rotate(0),
             animate_rotation=ft.Animation(200, ft.AnimationCurve.DECELERATE),
             data="chevron"
@@ -3475,11 +3472,14 @@ class LibraryView:
                 return False
             active_color = apply_opacity(0.1, CYAN)
             
-            # leading is a bare Icon at depth 0 and a Row only when indented.
+            # leading is a bare Container at depth 0 and a Row only when indented.
             lead = tile.leading
-            icon = lead.controls[1] if isinstance(lead, ft.Row) else lead
-            icon.icon = ft.Icons.EQUALIZER if is_current else ft.Icons.MUSIC_NOTE_ROUNDED
-            icon.color = CYAN if is_current else LIB_TRACK_COLOR
+            badge = lead.controls[1] if isinstance(lead, ft.Row) and len(lead.controls) > 1 else lead
+            if badge and isinstance(badge, ft.Container):
+                badge.bgcolor = apply_opacity(0.22, CYAN) if is_current else apply_opacity(0.08, TEXT)
+                badge.border = ft.Border.all(1, CYAN if is_current else BORDER_SUBTLE)
+                if isinstance(badge.content, ft.Text):
+                    badge.content.color = CYAN if is_current else DIM
             
             if isinstance(tile.title, ft.Row):
                 tile.title.controls[0].color = CYAN if is_current else TEXT
@@ -3658,16 +3658,23 @@ class LibraryView:
 
         is_current = (path == audio_engine.current_path and bool(path))
 
-        # Built only when there's a format to show. The old unconditional badge
-        # cost two controls plus the wrapping title Row on every untagged row,
-        # just to be hidden via visible=False.
-        fmt = (t.get("format") or "").upper()
-        badge = ft.Container(
-            content=ft.Text(fmt, size=10, weight=ft.FontWeight.BOLD, color=BG),
-            bgcolor=CYAN if is_current else DIM,
-            padding=ft.Padding.symmetric(horizontal=6, vertical=2),
-            border_radius=4,
-        ) if fmt else None
+        # Format indicator badge in leading position (saves horizontal space & replaces generic note icon)
+        fmt = (t.get("format") or (os.path.splitext(path)[1].lstrip(".").upper() if path else "") or "AUD").upper()
+        if len(fmt) > 5:
+            fmt = fmt[:5]
+
+        leading_badge = ft.Container(
+            content=ft.Text(fmt, size=9, weight=ft.FontWeight.W_700, color=CYAN if is_current else DIM),
+            bgcolor=apply_opacity(0.22, CYAN) if is_current else apply_opacity(0.08, TEXT),
+            border=ft.Border.all(1, CYAN if is_current else BORDER_SUBTLE),
+            border_radius=5,
+            width=40,
+            height=20,
+            alignment=ft.Alignment(0, 0),
+        )
+
+        dur = t.get("duration")
+        dur_label = ft.Text(fmt_time(dur), size=12, color=CYAN if is_current else TEXT_TERTIARY) if dur else None
 
         trailing_controls = []
         if playlist_id:
@@ -3682,13 +3689,50 @@ class LibraryView:
                     padding=ft.Padding.symmetric(horizontal=8, vertical=4),
                 )
             )
-            trailing_controls.insert(0, ft.Row(
+            trailing_controls.extend([
+                drag_handle,
+                ft.IconButton(ft.Icons.REMOVE_CIRCLE_OUTLINE, icon_size=18, icon_color="#FF4444", on_click=remove_from_pl, tooltip="Remove from Playlist"),
+            ])
+        else:
+            if dur_label:
+                trailing_controls.append(dur_label)
+
+        trailing_ctrl = ft.Row(trailing_controls, tight=True, spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER) if trailing_controls else None
+
+        leading_ctrl = (
+            ft.Row(
                 [
-                    drag_handle,
-                    ft.IconButton(ft.Icons.REMOVE_CIRCLE_OUTLINE, icon_size=18, icon_color="#FF4444", on_click=remove_from_pl, tooltip="Remove from Playlist"),
+                    ft.Container(width=depth * 16),
+                    leading_badge,
                 ],
-                spacing=4, tight=True
-            ))
+                tight=True,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            )
+            if depth > 0 else leading_badge
+        )
+
+        title_ctrl = ft.Text(
+            title,
+            color=CYAN if is_current else TEXT,
+            size=14, weight=ft.FontWeight.W_600,
+            max_lines=1, overflow=ft.TextOverflow.ELLIPSIS,
+        )
+
+        sub_parts = []
+        if tnum:
+            sub_parts.append(f"Track {tnum}")
+        if artist:
+            sub_parts.append(artist)
+        if album and album != "Unknown" and depth == 0:
+            sub_parts.append(album)
+        sub_str = "  ·  ".join(sub_parts) if sub_parts else artist
+        subtitle_ctrl = ft.Text(
+            sub_str,
+            color=CYAN if is_current else DIM,
+            size=12,
+            max_lines=1,
+            overflow=ft.TextOverflow.ELLIPSIS,
+        )
 
         tile = ft.ListTile(
             height=self.ROW_H,
@@ -3698,58 +3742,10 @@ class LibraryView:
                 "playlist_id": playlist_id,
                 "path": path,
             },
-            # Bare Icon at depth 0 (the whole tracks view). The indent Container
-            # was dead weight there and the Row wrapped a single child.
-            leading=(
-                ft.Row(
-                    [
-                        ft.Container(width=depth * 20),
-                        ft.Icon(
-                            ft.Icons.EQUALIZER if is_current else ft.Icons.MUSIC_NOTE_ROUNDED,
-                            color=CYAN if is_current else accent,
-                        ),
-                    ],
-                    tight=True,
-                )
-                if depth > 0 else
-                ft.Icon(
-                    ft.Icons.EQUALIZER if is_current else ft.Icons.MUSIC_NOTE_ROUNDED,
-                    color=CYAN if is_current else accent,
-                )
-            ),
-            # Single-line + ellipsis keeps every row exactly ROW_H tall, which
-            # item_extent depends on. The Row exists only to carry the badge.
-            title=(
-                ft.Row(
-                    [
-                        ft.Text(
-                            title,
-                            color=CYAN if is_current else TEXT,
-                            size=14, weight=ft.FontWeight.W_600,
-                            max_lines=1, overflow=ft.TextOverflow.ELLIPSIS,
-                            expand=True,
-                        ),
-                        badge,
-                    ],
-                    spacing=8,
-                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                )
-                if badge is not None else
-                ft.Text(
-                    title,
-                    color=CYAN if is_current else TEXT,
-                    size=14, weight=ft.FontWeight.W_600,
-                    max_lines=1, overflow=ft.TextOverflow.ELLIPSIS,
-                )
-            ),
-            subtitle=ft.Text(
-                f"Track {tnum}  ·  {artist}" if tnum else artist,
-                color=CYAN if is_current else DIM,
-                size=12,
-                max_lines=1,
-                overflow=ft.TextOverflow.ELLIPSIS,
-            ),
-            trailing=ft.Row(trailing_controls, tight=True, spacing=0) if playlist_id else None,
+            leading=leading_ctrl,
+            title=title_ctrl,
+            subtitle=subtitle_ctrl,
+            trailing=trailing_ctrl,
             bgcolor=apply_opacity(0.1, CYAN) if is_current else "transparent",
             on_click=lambda e: self.page.run_task(
                 self.app.play_track,
