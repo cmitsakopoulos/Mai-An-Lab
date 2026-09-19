@@ -111,3 +111,132 @@ def test_network_row_menu_defers_the_playlist_sheet():
 
     sheet.on_dismiss(None)
     view.page.run_task.assert_called_once()
+
+
+def test_track_context_menu_redownload_defers_to_sheet_dismissal():
+    """Tapping Redownload in track context menu must dismiss the sheet first
+    before switching tabs and starting search, avoiding route collisions."""
+    from ui.views.library import LibraryView
+
+    view = LibraryView.__new__(LibraryView)
+    view.app = MagicMock()
+    view.app.dismiss_dialog.return_value = True
+    view.page = MagicMock()
+    view.app.search_view = MagicMock()
+    view._build_context_menu_track_card = lambda meta: MagicMock()
+
+    meta = {"track_title": "Bohemian Rhapsody", "artist_name": "Queen"}
+    view._open_track_context_menu(meta)
+
+    sheet = view.page.show_dialog.call_args[0][0]
+    tile = next(
+        t for t in sheet.content.content.controls
+        if getattr(getattr(t, "title", None), "value", None) == "Redownload (Different Quality)"
+    )
+
+    tile.on_click(None)
+    view.app.dismiss_dialog.assert_called_once_with(sheet)
+    view.app._switch_tab.assert_not_called()
+    view.page.run_task.assert_not_called()
+
+    # Once Flutter finishes dismissal, the follow-up runs:
+    sheet.on_dismiss(None)
+    view.app._switch_tab.assert_called_once_with(1)
+    assert view.app.search_view._search_field.value == "Bohemian Rhapsody Queen"
+    assert view.app.search_view.view_mode == "tracks"
+    view.app.search_view._update_view_tabs.assert_called_once()
+    view.page.run_task.assert_called_once_with(view.app.search_view.start_search)
+
+
+def test_cupertino_segmented_bar_unmounted_updates_do_not_crash():
+    """CupertinoSegmentedBar.set_selected and _select must not raise
+    'Control must be added to the page first' when called on unmounted instances."""
+    import pytest
+    from ui.widgets import CupertinoSegmentedBar
+
+    bar = CupertinoSegmentedBar(
+        segments=[("a", "A", None, None), ("b", "B", None, None)],
+        selected_key="a",
+        on_change=None,
+    )
+    # In Flet, accessing .page on an unmounted control raises RuntimeError
+    with pytest.raises(RuntimeError, match="Control must be added to the page first"):
+        _ = bar.page
+
+    # Should update state and styles without raising
+    bar.set_selected("b")
+    assert bar.selected_key == "b"
+
+    bar._select("a")
+    assert bar.selected_key == "a"
+
+
+def test_source_segment_unmounted_update_does_not_crash():
+    """SourceSegment.update_state must not raise when unmounted."""
+    import pytest
+    from ui.widgets import SourceSegment
+
+    seg = SourceSegment("flac", selected=False)
+    with pytest.raises(RuntimeError, match="Control must be added to the page first"):
+        _ = seg.page
+
+    seg.update_state(True)
+    assert seg.selected is True
+
+
+def test_playlist_row_bin_icon_requests_delete_confirmation():
+    """Pressing the bin icon on a playlist row must ask for confirmation rather than
+    deleting immediately."""
+    from ui.views.library import LibraryView
+    import flet as ft
+
+    view = LibraryView.__new__(LibraryView)
+    view.app = MagicMock()
+    view.page = MagicMock()
+
+    tile = view._playlist_row({"id": 42, "name": "Chill Beats", "track_count": 5}, "pl_42", False)
+
+    # Find the bin icon button in trailing
+    bin_btn = next(
+        btn for btn in tile.trailing.controls
+        if isinstance(btn, ft.IconButton) and btn.icon == ft.Icons.DELETE_OUTLINE
+    )
+
+    # Click the bin icon
+    bin_btn.on_click(None)
+
+    # Must invoke confirm_delete_playlist on the app
+    view.app.confirm_delete_playlist.assert_called_once_with(42, "Chill Beats")
+
+
+def test_main_app_confirm_delete_playlist_dialog_behavior():
+    """MainApp.confirm_delete_playlist shows a confirmation AlertDialog with Cancel and Delete."""
+    from main import StreamripFletApp
+    import flet as ft
+
+    app = StreamripFletApp.__new__(StreamripFletApp)
+    app.page = MagicMock()
+    app.dismiss_dialog = MagicMock()
+
+    app.confirm_delete_playlist(42, "Chill Beats")
+
+    app.page.show_dialog.assert_called_once()
+    dlg = app.page.show_dialog.call_args[0][0]
+    assert isinstance(dlg, ft.AlertDialog)
+    assert dlg.title.value == "Delete Playlist?"
+    assert "Chill Beats" in dlg.content.value
+
+    cancel_btn = next(a for a in dlg.actions if isinstance(a, ft.TextButton) and a.content == "Cancel")
+    delete_btn = next(a for a in dlg.actions if isinstance(a, ft.Button))
+
+    # Cancel must dismiss dialog without deleting
+    cancel_btn.on_click(None)
+    app.dismiss_dialog.assert_called_once_with(dlg)
+    app.page.run_task.assert_not_called()
+
+    # Delete must dismiss dialog and run task _delete_playlist
+    delete_btn.on_click(None)
+    assert app.dismiss_dialog.call_count == 2
+    app.page.run_task.assert_called_once_with(app._delete_playlist, 42)
+
+

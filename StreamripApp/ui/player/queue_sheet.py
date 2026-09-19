@@ -205,7 +205,7 @@ class QueueSheet:
                                     max_lines=1,
                                 ),
                                 ft.Text(
-                                    t.get("artist_name", "Unknown"),
+                                    t.get("artist_name", "Unknown") if t.get("artist_name", "").strip().lower() != t.get("track_title", "").strip().lower() else "",
                                     color=CYAN if is_active else (LIB_TRACK_COLOR if same_art else DIM),
                                     size=11,
                                     overflow=ft.TextOverflow.ELLIPSIS,

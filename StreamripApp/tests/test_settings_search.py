@@ -212,6 +212,49 @@ class TestSettingsSearch(unittest.TestCase):
         self.assertEqual(view._selected_accent_color, initial_color)
         self.assertFalse(view._apply_visuals_container.visible)
 
+    def test_subpage_scroll_reset(self):
+        """Opening normal subpages must mount a fresh scroll column at offset 0
+        without invoking auto-scroll to bottom."""
+        from unittest.mock import MagicMock
+        class MockApp:
+            page = MagicMock()
+            def safe_update(self, fn):
+                if fn: fn()
+
+        app = MockApp()
+        view = SettingsView(app=app)
+        initial_col = view._scroll_column
+
+        # Navigate to Haptic Feedback
+        view._show_sub_page("Haptic Feedback", view._build_haptics_group())
+        new_col = view._scroll_column
+
+        # Must be a brand new Column instance to discard inherited scroll offsets
+        self.assertIsNot(initial_col, new_col)
+        self.assertIs(view._scroll_column, new_col)
+        # Normal pages should NOT trigger auto-scroll to bottom
+        app.page.run_task.assert_not_called()
+
+        # Returning to hub should also instantiate a clean column
+        view._show_hub()
+        hub_col = view._scroll_column
+        self.assertIsNot(new_col, hub_col)
+        self.assertIs(view._scroll_column, hub_col)
+
+    def test_about_auto_scroll(self):
+        """Opening About specifically schedules auto-scroll to the bottom."""
+        from unittest.mock import MagicMock
+        class MockApp:
+            page = MagicMock()
+            def safe_update(self, fn):
+                if fn: fn()
+
+        app = MockApp()
+        view = SettingsView(app=app)
+
+        view._show_sub_page("About", view._build_about_group())
+        app.page.run_task.assert_called_once_with(view._scroll_about_to_bottom)
+
 
 if __name__ == "__main__":
     unittest.main()

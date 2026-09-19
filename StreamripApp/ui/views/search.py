@@ -1095,6 +1095,7 @@ class SearchView:
                 expand=True,
             )
         ]
+        self.try_update(self._view_tabs_row)
 
     def _result_card(self, index: int, r: dict, depth: int = 0) -> ft.Control:
         m_type = r.get("media_type", "track")
@@ -1188,7 +1189,10 @@ class SearchView:
                 ft.Icon(icon_map.get(m_type, ft.Icons.MUSIC_NOTE), color=accent, size=18),
             ], tight=True),
             title=ft.Text(title, color=TEXT, size=14, weight=ft.FontWeight.W_600, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
-            subtitle=ft.Text(f"{subtitle}{'  ·  ' + detail if detail else ''}", color=DIM, size=12, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+            subtitle=ft.Text(
+                f"{subtitle if subtitle.strip().lower() != title.strip().lower() else ''}{('  ·  ' if (subtitle and subtitle.strip().lower() != title.strip().lower()) else '') + detail if detail else ''}",
+                color=DIM, size=12, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS
+            ),
             trailing=ft.Row([
                 preview_btn if m_type == "track" else ft.Container(),
                 ft.IconButton(

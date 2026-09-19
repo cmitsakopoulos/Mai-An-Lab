@@ -223,7 +223,10 @@ class AnimatedEntry(ft.Container):
         """Trigger the slide-out animation."""
         self.height = 0
         self.opacity = 0
-        self.update()
+        try:
+            self.update()
+        except Exception:
+            pass
 
 
 class ScaleButton(ft.GestureDetector):
@@ -343,7 +346,10 @@ class AppSearchBar(ft.Container):
     def _clear(self, callback):
         self._input.value = ""
         self._clear_btn.visible = False
-        self.update()
+        try:
+            self.update()
+        except Exception:
+            pass
         if callback: callback()
     @property
     def value(self): return self._input.value
@@ -428,14 +434,20 @@ class CupertinoSegmentedBar(ft.Container):
             return
         self.selected_key = key
         self._apply_styles()
-        self.update()
+        try:
+            self.update()
+        except Exception:
+            pass
         if self.on_change:
             self.on_change(key)
             
     def set_selected(self, key: str):
         self.selected_key = key
         self._apply_styles()
-        self.update()
+        try:
+            self.update()
+        except Exception:
+            pass
 
 
 class SourceSegment(ScaleButton):
@@ -462,7 +474,10 @@ class SourceSegment(ScaleButton):
         self.content.border = ft.Border.all(1, CYAN if selected else BORDER_SUBTLE)
         self.text_control.color = TEXT if selected else DIM
         self.text_control.weight = ft.FontWeight.W_700 if selected else ft.FontWeight.W_500
-        self.update()
+        try:
+            self.update()
+        except Exception:
+            pass
 
 
 class SettingsHeader(ft.Row):
@@ -552,7 +567,10 @@ class AccordionCard(ft.Column):
         self.chevron.icon = ft.Icons.KEYBOARD_ARROW_DOWN_ROUNDED if self.is_open else ft.Icons.CHEVRON_RIGHT_ROUNDED
         if self.on_toggle:
             self.on_toggle(self.is_open)
-        self.update()
+        try:
+            self.update()
+        except Exception:
+            pass
 
 
 class SkeletonRow(ft.Container):
