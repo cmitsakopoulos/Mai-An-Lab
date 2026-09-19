@@ -333,7 +333,9 @@ class StreamripSearcher:
             album_name = getattr(r, "album_name", "")
             
             detail_parts = []
-            if album_name: detail_parts.append(album_name)
+            item_name = getattr(r, "name", "")
+            if album_name and (m_type != "track" or album_name.strip().lower() != item_name.strip().lower()):
+                detail_parts.append(album_name)
             if year != "N/A": detail_parts.append(year)
             detail_parts.append(m_type.upper())
 

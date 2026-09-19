@@ -12,7 +12,7 @@ from ui.tokens import (
     SOURCE_COLORS, LIB_ARTIST_COLOR, LIB_ALBUM_COLOR, LIB_TRACK_COLOR,
     LIB_PLAYLIST_COLOR, apply_opacity, lerp_hex
 )
-from ui.widgets import AnimatedEntry, AccordionCard, src_color, dialog_handoff, fmt_time, CupertinoSegmentedBar
+from ui.widgets import AnimatedEntry, AccordionCard, src_color, dialog_handoff, fmt_time, CupertinoSegmentedBar, _ARTWORK_CACHE
 
 if sys.platform == "darwin":
     from utils.audio_engine_macos import audio_engine
@@ -3413,10 +3413,37 @@ class LibraryView:
         accent = LIB_PLAYLIST_COLOR
 
         def _confirm_delete(_e):
-            async def _do():
-                await self.app.db_manager.delete_playlist(pl_id)
-                await self.load_library()
-            self.page.run_task(_do)
+            if hasattr(self.app, "confirm_delete_playlist"):
+                self.app.confirm_delete_playlist(pl_id, name)
+            else:
+                def execute(_ev):
+                    self.app.dismiss_dialog(dlg)
+                    async def _do():
+                        await self.app.db_manager.delete_playlist(pl_id)
+                        await self.load_library()
+                    self.page.run_task(_do)
+
+                def cancel(_ev):
+                    self.app.dismiss_dialog(dlg)
+
+                dlg = ft.AlertDialog(
+                    title=ft.Text("Delete Playlist?", color=TEXT),
+                    bgcolor=SURFACE,
+                    content=ft.Text(
+                        f"Permanently delete playlist '{name}'? Tracks will remain in your library.",
+                        color=DIM, size=13,
+                    ),
+                    actions=[
+                        ft.TextButton("Cancel", on_click=cancel),
+                        ft.Button(
+                            content=ft.Text("Delete"),
+                            style=ft.ButtonStyle(bgcolor="#FF2222", color=TEXT),
+                            on_click=execute,
+                        ),
+                    ],
+                )
+                if self.page:
+                    self.page.show_dialog(dlg)
 
         def _edit_pl(_e):
             self.app.playlist_editor.open(pl_id, name, pl.get("color") or LIB_PLAYLIST_COLOR)
@@ -3653,16 +3680,25 @@ class LibraryView:
         artist = t.get("artist") or "Unknown"
         album  = t.get("album")  or "Unknown"
         tnum   = t.get("track_num")
-        meta   = {"path": path, "track_title": title, "artist_name": artist, "album_title": album}
+        dur    = t.get("duration")
+        fmt    = (t.get("format") or (os.path.splitext(path)[1].lstrip(".").upper() if path else "") or "AUD").upper()
+        if len(fmt) > 5:
+            fmt = fmt[:5]
+
+        meta   = {
+            **t,
+            "path": path,
+            "track_title": title,
+            "artist_name": artist,
+            "album_title": album,
+            "duration": dur,
+            "format": fmt,
+        }
         accent = LIB_TRACK_COLOR
 
         is_current = (path == audio_engine.current_path and bool(path))
 
         # Format indicator badge in leading position (saves horizontal space & replaces generic note icon)
-        fmt = (t.get("format") or (os.path.splitext(path)[1].lstrip(".").upper() if path else "") or "AUD").upper()
-        if len(fmt) > 5:
-            fmt = fmt[:5]
-
         leading_badge = ft.Container(
             content=ft.Text(fmt, size=9, weight=ft.FontWeight.W_700, color=CYAN if is_current else DIM),
             bgcolor=apply_opacity(0.22, CYAN) if is_current else apply_opacity(0.08, TEXT),
@@ -3673,7 +3709,6 @@ class LibraryView:
             alignment=ft.Alignment(0, 0),
         )
 
-        dur = t.get("duration")
         dur_label = ft.Text(fmt_time(dur), size=12, color=CYAN if is_current else TEXT_TERTIARY) if dur else None
 
         trailing_controls = []
@@ -3719,13 +3754,16 @@ class LibraryView:
         )
 
         sub_parts = []
-        if tnum:
-            sub_parts.append(f"Track {tnum}")
-        if artist:
+        if artist and artist != "Unknown" and artist.strip().lower() != title.strip().lower():
             sub_parts.append(artist)
-        if album and album != "Unknown" and depth == 0:
+        if (
+            album
+            and album != "Unknown"
+            and album.strip().lower() != title.strip().lower()
+            and album_context is None
+        ):
             sub_parts.append(album)
-        sub_str = "  ·  ".join(sub_parts) if sub_parts else artist
+        sub_str = "  ·  ".join(sub_parts) if sub_parts else (artist if artist and artist != "Unknown" else "")
         subtitle_ctrl = ft.Text(
             sub_str,
             color=CYAN if is_current else DIM,
@@ -3820,6 +3858,124 @@ class LibraryView:
         self.app.trigger_haptic("long_press")
         self._open_track_context_menu(meta)
 
+    def _build_context_menu_track_card(self, meta: dict) -> ft.Container:
+        path = meta.get("path", "")
+        title = meta.get("track_title") or meta.get("title") or "Track Actions"
+        artist = meta.get("artist_name") or meta.get("artist") or ""
+        album = meta.get("album_title") or meta.get("album") or ""
+        dur = meta.get("duration")
+        fmt = (meta.get("format") or (os.path.splitext(path)[1].lstrip(".").upper() if path else "") or "").upper()
+        if len(fmt) > 5:
+            fmt = fmt[:5]
+
+        # 1. Resolve artwork
+        art_src = _ARTWORK_CACHE.get(path) if path else None
+        if not art_src and path and os.path.exists(path):
+            dir_path = os.path.dirname(path)
+            for name in ("cover.jpg", "cover.png", "folder.jpg", "folder.png", "Artwork.jpg"):
+                candidate = os.path.join(dir_path, name)
+                if os.path.exists(candidate):
+                    art_src = candidate
+                    _ARTWORK_CACHE.put(path, candidate)
+                    break
+        if not art_src:
+            art_src = meta.get("image_url") or meta.get("image")
+
+        if art_src:
+            artwork_ctrl = ft.Container(
+                content=ft.Image(
+                    src=art_src,
+                    width=54,
+                    height=54,
+                    fit="cover",
+                    border_radius=ft.BorderRadius.all(10),
+                ),
+                width=54,
+                height=54,
+                border_radius=10,
+                border=ft.Border.all(1, BORDER_SUBTLE),
+                clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
+            )
+        else:
+            artwork_ctrl = ft.Container(
+                content=ft.Icon(ft.Icons.MUSIC_NOTE_ROUNDED, color=CYAN, size=26),
+                width=54,
+                height=54,
+                bgcolor=SURFACE,
+                border_radius=10,
+                border=ft.Border.all(1, BORDER_SUBTLE),
+                alignment=ft.Alignment(0, 0),
+            )
+
+        # 2. Title & Subtitle
+        title_ctrl = ft.Text(
+            title,
+            color=TEXT,
+            weight=ft.FontWeight.W_700,
+            size=15,
+            max_lines=1,
+            overflow=ft.TextOverflow.ELLIPSIS,
+        )
+
+        sub_parts = []
+        if artist and artist != "Unknown" and artist.strip().lower() != title.strip().lower():
+            sub_parts.append(artist)
+        if album and album != "Unknown" and album.strip().lower() != title.strip().lower():
+            sub_parts.append(album)
+        sub_text = "  ·  ".join(sub_parts) if sub_parts else (artist if artist and artist != "Unknown" else "")
+        subtitle_ctrl = ft.Text(
+            sub_text,
+            color=DIM,
+            size=12,
+            max_lines=1,
+            overflow=ft.TextOverflow.ELLIPSIS,
+        ) if sub_text else None
+
+        # 3. Badges (Format + Duration + Bitrate)
+        badge_controls = []
+        if fmt:
+            badge_controls.append(
+                ft.Container(
+                    content=ft.Text(fmt, size=9, weight=ft.FontWeight.W_700, color=CYAN),
+                    bgcolor=apply_opacity(0.22, CYAN),
+                    border=ft.Border.all(1, apply_opacity(0.35, CYAN)),
+                    border_radius=4,
+                    padding=ft.Padding.symmetric(horizontal=6, vertical=1),
+                )
+            )
+        if dur:
+            badge_controls.append(
+                ft.Text(fmt_time(dur), size=11, color=TEXT_TERTIARY, weight=ft.FontWeight.W_500)
+            )
+        bitrate = meta.get("bitrate")
+        if bitrate and bitrate > 0:
+            badge_controls.append(
+                ft.Text(f"{bitrate // 1000} kbps", size=10, color=DIM)
+            )
+
+        badges_row = ft.Row(badge_controls, spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER) if badge_controls else None
+
+        card_col_children = [title_ctrl]
+        if subtitle_ctrl:
+            card_col_children.append(subtitle_ctrl)
+        if badges_row:
+            card_col_children.append(badges_row)
+
+        return ft.Container(
+            content=ft.Row(
+                [
+                    artwork_ctrl,
+                    ft.Column(card_col_children, spacing=3, expand=True),
+                ],
+                spacing=12,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            bgcolor=SURFACE2,
+            border=ft.Border.all(1, BORDER_SUBTLE),
+            border_radius=RADIUS_CARD,
+            padding=ft.Padding.symmetric(horizontal=12, vertical=10),
+        )
+
     def _open_track_context_menu(self, meta: dict):
         # Flet 0.86: BottomSheet is a DialogControl, and the modal barrier's
         # teardown is only wired up when the sheet is presented via
@@ -3863,7 +4019,6 @@ class LibraryView:
             _close(lambda: self.app.confirm_delete_track(path, title))
 
         def _redownload(_e):
-            _close()
             title = meta.get("track_title", "")
             artist = meta.get("artist_name", "")
             
@@ -3874,22 +4029,36 @@ class LibraryView:
                 query_parts.append(artist)
                 
             query = " ".join(query_parts).strip()
-            if not query: return
-            
-            self.app._switch_tab(1)
-            
-            self.app.search_view._search_field.value = query
-            self.app.search_view.view_mode = "tracks"
-            self.app.search_view._update_view_tabs()
-            
-            self.page.run_task(self.app.search_view.start_search)
+            if not query:
+                _close()
+                return
+
+            def _perform_redownload():
+                self.app._switch_tab(1)
+                self.app.search_view._search_field.value = query
+                self.app.search_view.view_mode = "tracks"
+                self.app.search_view._update_view_tabs()
+                self.page.run_task(self.app.search_view.start_search)
+
+            _close(_perform_redownload)
+
+        grab_handle = ft.Container(
+            content=ft.Row(
+                [ft.Container(width=36, height=5, bgcolor=BORDER, border_radius=3)],
+                alignment=ft.MainAxisAlignment.CENTER,
+            ),
+            padding=ft.Padding.only(top=8, bottom=10),
+        )
+
+        track_card = self._build_context_menu_track_card(meta)
 
         bs = ft.BottomSheet(
             content=ft.Container(
                 content=ft.Column(
                     [
-                        ft.Text(meta.get("track_title", "Track Actions"), color=TEXT, weight=ft.FontWeight.W_700, size=14, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
-                        ft.Divider(color=BORDER),
+                        grab_handle,
+                        track_card,
+                        ft.Container(height=6),
                         ft.ListTile(
                             leading=ft.Icon(ft.Icons.QUEUE_MUSIC_ROUNDED, color=CYAN),
                             title=ft.Text("Play Next", color=TEXT),
@@ -3920,7 +4089,7 @@ class LibraryView:
                     spacing=0,
                 ),
                 bgcolor=SURFACE,
-                padding=16,
+                padding=ft.Padding.only(left=16, right=16, top=0, bottom=24),
             ),
             bgcolor=SURFACE,
             on_dismiss=_on_sheet_dismissed,

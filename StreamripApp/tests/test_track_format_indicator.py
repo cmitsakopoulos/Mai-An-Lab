@@ -156,5 +156,94 @@ class TestTrackFormatIndicator(unittest.TestCase):
         self.assertEqual(dialog_arg.bgcolor, "#1C1C1E")
 
 
+    def test_track_row_subtitle_no_track_name_or_number(self):
+        app = MagicMock()
+        view = LibraryView(app=app)
+        view.page = MagicMock()
+
+        # 1. Standard track: should show "Artist  ·  Album", NOT "Track 1"
+        track1 = {
+            "path": "/music/song1.flac",
+            "title": "Midnight Drive",
+            "artist": "Synthwave Act",
+            "album": "Neon City",
+            "track_num": 1,
+        }
+        row1 = view._track_row(track1, depth=0)
+        tile1 = view._get_tile(row1)
+        self.assertEqual(tile1.subtitle.value, "Synthwave Act  ·  Neon City")
+        self.assertNotIn("Track 1", tile1.subtitle.value)
+        self.assertNotIn("Midnight Drive", tile1.subtitle.value)
+
+        # 2. Single where album name == track title: album should NOT be repeated in subtitle
+        track_single = {
+            "path": "/music/single.flac",
+            "title": "One More Time",
+            "artist": "Daft Punk",
+            "album": "One More Time",
+            "track_num": 1,
+        }
+        row_single = view._track_row(track_single, depth=0)
+        tile_single = view._get_tile(row_single)
+        self.assertEqual(tile_single.subtitle.value, "Daft Punk")
+        self.assertNotIn("One More Time", tile_single.subtitle.value)
+
+        # 3. Inside an album context (depth > 0): album is already known, show only artist
+        row_album_ctx = view._track_row(track1, depth=1, album_context=("Synthwave Act", "Neon City"))
+        tile_album_ctx = view._get_tile(row_album_ctx)
+        self.assertEqual(tile_album_ctx.subtitle.value, "Synthwave Act")
+        self.assertNotIn("Neon City", tile_album_ctx.subtitle.value)
+
+    def test_track_context_menu_preview_card_structure(self):
+        app = MagicMock()
+        view = LibraryView(app=app)
+        page = MagicMock()
+        view.page = page
+
+        meta = {
+            "path": "/music/album/song.flac",
+            "track_title": "Starboy",
+            "artist_name": "The Weeknd",
+            "album_title": "Starboy",
+            "duration": 230,
+            "format": "FLAC",
+            "bitrate": 960000,
+        }
+
+        # 1. Test preview card builder
+        card = view._build_context_menu_track_card(meta)
+        self.assertIsInstance(card, ft.Container)
+        self.assertIsInstance(card.content, ft.Row)
+
+        # 2. Test opening context menu
+        view._open_track_context_menu(meta)
+        page.show_dialog.assert_called_once()
+        sheet = page.show_dialog.call_args[0][0]
+        self.assertIsInstance(sheet, ft.BottomSheet)
+
+        # Inspect controls hierarchy: grab_handle, track_card, spacer, tiles
+        controls = sheet.content.content.controls
+        self.assertTrue(len(controls) >= 5)
+
+        # Grab handle is first
+        grab_handle = controls[0]
+        self.assertIsInstance(grab_handle, ft.Container)
+
+        # Track card is second
+        track_card = controls[1]
+        self.assertIsInstance(track_card, ft.Container)
+
+        # Delete tile is directly discoverable by the test helper
+        delete_tile = next(
+            t for t in controls
+            if getattr(getattr(t, "title", None), "value", None) == "Delete Track"
+        )
+        self.assertIsNotNone(delete_tile)
+
+        # Dismissal safety: triggering delete calls app.dismiss_dialog(sheet)
+        delete_tile.on_click(None)
+        app.dismiss_dialog.assert_called_once_with(sheet)
+
+
 if __name__ == "__main__":
     unittest.main()

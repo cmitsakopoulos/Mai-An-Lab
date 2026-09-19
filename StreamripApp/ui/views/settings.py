@@ -744,18 +744,34 @@ class SettingsView:
         self._scroll_column = ft.Column(
             scroll=ft.ScrollMode.AUTO,
             spacing=12,
+            expand=True,
+        )
+        self._content_stack = ft.Stack(
+            [
+                self._scroll_column,
+                self._apply_visuals_container,
+            ],
+            expand=True,
         )
         self.main_content = ft.Container(
-            content=ft.Stack(
-                [
-                    self._scroll_column,
-                    self._apply_visuals_container,
-                ],
-                expand=True,
-            ),
+            content=self._content_stack,
             expand=True, 
             padding=ft.Padding.symmetric(horizontal=28, vertical=20),
         )
+
+    def _replace_scroll_column(self, controls: list[ft.Control] = None) -> ft.Column:
+        """Instantiates a clean ft.Column so Flutter attaches a fresh ScrollController
+        starting naturally at offset 0.0 with pure native gesture physics (no inherited
+        offsets or clamp collisions from previous pages)."""
+        self._scroll_column = ft.Column(
+            controls=controls or [],
+            scroll=ft.ScrollMode.AUTO,
+            spacing=12,
+            expand=True,
+        )
+        if hasattr(self, "_content_stack") and self._content_stack.controls:
+            self._content_stack.controls[0] = self._scroll_column
+        return self._scroll_column
 
     def _get_subpage_state(self, subpage_name: str) -> dict:
         if subpage_name == "AI Assistant":
@@ -848,15 +864,7 @@ class SettingsView:
         self.refresh()
         if getattr(self, "initial_subpage", None) == "Storage":
             self.initial_subpage = None
-            self._scroll_column.controls = [
-                ft.Row([
-                    ft.IconButton(ft.Icons.ARROW_BACK_IOS_NEW_ROUNDED, icon_color=CYAN, icon_size=16, 
-                                  on_click=lambda _: self._show_hub()),
-                    ft.Text("Storage", size=24, weight=ft.FontWeight.W_700, color=TEXT),
-                ], spacing=10),
-                ft.Container(height=20),
-                self._build_storage_group()
-            ]
+            self._show_sub_page("Storage", self._build_storage_group())
         else:
             self._show_hub() # Start at the Hub
         return self.main_content
@@ -1133,6 +1141,7 @@ class SettingsView:
                 # About Section
                 HubSettingItem(ft.Icons.INFO_OUTLINE_ROUNDED, "About", "App version and developer info", 
                                on_tap=lambda _: self._show_sub_page("About", self._build_about_group())),
+                ft.Container(height=35),
             ]
         else:
             q_clean = query.strip().lower()
@@ -1226,6 +1235,7 @@ class SettingsView:
         self._current_subpage_name = None
         self._baseline_subpage_state = None
         self._hide_save_bar()
+        self._replace_scroll_column([])
         query = (self._search_input.value or "").strip().lower()
         self._render_hub_or_search(query)
         self.app.safe_update(lambda: None)
@@ -1235,16 +1245,34 @@ class SettingsView:
         self._current_subpage_name = title
         self._baseline_subpage_state = self._get_subpage_state(title)
         self._hide_save_bar()
-        self._scroll_column.controls = [
+        subpage_controls = [
             ft.Row([
                 ft.IconButton(ft.Icons.ARROW_BACK_IOS_NEW_ROUNDED, icon_color=CYAN, icon_size=16, 
                               on_click=lambda _: self._show_hub()),
                 ft.Text(title, size=18, weight=ft.FontWeight.W_700, color=TEXT, overflow=ft.TextOverflow.ELLIPSIS, max_lines=1, expand=True),
             ], spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER),
             ft.Container(height=15),
-            content_control
+            content_control,
+            ft.Container(height=35),
         ]
+        self._replace_scroll_column(subpage_controls)
         self.app.safe_update(lambda: None)
+
+        if title == "About" and hasattr(self, "page") and self.page and hasattr(self.page, "run_task"):
+            self.page.run_task(self._scroll_about_to_bottom)
+
+    async def _scroll_about_to_bottom(self):
+        """Auto-scroll the About section smoothly to the bottom to highlight contact info."""
+        await asyncio.sleep(0.08)
+        if getattr(self, "_current_subpage_name", None) != "About":
+            return
+        try:
+            await asyncio.wait_for(
+                self._scroll_column.scroll_to(offset=-1, duration=250),
+                timeout=1.0,
+            )
+        except Exception as exc:
+            logger.debug("Auto-scroll About failed: %s", exc)
 
     # --- Sub-Page Builders ---
 

@@ -136,6 +136,27 @@ class NowPlayingSheet:
             visible=False,
         )
 
+        self._queue_btn = ft.Container(
+            content=ft.Row(
+                [
+                    ft.Icon(ft.Icons.QUEUE_MUSIC_ROUNDED, color=CYAN, size=17),
+                    ft.Text("Queue", size=13, weight=ft.FontWeight.W_600, color=TEXT, no_wrap=True),
+                ],
+                spacing=6,
+                alignment=ft.MainAxisAlignment.CENTER,
+                tight=True,
+            ),
+            bgcolor=apply_opacity(0.14, CYAN),
+            border=ft.Border.all(1, apply_opacity(0.35, CYAN)),
+            border_radius=RADIUS_PILL,
+            padding=ft.Padding.symmetric(horizontal=14, vertical=8),
+            margin=ft.Margin.only(top=6, right=2),
+            alignment=ft.Alignment(0, 0),
+            animate=ft.Animation(140, ft.AnimationCurve.EASE_OUT),
+            on_click=lambda e: self.app.queue_sheet.expand(),
+            tooltip="Playback Queue",
+        )
+
         self._root_layout = ft.Column(
             [
                 # Apple-style grab handle
@@ -153,14 +174,11 @@ class NowPlayingSheet:
                                 on_click=lambda e: self.collapse(),
                             ),
                             ft.Container(expand=True),
-                            ft.IconButton(
-                                icon=ft.Icons.QUEUE_MUSIC_ROUNDED,
-                                icon_color=DIM, icon_size=24,
-                                on_click=lambda e: self.app.queue_sheet.expand(),
-                            ),
-                        ]
+                            self._queue_btn,
+                        ],
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
                     ),
-                    padding=ft.Padding.symmetric(horizontal=14),
+                    padding=ft.Padding.only(left=14, right=14, top=4, bottom=4),
                 ),
                 ft.Container(expand=True),
                 # Artwork - Responsive Aspect Ratio Container

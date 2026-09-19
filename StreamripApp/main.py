@@ -3018,7 +3018,45 @@ class StreamripFletApp:
 
         self.page.update()
 
-    
+    def confirm_delete_playlist(self, pl_id: int, name: str):
+        def execute(_e):
+            self.dismiss_dialog(dlg)
+            self.page.run_task(self._delete_playlist, pl_id)
+
+        def cancel(_e):
+            self.dismiss_dialog(dlg)
+
+        # Deliberately left non-modal: the barrier stays tappable so there is
+        # always a way out of a destructive confirmation even if a button
+        # handler misfires.
+        dlg = ft.AlertDialog(
+            title=ft.Text("Delete Playlist?", color=TEXT),
+            bgcolor=SURFACE,
+            content=ft.Text(
+                f"Permanently delete playlist '{name}'? Tracks will remain in your library.",
+                color=DIM, size=13,
+            ),
+            actions=[
+                ft.TextButton("Cancel", on_click=cancel),
+                ft.Button(
+                    content=ft.Text("Delete"),
+                    style=ft.ButtonStyle(bgcolor="#FF2222", color=TEXT),
+                    on_click=execute,
+                ),
+            ],
+        )
+        if self.page:
+            self.page.show_dialog(dlg)
+
+    async def _delete_playlist(self, pl_id: int):
+        try:
+            await self.db_manager.delete_playlist(pl_id)
+            if hasattr(self, "library_view") and self.library_view:
+                await self.library_view.load_library()
+            self.show_snackbar("Playlist deleted.")
+        except Exception as exc:
+            logger.error("Playlist deletion failed: %s", exc)
+            self.show_snackbar(f"Could not delete playlist: {exc}")
 
     # ── cache helpers ────────────────────────────────────────────────────────
     async def _prune_caches_async(self):
