@@ -191,6 +191,8 @@ class StreamripFletApp:
         self._update_lock  = asyncio.Lock()
         self._flush_pending = False
         self._is_restarting = False
+        self._post_restart_message: str | None = None
+        self._apply_accent = _apply_accent
         self.is_background  = False
         self.is_restoring_session = False
 
@@ -326,13 +328,14 @@ class StreamripFletApp:
             except Exception:
                 break
 
-    def restart_ui(self, target_tab=None):
+    def restart_ui(self, target_tab=None, post_message=None):
         """Soft-restarts the app UI to apply theme changes immediately."""
         if self._is_restarting:
             logger.warning("Restart already in progress, ignoring.")
             return
             
         self._forced_tab = target_tab
+        self._post_restart_message = post_message
         self.page.clean()
         self._splash = self._build_splash()
         self.page.add(self._splash)
@@ -689,13 +692,187 @@ class StreamripFletApp:
         if self.page:
             self.page.show_dialog(self.wipe_dialog)
 
+    def open_fresh_install_reset_confirmation(self):
+        """Opens a confirmation dialog before completely lobotomizing the app state."""
+        def on_confirm(e):
+            self.dismiss_dialog(self.fresh_install_reset_dialog)
+            self.page.run_task(self.reset_to_fresh_install)
 
+        def on_cancel(e):
+            self.dismiss_dialog(self.fresh_install_reset_dialog)
+
+        self.fresh_install_reset_dialog = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("Are you sure? (Reset to Fresh Install)", weight=ft.FontWeight.BOLD),
+            content=ft.Column(
+                [
+                    ft.Text(
+                        "This will completely reset the app to an initial first-run state:",
+                        size=13,
+                        color=TEXT,
+                    ),
+                    ft.Text(
+                        "- Clears all library databases and metadata\n"
+                        "- Wipes search history and cached graph state\n"
+                        "- Clears playback queues and stored preferences\n"
+                        "- Removes the onboarding marker so the setup sequence appears immediately",
+                        size=12,
+                        color=DIM,
+                    ),
+                    ft.Container(height=4),
+                    ft.Text(
+                        "Your actual music audio files will NOT be touched.",
+                        size=12,
+                        weight=ft.FontWeight.BOLD,
+                        color=TEXT,
+                    ),
+                ],
+                spacing=8,
+                tight=True,
+            ),
+            actions=[
+                ft.TextButton("Cancel", on_click=on_cancel),
+                ft.TextButton(
+                    content=ft.Text("Reset & Lobotomize", weight=ft.FontWeight.BOLD, color="#FF4444"),
+                    on_click=on_confirm,
+                ),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+
+        if self.page:
+            self.page.show_dialog(self.fresh_install_reset_dialog)
+
+    async def reset_to_fresh_install(self):
+        """Wipes all databases, caches, preferences, queues, and onboarding markers across all storage targets, then restarts the UI."""
+        logger.info("Initiating fresh install reset (lobotomy)...")
+        try:
+            # 1. Close active DB connection if open
+            if hasattr(self, "db_manager") and self.db_manager:
+                try:
+                    await self.db_manager.close()
+                except Exception as e:
+                    logger.warning(f"Error closing db_manager: {e}")
+
+            # 2. Stop audio engine and clear queue
+            try:
+                audio_engine.stop()
+                audio_engine.queue.clear()
+            except Exception:
+                pass
+
+            # 3. Collect all candidate directories and files to purge
+            import shutil
+            from utils.filepath_utils import get_app_dir
+            from utils.streamrip_api import get_config_path
+            
+            app_dir = get_app_dir()
+            config_dir = os.path.dirname(get_config_path())
+            home = os.path.expanduser("~")
+            repo_app_dir = os.path.dirname(os.path.abspath(__file__))
+            flet_storage_dir = os.path.join(repo_app_dir, ".flet", "storage", "data")
+
+            # Explicit candidate paths to delete
+            paths_to_delete = [
+                os.path.join(app_dir, ".onboarded"),
+                os.path.join(app_dir, "library.db"),
+                os.path.join(app_dir, "library.db-wal"),
+                os.path.join(app_dir, "library.db-shm"),
+                os.path.join(app_dir, "queue_state.json"),
+                os.path.join(app_dir, "flet_prefs.json"),
+                os.path.join(app_dir, "user_prefs.json"),
+                os.path.join(app_dir, "recent_searches.json"),
+                os.path.join(app_dir, "graph_state.json"),
+                os.path.join(app_dir, "failed_downloads.db"),
+                os.path.join(app_dir, "mai_an_lab_state_latest.zip"),
+                os.path.join(config_dir, ".onboarded"),
+                os.path.join(config_dir, "user_prefs.json"),
+                os.path.join(config_dir, "failed_downloads.db"),
+                os.path.join(config_dir, "library.db"),
+                os.path.join(config_dir, "library.db-wal"),
+                os.path.join(config_dir, "library.db-shm"),
+                os.path.join(home, ".onboarded"),
+                os.path.join(home, "library.db"),
+                os.path.join(home, "library.db-wal"),
+                os.path.join(home, "library.db-shm"),
+                os.path.join(home, "queue_state.json"),
+                os.path.join(home, "flet_prefs.json"),
+                os.path.join(repo_app_dir, "recent_searches.json"),
+                os.path.join(repo_app_dir, "graph_state.json"),
+                os.path.join(repo_app_dir, "history.json"),
+                os.path.join(repo_app_dir, "chat_history.json"),
+                os.path.join(home, "Downloads", "mai_an_lab_state_latest.zip"),
+            ]
+
+            if hasattr(self, "library_folder") and self.library_folder:
+                paths_to_delete.append(os.path.join(self.library_folder, "mai_an_lab_state_latest.zip"))
+
+            for f_path in paths_to_delete:
+                try:
+                    if os.path.exists(f_path):
+                        if os.path.isdir(f_path):
+                            shutil.rmtree(f_path)
+                        else:
+                            os.remove(f_path)
+                except Exception:
+                    pass
+
+            # Wipe .flet/storage/data contents
+            if os.path.isdir(flet_storage_dir):
+                for item in os.listdir(flet_storage_dir):
+                    p = os.path.join(flet_storage_dir, item)
+                    try:
+                        if os.path.isdir(p):
+                            shutil.rmtree(p)
+                        else:
+                            os.remove(p)
+                    except Exception:
+                        pass
+
+            # Wipe cache queues
+            cache_dir = os.path.join(app_dir, ".cache")
+            if os.path.isdir(cache_dir):
+                for item in os.listdir(cache_dir):
+                    if "queue_" in item or "streamrip" in item:
+                        try:
+                            os.remove(os.path.join(cache_dir, item))
+                        except Exception:
+                            pass
+
+            # Wipe pca_report directories
+            for pca_p in [
+                os.path.join(config_dir, "pca_report"),
+                os.path.join(app_dir, "pca_report"),
+            ]:
+                if os.path.isdir(pca_p):
+                    try:
+                        shutil.rmtree(pca_p)
+                    except Exception:
+                        pass
+
+            # 4. Reset in-memory preferences and state
+            self._prefs = {}
+            self.library_folder = ""
+            self.target_folder = ""
+            self.download_history_list = []
+            if hasattr(self, "_explicit_feedback_cache"):
+                self._explicit_feedback_cache.clear()
+
+            # 5. Brief delay to ensure I/O settles, then restart UI
+            await asyncio.sleep(0.2)
+            self.restart_ui()
+            self.show_snackbar("App reset to fresh install. Onboarding ready.")
+        except Exception as e:
+            logger.error(f"Failed to reset to fresh install: {e}", exc_info=True)
+            self.show_snackbar("Reset failed. Check logs.")
 
     async def check_onboarding(self):
         """Detects a fresh install using a marker file."""
         try:
             marker_path = os.path.join(DATA_DIR, ".onboarded")
-            if os.path.exists(marker_path):
+            from utils.streamrip_api import get_config_path
+            marker_path2 = os.path.join(os.path.dirname(get_config_path()), ".onboarded")
+            if os.path.exists(marker_path) or os.path.exists(marker_path2):
                 logger.info("Onboarding marker found. Skipping guide.")
                 return
             
@@ -705,76 +882,9 @@ class StreamripFletApp:
             logger.error(f"Onboarding check failed: {e}")
 
     def show_onboarding_guide(self):
-        """Presents a clean, high-fidelity setup guide to the user."""
-        def close_guide(e):
-            self.dismiss_dialog(self.onboarding_dlg)
-
-            # Write the marker file so they don't see this again
-            try:
-                marker_path = os.path.join(DATA_DIR, ".onboarded")
-                with open(marker_path, "w") as f:
-                    f.write("1")
-            except Exception as ex:
-                logger.error(f"Failed to write onboarding marker: {ex}")
-
-            # Switch to Settings tab to help them start (now index 3)
-            self._switch_tab(3)
-
-        self.onboarding_dlg = ft.AlertDialog(
-            modal=True,
-            bgcolor=SURFACE,
-            content=ft.Container(
-                content=ft.Column(
-                    [
-                        ft.Icon(ft.Icons.AUTO_AWESOME_ROUNDED, color=CYAN, size=48),
-                        ft.Text("Welcome to Mai An Lab", size=22, weight=ft.FontWeight.W_900, color=TEXT, text_align=ft.TextAlign.CENTER),
-                        ft.Text("Your high-fidelity music hub is ready.", size=14, color=DIM, text_align=ft.TextAlign.CENTER),
-                        ft.Divider(color=BORDER, height=32),
-                        
-                        ft.Row([
-                            ft.Icon(ft.Icons.LOCK_PERSON_ROUNDED, color=CYAN, size=20),
-                            ft.Column([
-                                ft.Text("1. Authenticate", weight=ft.FontWeight.BOLD, size=13),
-                                ft.Text("Add your Qobuz ID & Token in Settings.", size=11, color=DIM),
-                            ], spacing=0, expand=True)
-                        ]),
-                        ft.Container(height=10),
-                        ft.Row([
-                            ft.Icon(ft.Icons.FOLDER_OPEN_ROUNDED, color=CYAN, size=20),
-                            ft.Column([
-                                ft.Text("2. Set Folders", weight=ft.FontWeight.BOLD, size=13),
-                                ft.Text("Choose where to download and index music.", size=11, color=DIM),
-                            ], spacing=0, expand=True)
-                        ]),
-                        ft.Container(height=10),
-                        ft.Row([
-                            ft.Icon(ft.Icons.GESTURE_ROUNDED, color=CYAN, size=20),
-                            ft.Column([
-                                ft.Text("3. Pro Tip", weight=ft.FontWeight.BOLD, size=13),
-                                ft.Text("Long-press any item for advanced actions.", size=11, color=DIM),
-                            ], spacing=0, expand=True)
-                        ]),
-                        
-                        ft.Container(height=24),
-                        ft.Button(
-                            content=ft.Text("GET STARTED", weight=ft.FontWeight.W_900, color=BG),
-                            style=ft.ButtonStyle(bgcolor=CYAN, shape=ft.RoundedRectangleBorder(radius=12)),
-                            on_click=close_guide,
-                            height=50,
-                            width=240,
-                        ),
-                    ],
-                    tight=True,
-                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                    spacing=12,
-                ),
-                padding=10,
-                width=300,
-            ),
-        )
-        
-        if self.page:
-            self.page.show_dialog(self.onboarding_dlg)
+        """Presents an interactive, high-fidelity setup guide to the user."""
+        from ui.player.onboarding_modal import OnboardingWizardModal
+        self.onboarding_wizard = OnboardingWizardModal.show(self)
 
     async def wipe_database(self):
         """Clears all indexed data from the local database without deleting the file."""
@@ -1023,7 +1133,11 @@ class StreamripFletApp:
         # Load show_jarvis from config
         try:
             cfg = load_config()
-            self._show_jarvis = bool(cfg.get("appearance", {}).get("show_jarvis", True))
+            raw_jarvis = cfg.get("appearance", {}).get("show_jarvis", True)
+            if isinstance(raw_jarvis, str):
+                self._show_jarvis = raw_jarvis.strip().lower() in ("true", "1", "yes")
+            else:
+                self._show_jarvis = bool(raw_jarvis) if raw_jarvis is not None else True
         except:
             self._show_jarvis = True
 
@@ -1202,6 +1316,11 @@ class StreamripFletApp:
         # Initial render
         self.page.update()
 
+        if getattr(self, "_post_restart_message", None):
+            msg = self._post_restart_message
+            self._post_restart_message = None
+            self.show_snackbar(msg, icon=ft.Icons.CHECK_CIRCLE_OUTLINE_ROUNDED)
+
     # ── back navigation ──────────────────────────────────────────────────────
     def navigate_back(self) -> bool:
         """Resolve ONE level of back-navigation. Returns True if consumed.
@@ -1364,6 +1483,18 @@ class StreamripFletApp:
 
         if previous_tab != index:
             self._tab_lifecycle(index, "on_show")
+
+    def switch_tab(self, index: int):
+        """Public tab switch entry point."""
+        self._switch_tab(index)
+
+    def switch_to_settings(self, subpage: str = None):
+        """Switches to Settings tab and directly opens the target subpage."""
+        if subpage and hasattr(self, "settings_view") and self.settings_view:
+            self.settings_view.initial_subpage = subpage
+        self._switch_tab(3)
+        if subpage and hasattr(self, "settings_view") and self.settings_view:
+            self.settings_view.open_subpage(subpage)
 
     # ── audio engine callbacks ───────────────────────────────────────────────
     def _on_loudness_boost_change(self, _instance, value: float):

@@ -532,7 +532,7 @@ class SettingsView:
         self._show_network_switch = ft.Switch(value=False, active_color=CYAN, on_change=self._on_appearance_change)
         self._show_playlists_switch = ft.Switch(value=True, active_color=CYAN, on_change=self._on_appearance_change)
         self._show_artists_switch = ft.Switch(value=True, active_color=CYAN, on_change=self._on_appearance_change)
-        self._show_albums_switch = ft.Switch(value=True, active_color=CYAN, on_change=self._on_appearance_change)
+        self._show_albums_switch = ft.Switch(value=False, active_color=CYAN, on_change=self._on_appearance_change)
         self._show_tracks_switch = ft.Switch(value=True, active_color=CYAN, on_change=self._on_appearance_change)
 
         # DSP Controls
@@ -907,11 +907,35 @@ class SettingsView:
         else:
             self._hide_save_bar()
 
+    def open_subpage(self, subpage_name: str):
+        """Directly transitions to any settings subpage by name."""
+        builders = {
+            "AI Assistant": self._build_assistant_group,
+            "Account": self._build_auth_group,
+            "Qobuz": self._build_auth_group,
+            "Deezer": self._build_auth_group,
+            "Storage": self._build_storage_group,
+            "Appearance": self._build_appearance_group,
+            "Audio & DSP": self._build_audio_dsp_group,
+            "Haptic Feedback": self._build_haptics_group,
+            "Permissions": self._build_permissions_group,
+            "Database Management": self._build_database_management_group,
+            "Advanced": self._build_advanced_group,
+            "About": self._build_about_group,
+        }
+        builder = builders.get(subpage_name)
+        if builder:
+            title = "Account" if subpage_name in ("Qobuz", "Deezer") else subpage_name
+            self._show_sub_page(title, builder())
+        else:
+            self._show_hub()
+
     def build(self) -> ft.Control:
         self.refresh()
-        if getattr(self, "initial_subpage", None) == "Storage":
-            self.initial_subpage = None
-            self._show_sub_page("Storage", self._build_storage_group())
+        initial = getattr(self, "initial_subpage", None)
+        self.initial_subpage = None
+        if initial:
+            self.open_subpage(initial)
         else:
             self._show_hub() # Start at the Hub
         return self.main_content
@@ -1045,7 +1069,8 @@ class SettingsView:
                 keywords=[
                     "toml", "config", "advanced", "raw", "editor", "maintenance",
                     "configuration", "config.toml", "file", "text editor", "export",
-                    "backup", "import", "developer"
+                    "backup", "import", "developer", "lobotomize", "fresh install",
+                    "reset", "onboarding test"
                 ]
             ),
             SettingSearchEntry(
@@ -1766,11 +1791,43 @@ class SettingsView:
             OnyxButton("SAVE CONFIG FILE", ft.Icons.TERMINAL, on_tap=lambda _: self._save_config()),
             ft.Container(height=10),
             ft.TextButton("Debug: Populate Play Counts", icon=ft.Icons.BUG_REPORT_ROUNDED, on_click=self._on_debug_populate_click),
+            ft.Divider(color=BORDER, height=40),
+            ft.Text("Developer & Onboarding Testing", weight=ft.FontWeight.BOLD, color="#FF4444"),
+            ft.Container(
+                content=ft.Column([
+                    ft.Row([
+                        ft.Icon(ft.Icons.WARNING_AMBER_ROUNDED, color="#FF4444", size=20),
+                        ft.Text(
+                            "Fresh Install Reset (Lobotomize)",
+                            weight=ft.FontWeight.BOLD,
+                            color=TEXT,
+                            size=13,
+                        ),
+                    ], spacing=6),
+                    ft.Text(
+                        "Wipes all local application state (databases, queues, search history, preferences, and onboarding markers) so you can test the onboarding setup flow from scratch.\n\nYour actual music audio files will NOT be touched.",
+                        color=DIM,
+                        size=12,
+                    ),
+                    ft.Container(height=6),
+                    ft.TextButton(
+                        "Reset to Fresh Install",
+                        icon=ft.Icons.RESTART_ALT_ROUNDED,
+                        icon_color="#FF4444",
+                        style=ft.ButtonStyle(color="#FF4444"),
+                        on_click=lambda _: self.app.open_fresh_install_reset_confirmation(),
+                    ),
+                ], spacing=6),
+                padding=12,
+                bgcolor=SURFACE2,
+                border_radius=8,
+                border=ft.Border.all(1, apply_opacity(0.3, "#FF4444")),
+            ),
         ], spacing=15)
 
     def _build_about_group(self):
         feature_items = [
-            ("High-Fidelity Audio & Streaming", "Seamless Qobuz integration supporting Hi-Res FLAC streaming, metadata fetching, cover art caching, and track downloading.", ft.Icons.HIGH_QUALITY_ROUNDED),
+            ("High-Fidelity Audio & Streaming", "Seamless Qobuz & Deezer integration supporting Hi-Res FLAC and MP3 streaming, metadata fetching, and track downloading with your personal accounts.", ft.Icons.HIGH_QUALITY_ROUNDED),
             ("DSP & Similarity Engine", "Native audio analysis (spectral centroid, RMS energy, rhythm/tempo, timbre vectors) powering intelligent Auto-Play queues and track similarity matching.", ft.Icons.GRAPHIC_EQ_ROUNDED),
             ("Jarvis AI Assistant", "Natural language voice & text control powered by Google Gemini or local LLM servers (Ollama, LM Studio) for queue, playback, and discovery management.", ft.Icons.SMART_TOY_ROUNDED),
             ("Parametric Equalizer & DSP", "Interactive 5-band equalizer with real-time curve rendering, custom preset saving, and audio dynamism enhancement.", ft.Icons.TUNE_ROUNDED),
@@ -2306,12 +2363,18 @@ class SettingsView:
             raw_accent = appearance.get("accent_color", "#FFD60A")
             self._selected_accent_color = LEGACY_ACCENT_MAP.get(raw_accent.upper(), raw_accent)
             self._pill_style_dropdown.value = appearance.get("pill_style", "category")
-            self._show_jarvis_switch.value = bool(appearance.get("show_jarvis", True))
-            self._show_network_switch.value = bool(appearance.get("show_network", False))
-            self._show_playlists_switch.value = bool(appearance.get("show_playlists", True))
-            self._show_artists_switch.value = bool(appearance.get("show_artists", True))
-            self._show_albums_switch.value = bool(appearance.get("show_albums", True))
-            self._show_tracks_switch.value = bool(appearance.get("show_tracks", True))
+            def _to_bool(val, default):
+                if val is None: return default
+                if isinstance(val, bool): return val
+                if isinstance(val, str): return val.strip().lower() in ("true", "1", "yes")
+                return bool(val)
+
+            self._show_jarvis_switch.value = _to_bool(appearance.get("show_jarvis"), True)
+            self._show_network_switch.value = _to_bool(appearance.get("show_network"), False)
+            self._show_playlists_switch.value = _to_bool(appearance.get("show_playlists"), True)
+            self._show_artists_switch.value = _to_bool(appearance.get("show_artists"), True)
+            self._show_albums_switch.value = _to_bool(appearance.get("show_albums"), False)
+            self._show_tracks_switch.value = _to_bool(appearance.get("show_tracks"), True)
 
             # Load DSP Settings
             dsp = cfg.get("dsp", {})

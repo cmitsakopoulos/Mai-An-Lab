@@ -97,6 +97,8 @@ def pick_folder(title="Select Folder") -> str | None:
         return None
         
     return None # Fallback to Flet FilePicker for Windows/Mobile
+ 
+open_native_directory_picker = pick_folder
 
 def strip_markup(text: str) -> str:
     """Remove Kivy-style [b]…[/b] markup tags that streamrip_search pre-computes."""

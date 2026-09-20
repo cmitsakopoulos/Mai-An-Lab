@@ -248,11 +248,17 @@ class LibraryView:
             self.sort_mode = "date"
             appearance = {}
 
-        show_playlists = bool(appearance.get("show_playlists", True))
-        show_artists = bool(appearance.get("show_artists", True))
-        show_albums = bool(appearance.get("show_albums", True))
-        show_tracks = bool(appearance.get("show_tracks", True))
-        show_network = bool(appearance.get("show_network", False))
+        def _to_bool(val, default):
+            if val is None: return default
+            if isinstance(val, bool): return val
+            if isinstance(val, str): return val.strip().lower() in ("true", "1", "yes")
+            return bool(val)
+
+        show_playlists = _to_bool(appearance.get("show_playlists"), True)
+        show_artists = _to_bool(appearance.get("show_artists"), True)
+        show_albums = _to_bool(appearance.get("show_albums"), False)
+        show_tracks = _to_bool(appearance.get("show_tracks"), True)
+        show_network = _to_bool(appearance.get("show_network"), False)
 
         if show_tracks:
             self.view_mode = "tracks"
@@ -559,15 +565,11 @@ class LibraryView:
             spacing=0,
         )
 
-    async def _on_enter_paths_click(self, e):
-        is_cached = 3 in self.app._view_cache
-        if not is_cached:
-            self.app.settings_view.initial_subpage = "Storage"
-            self.app._switch_tab(3)
+    def _on_enter_paths_click(self, e):
+        if hasattr(self.app, "switch_to_settings"):
+            self.app.switch_to_settings("Storage")
         else:
             self.app._switch_tab(3)
-            await asyncio.sleep(0.1)
-            self.app.settings_view._show_sub_page("Storage", self.app.settings_view._build_storage_group())
 
     def build(self) -> ft.Control:
         self.page.run_task(self.load_library)
@@ -2466,11 +2468,17 @@ class LibraryView:
         except:
             appearance = {}
 
-        show_playlists = bool(appearance.get("show_playlists", True))
-        show_artists = bool(appearance.get("show_artists", True))
-        show_albums = bool(appearance.get("show_albums", True))
-        show_tracks = bool(appearance.get("show_tracks", True))
-        show_network = bool(appearance.get("show_network", False))
+        def _to_bool(val, default):
+            if val is None: return default
+            if isinstance(val, bool): return val
+            if isinstance(val, str): return val.strip().lower() in ("true", "1", "yes")
+            return bool(val)
+
+        show_playlists = _to_bool(appearance.get("show_playlists"), True)
+        show_artists = _to_bool(appearance.get("show_artists"), True)
+        show_albums = _to_bool(appearance.get("show_albums"), False)
+        show_tracks = _to_bool(appearance.get("show_tracks"), True)
+        show_network = _to_bool(appearance.get("show_network"), False)
 
         visible_modes = []
         if show_network: visible_modes.append("network")

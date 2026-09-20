@@ -238,27 +238,53 @@ class SearchView:
         self._setup_prompt = ft.Container(
             content=ft.Column(
                 [
-                    ft.Icon(ft.Icons.LOCK_OUTLINE_ROUNDED, color=CYAN, size=48),
-                    ft.Text("Setup Required", size=20, weight=ft.FontWeight.BOLD, color=TEXT),
-                    ft.Text("Please enter your Qobuz or Deezer credentials in Settings to enable search.", 
-                            color=DIM, size=13, text_align=ft.TextAlign.CENTER),
-                    ft.Container(height=12),
-                    ft.Row([
-                        ft.Button(
-                            "Go to Settings",
-                            icon=ft.Icons.SETTINGS_ROUNDED,
-                            on_click=lambda _: self.app._switch_tab(3),
-                            style=ft.ButtonStyle(color=BG, bgcolor=CYAN)
+                    ft.Container(
+                        content=ft.Icon(ft.Icons.LOCK_PERSON_ROUNDED, color=CYAN, size=28),
+                        width=56,
+                        height=56,
+                        border_radius=18,
+                        bgcolor=apply_opacity(0.12, CYAN),
+                        alignment=ft.Alignment(0, 0),
+                    ),
+                    ft.Text("Streaming Setup", size=19, weight=ft.FontWeight.W_800, color=TEXT),
+                    ft.Container(
+                        content=ft.Text(
+                            "Link your Qobuz or Deezer account in Settings to unlock lossless streaming "
+                            "and studio-grade ripping.",
+                            color=DIM,
+                            size=12,
+                            text_align=ft.TextAlign.CENTER,
                         ),
-                        ft.TextButton(
-                            "Refresh",
-                            icon=ft.Icons.REFRESH_ROUNDED,
-                            on_click=lambda _: self.refresh_setup_state(),
-                        ),
-                    ], alignment=ft.MainAxisAlignment.CENTER),
+                        width=320,
+                    ),
+                    ft.Container(height=10),
+                    ft.Column(
+                        [
+                            ft.Button(
+                                content=ft.Row(
+                                    [
+                                        ft.Icon(ft.Icons.KEY_ROUNDED, color=BG, size=15),
+                                        ft.Text("CONNECT ACCOUNT", weight=ft.FontWeight.W_800, color=BG, size=12),
+                                    ],
+                                    alignment=ft.MainAxisAlignment.CENTER,
+                                    spacing=8,
+                                ),
+                                style=ft.ButtonStyle(
+                                    bgcolor=CYAN,
+                                    shape=ft.RoundedRectangleBorder(radius=12),
+                                ),
+                                height=44,
+                                width=260,
+                                on_click=lambda _: self.app.switch_to_settings("Account") if hasattr(self.app, "switch_to_settings") else self.app._switch_tab(3),
+                            ),
+                        ],
+                        spacing=8,
+                        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
                 ],
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                spacing=8,
+                spacing=10,
+                tight=True,
             ),
             alignment=ft.Alignment(0, 0),
             visible=False,
@@ -1104,7 +1130,10 @@ class SearchView:
         missing = self._credentials_missing(self.selected_source)
         if missing:
             self.app.show_snackbar(missing, icon=ft.Icons.LOCK_OUTLINE_ROUNDED, color=src_color(self.selected_source))
-            self.app._switch_tab(3)
+            if hasattr(self.app, "switch_to_settings"):
+                self.app.switch_to_settings("Account")
+            else:
+                self.app._switch_tab(3)
             return
 
         self._search_indicator.visible = True
