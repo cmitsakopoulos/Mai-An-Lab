@@ -167,6 +167,7 @@ from ui.player.mini_player import MiniPlayerBar
 from ui.player.now_playing import NowPlayingSheet
 from ui.player.queue_sheet import QueueSheet
 from ui.player.quality_selector import QualitySelectorSheet
+from ui.player.download_dock import DownloadDock
 from ui.player.dialogs import PlaylistEditorDialog
 debug_log("importing queue_controller and error_boundary")
 from utils.queue_controller import QueueController
@@ -438,6 +439,10 @@ class StreamripFletApp:
         self.now_playing         = NowPlayingSheet(self)
         self.queue_sheet         = QueueSheet(self)
         self.quality_selector_sheet = QualitySelectorSheet(self)
+        # App-level download surface. Registered as the QueueController's
+        # listener so downloads stay visible from every tab, not just Search.
+        self.download_dock       = DownloadDock(self)
+        self.queue.add_listener(self.download_dock.refresh)
         self.playlist_editor     = PlaylistEditorDialog(self)
         self.notifications       = NotificationSystem(self)
         self.assistant_view      = AssistantView(self)
@@ -924,9 +929,17 @@ class StreamripFletApp:
         except Exception as e:
             logger.debug("Haptic trigger failed: %s", e)
 
-    def safe_update(self, fn):
-        """Queue a UI mutation and schedule a single coalesced page.update().
+    def safe_update(self, fn, target=None):
+        """Queue a UI mutation and schedule a single coalesced update.
         Thread-safe entry point: may be called from any background thread.
+
+        `target` narrows the sync to one control's subtree instead of the whole
+        page. A download emits progress about four times a second, and a bare
+        page.update() re-syncs every control in every cached tab on each tick —
+        which is what made the entire UI visibly churn while downloading. A
+        flush uses the narrow path only when EVERY mutation in that flush named
+        a target; one untargeted caller in the batch falls back to page.update()
+        so nothing can be left unsynced.
         """
         if not self.page: return
 
@@ -941,13 +954,13 @@ class StreamripFletApp:
         try:
             # Use run_task to bridge the sync/async gap safely.
             _ = self.page.session
-            self.page.run_task(self._safe_update_handler, fn)
+            self.page.run_task(self._safe_update_handler, fn, target)
         except RuntimeError:
             return
 
-    async def _safe_update_handler(self, fn):
+    async def _safe_update_handler(self, fn, target=None):
         async with self._update_lock:
-            self._pending_fns.append(fn)
+            self._pending_fns.append((fn, target))
             if self._flush_pending:
                 # A flush is already scheduled; just queue the fn and return.
                 # This is the key coalescing step: multiple safe_update() calls
@@ -970,7 +983,9 @@ class StreamripFletApp:
         if not fns:
             return
 
-        for fn in fns:
+        targets = []
+        narrow = True
+        for fn, target in fns:
             try:
                 if asyncio.iscoroutinefunction(fn):
                     await fn()
@@ -978,11 +993,25 @@ class StreamripFletApp:
                     fn()
             except Exception:
                 logger.exception("safe_update execution error")
-        
-        # Skip page.update() while the app is backgrounded; pushing diffs to
-        # a suspended Flet/Flutter client wastes CPU and can cause UI hangs.
+            if target is None:
+                narrow = False
+            elif not any(target is t for t in targets):
+                targets.append(target)
+
+        # Skip the sync while the app is backgrounded; pushing diffs to a
+        # suspended Flet/Flutter client wastes CPU and can cause UI hangs.
         # _on_lifecycle calls safe_update(lambda: None) on resume to force-sync.
         if self.is_background:
+            return
+
+        if narrow and targets:
+            for target in targets:
+                try:
+                    target.update()
+                except Exception:
+                    # Not mounted yet, or detached mid-flush. A missed narrow
+                    # sync is cosmetic; the next full update will catch it.
+                    pass
             return
         try:
             self.page.update()
@@ -1091,6 +1120,7 @@ class StreamripFletApp:
                     content=self._swipe_content,
                     expand=True,
                 ),
+                self.download_dock.build(),
                 self.mini_player.build(),
                 self._nav,
             ],
@@ -1130,6 +1160,7 @@ class StreamripFletApp:
         self.page.overlay.append(self.quality_selector_sheet.build())
         self.page.overlay.append(self.now_playing.build())
         self.page.overlay.append(self.queue_sheet.build())
+        self.page.overlay.append(self.download_dock.build_sheet())
         
         # Initialize haptic feedback overlay (Android only)
         if sys.platform != "darwin":
@@ -1184,6 +1215,16 @@ class StreamripFletApp:
         and reaching for page.pop_dialog() here would re-introduce the toast-eats
         -the-pop hazard documented on dismiss_dialog().
         """
+        # Search selection mode → normal browsing. This is the most nested
+        # state in the app: it is a mode inside a tab, so back must resolve it
+        # before anything else, the same way a selection mode does elsewhere.
+        if self._current_tab == 1:
+            sv = getattr(self, "search_view", None)
+            if sv is not None and getattr(sv, "selection_mode", False):
+                sv.exit_selection()
+                self.trigger_haptic("swipe_back")
+                return True
+
         # Settings subpage → hub. The hub is a content swap inside the Settings
         # tab, not a separate tab, so this rung has to come first.
         if self._current_tab == 3:
@@ -1258,6 +1299,22 @@ class StreamripFletApp:
         abs_index = self._get_absolute_tab_index(e.control.selected_index)
         self._switch_tab(abs_index)
 
+    # Views that want to save/restore state across a tab switch implement
+    # on_hide()/on_show(). Swapping _tab_content.content remounts the subtree,
+    # so Flutter-side state — scroll position above all — is discarded even
+    # though the Python controls survive in _view_cache.
+    _TAB_VIEWS = {0: "assistant_view", 1: "search_view", 2: "library_view", 3: "settings_view"}
+
+    def _tab_lifecycle(self, index: int, hook: str) -> None:
+        view = getattr(self, self._TAB_VIEWS.get(index, ""), None)
+        fn = getattr(view, hook, None)
+        if callable(fn):
+            try:
+                fn()
+            except Exception:
+                # A lifecycle hook must never be able to block navigation.
+                logger.exception("%s hook failed for tab %s", hook, index)
+
     def _switch_tab(self, index: int):
         # Remember where we came from *before* the overwrite, so back-navigation
         # out of Settings can return there. Guarded on the outgoing tab not
@@ -1266,6 +1323,10 @@ class StreamripFletApp:
         if index == 3 and self._current_tab != 3:
             self._previous_tab = self._current_tab
 
+        if self._current_tab != index:
+            self._tab_lifecycle(self._current_tab, "on_hide")
+
+        previous_tab = self._current_tab
         self._current_tab = index
 
         if index == 0:
@@ -1300,6 +1361,9 @@ class StreamripFletApp:
             self._nav.indicator_color = (CYAN + "55" if is_nav_tab else "transparent")
 
         self.safe_update(_mutate)
+
+        if previous_tab != index:
+            self._tab_lifecycle(index, "on_show")
 
     # ── audio engine callbacks ───────────────────────────────────────────────
     def _on_loudness_boost_change(self, _instance, value: float):
@@ -2831,7 +2895,8 @@ class StreamripFletApp:
 
     # ── download queue UI relay ───────────────────────────────────────────────
     def refresh_queue_ui(self):
-        self.search_view.refresh_queue_ui(self.queue.download_queue)
+        """Kept for existing call sites; the dock owns download presentation."""
+        self.download_dock.refresh()
 
     # ── metadata editor ──────────────────────────────────────────────────────
     def open_artist_metadata_editor(self, artist_name: str, on_saved=None):

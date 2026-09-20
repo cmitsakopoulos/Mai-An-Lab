@@ -206,18 +206,36 @@ class NotificationSystem:
         self.app.safe_update(_present)
 
 
+# Rows past this index enter with no delay. A stagger that runs the whole way
+# down a page makes the last row arrive long after the user has started
+# reading, and on a 35-row page that reads as lag rather than polish.
+STAGGER_LIMIT = 10
+STAGGER_STEP_MS = 22
+
+
 class AnimatedEntry(ft.Container):
-    def __init__(self, content, target_height=56, depth=0, **kwargs):
+    def __init__(self, content, target_height=56, depth=0, stagger_index=None, **kwargs):
+        """`stagger_index` delays the fade-in so a page of results cascades in
+        rather than appearing as one block. Pass None to opt out entirely —
+        rows inserted into an existing list (an expanded album's tracks) should
+        appear immediately, since the surrounding list is already settled."""
+        delay = 0
+        if stagger_index is not None and stagger_index < STAGGER_LIMIT:
+            delay = stagger_index * STAGGER_STEP_MS
+
         super().__init__(
             content=content,
             height=target_height,
             opacity=1.0,
             animate=ft.Animation(200, ft.AnimationCurve.EASE_OUT_EXPO),
-            animate_opacity=ft.Animation(200, ft.AnimationCurve.EASE_OUT_EXPO),
+            animate_opacity=ft.Animation(
+                200 + delay, ft.AnimationCurve.EASE_OUT_EXPO
+            ),
             **kwargs
         )
         self.target_height = target_height
         self.depth = depth
+        self.stagger_delay = delay
 
     def hide(self):
         """Trigger the slide-out animation."""
@@ -392,12 +410,13 @@ class CupertinoSegmentedBar(ft.Container):
                 tight=True,
             )
             
+            pad_h = 4 if len(segments) >= 5 else (6 if len(segments) == 4 else 10)
             btn = ft.Container(
                 content=inner_row,
                 bgcolor=apply_opacity(0.14, accent) if is_active else "transparent",
                 border=ft.Border.all(1, apply_opacity(0.35, accent)) if is_active else None,
                 border_radius=RADIUS_PILL - 4,
-                padding=ft.Padding.symmetric(horizontal=10, vertical=6),
+                padding=ft.Padding.symmetric(horizontal=pad_h, vertical=6),
                 alignment=ft.Alignment(0, 0),
                 expand=True,
                 animate=ft.Animation(140, ft.AnimationCurve.EASE_OUT),

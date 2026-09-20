@@ -7,6 +7,9 @@ aiosqlite
 tomlkit
 certifi
 tinytag
+# Deezer backend: API client + Blowfish/AES for its encrypted CDN streams.
+deezer-py
+pycryptodomex
 aiofiles
 serious-python
 numpy

@@ -16,6 +16,9 @@ dependencies = [
     "certifi",
     "numpy",
     "tinytag",
+    # Deezer backend: API client + Blowfish/AES for its encrypted CDN streams.
+    "deezer-py",
+    "pycryptodomex",
     "pillow",
     "flet_audio_service @ file:///Users/chrismitsacopoulos/Desktop/Mai-An-Lab/flet_audio_service"
 ]

@@ -5,6 +5,7 @@ import logging
 import asyncio
 import time
 import shutil
+import re
 import mutagen
 from mutagen.flac import FLAC
 from mutagen.id3 import ID3, TIT2, TPE1, TALB, TYER
@@ -13,6 +14,7 @@ from pathlib import Path
 from .config import Config, DEFAULT_CONFIG_PATH, CURRENT_CONFIG_VERSION
 from .qobuz import QobuzClient
 from .downloadable import BasicDownloadable
+from .source_metadata import extract_tracks, normalize_track
 from .filepath_utils import clean_filename
 from .metadata_objects import AlbumMetadata, TrackMetadata
 from .tagger import tag_file
@@ -165,30 +167,59 @@ def repair_config():
     return True
 
 def _detect_type_and_id(url: str):
-    # Minimal URL parser for Qobuz
-    patterns = [
-        (r'qobuz\.com/.*?track/(?P<id>\w+)', 'track'),
-        (r'qobuz\.com/.*?album/(?P<id>\w+)', 'album'),
-        (r'qobuz\.com/.*?artist/(?P<id>\w+)', 'artist'),
-        (r'qobuz\.com/.*?playlist/(?P<id>\w+)', 'playlist'),
-    ]
-    for pattern, mtype in patterns:
-        match = re.search(pattern, url)
-        if match: return mtype, match.group('id')
-    return None, None
+    """Parse a Qobuz or Deezer URL into (media_type, id, source).
 
-import re
+    Deezer localises its web URLs (deezer.com/en/album/..., /fr/track/...) and
+    also serves bare deezer.page.link share URLs, so the id is matched after an
+    optional locale segment rather than anchored to the host.
+    """
+    patterns = [
+        # The id is the LAST path segment: Qobuz web URLs carry a slug first
+        # (/us-en/album/<slug>/<id>), and a lazy '.*?album/(\w+)' captured that
+        # slug instead of the id. Links the app builds itself have no slug, so
+        # this only ever bit pasted URLs.
+        (r'qobuz\.com/.*?track/(?:.*/)?(?P<id>\w+)(?:[/?#]|$)', 'track', 'qobuz'),
+        (r'qobuz\.com/.*?album/(?:.*/)?(?P<id>\w+)(?:[/?#]|$)', 'album', 'qobuz'),
+        (r'qobuz\.com/.*?artist/(?:.*/)?(?P<id>\w+)(?:[/?#]|$)', 'artist', 'qobuz'),
+        (r'qobuz\.com/.*?playlist/(?:.*/)?(?P<id>\w+)(?:[/?#]|$)', 'playlist', 'qobuz'),
+        (r'deezer\.[a-z.]+/(?:[a-z]{2}/)?track/(?P<id>\d+)', 'track', 'deezer'),
+        (r'deezer\.[a-z.]+/(?:[a-z]{2}/)?album/(?P<id>\d+)', 'album', 'deezer'),
+        (r'deezer\.[a-z.]+/(?:[a-z]{2}/)?artist/(?P<id>\d+)', 'artist', 'deezer'),
+        (r'deezer\.[a-z.]+/(?:[a-z]{2}/)?playlist/(?P<id>\d+)', 'playlist', 'deezer'),
+    ]
+    for pattern, mtype, source in patterns:
+        match = re.search(pattern, url)
+        if match: return mtype, match.group('id'), source
+    return None, None, None
+
+
+def _build_client(source: str, config):
+    """Construct the client for a source.
+
+    DeezerClient is imported lazily: it pulls in deezer-py and pycryptodomex,
+    which are Deezer-only and may be absent from a stripped build. A top-level
+    import would make a missing optional dependency break Qobuz too.
+    """
+    if source == "deezer":
+        from .deezer import DeezerClient
+        return DeezerClient(config)
+    return QobuzClient(config)
+
+
+def _default_quality(source: str, config) -> int:
+    return (config.session.deezer.quality if source == "deezer"
+            else config.session.qobuz.quality)
 
 async def download(url, download_dir, progress_callback=None, quality=None, stop_event=None):
-    """Qobuz-only download entry point with granular progress tracking."""
+    """Download entry point (Qobuz and Deezer) with granular progress tracking."""
     os.makedirs(download_dir, exist_ok=True)
     
-    mtype, mid = _detect_type_and_id(url)
+    mtype, mid, source = _detect_type_and_id(url)
     if not mtype:
-        raise Exception(f"Could not parse Qobuz URL: {url}")
+        raise Exception(f"Could not parse Qobuz or Deezer URL: {url}")
 
     config = Config(get_config_path())
-    client = QobuzClient(config)
+    client = _build_client(source, config)
     
     import tempfile
     await client.login()
@@ -199,23 +230,18 @@ async def download(url, download_dir, progress_callback=None, quality=None, stop
     meta = await client.get_metadata(mid, mtype)
     
     tracks = []
-    if mtype == 'track':
-        tracks = [meta]
-    elif mtype == 'album':
-        album_meta = meta
-        tracks = meta.get('tracks', {}).get('items', [])
-        for t in tracks:
-            if 'album' not in t: t['album'] = album_meta
-    elif mtype == 'playlist':
-        tracks = meta.get('tracks', {}).get('items', [])
+    if mtype in ('track', 'album', 'playlist'):
+        tracks = extract_tracks(source, mtype, meta)
     elif mtype == 'artist':
-        albums = meta.get('albums', {}).get('items', [])
+        # An artist payload lists albums, each of which needs its own fetch
+        # before its tracks exist. Deezer returns a plain list here, Qobuz a
+        # paged {"items": [...]} object.
+        albums = meta.get('albums', [])
+        if isinstance(albums, dict):
+            albums = albums.get('items', [])
         for a in albums:
             a_meta = await client.get_metadata(str(a['id']), 'album')
-            a_tracks = a_meta.get('tracks', {}).get('items', [])
-            for t in a_tracks:
-                if 'album' not in t: t['album'] = a_meta
-            tracks.extend(a_tracks)
+            tracks.extend(extract_tracks(source, 'album', a_meta))
 
     if not tracks:
         return []
@@ -229,7 +255,7 @@ async def download(url, download_dir, progress_callback=None, quality=None, stop
     async def _resolve(t_meta):
         async with resolve_sem:
             try:
-                target_quality = quality if quality is not None else config.session.qobuz.quality
+                target_quality = quality if quality is not None else _default_quality(source, config)
                 d = await client.get_downloadable(str(t_meta['id']), target_quality)
                 await d.size()
                 return d
@@ -278,10 +304,15 @@ async def download(url, download_dir, progress_callback=None, quality=None, stop
             
         async with dl_sem:
             track_id = str(track_meta['id'])
-            title = track_meta.get('title', 'Unknown')
+            norm = normalize_track(source, track_meta, i + 1)
+            album_norm = norm['album']
+            title = norm['title']
             
             try:
-                track_num = track_meta.get('track_number', i+1)
+                try:
+                    track_num = int(norm['track_number'])
+                except (TypeError, ValueError):
+                    track_num = i + 1
                 raw_filename = f"{track_num:02d}. {title}.{downloadable.extension}"
                 filename = clean_filename(raw_filename, restrict=False)
                 dest_path = os.path.join(download_dir, filename)
@@ -295,13 +326,7 @@ async def download(url, download_dir, progress_callback=None, quality=None, stop
                 
                 _trigger_update("Tagging")
                 
-                album_meta_data = track_meta.get('album', {})
-                image_raw = album_meta_data.get('image')
-                cover_url = ""
-                if isinstance(image_raw, str):
-                    cover_url = image_raw
-                elif isinstance(image_raw, dict):
-                    cover_url = image_raw.get('large') or image_raw.get('extralarge') or image_raw.get('medium') or image_raw.get('small') or ""
+                cover_url = album_norm['cover_url']
 
                 cover_path = None
                 if cover_url and cover_url.startswith("http"):
@@ -314,35 +339,26 @@ async def download(url, download_dir, progress_callback=None, quality=None, stop
                     except Exception:
                         cover_path = None
 
-                artist_dict = album_meta_data.get('artist', {})
-                album_artist = artist_dict.get('name', 'Unknown Artist') if isinstance(artist_dict, dict) else str(artist_dict)
-
-                genre_data = album_meta_data.get('genre', {})
-                genres = [g.get('name') for g in genre_data.get('path', []) if isinstance(g, dict)] if isinstance(genre_data, dict) else []
-                        
                 album_obj = AlbumMetadata(
-                    id=str(album_meta_data.get('id', '')),
-                    album=album_meta_data.get('title', 'Unknown Album'),
-                    artist=album_artist,
-                    year=str(album_meta_data.get('release_date', '')).split('-')[0][:4],
-                    tracktotal=album_meta_data.get('tracks_count', 1),
-                    disctotal=album_meta_data.get('media_count', 1),
-                    genres=genres if genres else None,
-                    copyright=album_meta_data.get('copyright')
+                    id=album_norm['id'],
+                    album=album_norm['album'],
+                    artist=album_norm['artist'],
+                    year=album_norm['year'],
+                    tracktotal=album_norm['tracktotal'],
+                    disctotal=album_norm['disctotal'],
+                    genres=album_norm['genres'],
+                    copyright=album_norm['copyright']
                 )
-                
-                track_artist = track_meta.get('performer', {}).get('name') or track_meta.get('artist', {}).get('name') or 'Unknown Artist'
-                composer_dict = track_meta.get('composer', {})
-                
+
                 track_obj = TrackMetadata(
                     id=str(track_id),
                     title=title,
-                    artist=track_artist,
+                    artist=norm['artist'],
                     album=album_obj,
                     tracknumber=track_num,
-                    discnumber=track_meta.get('media_number', 1),
-                    isrc=track_meta.get('isrc'),
-                    composer=composer_dict.get('name') if isinstance(composer_dict, dict) else None,
+                    discnumber=norm['disc_number'],
+                    isrc=norm['isrc'],
+                    composer=norm['composer'],
                     lyrics=None
                 )
 

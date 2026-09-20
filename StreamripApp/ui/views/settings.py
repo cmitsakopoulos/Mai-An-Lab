@@ -9,8 +9,13 @@ import flet as ft
 import flet.canvas as cv
 from ui.tokens import (
     BG, SURFACE, SURFACE2, CYAN, AMBER, TEXT, DIM, BORDER, apply_opacity,
-    lerp_hex, LEGACY_ACCENT_MAP
+    lerp_hex, LEGACY_ACCENT_MAP, SOURCE_COLORS
 )
+
+# Source identity colours, shared with the search header's source pills so a
+# credentials card is recognisably "the Deezer one" at a glance.
+QOBUZ_COLOR = SOURCE_COLORS["qobuz"]
+DEEZER_COLOR = SOURCE_COLORS["deezer"]
 from ui.widgets import OnyxButton, HubSettingItem, pick_folder
 
 if sys.platform == "darwin":
@@ -303,6 +308,27 @@ class SettingsView:
             expand=True,
         )
 
+        # Empty value == ask every time. The quality sheet reads this and
+        # bypasses itself when a real tier is stored, which is what turns a
+        # ten-track batch into one decision instead of ten.
+        self._default_quality_dropdown = ft.Dropdown(
+            label="Quality",
+            value="",
+            options=[
+                ft.DropdownOption(key="",      text="Ask every time"),
+                ft.DropdownOption(key="mp3",   text="High \u2014 MP3 / AAC 320kbps"),
+                ft.DropdownOption(key="cd",    text="CD Quality \u2014 16-bit FLAC"),
+                ft.DropdownOption(key="hires", text="Hi-Res \u2014 24-bit FLAC"),
+            ],
+            bgcolor=SURFACE2,
+            border_color=BORDER,
+            focused_border_color=CYAN,
+            text_style=ft.TextStyle(color=TEXT, size=13),
+            label_style=ft.TextStyle(color=CYAN, size=11),
+            border_radius=10,
+            expand=True,
+        )
+
         self._selected_accent_color = CYAN
 
         # Qobuz Credentials
@@ -349,6 +375,21 @@ class SettingsView:
         self._qobuz_use_token_switch = ft.Switch(
             value=True,
             active_color=CYAN
+        )
+
+        # Deezer Credentials. The ARL is a single long cookie value, so it gets
+        # one field rather than the user/token/app-id/secret quartet Qobuz needs.
+        # Left unmasked on purpose, matching the Qobuz token field: it is pasted
+        # rather than typed, and people need to see that it arrived intact.
+        self._deezer_arl_field = ft.TextField(
+            label="Deezer ARL Cookie",
+            hint_text="Long alphanumeric string from your browser cookies",
+            bgcolor=SURFACE2,
+            border_color=BORDER,
+            focused_border_color=DEEZER_COLOR,
+            text_style=ft.TextStyle(color=TEXT, size=13),
+            label_style=ft.TextStyle(color=DEEZER_COLOR, size=11),
+            border_radius=10,
         )
 
         # AI Assistant (Jarvis) Controls
@@ -791,6 +832,12 @@ class SettingsView:
                 "app_id": getattr(self, "_qobuz_app_id_field", None) and (self._qobuz_app_id_field.value or "").strip(),
                 "app_secret": getattr(self, "_qobuz_app_secret_field", None) and (self._qobuz_app_secret_field.value or "").strip(),
                 "use_token": getattr(self, "_qobuz_use_token_switch", None) and self._qobuz_use_token_switch.value,
+                # The Account page saves Deezer too. Anything editable on the
+                # page must appear here: _check_dirty decides whether to show the
+                # save bar purely by diffing this snapshot against its baseline,
+                # so a field that is missing can never be saved, and editing it
+                # actively hides a save bar raised by the other fields.
+                "deezer_arl": getattr(self, "_deezer_arl_field", None) and (self._deezer_arl_field.value or "").strip(),
             }
         elif subpage_name == "Storage":
             return {
@@ -887,13 +934,13 @@ class SettingsView:
             ),
             SettingSearchEntry(
                 title="Authentication",
-                subtitle="Qobuz credentials & tokens",
+                subtitle="Qobuz & Deezer credentials",
                 category="SET-UP",
                 subpage_name="Account",
                 icon=ft.Icons.LOCK_PERSON_ROUNDED,
                 on_select=lambda: self._show_sub_page("Account", self._build_auth_group()),
                 keywords=[
-                    "qobuz", "token", "login", "auth", "credentials", "account",
+                    "qobuz", "deezer", "arl", "token", "login", "auth", "credentials", "account",
                     "app id", "app secret", "password", "username", "user", "secret",
                     "qobuz app", "session", "sign in", "reauthenticate"
                 ]
@@ -1101,7 +1148,7 @@ class SettingsView:
                 ft.Text("SET-UP", size=11, color=CYAN, weight=ft.FontWeight.W_800),
                 HubSettingItem(ft.Icons.SMART_TOY_ROUNDED, "AI Assistant (Jarvis)", "Google Gemini API key, providers & LLM settings",
                                on_tap=lambda _: self._show_sub_page("AI Assistant", self._build_assistant_group())),
-                HubSettingItem(ft.Icons.LOCK_PERSON_ROUNDED, "Authentication", "Qobuz credentials & tokens", 
+                HubSettingItem(ft.Icons.LOCK_PERSON_ROUNDED, "Authentication", "Qobuz & Deezer credentials", 
                                on_tap=lambda _: self._show_sub_page("Account", self._build_auth_group())),
                 HubSettingItem(ft.Icons.STORAGE_ROUNDED, "Storage & Paths", "Library and download locations", 
                                on_tap=lambda _: self._show_sub_page("Storage", self._build_storage_group())),
@@ -1278,8 +1325,9 @@ class SettingsView:
 
     def _build_auth_group(self):
         # Attach dirty listeners
-        save_cb = lambda e=None: self._check_dirty("Account", self._save_qobuz_credentials, label="SAVE CREDENTIALS", icon=ft.Icons.KEY_ROUNDED, event=e)
-        for field in [self._qobuz_user_id_field, self._qobuz_token_field, self._qobuz_app_id_field, self._qobuz_app_secret_field]:
+        save_cb = lambda e=None: self._check_dirty("Account", self._save_account_credentials, label="SAVE CREDENTIALS", icon=ft.Icons.KEY_ROUNDED, event=e)
+        for field in [self._qobuz_user_id_field, self._qobuz_token_field, self._qobuz_app_id_field,
+                      self._qobuz_app_secret_field, self._deezer_arl_field]:
             field.on_change = save_cb
         self._qobuz_use_token_switch.on_change = save_cb
 
@@ -1288,8 +1336,8 @@ class SettingsView:
                 content=ft.Row([
                     ft.Icon(ft.Icons.LOCK_PERSON_ROUNDED, color=CYAN, size=24),
                     ft.Column([
-                        ft.Text("Qobuz Credentials & API Keys", weight=ft.FontWeight.BOLD, color=TEXT, size=15),
-                        ft.Text("Manage your user login tokens and developer API keys for high-resolution streaming.", color=DIM, size=12),
+                        ft.Text("Streaming Credentials", weight=ft.FontWeight.BOLD, color=TEXT, size=15),
+                        ft.Text("Sign in to each source you want to search and download from. Both can be configured at once.", color=DIM, size=12),
                     ], spacing=2, expand=True),
                 ], vertical_alignment=ft.CrossAxisAlignment.CENTER, spacing=14),
                 padding=16,
@@ -1300,8 +1348,8 @@ class SettingsView:
             ft.Container(
                 content=ft.Column([
                     ft.Row([
-                        ft.Icon(ft.Icons.ACCOUNT_CIRCLE_ROUNDED, color=CYAN, size=18),
-                        ft.Text("User Account", weight=ft.FontWeight.BOLD, color=TEXT, size=13),
+                        ft.Icon(ft.Icons.ACCOUNT_CIRCLE_ROUNDED, color=QOBUZ_COLOR, size=18),
+                        ft.Text("Qobuz Account", weight=ft.FontWeight.BOLD, color=TEXT, size=13),
                     ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
                     ft.Text("Authentication details used to generate valid Qobuz user sessions.", color=DIM, size=11),
                     ft.Container(height=4),
@@ -1327,8 +1375,8 @@ class SettingsView:
             ft.Container(
                 content=ft.Column([
                     ft.Row([
-                        ft.Icon(ft.Icons.KEY_ROUNDED, color=CYAN, size=18),
-                        ft.Text("Developer API Keys", weight=ft.FontWeight.BOLD, color=TEXT, size=13),
+                        ft.Icon(ft.Icons.KEY_ROUNDED, color=QOBUZ_COLOR, size=18),
+                        ft.Text("Qobuz Developer API Keys", weight=ft.FontWeight.BOLD, color=TEXT, size=13),
                     ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
                     ft.Text("Qobuz Application ID and Secret required to negotiate API sessions.", color=DIM, size=11),
                     ft.Container(height=4),
@@ -1343,6 +1391,28 @@ class SettingsView:
                 border_radius=12,
                 border=ft.Border.all(1, BORDER),
             ),
+            ft.Container(
+                content=ft.Column([
+                    ft.Row([
+                        ft.Icon(ft.Icons.ACCOUNT_CIRCLE_ROUNDED, color=DEEZER_COLOR, size=18),
+                        ft.Text("Deezer Account", weight=ft.FontWeight.BOLD, color=TEXT, size=13),
+                    ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                    ft.Text("Deezer authenticates with a single ARL cookie taken from a logged-in browser session.", color=DIM, size=11),
+                    ft.Container(height=4),
+                    self._deezer_arl_field,
+                    ft.Text("Browser \u2192 DevTools \u2192 Application \u2192 Cookies \u2192 deezer.com \u2192 copy the 'arl' value.", color=DIM, size=11),
+                    ft.Container(height=4),
+                    ft.Row([
+                        ft.Icon(ft.Icons.INFO_OUTLINE_ROUNDED, color=DIM, size=14),
+                        ft.Text("FLAC requires a Deezer HiFi subscription; other plans fall back to 320 kbps MP3.",
+                                color=DIM, size=11, expand=True),
+                    ], spacing=6, vertical_alignment=ft.CrossAxisAlignment.START),
+                ], spacing=10),
+                padding=16,
+                bgcolor=SURFACE2,
+                border_radius=12,
+                border=ft.Border.all(1, BORDER),
+            ),
         ], spacing=16)
 
     def _build_storage_group(self):
@@ -1350,6 +1420,7 @@ class SettingsView:
         save_cb = lambda e=None: self._check_dirty("Storage", self._save_paths, label="SAVE PATHS", icon=ft.Icons.FOLDER_ROUNDED, event=e)
         self._dl_path_field.on_change = save_cb
         self._lib_path_field.on_change = save_cb
+        self._default_quality_dropdown.on_change = save_cb
 
         return ft.Column([
             ft.Container(
@@ -1377,6 +1448,22 @@ class SettingsView:
                         self._dl_path_field,
                         ft.IconButton(ft.Icons.FOLDER_OPEN_ROUNDED, icon_color=CYAN, tooltip="Browse folder", on_click=self._browse_download_folder)
                     ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                ], spacing=8),
+                padding=16,
+                bgcolor=SURFACE2,
+                border_radius=12,
+                border=ft.Border.all(1, BORDER),
+            ),
+            ft.Container(
+                content=ft.Column([
+                    ft.Row([
+                        ft.Icon(ft.Icons.HIGH_QUALITY_ROUNDED, color=CYAN, size=18),
+                        ft.Text("Default Download Quality", weight=ft.FontWeight.BOLD, color=TEXT, size=13),
+                    ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                    ft.Text("Pick a tier to skip the quality sheet on every download. "
+                            "\"Ask every time\" restores the prompt.", color=DIM, size=11),
+                    ft.Container(height=4),
+                    self._default_quality_dropdown,
                 ], spacing=8),
                 padding=16,
                 bgcolor=SURFACE2,
@@ -2184,6 +2271,13 @@ class SettingsView:
         self._dl_path_field.value  = self.app.target_folder or get_default_download_path()
         self._lib_path_field.value = self.app.library_folder
         try:
+            from utils.streamrip_api import load_config as _lc
+            self._default_quality_dropdown.value = str(
+                (_lc().get("general", {}) or {}).get("default_quality", "")
+            ).lower()
+        except Exception:
+            self._default_quality_dropdown.value = ""
+        try:
             from utils.streamrip_api import load_config, get_config_path
             cfg = load_config()
             with open(get_config_path(), "r", encoding="utf-8") as f:
@@ -2200,6 +2294,9 @@ class SettingsView:
             secrets_list = qobuz.get("secrets", [])
             self._qobuz_app_secret_field.value = str(secrets_list[0]) if (secrets_list and isinstance(secrets_list, list) and len(secrets_list) > 0) else "e79f8b9be485692b0e5f9dd895826368"
             self._qobuz_use_token_switch.value = bool(qobuz.get("use_auth_token", True))
+
+            deezer_cfg = cfg.get("deezer", {}) or {}
+            self._deezer_arl_field.value = str(deezer_cfg.get("arl", ""))
 
             landing = cfg.get("landing", {})
             self._show_most_listened_switch.value = bool(landing.get("show_search_history", True))
@@ -2353,6 +2450,9 @@ class SettingsView:
         self.app.library_folder = lib
         from utils.streamrip_api import update_config_params
         update_config_params({"downloads": {"folder": dl}})
+        # "" means ask every time; the quality sheet treats any unknown value
+        # as "ask", so this is safe against a hand-edited config too.
+        update_config_params({"general": {"default_quality": self._default_quality_dropdown.value or ""}})
         self.app._save_pref("folder_path", dl)
         self.app._save_pref("library_path", lib)
         self.app.show_snackbar("Storage paths updated.")
@@ -2413,6 +2513,69 @@ class SettingsView:
             self.app.sync_config_to_ui()
         else:
             self.app.show_snackbar("Failed to update credentials.")
+
+    def _save_deezer_credentials(self, notify: bool = True) -> bool:
+        """Persist the Deezer ARL. A blank value intentionally clears it."""
+        arl = (self._deezer_arl_field.value or "").strip()
+        from utils.streamrip_api import update_config_params
+        success = update_config_params({"deezer": {"arl": arl}})
+        if notify:
+            if success:
+                self.app.show_snackbar("Deezer credentials updated." if arl else "Deezer ARL cleared.")
+                self.app.sync_config_to_ui()
+            else:
+                self.app.show_snackbar("Failed to update Deezer credentials.")
+        return success
+
+    def _save_account_credentials(self):
+        """Save both sources from the one Account section.
+
+        The two are saved independently on purpose: requiring a full Qobuz login
+        before a Deezer-only user could store an ARL (or vice versa) would make
+        the section unusable for anyone who only has one account.
+        """
+        uid   = (self._qobuz_user_id_field.value or "").strip()
+        token = (self._qobuz_token_field.value or "").strip()
+        arl   = (self._deezer_arl_field.value or "").strip()
+
+        saved, problems = [], []
+
+        if uid and token:
+            app_id     = (self._qobuz_app_id_field.value or "").strip() or "312369995"
+            app_secret = (self._qobuz_app_secret_field.value or "").strip() or "e79f8b9be485692b0e5f9dd895826368"
+            from utils.streamrip_api import update_config_params
+            if update_config_params({
+                "qobuz": {
+                    "use_auth_token": self._qobuz_use_token_switch.value,
+                    "email_or_userid": uid,
+                    "password_or_token": token,
+                    "app_id": app_id,
+                    "secrets": [app_secret],
+                }
+            }):
+                saved.append("Qobuz")
+            else:
+                problems.append("Qobuz save failed")
+        elif uid or token:
+            problems.append("Qobuz needs both a User ID and a token")
+
+        if self._save_deezer_credentials(notify=False):
+            if arl:
+                saved.append("Deezer")
+        else:
+            problems.append("Deezer save failed")
+
+        if saved:
+            self.app.sync_config_to_ui()
+
+        if problems:
+            self.app.show_snackbar(
+                (f"Saved {' & '.join(saved)}. " if saved else "") + "; ".join(problems)
+            )
+        elif saved:
+            self.app.show_snackbar(f"{' & '.join(saved)} credentials updated.")
+        else:
+            self.app.show_snackbar("Nothing to save \u2014 enter credentials for a source first.")
 
     # ── native browsing ──────────────────────────────────────────────────────
     def _browse_android_paths(self, target: str):

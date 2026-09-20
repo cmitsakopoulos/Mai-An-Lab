@@ -24,6 +24,9 @@ StreamripApp/chat_history.json
 StreamripApp/storage/
 StreamripApp/requirements.txt.bak
 *.log
+*auth_log*
+*auth_log.txt
+qobuz_auth_log.txt
 
 # Build Artifacts and Tooling
 **/dist/

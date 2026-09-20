@@ -47,11 +47,15 @@ RADIUS_PILL     = 20
 RADIUS_THUMB    = 8
 
 
+# Per-source identity colours, on the Apple HIG dark palette so they sit with
+# the rest of the tokens rather than beside them. These are the single source of
+# truth: ui.widgets.src_color reads this table, and utils.streamrip_search mirrors
+# it so a result card's accent matches the source pill that produced it.
 SOURCE_COLORS = {
-    "qobuz":      "#00E5FF",
-    "tidal":      "#0088FF", # From earlier testing, ignore.
-    "deezer":     "#CC00FF", # From earlier testing, ignore
-    "soundcloud": "#FF5500", # From earlier testing, ignore
+    "qobuz":      "#FF9F0A",  # Apple System Orange (gold)
+    "deezer":     "#BF5AF2",  # Apple System Purple
+    "tidal":      "#0A84FF",  # Apple System Blue - unused, kept for src_color misses
+    "soundcloud": "#FF5500",  # Brand orange - unused
 }
 
 LIB_ARTIST_COLOR   = "#BF5AF2"  # Apple System Purple

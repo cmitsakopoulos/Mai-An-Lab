@@ -280,30 +280,9 @@ class QobuzClient(Client):
                 }
                 endpoint = "user/login"
 
-            # Filesystem logging for Flet runtime debug
-            log_path = "/Users/chrismitsacopoulos/Desktop/Mai-An-Lab/qobuz_auth_log.txt"
-            try:
-                with open(log_path, "w", encoding="utf-8") as lf:
-                    lf.write(f"Login Attempt Started (endpoint={endpoint})\n")
-                    lf.write(f"Config path: {getattr(self.config, 'path', 'unknown')}\n")
-                    lf.write(f"use_auth_token: {c.use_auth_token}\n")
-                    lf.write(f"email_or_userid: {c.email_or_userid}\n")
-                    lf.write(f"password_or_token length: {len(c.password_or_token) if c.password_or_token else 0}\n")
-                    lf.write(f"app_id: {self.app_id}\n")
-            except Exception as e:
-                logger.error("Could not write initial auth log: %s", e)
-
             logger.debug("Request params %s", self._redact_auth_payload(params))
             status, resp = await self._api_request(endpoint, params)
             logger.debug("Login resp: %s", self._redact_auth_payload(resp))
-
-            try:
-                with open(log_path, "a", encoding="utf-8") as lf:
-                    lf.write(f"\nAPI Response from {endpoint}:\n")
-                    lf.write(f"Status: {status}\n")
-                    lf.write(f"Body: {resp}\n")
-            except Exception as e:
-                logger.error("Could not write api response to auth log: %s", e)
 
             if status == 200 and isinstance(resp, dict) and (resp.get("user") or endpoint == "user/get"):
                 uat = resp.get("user_auth_token") or c.password_or_token

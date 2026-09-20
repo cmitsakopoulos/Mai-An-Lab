@@ -274,6 +274,10 @@ class LibraryView:
         self._load_token    = 0      # incremented each load to cancel stale workers
         self._is_loading_chunk = False
         self._is_scanning   = False
+        # A scan the user did not ask for (post-download) runs quiet and,
+        # if the tab is off-screen, defers its list rebuild to on_show.
+        self._scan_is_quiet = False
+        self._needs_reload  = False
         self._path_to_controls: dict[str, list[ft.Control]] = {}
         self._scan_timer    = None
         self._search_token  = 0
@@ -4184,20 +4188,34 @@ class LibraryView:
         self.page.show_dialog(bs)
 
     # ── library scan ─────────────────────────────────────────────────────────
-    def start_scan(self):
+    def start_scan(self, quiet: bool = False):
+        """Index the library folder.
+
+        `quiet` is for scans the user did not ask for — the one that runs after
+        a download lands. A user-initiated scan legitimately takes over the
+        view; an automatic one must not, because every step below is a visible,
+        page-wide disturbance: showing the scan banner, collapsing the whole
+        expanded tree, resetting the row cache, and finally a full
+        load_library() rebuild. That is what made finishing a download look
+        like the entire app had refreshed.
+        """
         if self._is_scanning:
             return
         self._is_scanning = True
+        self._scan_is_quiet = quiet
 
         target = self.app.library_folder or self.app.target_folder or get_app_dir()
-        self._scan_progress_container.visible = True
-        self._scan_progress.value = None
-        self._scan_status_lbl.value = "Initializing active scan…"
-        self._scan_btn.disabled = True
-        self._empty_label.visible = False
-        self.expanded_nodes = set()
-        self._path_to_controls = {}
-        self.app.safe_update(lambda: None)
+        if not quiet:
+            self._scan_progress_container.visible = True
+            self._scan_progress.value = None
+            self._scan_status_lbl.value = "Initializing active scan…"
+            self._scan_btn.disabled = True
+            self._empty_label.visible = False
+            # Collapsing the tree is destructive to the user's place in it, so
+            # it only happens for a scan they asked for.
+            self.expanded_nodes = set()
+            self._path_to_controls = {}
+            self.app.safe_update(lambda: None)
 
         async def _scan():
             from utils.library_scanner import LibraryScanner
@@ -4211,6 +4229,10 @@ class LibraryView:
         self.page.run_task(self.app.error_boundary.capture(_scan))
 
     def _on_scan_progress(self, percent: float, track_title: str):
+        if getattr(self, "_scan_is_quiet", False):
+            # A background scan emits one of these per file; each is an
+            # untargeted safe_update, i.e. a full page sync per track.
+            return
         if not hasattr(self, "_scan_update_count"):
             self._scan_update_count = 0
         self._scan_update_count += 1
@@ -4226,22 +4248,39 @@ class LibraryView:
         self.app.safe_update(_apply)
 
     def _on_scan_complete(self, count: int, _skipped: int):
+        quiet = getattr(self, "_scan_is_quiet", False)
         self._cached_unanalysed = None
         self._scan_update_count = 0
         self._is_scanning = False
-        self.page.run_task(self.load_library)
+        self._scan_is_quiet = False
 
-        def _hide_scanner():
-            self._scan_progress_container.visible = False
-            self._scan_btn.disabled = False
-        self.app.safe_update(_hide_scanner)
+        if quiet and self.app._current_tab != 2:
+            # Nobody is looking at the library. load_library() clears the row
+            # cache and rebuilds the whole list; doing that for an off-screen
+            # tab is pure churn. Defer it to the next time the tab is shown.
+            self._needs_reload = True
+        else:
+            self.page.run_task(self.load_library)
 
-        assistant = getattr(self.app, "assistant_view", None)
-        if assistant is not None:
-            assistant._init_greeted = False
+        if not quiet:
+            def _hide_scanner():
+                self._scan_progress_container.visible = False
+                self._scan_btn.disabled = False
+            self.app.safe_update(_hide_scanner)
 
-        msg = f"Scan complete. Indexed {count} items." if count else "Library is up to date."
-        self.app.show_snackbar(msg, icon=ft.Icons.CHECK_CIRCLE_OUTLINE if "Indexed" in msg else ft.Icons.INFO_OUTLINE, color=CYAN)
+            assistant = getattr(self.app, "assistant_view", None)
+            if assistant is not None:
+                assistant._init_greeted = False
+
+            msg = f"Scan complete. Indexed {count} items." if count else "Library is up to date."
+            self.app.show_snackbar(msg, icon=ft.Icons.CHECK_CIRCLE_OUTLINE if "Indexed" in msg else ft.Icons.INFO_OUTLINE, color=CYAN)
+
+    # ── tab lifecycle ───────────────────────────────────────────────────────
+    def on_show(self):
+        """Pick up any reload a background scan deferred while we were hidden."""
+        if getattr(self, "_needs_reload", False):
+            self._needs_reload = False
+            self.page.run_task(self.load_library)
 
 
     def _on_compute_dsp_click(self, _e):

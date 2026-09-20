@@ -34,6 +34,42 @@ class Summary(ABC):
         return self.summarize()
 
 
+def _pick_image(*candidates) -> str:
+    """First usable artwork URL among the shapes the sources use.
+
+    Qobuz nests artwork in an ``image`` dict keyed by size; Deezer puts it in
+    flat ``cover_xl``/``cover_big``/``picture_*`` keys on the item itself.
+    """
+    for raw in candidates:
+        if isinstance(raw, str) and raw:
+            return raw
+        if isinstance(raw, dict) and raw:
+            picked = (
+                raw.get("large")
+                or raw.get("extralarge")
+                or raw.get("medium")
+                or raw.get("small")
+            )
+            if picked:
+                return picked
+            first = next((v for v in raw.values() if isinstance(v, str) and v), "")
+            if first:
+                return first
+    return ""
+
+
+def _flat_cover(item: dict) -> str:
+    """Deezer-style flat artwork keys, largest first."""
+    if not isinstance(item, dict):
+        return ""
+    for key in ("cover_xl", "cover_big", "cover_medium", "cover", "picture_xl",
+                "picture_big", "picture_medium", "picture"):
+        val = item.get(key)
+        if isinstance(val, str) and val:
+            return val
+    return ""
+
+
 @dataclass(slots=True)
 class ArtistSummary(Summary):
     id: str
@@ -114,14 +150,11 @@ class TrackSummary(Summary):
         
         album_name = item.get("album", {}).get("title") or ""
         
-        image_raw = item.get("image") or (item.get("album", {}).get("image") if isinstance(item.get("album"), dict) else "")
-        image_url = ""
-        if isinstance(image_raw, str):
-            image_url = image_raw
-        elif isinstance(image_raw, dict):
-            image_url = image_raw.get("large") or image_raw.get("extralarge") or image_raw.get("medium") or image_raw.get("small") or ""
-            if not image_url and image_raw:
-                image_url = list(image_raw.values())[0]
+        album_item = item.get("album") if isinstance(item.get("album"), dict) else {}
+        image_url = _pick_image(
+            item.get("image"),
+            album_item.get("image"),
+        ) or _flat_cover(item) or _flat_cover(album_item)
 
         return cls(id, name.strip(), artist, date_released, image_url, album_name)
 
@@ -162,6 +195,7 @@ class AlbumSummary(Summary):
         )
         num_tracks = (
             item.get("tracks_count", 0)
+            or item.get("nb_tracks", 0)
             or item.get("numberOfTracks", 0)
             or len(
                 item.get("tracks", []) or item.get("items", []),
@@ -178,14 +212,7 @@ class AlbumSummary(Summary):
             or "Unknown"
         )
         
-        image_raw = item.get("image") or ""
-        image_url = ""
-        if isinstance(image_raw, str):
-            image_url = image_raw
-        elif isinstance(image_raw, dict):
-            image_url = image_raw.get("large") or image_raw.get("extralarge") or image_raw.get("medium") or image_raw.get("small") or ""
-            if not image_url and image_raw:
-                image_url = list(image_raw.values())[0]
+        image_url = _pick_image(item.get("image")) or _flat_cover(item)
 
         return cls(id, name, artist, str(num_tracks), date_released, image_url)
 
@@ -272,17 +299,23 @@ class SearchResults:
         else:
             raise Exception(f"invalid media type {media_type}")
 
+        key = media_type + "s"
         results = []
         for page in pages:
-            if source == "qobuz":
-                key = media_type + "s"
-                for item in page[key]["items"]:
-                    results.append(summary_type.from_item(item))
+            # Qobuz pages nest items under "<media_type>s"; other sources (and
+            # our own pre-grouped wrappers) may pass a bare {"items": [...]}.
+            # Accept both regardless of source rather than keying off the name.
+            if key in page and isinstance(page[key], dict) and "items" in page[key]:
+                items = page[key]["items"]
+            elif "items" in page:
+                items = page["items"]
+            elif "data" in page:
+                # Raw Deezer search page.
+                items = page["data"]
             else:
-                # Basic fallback for other sources
-                if "items" in page:
-                    for item in page["items"]:
-                        results.append(summary_type.from_item(item))
+                continue
+            for item in items:
+                results.append(summary_type.from_item(item))
 
         return cls(results)
 

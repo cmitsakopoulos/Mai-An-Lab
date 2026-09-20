@@ -23,12 +23,15 @@ from main import StreamripFletApp
 from ui.views.settings import SettingsView
 
 
-def _app(current_tab=3, subpage=None, previous_tab=2):
+def _app(current_tab=3, subpage=None, previous_tab=2, selection_mode=False):
     """A stub carrying only what navigate_back() touches."""
     app = MagicMock()
     app._current_tab = current_tab
     app._previous_tab = previous_tab
     app.settings_view._current_subpage_name = subpage
+    # Explicit: a bare MagicMock attribute is truthy, which would make the
+    # search-selection rung swallow back on every Search-tab case.
+    app.search_view.selection_mode = selection_mode
     # Bind the real implementations onto the stub.
     app.navigate_back = lambda: StreamripFletApp.navigate_back(app)
     return app
@@ -63,6 +66,34 @@ class TestNavigateBack(unittest.TestCase):
                 app = _app(current_tab=tab)
                 self.assertFalse(app.navigate_back())
                 app._switch_tab.assert_not_called()
+
+    def test_search_selection_mode_consumes_back_first(self):
+        """Selection mode is the most nested state in the app: a mode inside a
+        tab. Back must dismiss it before it means anything else."""
+        app = _app(current_tab=1, selection_mode=True)
+
+        self.assertTrue(app.navigate_back())
+        app.search_view.exit_selection.assert_called_once()
+        app._switch_tab.assert_not_called()
+
+    def test_search_tab_without_selection_does_not_consume_back(self):
+        app = _app(current_tab=1, selection_mode=False)
+
+        self.assertFalse(app.navigate_back())
+        app.search_view.exit_selection.assert_not_called()
+
+    def test_selection_rung_only_applies_to_the_search_tab(self):
+        """A selection left active on Search must not hijack back from Library."""
+        app = _app(current_tab=2, selection_mode=True)
+
+        self.assertFalse(app.navigate_back())
+        app.search_view.exit_selection.assert_not_called()
+
+    def test_missing_search_view_falls_through(self):
+        app = _app(current_tab=1)
+        app.search_view = None
+
+        self.assertFalse(app.navigate_back())
 
     def test_missing_settings_view_falls_through_to_tab_switch(self):
         app = _app(current_tab=3, subpage=None, previous_tab=0)

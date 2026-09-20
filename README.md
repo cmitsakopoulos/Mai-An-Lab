@@ -26,6 +26,7 @@ Search the entire Qobuz streaming catalog across Artists, Albums, and Tracks wit
 
 - **Direct Network Audio Streaming**: Resolves authenticated stream URLs on the fly to play full-length track previews directly over the network with zero disk overhead. Includes interactive connection cards displaying real-time stream resolution and granular cancellation.
 - **High-Fidelity Streamrip Acquisition**: Download albums or individual tracks directly to your system directory in user-selected formats ranging from **High (320kbps MP3/AAC)** and **CD Quality (16-bit FLAC)** to uncompressed **Hi-Res (24-bit FLAC)** with embedded tags and artwork.
+- **Integrated Download Dock & Queue**: Monitor multi-track acquisition in real-time with speed metrics, quality badges, retry controls, and auto-collapsing floating action pills.
 
 <p align="center">
   <img src="assets/search_query.png" width="31%" alt="Real-time Query & Skeleton Loading" style="border-radius: 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); border: 1px solid rgba(255, 255, 255, 0.1);">
@@ -33,6 +34,9 @@ Search the entire Qobuz streaming catalog across Artists, Albums, and Tracks wit
   <img src="assets/search_stream.png" width="31%" alt="Direct Network Streaming & Progress" style="border-radius: 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); border: 1px solid rgba(255, 255, 255, 0.1);">
   &nbsp;
   <img src="assets/search_quality.png" width="31%" alt="Download Quality Selection" style="border-radius: 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); border: 1px solid rgba(255, 255, 255, 0.1);">
+</p>
+<p align="center">
+  <img src="assets/download_queue.png" width="45%" alt="Expanded Download Dock & Queue" style="border-radius: 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); border: 1px solid rgba(255, 255, 255, 0.1);">
 </p>
 
 ---
@@ -42,12 +46,15 @@ Search the entire Qobuz streaming catalog across Artists, Albums, and Tracks wit
 Browse catalog tracks, albums, and artists through SQL joins with integrated queue management, scrubbing, volume control, and a persistent mini-player. Toggling the Network view opens an interactive force-directed similarity graph mapped across your library.
 
 - **Seed-Anchored Similarity Walks**: Generates adaptive playlists directly from any seed track. Metadata defines the candidate pool through genre taxonomy boundaries (and regional bounds for untagged tracks), while acoustic cosine proximity across the continuous $Z_r$ coordinate space ranks tracks without chaining drift. Repetition is bounded by per-artist and per-album caps.
+- **Context Actions & Metadata**: Long-press any track to trigger a native Cupertino bottom sheet showing technical audio specs (format, sample rate, bit depth), artist exploration, and instant similarity queue generation.
 - **Interactive Force-Directed Canvas**: Renders a live 2D similarity graph color-coded by Louvain genre communities across a 24-color dark-theme palette. Tapping nodes displays instant playback controls, exploration actions, and draws directed similarity walk trajectories directly over the canvas with step badges.
 
 <p align="center">
-  <img src="assets/library_look.png" width="45%" alt="Music Library & Mini-Player" style="border-radius: 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); border: 1px solid rgba(255, 255, 255, 0.1);">
+  <img src="assets/library_look.png" width="31%" alt="Music Library & Mini-Player" style="border-radius: 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); border: 1px solid rgba(255, 255, 255, 0.1);">
   &nbsp;
-  <img src="assets/network_look.png" width="45%" alt="Interactive Acoustic Network Graph" style="border-radius: 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); border: 1px solid rgba(255, 255, 255, 0.1);">
+  <img src="assets/library_context_menu.png" width="31%" alt="Track Long-Press Context Menu" style="border-radius: 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); border: 1px solid rgba(255, 255, 255, 0.1);">
+  &nbsp;
+  <img src="assets/network_look.png" width="31%" alt="Interactive Acoustic Network Graph" style="border-radius: 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); border: 1px solid rgba(255, 255, 255, 0.1);">
 </p>
 
 ---
@@ -75,6 +82,18 @@ Fine-tune your listening experience via a manual 5-band Equalizer and real-time 
   <img src="assets/eq_dsp.png" width="45%" alt="Dynamism Enhancement & Graphic EQ Curve" style="border-radius: 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); border: 1px solid rgba(255, 255, 255, 0.1);">
   &nbsp;
   <img src="assets/eq_presets.png" width="45%" alt="5-Band Sliders & System Presets" style="border-radius: 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); border: 1px solid rgba(255, 255, 255, 0.1);">
+</p>
+
+---
+
+### Settings & System Customization
+
+Configure runtime storage paths, audio render engines, theme accents, and customize view visibility. The Appearance hub allows granular control over active Library tabs (e.g. limiting to 3 active views for ergonomic Cupertino segmented navigation) and visual palettes.
+
+<p align="center">
+  <img src="assets/settings_general.png" width="45%" alt="General Settings & Audio Engine" style="border-radius: 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); border: 1px solid rgba(255, 255, 255, 0.1);">
+  &nbsp;
+  <img src="assets/settings_appearance.png" width="45%" alt="Appearance & Tab Visibility Customization" style="border-radius: 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); border: 1px solid rgba(255, 255, 255, 0.1);">
 </p>
 
 ---

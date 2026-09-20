@@ -1,4 +1,4 @@
-"""Streamrip search; Minimal Qobuz-only implementation."""
+"""Streamrip search across the supported backends (Qobuz, Deezer)."""
 
 import logging
 import threading
@@ -8,15 +8,40 @@ from .config import Config
 
 logger = logging.getLogger(__name__)
 
+# Mirrors ui.tokens.SOURCE_COLORS. Kept as a literal because utils/ must not
+# import from ui/ (the UI layer imports utils, not the other way round), so any
+# change here needs the same edit there.
 _SOURCE_COLORS = {
-    "qobuz": "#D4AF37",
+    "qobuz": "#FF9F0A",   # Apple System Orange (gold)
+    "deezer": "#BF5AF2",  # Apple System Purple
 }
 _DEFAULT_COLOR = "#FFFFFF"
+
+SUPPORTED_SOURCES = ("qobuz", "deezer")
+
+# Web URL templates, used to build a link the download path can parse back into
+# (media_type, id, source) via streamrip_api._detect_type_and_id.
+_SOURCE_URL_TEMPLATES = {
+    "qobuz": "https://www.qobuz.com/{media_type}/{id}",
+    "deezer": "https://www.deezer.com/{media_type}/{id}",
+}
+
+
+def _page_items(source: str, page: dict, media_type: str) -> list:
+    """Items out of one raw search page.
+
+    Qobuz paginates as {"tracks": {"items": [...]}}; Deezer returns a flat
+    {"data": [...]} regardless of media type.
+    """
+    if source == "deezer":
+        return page.get("data", []) or []
+    return page.get(f"{media_type}s", {}).get("items", []) or []
 
 class StreamripSearcher:
     _loop = None
     _thread = None
-    _client = None
+    # One cached, logged-in client per source.
+    _clients: dict = {}
     _client_lock = None
     _last_activity = 0.0
     _cleanup_task = None
@@ -57,16 +82,16 @@ class StreamripSearcher:
             if elapsed >= cls._inactivity_timeout:
                 logger.info("StreamripSearcher: Inactivity timeout reached (%ds). Cleaning up network sessions...", cls._inactivity_timeout)
                 
-                # 1. Close active Qobuz client session
+                # 1. Close every active client session
                 if cls._client_lock is not None:
                     async with cls._client_lock:
-                        if cls._client is not None:
+                        for src, client in list(cls._clients.items()):
                             try:
-                                if cls._client.session and not cls._client.session.closed:
-                                    await cls._client.session.close()
+                                if client.session and not client.session.closed:
+                                    await client.session.close()
                             except Exception as e:
-                                logger.error("Error closing client session: %s", e)
-                            cls._client = None
+                                logger.error("Error closing %s client session: %s", src, e)
+                        cls._clients.clear()
                 
                 # 2. Stop event loop and thread
                 if cls._loop is not None:
@@ -82,85 +107,114 @@ class StreamripSearcher:
         from .streamrip_api import get_config_path
         self.config_path = config_path or get_config_path()
 
-    async def _get_client(self, progress_callback=None):
+    @staticmethod
+    def _credentials_changed(source: str, old_cfg, new_cfg) -> bool:
+        """Whether a cached client's stored credentials are now stale."""
+        if source == "deezer":
+            return old_cfg.session.deezer.arl != new_cfg.session.deezer.arl
+        old_c = old_cfg.session.qobuz
+        new_c = new_cfg.session.qobuz
+        return (old_c.email_or_userid != new_c.email_or_userid or
+                old_c.password_or_token != new_c.password_or_token or
+                getattr(old_c, "app_id", None) != getattr(new_c, "app_id", None) or
+                old_c.use_auth_token != new_c.use_auth_token)
+
+    async def _get_client(self, source: str = "qobuz", progress_callback=None):
+        source = (source or "qobuz").lower()
+        if source not in SUPPORTED_SOURCES:
+            raise Exception(f"Source '{source}' is not supported.")
+
         if StreamripSearcher._client_lock is None:
             StreamripSearcher._client_lock = asyncio.Lock()
             
         async with StreamripSearcher._client_lock:
             from .config import Config
             config = Config(self.config_path)
-            
+            cached = StreamripSearcher._clients.get(source)
+
             # Reset client if credentials changed in the configuration
-            if StreamripSearcher._client is not None:
-                old_c = StreamripSearcher._client.config.session.qobuz
-                new_c = config.session.qobuz
-                if (old_c.email_or_userid != new_c.email_or_userid or 
-                    old_c.password_or_token != new_c.password_or_token or
-                    getattr(old_c, "app_id", None) != getattr(new_c, "app_id", None) or
-                    old_c.use_auth_token != new_c.use_auth_token):
-                    logger.info("Qobuz credentials changed, resetting client session.")
-                    if hasattr(StreamripSearcher._client, "close"):
-                        await StreamripSearcher._client.close()
-                    elif StreamripSearcher._client.session and not StreamripSearcher._client.session.closed:
-                        await StreamripSearcher._client.session.close()
-                    StreamripSearcher._client = None
+            if cached is not None and self._credentials_changed(source, cached.config_root, config):
+                logger.info("%s credentials changed, resetting client session.", source)
+                try:
+                    if hasattr(cached, "close"):
+                        await cached.close()
+                    elif cached.session and not cached.session.closed:
+                        await cached.session.close()
+                except Exception as e:
+                    logger.error("Error closing %s client session: %s", source, e)
+                cached = None
+                StreamripSearcher._clients.pop(source, None)
 
-            if StreamripSearcher._client is None or getattr(StreamripSearcher._client, "session", None) is None or StreamripSearcher._client.session.closed:
-                from .qobuz import QobuzClient
-                StreamripSearcher._client = QobuzClient(config)
+            if cached is None or getattr(cached, "session", None) is None or cached.session.closed:
+                if source == "deezer":
+                    from .deezer import DeezerClient
+                    client = DeezerClient(config)
+                else:
+                    from .qobuz import QobuzClient
+                    client = QobuzClient(config)
+                # The clients keep only their own config section, but the
+                # staleness check above needs the whole tree.
+                client.config_root = config
                 if progress_callback:
-                    progress_callback("Authenticating", "Logging in to Qobuz API...")
-                await StreamripSearcher._client.login()
-            return StreamripSearcher._client
+                    progress_callback("Authenticating", "Signing in\u2026")
+                await client.login()
+                StreamripSearcher._clients[source] = client
+            return StreamripSearcher._clients[source]
 
-    async def get_track_stream_url(self, track_id: str, quality: int = 1) -> str:
+    async def get_track_stream_url(self, track_id: str, quality: int = 1, source: str = "qobuz") -> str:
         loop = self._get_loop()
         future = asyncio.run_coroutine_threadsafe(
-            self._get_track_stream_url_async(track_id, quality),
+            self._get_track_stream_url_async(track_id, quality, source),
             loop
         )
         return await asyncio.wrap_future(future)
 
-    async def _get_track_stream_url_async(self, track_id: str, quality: int) -> str:
-        client = await self._get_client()
+    async def _get_track_stream_url_async(self, track_id: str, quality: int, source: str = "qobuz") -> str:
+        client = await self._get_client(source)
         downloadable = await client.get_downloadable(track_id, quality)
         return downloadable.url
 
 
-    def get_artist_albums(self, artist_id: str, callback, limit: int = 30, offset: int = 0) -> None:
+    def get_artist_albums(self, artist_id: str, callback, limit: int = 30, offset: int = 0, source: str = "qobuz") -> None:
         loop = self._get_loop()
         asyncio.run_coroutine_threadsafe(
-            self._run_artist_albums_wrapper(artist_id, callback, limit, offset),
+            self._run_artist_albums_wrapper(artist_id, callback, limit, offset, source),
             loop
         )
 
-    async def _run_artist_albums_wrapper(self, artist_id, callback, limit, offset):
+    async def _run_artist_albums_wrapper(self, artist_id, callback, limit, offset, source="qobuz"):
         try:
-            results = await self._get_artist_albums_async(artist_id, limit, offset)
+            results = await self._get_artist_albums_async(artist_id, limit, offset, source)
         except Exception as exc:
             logger.error("Get artist albums failed: %s", exc)
             results = []
         callback(results)
 
-    async def _get_artist_albums_async(self, artist_id, limit, offset):
-        client = await self._get_client()
-        resp = await client.get_metadata(artist_id, "artist", limit=limit, offset=offset)
-        
-        albums_data = resp.get("albums", {})
-        raw_albums = albums_data.get("items", [])
-        
-        raw_albums = raw_albums[:limit]
-        
+    async def _get_artist_albums_async(self, artist_id, limit, offset, source="qobuz"):
+        source = (source or "qobuz").lower()
+        client = await self._get_client(source)
+
+        if source == "deezer":
+            # The Deezer client returns every album in one flat list and takes
+            # no paging arguments, so the window is applied here instead.
+            resp = await client.get_metadata(artist_id, "artist")
+            raw_albums = (resp.get("albums", []) or [])[offset:offset + limit]
+        else:
+            resp = await client.get_metadata(artist_id, "artist", limit=limit, offset=offset)
+            albums_data = resp.get("albums", {})
+            raw_albums = albums_data.get("items", [])[:limit]
+
         for a in raw_albums:
             a["_media_type"] = "album"
             
-        parsed = self._parse_results(raw_albums, "qobuz")
+        parsed = self._parse_results(raw_albums, source)
         
         if len(raw_albums) > 0:
             # Always offer load more if we just got results (User preference for reliability)
             parsed.append({
                 "media_type": "load_more_artist",
                 "id": artist_id,
+                "source": source,
                 "offset": offset + limit,
                 "limit": limit,
                 "ui_title": "Load More",
@@ -176,59 +230,73 @@ class StreamripSearcher:
             
         return parsed
 
-    def get_album_tracks(self, album_id: str, callback) -> None:
+    def get_album_tracks(self, album_id: str, callback, source: str = "qobuz") -> None:
         loop = self._get_loop()
         asyncio.run_coroutine_threadsafe(
-            self._run_album_tracks_wrapper(album_id, callback),
+            self._run_album_tracks_wrapper(album_id, callback, source),
             loop
         )
 
-    async def _run_album_tracks_wrapper(self, album_id, callback):
+    async def _run_album_tracks_wrapper(self, album_id, callback, source="qobuz"):
         try:
-            results = await self._get_album_tracks_async(album_id)
+            results = await self._get_album_tracks_async(album_id, source)
         except Exception as exc:
             logger.error("Get album tracks failed: %s", exc)
             results = []
         callback(results)
 
-    async def _get_album_tracks_async(self, album_id):
-        client = await self._get_client()
+    async def _get_album_tracks_async(self, album_id, source="qobuz"):
+        source = (source or "qobuz").lower()
+        client = await self._get_client(source)
         resp = await client.get_metadata(album_id, "album")
-        raw_tracks = resp.get("tracks", {}).get("items", [])
+        raw = resp.get("tracks", [])
+        # Qobuz nests its track list one level deeper than Deezer.
+        raw_tracks = raw.get("items", []) if isinstance(raw, dict) else raw
         for t in raw_tracks:
             t["_media_type"] = "track"
-        return self._parse_results(raw_tracks, "qobuz")
+            # Album-track payloads carry no album object of their own; the
+            # tagging step needs one to name the album and find cover art.
+            t.setdefault("album", resp)
+        return self._parse_results(raw_tracks, source)
 
     def search(self, query: str, source: str, callback, media_types=None, limit: int = 50, offset: int = 0, progress_callback=None) -> None:
-        if source.lower() != "qobuz":
-            callback({"error": f"Source '{source}' is not supported in this minimal build."})
+        source = (source or "qobuz").lower()
+        if source not in SUPPORTED_SOURCES:
+            callback({"error": f"Source '{source}' is not supported. Available: {', '.join(SUPPORTED_SOURCES)}."})
             return
         
         query = query.strip()
         loop = self._get_loop()
         asyncio.run_coroutine_threadsafe(
-            self._run_search_wrapper(query, media_types or ["track", "album"], limit, offset, callback, progress_callback),
+            self._run_search_wrapper(query, media_types or ["track", "album"], limit, offset, callback, progress_callback, source),
             loop
         )
 
-    async def _run_search_wrapper(self, query, media_types, limit, offset, callback, progress_callback=None):
+    async def _run_search_wrapper(self, query, media_types, limit, offset, callback, progress_callback=None, source="qobuz"):
         try:
-            results = await self._search_async(query, media_types, limit, offset, progress_callback)
+            results = await self._search_async(query, media_types, limit, offset, progress_callback, source)
         except Exception as exc:
             logger.error("Search failed: %s", exc, exc_info=True)
             results = {"error": str(exc)}
         callback(results)
 
-    async def _search_async(self, query: str, media_types: list, limit: int = 50, offset: int = 0, progress_callback=None) -> list:
+    async def _search_async(self, query: str, media_types: list, limit: int = 50, offset: int = 0, progress_callback=None, source: str = "qobuz") -> list:
         from .exceptions import MissingCredentialsError, AuthenticationError
+        source = (source or "qobuz").lower()
+        label = source.title()
+        missing_creds_hint = (
+            "Deezer credentials are missing. Please enter your ARL cookie in the Settings tab."
+            if source == "deezer" else
+            "Qobuz credentials are missing. Please enter your User ID and Token in the Settings tab."
+        )
         try:
             if progress_callback:
-                progress_callback("Connecting", "Establishing connection to Qobuz...")
-            client = await self._get_client(progress_callback)
+                progress_callback("Connecting", "Contacting API\u2026")
+            client = await self._get_client(source, progress_callback)
         except MissingCredentialsError:
-            raise Exception("Qobuz credentials are missing. Please enter your User ID and Token in the Settings tab.")
+            raise Exception(missing_creds_hint)
         except AuthenticationError:
-            raise Exception("Qobuz authentication failed. Please check your credentials in the Settings tab.")
+            raise Exception(f"{label} authentication failed. Please check your credentials in the Settings tab.")
         except Exception as exc:
             raise Exception(f"Connection failed: {exc}")
 
@@ -236,7 +304,7 @@ class StreamripSearcher:
             pages = await client.search(m_type, query, limit=limit, offset=offset)
             items_out = []
             for page in pages:
-                for item in page.get(f"{m_type}s", {}).get("items", []):
+                for item in _page_items(source, page, m_type):
                     if isinstance(item, dict):
                         item["_media_type"] = m_type
                         items_out.append(item)
@@ -252,11 +320,11 @@ class StreamripSearcher:
         any_ok = False
         for m in media_types:
             if progress_callback:
-                progress_callback("Searching", f"Searching {m}s on Qobuz...")
+                progress_callback("Searching", f"Looking up {m}s\u2026")
             try:
                 items = await _fetch_type(m)
             except Exception as exc:
-                logger.warning("Qobuz search %s failed: %s", m, exc, exc_info=True)
+                logger.warning("%s search %s failed: %s", label, m, exc, exc_info=True)
                 fetch_errors.append(exc)
                 continue
             any_ok = True
@@ -266,13 +334,13 @@ class StreamripSearcher:
             raise self._humanize_search_error(fetch_errors[0])
 
         if progress_callback:
-            progress_callback("Processing", "Formatting search results...")
+            progress_callback("Processing", "Formatting results\u2026")
 
         raw = []
         for items in results_per_type:
             raw.extend(items)
 
-        return self._parse_results(raw, "qobuz")
+        return self._parse_results(raw, source)
 
     @staticmethod
     def _humanize_search_error(exc: Exception) -> Exception:
@@ -345,7 +413,9 @@ class StreamripSearcher:
                 "artist": getattr(r, "artist", ""),
                 "source": source,
                 "media_type": m_type,
-                "url": f"https://www.qobuz.com/{m_type}/{r.id}",
+                "url": _SOURCE_URL_TEMPLATES.get(
+                    source, _SOURCE_URL_TEMPLATES["qobuz"]
+                ).format(media_type=m_type, id=r.id),
                 "year": year,
                 "album": album_name,
                 "image": image_url,
