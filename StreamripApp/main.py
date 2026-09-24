@@ -615,6 +615,10 @@ class StreamripFletApp:
         try:
             await asyncio.sleep(3)  # let startup / the scan settle before network
             from utils.metadata_enrich import enrich_library
+            # Background pass: NEW artists only (no include_failed /
+            # retry_incomplete). Re-checking blanks and retrying failures is
+            # deliberate work the user asks for with Sync in the workbench, not
+            # something to repeat on every boot at 1 req/s.
             summary = await enrich_library(self.db_manager, with_genres=True)
             if summary.get("enriched"):
                 logger.info("Metadata enrichment complete: %s", summary)
@@ -3031,13 +3035,15 @@ class StreamripFletApp:
 
     # ── metadata editor ──────────────────────────────────────────────────────
     def open_artist_metadata_editor(self, artist_name: str, on_saved=None):
-        from ui.player.dialogs import ArtistMetadataDialog
-        dlg = ArtistMetadataDialog(self)
-        dlg.open(artist_name, on_saved=on_saved)
+        """Route an artist to THE metadata editor — the Settings workbench.
 
-    def open_metadata_enrichment_wizard(self):
+        This used to open a second, separate AlertDialog editor with its own
+        affordances and its own save path (which refreshed only some of the
+        walk's derived models, so an edit made here behaved differently from the
+        identical edit made in the workbench). One surface, one save path.
+        """
         self.switch_tab(3)
-        self.settings_view._on_launch_enrichment_wizard_click()
+        self.settings_view._on_open_metadata_workbench_click(focus_artist=artist_name)
 
     def show_play_similar_dialog(self):
         def close_dialog(e):

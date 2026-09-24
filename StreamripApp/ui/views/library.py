@@ -3857,8 +3857,9 @@ class LibraryView:
 
     def _edit_btn(self, artist_name: str, color: str = DIM) -> ft.Control:
         # Artists only. The generic track/album tag editor was retired (see
-        # deprecated_feature/README.md); ArtistMetadataDialog writes country and
-        # genre overrides to the DB and is the one metadata editor that works.
+        # deprecated_feature/README.md). This is a shortcut INTO the Settings
+        # metadata workbench, focused on this artist — not a second editor. There
+        # used to be two, with different affordances and different save paths.
         return ft.IconButton(
             icon=ft.Icons.EDIT_OUTLINED,
             icon_color=apply_opacity(0.6, color), icon_size=20,

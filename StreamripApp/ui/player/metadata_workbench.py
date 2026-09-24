@@ -1,29 +1,42 @@
-"""Metadata Workbench — the single surface for artist-provenance curation.
+"""Metadata Workbench — the sorting board for artist provenance.
 
-This absorbs what used to be a separate 5-step wizard. There is now ONE place to
-do everything metadata:
+Auto-Play reads two fields per artist: `country` and `genres`. `_pool_foreign`
+uses them to decide what belongs in a queue, and `genre_graph.node_label` uses
+them to place the artist in the journey graph. This is the surface that fills
+them in.
 
-  • SYNC   — pull country + genres from MusicBrainz for un-enriched artists,
-             shown as an inline progress banner (no separate page, so there is
-             nowhere to get lost coming back from);
-  • REVIEW — low-confidence matches surface as the "Uncertain" filter, accepted
-             or rejected inline;
-  • FIX    — the artists MusicBrainz simply has no tags for (on this library, the
-             Greek scene) are tagged by hand or in a scene-wide batch.
+── Why it is a board and not a list of problems ──────────────────────────────
+The previous design asked "which columns are empty?" and presented the answer as
+four severity filters (critical / no tags / uncertain / all). Two things were
+wrong with that:
 
-Design notes (see the redesign appraisal):
-  • summary before detail — a coverage figure + severity bar, on the same field
-    the walk reads; severity is a colour (red = an artist Auto-Play cannot fence
-    at all — no genre AND no country);
-  • fix a scene, not a row — gaps group by country and a whole shelf tags at once;
-  • tap, don't type — editing is inline, seeded by the artist's own file tags and
-    the library's existing genre vocabulary so a hand entry lands inside the NPMI
-    model that has to read it.
+  • it nagged about artists that already work. Measured on the real library it
+    flagged 70, of which 32 had a usable tag sitting in their own files and 27
+    more had a country — leaving 11 that genuinely needed a person;
+  • fixing them was one-at-a-time, through an inline expander that reflowed the
+    whole list under your finger.
 
-Flet 0.86 gotchas baked in here: `SegmentedButton.selected` is `list[str]` and
-its msgpack encoder cannot serialize a `set` — so the filter control is a custom
-scrollable pill row (four filters don't fit a native segmented button in
-portrait anyway), and every control property stays a list/str/num.
+So the unit of work here is not "an artist with a problem", it is "a pile of
+artists that belong to one scene". You select several and drop them on a genre,
+because that is what the user actually knows: not this artist's tag list, but
+that these twenty are all Greek rap. The bins are the library's own vocabulary,
+which matters for correctness and not just typing — the NPMI model in
+`genre_similarity` is learned from co-occurrence across THIS library's tags, so
+a freshly invented spelling has no learned relation to anything.
+
+── Flet 0.86 mechanics baked in ──────────────────────────────────────────────
+  • The ListView is a DIRECT child of an expanding Column, never wrapped in an
+    expand Container, and the pane is mounted with `_show_sub_page_full` so it
+    is not nested inside the settings hub's scrolling Column. Both were
+    violated before, which is what made scrolling fight back.
+  • `Draggable`/`DragTarget` carry the payload on `e.src.data`, so nothing has
+    to go through `page.get_control`.
+  • Drag is an accelerator, never the only path: a horizontal drag inside a
+    settings sub-page already means "back" (docs/FLET_FACTS.md §4), and touch
+    gesture arbitration is unkind to drag-inside-scroll. Select-then-tap does
+    the same job and is the primary route.
+  • Row edits mutate one row and call `row.update()`; only structural changes
+    re-render the list. The old code rebuilt every row on every chip tap.
 """
 
 from __future__ import annotations
@@ -33,11 +46,14 @@ import logging
 import flet as ft
 
 from ui.tokens import (
-    TEXT, DIM, BORDER, SURFACE, SURFACE2, CYAN, BG,
+    TEXT, DIM, TEXT_TERTIARY, BORDER, BORDER_SUBTLE, SURFACE, SURFACE2,
+    SURFACE_ELEVATED, CYAN, BG, RADIUS_CARD, RADIUS_PILL,
     ACCENT_GREEN, ACCENT_AMBER, ACCENT_RED, apply_opacity,
 )
+from ui.widgets import CupertinoSegmentedBar
 from utils.metadata_enrich import (
     enrich_library,
+    refresh_walk_models,
     search_musicbrainz_artists_candidates,
     musicbrainz_artist_details,
 )
@@ -45,11 +61,43 @@ from utils.metadata_enrich import (
 logger = logging.getLogger(__name__)
 
 _COUNTRY_NAMES = {
-    "GR": "Greece", "US": "United States", "GB": "United Kingdom", "FR": "France",
-    "DE": "Germany", "IT": "Italy", "ES": "Spain", "NL": "Netherlands",
-    "SE": "Sweden", "CA": "Canada", "AU": "Australia", "JP": "Japan",
-    "KR": "South Korea", "BR": "Brazil", "RU": "Russia", "IE": "Ireland",
+    "GR": "Greece", "US": "United States", "GB": "United Kingdom",
+    "FR": "France", "DE": "Germany", "IT": "Italy", "ES": "Spain",
+    "SE": "Sweden", "NO": "Norway", "FI": "Finland", "DK": "Denmark",
+    "NL": "Netherlands", "BE": "Belgium", "IE": "Ireland", "PT": "Portugal",
+    "CA": "Canada", "AU": "Australia", "NZ": "New Zealand", "JP": "Japan",
+    "KR": "South Korea", "CN": "China", "TW": "Taiwan", "IN": "India",
+    "BR": "Brazil", "AR": "Argentina", "MX": "Mexico", "CL": "Chile",
+    "CO": "Colombia", "JM": "Jamaica", "CU": "Cuba", "NG": "Nigeria",
+    "ZA": "South Africa", "GH": "Ghana", "KE": "Kenya", "ET": "Ethiopia",
+    "MA": "Morocco", "SN": "Senegal", "EG": "Egypt", "IL": "Israel",
+    "TR": "Türkiye", "RU": "Russia", "UA": "Ukraine", "PL": "Poland",
+    "CZ": "Czechia", "HU": "Hungary", "RO": "Romania", "RS": "Serbia",
+    "HR": "Croatia", "BG": "Bulgaria", "CH": "Switzerland", "AT": "Austria",
+    "IS": "Iceland", "CV": "Cape Verde", "CY": "Cyprus", "AL": "Albania",
+    "HK": "Hong Kong", "SG": "Singapore", "TH": "Thailand", "PH": "Philippines",
+    "ID": "Indonesia", "MY": "Malaysia", "VN": "Vietnam", "PR": "Puerto Rico",
 }
+
+# Where a field came from, and how to show it. Provenance is surfaced because
+# the cascade now fuses sources: MusicBrainz for country, the artist's own files
+# or Deezer for genres when MusicBrainz has none. Without this the user cannot
+# tell an authority answer from a supplement, or see which side of a
+# disagreement to distrust.
+_SOURCE_STYLE = {
+    "musicbrainz": ("MB", CYAN),
+    "files":       ("FILES", ACCENT_GREEN),
+    "qobuz":       ("QOBUZ", "#FF9F0A"),
+    "manual":      ("YOURS", ACCENT_AMBER),
+}
+
+_DRAG_GROUP = "mw_artist"
+
+# Fixed column widths, kept here so the header and the rows can never drift
+# apart. Everything else is proportional, so the two text columns get the whole
+# remaining width instead of the scraps four fixed columns used to leave them.
+_CHECK_W = 34
+_TRACKS_W = 26
 
 
 def _flag(cc: str | None) -> str:
@@ -59,685 +107,960 @@ def _flag(cc: str | None) -> str:
     return chr(0x1F1E6 + ord(cc[0]) - 65) + chr(0x1F1E6 + ord(cc[1]) - 65)
 
 
-class MetadataWorkbenchPane(ft.Container):
-    """Standing surface for artist-metadata sync, review, and curation."""
+def _country_label(cc: str | None) -> str:
+    if not cc:
+        return "—"
+    return _COUNTRY_NAMES.get(cc.upper(), cc.upper())
+
+
+def _genre_names(items) -> list[str]:
+    return [
+        (x.get("name") if isinstance(x, dict) else str(x))
+        for x in (items or [])
+        if (x.get("name") if isinstance(x, dict) else str(x))
+    ]
+
+
+class MetadataWorkbenchPane(ft.Column):
+    """Standing surface for artist-metadata sync, review, and bulk curation.
+
+    A non-scrolling expanding Column: hero, filter, the list (which owns the
+    only scroll), and the pinned bin tray."""
 
     def __init__(self, app, on_back=None, on_open_sync=None):
-        super().__init__(expand=True, bgcolor=BG, padding=ft.Padding.symmetric(horizontal=14, vertical=8))
+        super().__init__(expand=True, spacing=0)
         self.app = app
         self.db = app.db_manager
         self.on_back = on_back
-        self.on_open_sync = on_open_sync  # kept for signature compatibility; unused (sync is inline)
+        self.on_open_sync = on_open_sync  # signature compatibility; sync is inline
 
         # ── data ──
         self.coverage: dict = {}
         self.all_gaps: list[dict] = []
         self.low_conf: list[dict] = []
         self.vocab: list[dict] = []
-        self.source_cache: dict[str, list[str]] = {}
+        self.countries: list[dict] = []
 
         # ── view state ──
-        self.filter = "critical"          # critical | no_tags | uncertain | all
+        self.filter = "needs"      # needs | suggested | all | uncertain
         self.search = ""
         self.selected: set[str] = set()
-        self.expanded: str | None = None
-        self.edit_country = ""
-        self.edit_genres: set[str] = set()
-        # Inline custom-genre buffer — persisted to state so a full _render_body
-        # (fired on every chip tap) doesn't wipe half-typed text, the same way
-        # edit_country already does via on_change.
-        self.edit_custom = ""
+        self._pending_focus: str | None = None
+        self._row_refs: dict[str, ft.Control] = {}
 
         # ── sync state ──
         self.syncing = False
         self.cancel_event: asyncio.Event | None = None
-        self.s_cur = self.s_total = self.s_ok = self.s_low = self.s_gap = 0
+        self.s_cur = self.s_total = 0
+        self.s_ok = self.s_sup = self.s_blank = self.s_err = 0
         self.s_name = ""
 
-        # ── holders ──
-        self._h_overview = ft.Container()
-        self._h_controls = ft.Container()
-        self._h_batch = ft.Container()
-        self._h_body = ft.Container(expand=True)
+        # ── chrome ──
+        self._h_hero = ft.Container()
+        self._h_filter = ft.Container()
+        self._h_bins = ft.Container()
+        # The ONE scrollable. Direct child of this expanding Column: wrapping it
+        # in an expand Container leaves it unbounded (blank subtree, no scroll),
+        # and `scroll` must be set explicitly or Android shows no scrollbar.
+        self._list = ft.ListView(
+            expand=True, spacing=0, padding=ft.Padding.only(bottom=8),
+            build_controls_on_demand=True, scroll=ft.ScrollMode.ALWAYS,
+        )
         self._search_field = ft.TextField(
-            hint_text="Search artists…", prefix_icon=ft.Icons.SEARCH,
+            hint_text="Find an artist…", prefix_icon=ft.Icons.SEARCH_ROUNDED,
             bgcolor=SURFACE2, border_color=BORDER, focused_border_color=CYAN,
-            text_style=ft.TextStyle(color=TEXT, size=13), dense=True,
-            content_padding=ft.Padding.symmetric(horizontal=12, vertical=8),
+            border_radius=10, text_style=ft.TextStyle(color=TEXT, size=13),
+            dense=True, content_padding=ft.Padding.symmetric(horizontal=12, vertical=8),
             on_change=self._on_search,
         )
 
-        self.content = ft.Column(
-            [self._h_overview, self._h_controls, self._h_batch, self._h_body],
-            expand=True, spacing=14,
-        )
+        self.controls = [
+            self._h_hero,
+            self._h_filter,
+            self._list,
+            self._h_bins,
+        ]
         self._reload()
 
-    # ── shared button styling — pronounced, filled, generous hit area ─────────
-    def _filled_btn(self, text, on_click, *, bg=CYAN, fg=BG, icon=None, expand=False, disabled=False):
-        row = []
-        if icon:
-            row.append(ft.Icon(icon, size=17, color=fg))
-        row.append(ft.Text(text, weight="bold", size=13, color=fg))
-        return ft.Container(
-            content=ft.Row(row, spacing=8, tight=True, alignment="center"),
-            bgcolor=apply_opacity(0.4, bg) if disabled else bg,
-            border_radius=10, padding=ft.Padding.symmetric(horizontal=18, vertical=12),
-            on_click=None if disabled else on_click, ink=not disabled,
-            alignment=ft.Alignment(0, 0), expand=expand,
-        )
+    # ── public entry point (Library's per-artist edit button) ────────────────
+    def focus_artist(self, name: str):
+        """Jump to one artist and open its editor. The Library's edit button
+        routes here instead of opening a second editor of its own."""
+        self._pending_focus = name
+        self.filter = "all"
+        self.search = name
+        self._search_field.value = name
+        self._reload()
 
-    def _ghost_btn(self, text, on_click, *, fg=DIM, icon=None):
-        row = []
-        if icon:
-            row.append(ft.Icon(icon, size=16, color=fg))
-        row.append(ft.Text(text, weight="bold", size=12.5, color=fg))
-        return ft.Container(
-            content=ft.Row(row, spacing=7, tight=True, alignment="center"),
-            bgcolor="transparent", border_radius=10, border=ft.Border.all(1, BORDER),
-            padding=ft.Padding.symmetric(horizontal=14, vertical=11),
-            on_click=on_click, ink=True, alignment=ft.Alignment(0, 0),
-        )
-
-    def _section_label(self, text: str, trailing: ft.Control | None = None) -> ft.Control:
-        left = ft.Text(text, size=11, weight=ft.FontWeight.W_800, color=CYAN)
-        if trailing is None:
-            return ft.Container(content=left, padding=ft.Padding.only(bottom=2))
-        return ft.Row([left, ft.Container(expand=True), trailing], vertical_alignment="center")
-
-    # ── data load ─────────────────────────────────────────────────────────────
+    # ── data ─────────────────────────────────────────────────────────────────
     async def _reload_async(self):
         try:
-            self.coverage = await self.db.get_metadata_coverage()
-            self.all_gaps = await self.db.get_metadata_gap_artists(limit=1000)
+            # One gap scan, shared with coverage. Previously coverage ran its
+            # own full-library scan and the pane ran a second.
+            self.all_gaps = await self.db.get_metadata_gap_artists(limit=2000)
+            self.coverage = await self.db.get_metadata_coverage(gaps=self.all_gaps)
             self.low_conf = await self.db.get_low_confidence_artists(limit=500)
-            self.vocab = await self.db.get_genre_vocabulary(limit=48)
+            self.vocab = await self.db.get_genre_vocabulary(limit=40)
+            self.countries = await self.db.get_library_countries()
         except Exception as exc:
             logger.exception("Metadata workbench load failed: %s", exc)
         self._render()
+        if self._pending_focus:
+            name, self._pending_focus = self._pending_focus, None
+            row = next((g for g in self.all_gaps if g["artist_name"] == name), None)
+            if row:
+                self._open_editor(row)
 
     def _reload(self):
         self.app.page.run_task(self._reload_async)
 
-    async def _source_tags(self, artist: str) -> list[str]:
-        if artist not in self.source_cache:
-            try:
-                self.source_cache[artist] = await self.db.get_artist_source_genres(artist)
-            except Exception:
-                self.source_cache[artist] = []
-        return self.source_cache[artist]
-
-    # ── render ────────────────────────────────────────────────────────────────
-    def _render(self):
-        self._render_overview()
-        self._render_controls()
-        self._render_batch()
-        self._render_body()
-        self.app.page.update()
-
-    # ── OVERVIEW: coverage + sync ─────────────────────────────────────────────
-    def _render_overview(self):
-        cov = self.coverage
-        pct = int(round(100 * cov.get("genre_pct", 0.0)))
-        tracks = cov.get("tracks", 0)
-        with_g = cov.get("tracks_with_genres", 0)
-        crit = cov.get("critical", 0)
-        gaps = cov.get("gap_artists", 0)
-
-        badge_text = "NO DATA" if tracks == 0 else ("WALK READY" if pct >= 80 else "NEEDS TAGS")
-        badge_bg = DIM if tracks == 0 else (CYAN if pct >= 80 else ACCENT_AMBER)
-
-        # Track-level three-way partition (green + amber + red == tracks), so the
-        # bar is honest about proportions.
-        g_green = cov.get("tracks_with_genres", 0)
-        g_red = cov.get("tracks_critical", 0)
-        g_amber = cov.get("tracks_partial", max(0, tracks - g_green - g_red))
-        bar = ft.Container(
-            content=ft.Row([
-                ft.Container(expand=max(1, g_green), height=10, bgcolor=ACCENT_GREEN),
-                ft.Container(expand=max(1, g_amber), height=10, bgcolor=ACCENT_AMBER),
-                ft.Container(expand=max(1, g_red), height=10, bgcolor=ACCENT_RED),
-            ], spacing=2) if tracks > 0 else ft.Container(expand=True, height=10, bgcolor=SURFACE2),
-            border_radius=6, clip_behavior=ft.ClipBehavior.HARD_EDGE,
-            margin=ft.Margin.only(top=8, bottom=8),
-        )
-
-        coverage_card = ft.Container(
-            content=ft.Row([
-                ft.Column([
-                    ft.Text(f"{pct}%", size=32, weight=ft.FontWeight.W_800, color=CYAN if tracks > 0 else DIM),
-                    ft.Container(
-                        content=ft.Text(badge_text, size=9, weight="bold", color=BG),
-                        bgcolor=badge_bg, border_radius=4,
-                        padding=ft.Padding.symmetric(horizontal=5, vertical=1),
-                    ),
-                ], spacing=2, horizontal_alignment="center", tight=True),
-                ft.Container(width=14),
-                ft.Column([
-                    ft.Text(f"{with_g:,} of {tracks:,} tracks have usable tags" if tracks > 0 else "No tracks indexed in library",
-                            size=13, color=TEXT, weight="bold"),
-                    bar,
-                    ft.Text(f"{gaps} artists need attention · {crit} critical" if tracks > 0 else "Index your music library to begin metadata curation",
-                            size=11.5, color=DIM),
-                ], spacing=0, expand=True),
-            ], vertical_alignment="center"),
-            bgcolor=apply_opacity(0.12, SURFACE2), border_radius=14, padding=14,
-            border=ft.Border.all(1, apply_opacity(0.4, CYAN if tracks > 0 else BORDER)),
-        )
-
-        if self.syncing:
-            action = self._sync_banner()
-        else:
-            action = ft.Row([
-                self._filled_btn("Sync from MusicBrainz", lambda _e: self._start_sync(),
-                                 icon=ft.Icons.CLOUD_SYNC_ROUNDED, expand=True, disabled=(tracks == 0)),
-            ])
-
-        refresh_btn = ft.Container(
-            content=ft.Row([
-                ft.Icon(ft.Icons.REFRESH_ROUNDED, size=13, color=CYAN),
-                ft.Text("Reload", size=11, color=CYAN, weight="bold"),
-            ], spacing=4, tight=True, vertical_alignment="center"),
-            bgcolor=apply_opacity(0.12, CYAN),
-            border_radius=6,
-            padding=ft.Padding.symmetric(horizontal=8, vertical=4),
-            border=ft.Border.all(1, apply_opacity(0.4, CYAN)),
-            on_click=lambda _e: self._reload(),
-            ink=True,
-            tooltip="Reload metadata from database",
-        )
-
-        self._h_overview.content = ft.Column([
-            self._section_label("OVERVIEW", trailing=refresh_btn),
-            coverage_card,
-            action,
-        ], spacing=10)
-
-    def _sync_banner(self) -> ft.Control:
-        pct = (self.s_cur / self.s_total) if self.s_total else None
-        self._sync_bar = ft.ProgressBar(value=pct, color=CYAN, bgcolor=SURFACE2, height=6)
-        self._sync_label = ft.Text(
-            f"Syncing {self.s_cur}/{self.s_total} · {self.s_name}"[:60],
-            size=12, color=TEXT, weight="bold", overflow=ft.TextOverflow.ELLIPSIS, max_lines=1,
-        )
-        self._sync_counts = ft.Row([
-            ft.Text(f"✓ {self.s_ok}", size=12, color=ACCENT_GREEN, weight="bold"),
-            ft.Text(f"⚠ {self.s_low}", size=12, color=ACCENT_AMBER, weight="bold"),
-            ft.Text(f"✗ {self.s_gap}", size=12, color=ACCENT_RED, weight="bold"),
-        ], spacing=16)
-        return ft.Container(
-            content=ft.Column([
-                self._sync_label,
-                self._sync_bar,
-                ft.Row([
-                    self._sync_counts,
-                    ft.Container(expand=True),
-                    self._ghost_btn("Stop", lambda _e: self._cancel_sync(), fg=ACCENT_RED),
-                ], vertical_alignment="center"),
-            ], spacing=8),
-            bgcolor=SURFACE2, border_radius=12, padding=12,
-            border=ft.Border.all(1, apply_opacity(0.4, CYAN)),
-        )
-
-    # ── SYNC ──────────────────────────────────────────────────────────────────
-    def _start_sync(self):
-        if self.syncing:
-            return
-        self.syncing = True
-        self.cancel_event = asyncio.Event()
-        self.s_cur = self.s_total = self.s_ok = self.s_low = self.s_gap = 0
-        self.s_name = "Starting…"
-        self._render_overview()
-        self.app.page.update()
-        self.app.page.run_task(self._do_sync)
-
-    async def _do_sync(self):
-        def cb(i, total, name, res):
-            self.s_cur, self.s_total, self.s_name = i, total, name
-            st = res.get("status")
-            if st == "ok":
-                self.s_ok += 1
-            elif st == "lowconfidence":
-                self.s_low += 1
-            else:
-                self.s_gap += 1
-            self._update_sync_banner()
-
-        try:
-            await enrich_library(
-                self.db, with_genres=True, include_failed=True,
-                progress=cb, cancel_event=self.cancel_event,
-            )
-        except Exception as exc:
-            logger.exception("Workbench sync failed: %s", exc)
-            self.app.show_snackbar(f"Sync failed: {exc}", color=ACCENT_RED)
-        finally:
-            self.syncing = False
-            await self._reload_async()
-            self.app.show_snackbar(
-                f"Sync done · {self.s_ok} matched, {self.s_low} uncertain, {self.s_gap} still blank",
-                icon=ft.Icons.CHECK_CIRCLE, color=CYAN,
-            )
-
-    def _update_sync_banner(self):
-        if not self.syncing:
-            return
-        bar = getattr(self, "_sync_bar", None)
-        if bar is None:
-            return
-        bar.value = (self.s_cur / self.s_total) if self.s_total else None
-        self._sync_label.value = f"Syncing {self.s_cur}/{self.s_total} · {self.s_name}"[:60]
-        self._sync_counts.controls[0].value = f"✓ {self.s_ok}"
-        self._sync_counts.controls[1].value = f"⚠ {self.s_low}"
-        self._sync_counts.controls[2].value = f"✗ {self.s_gap}"
+    def _safe_update(self):
         try:
             self.app.page.update()
         except Exception:
             pass
 
+    def _render(self):
+        self._render_hero()
+        self._render_filter()
+        self._render_list()
+        self._render_bins()
+        self._safe_update()
+
+    # ── HERO ─────────────────────────────────────────────────────────────────
+    def _render_hero(self):
+        cov = self.coverage
+        artists = cov.get("artists", 0)
+        placeable = cov.get("placeable", 0)
+        blocking = cov.get("blocking", 0)
+
+        if self.syncing:
+            body = self._sync_banner()
+        else:
+            # An outcome, not a percentage: "can Auto-Play position this artist
+            # at all" is the fact the user can act on, and it doesn't nag about
+            # the artists that already work.
+            if artists == 0:
+                headline, sub, tone = "No artists yet", "Index your library to begin.", DIM
+            elif blocking == 0:
+                headline = "Every artist is placeable."
+                sub = f"All {artists:,} have a genre or a country."
+                tone = ACCENT_GREEN
+            else:
+                headline = f"{placeable:,} of {artists:,} artists placeable"
+                sub = f"{blocking} still need a genre or a country."
+                tone = ACCENT_AMBER
+            # The button sits on its OWN row. Inline, it stole ~120pt from the
+            # headline, which then wrapped to two lines and pushed the subtitle
+            # to three — a 230pt card for two short sentences.
+            body = ft.Column([
+                ft.Row([
+                    ft.Container(width=3, height=34, bgcolor=tone, border_radius=2),
+                    ft.Column([
+                        ft.Text(headline, size=14.5, weight=ft.FontWeight.W_700,
+                                color=TEXT, max_lines=2,
+                                overflow=ft.TextOverflow.ELLIPSIS),
+                        ft.Text(sub, size=11.5, color=DIM, max_lines=2,
+                                overflow=ft.TextOverflow.ELLIPSIS),
+                    ], spacing=2, expand=True, tight=True),
+                ], spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                ft.Row([
+                    ft.Container(expand=True),
+                    self._filled_btn("Sync", lambda _e: self._start_sync(),
+                                     icon=ft.Icons.CLOUD_SYNC_ROUNDED,
+                                     disabled=(artists == 0)),
+                ]),
+            ], spacing=6, tight=True)
+
+        self._h_hero.content = ft.Column([
+            ft.Container(
+                content=body,
+                bgcolor=SURFACE, border_radius=RADIUS_CARD, padding=14,
+                border=ft.Border.all(1, BORDER_SUBTLE),
+            ),
+            ft.Container(height=10),
+            self._search_field,
+            ft.Container(height=10),
+        ], spacing=0)
+
+    def _sync_banner(self) -> ft.Control:
+        pct = (self.s_cur / self.s_total) if self.s_total else None
+        self._sync_bar = ft.ProgressBar(value=pct, color=CYAN, bgcolor=SURFACE2, height=5)
+        self._sync_label = ft.Text(
+            f"Looking up {self.s_cur} of {self.s_total} · {self.s_name}"[:64],
+            size=12.5, color=TEXT, weight=ft.FontWeight.W_600,
+            overflow=ft.TextOverflow.ELLIPSIS, max_lines=1,
+        )
+        # Four counters, not three. 'No tags found' and 'Connection failed' are
+        # completely different situations that the old UI collapsed into one ✗,
+        # so an outage looked exactly like a library full of untagged artists.
+        self._sync_counts = ft.Row([
+            self._counter("matched", self.s_ok, ACCENT_GREEN),
+            self._counter("from other sources", self.s_sup, "#BF5AF2"),
+            self._counter("no tags found", self.s_blank, DIM),
+            self._counter("connection failed", self.s_err, ACCENT_RED),
+        ], spacing=14, wrap=True, run_spacing=4)
+        return ft.Column([
+            self._sync_label,
+            self._sync_bar,
+            ft.Row([
+                self._sync_counts,
+                ft.Container(expand=True),
+                self._ghost_btn("Stop", lambda _e: self._cancel_sync(), fg=ACCENT_RED),
+            ], vertical_alignment=ft.CrossAxisAlignment.CENTER),
+        ], spacing=9)
+
+    def _counter(self, label: str, n: int, color) -> ft.Control:
+        return ft.Row([
+            ft.Text(str(n), size=12.5, color=color, weight=ft.FontWeight.W_800,
+                    font_family="monospace"),
+            ft.Text(label, size=10.5, color=DIM),
+        ], spacing=4, tight=True)
+
+    def _update_sync_banner(self):
+        if not self.syncing or getattr(self, "_sync_bar", None) is None:
+            return
+        self._sync_bar.value = (self.s_cur / self.s_total) if self.s_total else None
+        self._sync_label.value = (
+            f"Looking up {self.s_cur} of {self.s_total} · {self.s_name}"[:64]
+        )
+        for ctrl, n in zip(
+            self._sync_counts.controls,
+            (self.s_ok, self.s_sup, self.s_blank, self.s_err),
+        ):
+            ctrl.controls[0].value = str(n)
+        self._safe_update()
+
+    # ── SYNC ─────────────────────────────────────────────────────────────────
+    def _start_sync(self):
+        if self.syncing:
+            return
+        self.syncing = True
+        self.cancel_event = asyncio.Event()
+        self.s_cur = self.s_total = 0
+        self.s_ok = self.s_sup = self.s_blank = self.s_err = 0
+        self.s_name = "Starting…"
+        self._render_hero()
+        self._safe_update()
+        self.app.page.run_task(self._do_sync)
+
+    async def _do_sync(self):
+        def cb(i, total, name, res):
+            self.s_cur, self.s_total, self.s_name = i, total, name
+            st, reason = res.get("status"), res.get("reason")
+            if st == "error":
+                self.s_err += 1
+            elif not res.get("genres"):
+                self.s_blank += 1
+            elif reason in ("files", "qobuz"):
+                self.s_sup += 1
+            else:
+                self.s_ok += 1
+            self._update_sync_banner()
+
+        summary: dict = {}
+        try:
+            summary = await enrich_library(
+                self.db, with_genres=True, include_failed=True,
+                retry_incomplete=True, progress=cb,
+                cancel_event=self.cancel_event,
+            )
+        except Exception as exc:
+            logger.exception("Workbench sync failed: %s", exc)
+            summary = {"status": f"error: {exc}"}
+        finally:
+            self.syncing = False
+            await self._reload_async()
+            self._report_sync(summary)
+
+    def _report_sync(self, summary: dict):
+        """Say what actually happened.
+
+        The summary used to be discarded entirely, so an aborted pass, a
+        cancelled one and a missing aiohttp all reported "Sync done · 0 matched"
+        — indistinguishable from a library that genuinely has no metadata."""
+        status = (summary or {}).get("status")
+        if status == "no_aiohttp":
+            self.app.show_snackbar(
+                "Can't sync — networking is unavailable in this build.",
+                color=ACCENT_RED)
+            return
+        if isinstance(status, str) and status.startswith("error:"):
+            self.app.show_snackbar(f"Sync failed — {status[6:].strip()}", color=ACCENT_RED)
+            return
+        if status == "aborted":
+            self.app.show_snackbar(
+                f"Stopped after {self.s_cur} of {self.s_total} — no connection. "
+                f"Nothing was lost; run Sync again when you're back online.",
+                color=ACCENT_RED)
+            return
+        if status == "cancelled":
+            self.app.show_snackbar(
+                f"Stopped at {self.s_cur} of {self.s_total}. "
+                f"{summary.get('enriched', 0)} artists saved.", color=ACCENT_AMBER)
+            return
+        if status == "uptodate":
+            self.app.show_snackbar("Everything is already up to date.",
+                                   icon=ft.Icons.CHECK_CIRCLE, color=CYAN)
+            return
+
+        parts = [f"{self.s_ok} matched"]
+        srcs = [("your files", summary.get("from_files", 0) or 0),
+                ("Qobuz", summary.get("from_qobuz", 0) or 0)]
+        filled = [f"{n} from {label}" for label, n in srcs if n]
+        if filled:
+            parts.append(", ".join(filled))
+        if self.s_blank:
+            parts.append(f"{self.s_blank} still blank")
+        self.app.show_snackbar("Sync done · " + ", ".join(parts),
+                               icon=ft.Icons.CHECK_CIRCLE, color=CYAN)
+
     def _cancel_sync(self):
         if self.cancel_event:
             self.cancel_event.set()
 
-    # ── CONTROLS: filters + search ────────────────────────────────────────────
-    def _render_controls(self):
-        counts = {
-            "critical": sum(1 for g in self.all_gaps if g.get("gap_severity") == 0),
-            "no_tags": sum(1 for g in self.all_gaps if g.get("gap_severity") in (0, 1)),
-            "uncertain": len(self.low_conf),
-            "all": len(self.all_gaps),
-        }
-        # Wrap rather than horizontal-scroll: Flet renders a horizontal
-        # scrollbar UNDER the row (and can't place it on top), which crowded the
-        # search field. Wrapping keeps every category visible with no scrollbar.
-        pills = ft.Row([
-            self._filter_pill("critical", "Critical", counts["critical"]),
-            self._filter_pill("no_tags", "No tags", counts["no_tags"]),
-            self._filter_pill("uncertain", "Uncertain", counts["uncertain"]),
-            self._filter_pill("all", "All", counts["all"]),
-        ], spacing=8, run_spacing=8, wrap=True)
+    # ── FILTER ───────────────────────────────────────────────────────────────
+    def _render_filter(self):
+        # Counts do NOT go in the labels. `CupertinoSegmentedBar` sets
+        # `no_wrap=True` on segment text, so at four segments on a 390pt screen
+        # 'Needs you  11' rendered as 'Needs you 1' and 'Suggested  10' as
+        # 'Suggested 1('. The count belongs in the list caption below.
+        segs = [
+            ("needs", "Needs you", None, ACCENT_RED),
+            ("suggested", "Suggested", None, ACCENT_GREEN),
+            ("uncertain", "Review", None, ACCENT_AMBER),
+            ("all", "All", None, CYAN),
+        ]
+        self._seg = CupertinoSegmentedBar(segs, self.filter, self._set_filter, height=36)
+        self._h_filter.content = ft.Column([
+            self._seg,
+            ft.Container(height=8),
+        ], spacing=0)
 
-        self._h_controls.content = ft.Column([
-            self._section_label("ARTISTS"),
-            pills,
-            self._search_field,
-        ], spacing=10)
+    def _set_filter(self, key: str):
+        self.filter = key
+        self.selected.clear()
+        # The bar restyles itself when the USER taps it, but not when we set the
+        # filter in code (focus_artist does), so sync it explicitly.
+        seg = getattr(self, "_seg", None)
+        if seg is not None and seg.selected_key != key:
+            seg.set_selected(key)
+        self._render_list()
+        self._render_bins()
+        self._safe_update()
 
-    def _filter_pill(self, key: str, label: str, count: int) -> ft.Control:
-        active = self.filter == key
-        bg_col = CYAN if active else "transparent"
-        fg_col = BG if active else DIM
-        badge_bg = apply_opacity(0.25, BG) if active else apply_opacity(0.12, TEXT)
-        badge_fg = BG if active else DIM
+    def _on_search(self, e):
+        self.search = e.control.value or ""
+        self._render_list()
+        self._render_bins()
+        self._safe_update()
 
-        return ft.Container(
-            content=ft.Row([
-                ft.Text(label, size=12.5, color=fg_col, weight="bold" if active else None),
-                ft.Container(
-                    content=ft.Text(str(count), size=11, color=badge_fg, font_family="monospace", weight="bold"),
-                    bgcolor=badge_bg,
-                    border_radius=6, padding=ft.Padding.symmetric(horizontal=7, vertical=2),
-                ),
-            ], spacing=7, tight=True, vertical_alignment="center"),
-            bgcolor=bg_col,
-            border=ft.Border.all(1, CYAN if active else BORDER),
-            border_radius=10, padding=ft.Padding.symmetric(horizontal=12, vertical=8),
-            on_click=lambda _e, k=key: self._set_filter(k), ink=True,
-        )
-
-    # ── BATCH bar ──────────────────────────────────────────────────────────────
-    def _render_batch(self):
-        if not self.selected or self.filter == "uncertain":
-            self._h_batch.content = None
-            self._h_batch.visible = False
-            return
-        self._h_batch.visible = True
-        self._h_batch.content = ft.Container(
-            content=ft.Row([
-                ft.Text(f"{len(self.selected)} selected", size=12.5, color=CYAN, weight="bold"),
-                ft.TextButton("Clear", on_click=lambda _e: self._clear_selection(),
-                              style=ft.ButtonStyle(color=DIM)),
-                ft.Container(expand=True),
-                self._filled_btn("Tag All →", lambda _e: self._open_batch_editor()),
-            ], vertical_alignment="center"),
-            bgcolor=apply_opacity(0.10, CYAN), border_radius=12,
-            padding=ft.Padding.symmetric(horizontal=12, vertical=8),
-            border=ft.Border.all(1, apply_opacity(0.4, CYAN)),
-        )
-
-    # ── BODY ────────────────────────────────────────────────────────────────────
-    def _render_body(self):
+    # ── LIST ─────────────────────────────────────────────────────────────────
+    def _visible(self) -> list[dict]:
+        q = self.search.strip().lower()
         if self.filter == "uncertain":
-            self._render_review_body()
+            pool = self.low_conf
+        else:
+            pool = self.all_gaps
+            if self.filter == "needs":
+                pool = [g for g in pool if g.get("gap_severity") == 0]
+            elif self.filter == "suggested":
+                pool = [g for g in pool if g.get("gap_severity") == 1]
+        if q:
+            pool = [g for g in pool if q in g["artist_name"].lower()]
+        return pool
+
+    def _render_list(self):
+        rows = self._visible()
+        self._row_refs.clear()
+        if not rows:
+            self._list.controls = [self._empty_state()]
             return
+        controls: list[ft.Control] = [self._column_header()]
+        for i, g in enumerate(rows):
+            ctrl = self._row(g, last=(i == len(rows) - 1))
+            self._row_refs[g["artist_name"]] = ctrl
+            controls.append(ctrl)
+        n = len(rows)
+        plural = "s" if n != 1 else ""
+        caption = {
+            "needs": f"{n} artist{plural} Auto-Play can't place yet",
+            "suggested": f"{n} artist{plural} your own files can already tag",
+            "uncertain": f"{n} match{'es' if n != 1 else ''} MusicBrainz wasn't sure about",
+            "all": f"{n} artist{plural} with incomplete metadata",
+        }[self.filter]
+        # One inset group with hairline rules between rows, Apple-style, rather
+        # than a stack of separate cards.
+        self._list.controls = [
+            ft.Container(
+                content=ft.Text(caption, size=10.5,
+                                color=TEXT_TERTIARY, max_lines=2),
+                padding=ft.Padding.only(left=4, bottom=6),
+            ),
+            ft.Container(
+                content=ft.Column(controls, spacing=0),
+                bgcolor=SURFACE, border_radius=RADIUS_CARD,
+                border=ft.Border.all(1, BORDER_SUBTLE),
+                clip_behavior=ft.ClipBehavior.HARD_EDGE,
+            ),
+        ]
 
-        gaps = self._visible_gaps()
-        if not gaps:
-            if self.coverage.get("tracks", 0) == 0:
-                self._h_body.content = self._empty_state(
-                    "Your library is empty.",
-                    "Index your music files or download tracks to populate artists and metadata tags.",
-                    icon=ft.Icons.LIBRARY_MUSIC_ROUNDED,
-                )
-            else:
-                self._h_body.content = self._empty_state(
-                    "Nothing to fix in this view.",
-                    "Every artist here has the tags Auto-Play needs.",
-                    icon=ft.Icons.CHECK_CIRCLE_ROUNDED,
-                )
-            return
+    def _column_header(self) -> ft.Control:
+        """Three columns, not four.
 
-        groups: dict[str, list[dict]] = {}
-        for g in gaps:
-            groups.setdefault(g.get("country") or "", []).append(g)
-        ordered = sorted(groups.items(), key=lambda kv: (kv[0] == "", -len(kv[1]), kv[0]))
-
-        controls: list[ft.Control] = []
-        for country, items in ordered:
-            controls.append(self._scene_header(country, len(items)))
-            for g in items:
-                controls.append(self._gap_row(g))
-                if self.expanded == g["artist_name"]:
-                    controls.append(self._tag_editor(g, is_review=False))
-        self._h_body.content = ft.ListView(controls=controls, expand=True, spacing=0,
-                                            build_controls_on_demand=True,
-                                            # Android needs explicit scroll for a
-                                            # visible scrollbar (see library.py).
-                                            scroll=ft.ScrollMode.ALWAYS)
-
-    def _render_review_body(self):
-        q = self.search.strip().lower()
-        items = [x for x in self.low_conf if not q or q in x["artist_name"].lower()]
-        if not items:
-            if self.coverage.get("tracks", 0) == 0:
-                self._h_body.content = self._empty_state(
-                    "Your library is empty.",
-                    "Index your music files or download tracks to populate artists and metadata tags.",
-                    icon=ft.Icons.LIBRARY_MUSIC_ROUNDED,
-                )
-            else:
-                self._h_body.content = self._empty_state(
-                    "No uncertain matches.",
-                    "Run a sync, or everything MusicBrainz returned is already resolved.",
-                    icon=ft.Icons.CHECK_CIRCLE_ROUNDED,
-                )
-            return
-        controls: list[ft.Control] = [self._section_hint(
-            "Matches MusicBrainz wasn't sure about. Accept to keep, reject to blank, "
-            "or search for the right act.")]
-        for it in items:
-            controls.append(self._review_row(it))
-            if self.expanded == it["artist_name"]:
-                controls.append(self._tag_editor(it, is_review=True))
-        self._h_body.content = ft.ListView(controls=controls, expand=True, spacing=0,
-                                            build_controls_on_demand=True,
-                                            # Android needs explicit scroll for a
-                                            # visible scrollbar (see library.py).
-                                            scroll=ft.ScrollMode.ALWAYS)
-
-    def _empty_state(self, title: str, sub: str, icon=ft.Icons.CHECK_CIRCLE_ROUNDED) -> ft.Control:
-        icon_color = ACCENT_GREEN if icon == ft.Icons.CHECK_CIRCLE_ROUNDED else DIM
-        return ft.Column([
-            ft.Icon(icon, color=icon_color, size=40),
-            ft.Text(title, color=TEXT, size=15, weight="bold"),
-            ft.Text(sub, color=DIM, size=11.5, text_align=ft.TextAlign.CENTER),
-        ], horizontal_alignment="center", alignment=ft.MainAxisAlignment.CENTER,
-            expand=True, spacing=8)
-
-    def _section_hint(self, text: str) -> ft.Control:
-        return ft.Container(
-            content=ft.Text(text, size=11.5, color=DIM),
-            padding=ft.Padding.only(bottom=8, top=2),
-        )
-
-    def _scene_header(self, country: str, n: int) -> ft.Control:
-        name = _COUNTRY_NAMES.get(country, country) if country else "Unknown country"
-        badge = ft.Text(_flag(country), size=13) if country else ft.Text("?", size=12, color=DIM, weight="bold")
+        At 390pt the four-column version left ARTIST and GENRE about 57pt each
+        once the checkbox, a FROM column and a TRACKS column had taken their
+        fixed widths — narrow enough that every value ellipsised to nothing.
+        Provenance moved into the genre cell as a coloured suffix, which is
+        where it reads better anyway, and TRACKS lost its wide header word."""
+        def h(t, **kw):
+            return ft.Text(t, size=9, weight=ft.FontWeight.W_800,
+                           color=TEXT_TERTIARY, **kw)
         return ft.Container(
             content=ft.Row([
-                badge,
-                ft.Text(name.upper(), size=11, weight=ft.FontWeight.W_800, color=DIM),
-                ft.Container(height=1, bgcolor=BORDER, expand=True),
-                ft.Text(str(n), size=11, color=DIM, font_family="monospace"),
-            ], vertical_alignment="center", spacing=8),
-            padding=ft.Padding.only(top=14, bottom=6),
+                ft.Container(width=_CHECK_W),
+                ft.Container(content=h("ARTIST"), expand=5),
+                ft.Container(content=h("GENRE"), expand=4),
+                ft.Container(content=h("♪", text_align=ft.TextAlign.RIGHT),
+                             width=_TRACKS_W),
+            ], spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            padding=ft.Padding.only(left=8, right=10, top=9, bottom=5),
         )
 
-    def _sev_badge(self, sev: int) -> ft.Control:
-        if sev == 0:
-            label, bg, fg = "CRITICAL", apply_opacity(0.18, ACCENT_RED), ACCENT_RED
-        elif sev == 1:
-            label, bg, fg = "NO TAGS", apply_opacity(0.18, ACCENT_AMBER), ACCENT_AMBER
-        else:
-            label, bg, fg = "PARTIAL", apply_opacity(0.14, ACCENT_AMBER), DIM
-        return ft.Container(
-            content=ft.Text(label, size=9.5, weight="bold", color=fg),
-            bgcolor=bg, border_radius=6,
-            padding=ft.Padding.symmetric(horizontal=7, vertical=3),
-            border=ft.Border.all(1, apply_opacity(0.4, fg)),
-            tooltip="No Tags · No Country" if sev == 0 else "Incomplete",
-        )
-
-    def _sev_dot(self, sev: int) -> ft.Control:
-        return self._sev_badge(sev)
-
-    # ── gap row + editor ──────────────────────────────────────────────────────
-    def _visible_gaps(self) -> list[dict]:
-        q = self.search.strip().lower()
-        out = []
-        for g in self.all_gaps:
-            sev = g.get("gap_severity", 2)
-            if self.filter == "critical" and sev != 0:
-                continue
-            if self.filter == "no_tags" and sev not in (0, 1):
-                continue
-            if q and q not in g["artist_name"].lower():
-                continue
-            out.append(g)
-        return out
-
-    def _gap_row(self, g: dict) -> ft.Control:
+    def _row(self, g: dict, *, last: bool = False) -> ft.Control:
+        """One table row. Draggable on desktop, checkbox-selectable everywhere."""
         name = g["artist_name"]
         sev = g.get("gap_severity", 2)
-        tc = g.get("track_count", 0)
-        genres = [x.get("name") if isinstance(x, dict) else str(x) for x in (g.get("genres") or [])]
-        country = g.get("country")
+        genres = _genre_names(g.get("genres"))
+        files = g.get("source_genres") or []
+        country = (g.get("country") or "").upper() or None
+        prov = g.get("provenance") or {}
+        selected = name in self.selected
 
-        if not genres and not country:
-            summary = ft.Text("No Tags · No Country", size=11, color=ACCENT_RED)
-        elif not genres:
-            summary = ft.Text("No Tags", size=11, color=ACCENT_RED)
-        elif not country:
-            summary = ft.Text(f"{', '.join(genres[:3])} · No Country", size=11, color=DIM,
-                              overflow=ft.TextOverflow.ELLIPSIS, max_lines=1)
+        # Genre cell: what we have, else what a source proposes.
+        if genres:
+            gtext, gcolor = ", ".join(genres[:3]), TEXT
+            src_key = prov.get("genres")
+        elif files:
+            gtext, gcolor = files[0], ACCENT_GREEN
+            src_key = "files"
         else:
-            summary = ft.Text(", ".join(genres[:3]), size=11, color=DIM,
-                              overflow=ft.TextOverflow.ELLIPSIS, max_lines=1)
+            gtext, gcolor = "—", TEXT_TERTIARY
+            src_key = None
 
-        is_expanded = self.expanded == name
-        checkbox = ft.Checkbox(value=name in self.selected, fill_color=CYAN,
-                               on_change=lambda e, n=name: self._toggle_select(n, e.control.value))
+        badge_text, badge_color = _SOURCE_STYLE.get(src_key or "", ("", DIM))
+
+        # `fill_color` as a bare colour fills the box in EVERY state, so every
+        # unselected row rendered as a solid accent square that read as already
+        # ticked. It has to be keyed on ControlState.
+        check = ft.Checkbox(
+            value=selected, check_color=BG, splash_radius=0,
+            fill_color={
+                ft.ControlState.SELECTED: CYAN,
+                ft.ControlState.DEFAULT: "transparent",
+            },
+            border_side={
+                ft.ControlState.DEFAULT: ft.BorderSide(1.5, DIM),
+                ft.ControlState.SELECTED: ft.BorderSide(0, "transparent"),
+            },
+            on_change=lambda e, n=name: self._toggle_select(n, bool(e.control.value)),
+        )
+        # Severity reads as a coloured left edge on the row rather than a
+        # separate dot column — one less fixed width competing for the name.
+        edge = ACCENT_RED if sev == 0 else (ACCENT_GREEN if sev == 1 else "transparent")
+
+        # Names and genres WRAP to a second line instead of ellipsising away.
+        # 'Vasilis Karras, Pantelis Pantelidis' has no useful one-line form at
+        # this width, and a truncated name is not something you can act on.
+        name_cell = ft.Row([
+            ft.Text(_flag(country), size=11) if country else ft.Container(width=0),
+            ft.Text(name, size=13, weight=ft.FontWeight.W_600, color=TEXT,
+                    max_lines=2, overflow=ft.TextOverflow.ELLIPSIS, expand=True),
+        ], spacing=4, vertical_alignment=ft.CrossAxisAlignment.START, tight=True)
+
+        genre_cell = ft.Column([
+            ft.Text(gtext, size=11.5, color=gcolor,
+                    max_lines=2, overflow=ft.TextOverflow.ELLIPSIS),
+            (ft.Text(badge_text, size=8, weight=ft.FontWeight.W_800, color=badge_color)
+             if badge_text else ft.Container(height=0)),
+        ], spacing=1, tight=True)
+
+        inner = ft.Row([
+            ft.Container(content=check, width=_CHECK_W, alignment=ft.Alignment(0, 0)),
+            ft.Container(content=name_cell, expand=5),
+            ft.Container(content=genre_cell, expand=4),
+            ft.Container(
+                content=ft.Text(str(g.get("track_count", 0)), size=11, color=DIM,
+                                font_family="monospace",
+                                text_align=ft.TextAlign.RIGHT),
+                width=_TRACKS_W,
+            ),
+        ], spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER)
+
+        row = ft.Container(
+            content=inner,
+            bgcolor=apply_opacity(0.10, CYAN) if selected else "transparent",
+            padding=ft.Padding.only(left=8, right=10, top=8, bottom=8),
+            border_radius=0,
+            border=ft.Border(
+                left=ft.BorderSide(3, edge),
+                bottom=(ft.BorderSide(0, "transparent") if last
+                        else ft.BorderSide(1, BORDER_SUBTLE)),
+            ),
+            on_click=lambda _e, gg=g: self._open_editor(gg),
+            ink=True, data=name,
+        )
+        # Drag is the desktop accelerator. `content_feedback` shows what is
+        # actually travelling, which for a multi-selection is the whole pile.
+        drag = ft.Draggable(
+            group=_DRAG_GROUP, content=row, data=name,
+            content_feedback=self._drag_feedback(name),
+            on_drag_start=lambda _e, n=name: self._on_drag_start(n),
+        )
+        # Keep the checkbox reachable: selection can be changed in code (a drag
+        # start replaces the selection, "Clear" empties it), and the tick has to
+        # follow — a native click updates the widget itself, nothing else does.
+        drag._checkbox = check
+        return drag
+
+    def _drag_feedback(self, name: str) -> ft.Control:
+        n = len(self.selected) if name in self.selected and self.selected else 1
+        label = f"{n} artists" if n > 1 else name
         return ft.Container(
             content=ft.Row([
-                checkbox,
-                ft.Column([
-                    ft.Row([
-                        ft.Text(_flag(country), size=14) if country else ft.Container(),
-                        ft.Text(name, size=14, weight="bold",
-                                color=CYAN if is_expanded else TEXT,
-                                overflow=ft.TextOverflow.ELLIPSIS, max_lines=1, expand=True),
-                    ], spacing=6, vertical_alignment="center"),
-                    summary,
-                ], spacing=2, expand=True, tight=True),
-                ft.Container(
-                    content=ft.Text(f"{tc} Track{'s' if tc != 1 else ''}", size=10.5, color=DIM, font_family="monospace", weight="bold"),
-                    bgcolor=SURFACE, border_radius=6,
-                    padding=ft.Padding.symmetric(horizontal=8, vertical=4),
-                    border=ft.Border.all(1, BORDER),
-                ),
-            ], vertical_alignment="center", spacing=11),
-            padding=ft.Padding.symmetric(horizontal=10, vertical=10),
-            margin=ft.Margin.only(bottom=4),
-            bgcolor=apply_opacity(0.65, SURFACE2) if is_expanded else SURFACE2,
-            border_radius=10,
-            border=ft.Border.all(1, apply_opacity(0.65, CYAN) if is_expanded else apply_opacity(0.5, BORDER)),
-            on_click=lambda _e, n=name: self._toggle_expand(n), ink=True,
+                ft.Icon(ft.Icons.DRAG_INDICATOR_ROUNDED, size=15, color=BG),
+                ft.Text(label, size=12.5, weight=ft.FontWeight.W_700, color=BG),
+            ], spacing=6, tight=True),
+            bgcolor=CYAN, border_radius=RADIUS_PILL,
+            padding=ft.Padding.symmetric(horizontal=14, vertical=9),
+            opacity=0.95,
         )
 
-    def _chip(self, label: str, *, kind: str, on_click) -> ft.Control:
-        if kind == "on":                    # currently selected (tap to remove)
-            bg, fg, border, txt = CYAN, BG, CYAN, f"{label}  ✕"
-        elif kind == "sug":                 # from the artist's own files
-            bg, fg, border, txt = "transparent", ACCENT_GREEN, apply_opacity(0.45, ACCENT_GREEN), f"+ {label}"
-        elif kind == "mb":                  # from a MusicBrainz lookup
-            bg, fg, border, txt = "transparent", CYAN, apply_opacity(0.5, CYAN), f"+ {label}"
-        else:                               # kind == "ghost" — library vocabulary
-            bg, fg, border, txt = "transparent", DIM, BORDER, label
+    def _on_drag_start(self, name: str):
+        # Dragging an unselected row acts on that row alone — it must not
+        # silently carry a selection the user made somewhere else.
+        if name not in self.selected:
+            for other in list(self.selected):
+                self._toggle_select(other, False)
+            self._toggle_select(name, True)
+
+    def _toggle_select(self, name: str, on: bool):
+        """Selection changes ONE row's appearance. The old code re-rendered the
+        entire list (up to a thousand rows) on every tick."""
+        if on:
+            self.selected.add(name)
+        else:
+            self.selected.discard(name)
+        drag = self._row_refs.get(name)
+        if drag is not None:
+            row = drag.content
+            row.bgcolor = apply_opacity(0.10, CYAN) if on else "transparent"
+            drag.content_feedback = self._drag_feedback(name)
+            cb = getattr(drag, "_checkbox", None)
+            if cb is not None and cb.value != on:
+                cb.value = on
+            try:
+                row.update()
+            except Exception:
+                pass
+        self._render_bins()
+        self._safe_update()
+
+    def _empty_state(self) -> ft.Control:
+        if self.coverage.get("artists", 0) == 0:
+            icon, title, sub = (ft.Icons.LIBRARY_MUSIC_ROUNDED, "Your library is empty.",
+                                "Index your music to start curating metadata.")
+        elif self.search.strip():
+            icon, title, sub = (ft.Icons.SEARCH_OFF_ROUNDED, "No artist by that name.",
+                                "Try a different spelling, or clear the search.")
+        elif self.filter == "needs":
+            icon, title, sub = (ft.Icons.CHECK_CIRCLE_ROUNDED,
+                                "Every artist can be placed.",
+                                "Auto-Play has a genre or a country for all of them.")
+        elif self.filter == "uncertain":
+            icon, title, sub = (ft.Icons.CHECK_CIRCLE_ROUNDED, "Nothing to review.",
+                                "Every match MusicBrainz returned is resolved.")
+        else:
+            icon, title, sub = (ft.Icons.CHECK_CIRCLE_ROUNDED, "Nothing to fix here.",
+                                "This view is clear.")
         return ft.Container(
-            content=ft.Text(txt, size=12, color=fg, weight="bold" if kind == "on" else None),
-            bgcolor=bg, border_radius=14, border=ft.Border.all(1, border),
-            padding=ft.Padding.symmetric(horizontal=11, vertical=6),
-            on_click=on_click, ink=True,
+            content=ft.Column([
+                ft.Icon(icon, color=ACCENT_GREEN if "CHECK" in str(icon) else DIM, size=38),
+                ft.Text(title, color=TEXT, size=15, weight=ft.FontWeight.W_700),
+                ft.Text(sub, color=DIM, size=11.5, text_align=ft.TextAlign.CENTER),
+            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                alignment=ft.MainAxisAlignment.CENTER, spacing=8),
+            padding=ft.Padding.symmetric(horizontal=20, vertical=48),
+            alignment=ft.Alignment(0, 0),
         )
 
-    def _on_country_change(self, val: str, flag_widget: ft.Text):
-        self.edit_country = (val or "").strip().upper()
-        if flag_widget:
-            flag_widget.value = _flag(self.edit_country)
-        self.app.page.update()
+    # ── BINS ─────────────────────────────────────────────────────────────────
+    def _render_bins(self):
+        """The pinned tray: drop targets for the library's own vocabulary.
 
-    def _tag_editor(self, item: dict, *, is_review: bool) -> ft.Control:
-        """Inline hand-tagging editor for both gap artists and low-confidence
-        review. Tag chips come from three inline sources — current selection, the
-        artist's own file tags, and the library vocabulary."""
-        name = item["artist_name"]
-        source = self.source_cache.get(name, [])
-        src_lc = {s.lower() for s in source}
+        Visible only when something is selected or draggable — an empty tray on
+        an empty list is just chrome."""
+        if self.filter == "uncertain" or not self.all_gaps:
+            self._h_bins.content = None
+            self._h_bins.visible = False
+            return
+        self._h_bins.visible = True
+        n = len(self.selected)
 
-        selected_chips = [self._chip(t, kind="on", on_click=lambda _e, t=t: self._edit_toggle_genre(t))
-                          for t in sorted(self.edit_genres)]
-        src_chips = [self._chip(t, kind="sug", on_click=lambda _e, t=t: self._edit_add_genre(t))
-                     for t in source if t.lower() not in self.edit_genres]
-        vocab_chips = [self._chip(v["name"], kind="ghost", on_click=lambda _e, t=v["name"]: self._edit_add_genre(t))
-                       for v in self.vocab
-                       if v["name"].lower() not in self.edit_genres
-                       and v["name"].lower() not in src_lc][:10]
+        bins: list[ft.Control] = []
+        for v in self.vocab[:10]:
+            bins.append(self._bin(v["name"], kind="genre", count=v.get("artists", 0)))
+        for c in self.countries[:4]:
+            bins.append(self._bin(c["code"], kind="country", count=c.get("artists", 0)))
+        bins.append(self._bin("New…", kind="new", count=0))
 
-        custom = ft.TextField(value=self.edit_custom, hint_text="Add a genre…", dense=True, width=150, bgcolor=SURFACE2,
-                              border_color=BORDER, focused_border_color=CYAN,
-                              text_style=ft.TextStyle(color=TEXT, size=12),
-                              content_padding=ft.Padding.symmetric(horizontal=10, vertical=6),
-                              on_change=lambda e: setattr(self, "edit_custom", e.control.value or ""),
-                              on_submit=self._edit_add_custom)
-
-        country_flag_preview = ft.Text(_flag(self.edit_country), size=18)
-        country_field = ft.TextField(
-            value=self.edit_country, width=100, dense=True, hint_text="ISO",
-            bgcolor=SURFACE2, border_color=BORDER, focused_border_color=CYAN,
-            text_style=ft.TextStyle(color=TEXT, size=13, weight="bold"),
-            content_padding=ft.Padding.symmetric(horizontal=10, vertical=6),
-            on_change=lambda e: self._on_country_change(e.control.value, country_flag_preview),
-        )
-
-        blocks: list[ft.Control] = []
-        if src_chips:
-            blocks.append(ft.Container(
-                content=ft.Column([
-                    ft.Row([
-                        ft.Icon(ft.Icons.FOLDER_ROUNDED, size=14, color=ACCENT_GREEN),
-                        ft.Text("FROM THIS ARTIST'S FILES", size=10, color=ACCENT_GREEN, weight="bold"),
-                        ft.Container(expand=True),
-                        ft.Text("Tap to add", size=10, color=DIM),
-                    ], spacing=6, vertical_alignment="center"),
-                    ft.Row(src_chips, wrap=True, spacing=6, run_spacing=6),
-                ], spacing=8),
-                bgcolor=SURFACE2, border_radius=10, padding=10,
-                border=ft.Border.all(1, apply_opacity(0.35, ACCENT_GREEN)),
-            ))
-
-        blocks.append(ft.Container(
+        hint = (f"{n} selected — tap a tag to apply"
+                if n else "Select artists, or drag one onto a tag")
+        # ONE fixed-height row that scrolls sideways, NOT a wrapping row.
+        # Wrapping put twelve pills on five lines (~600pt) in a tray that does
+        # not expand, so the ListView — which does — was left roughly 110pt and
+        # showed a single clipped artist. A tray must cost a fixed, small slice
+        # of the screen no matter how much vocabulary the library has.
+        self._h_bins.content = ft.Container(
             content=ft.Column([
                 ft.Row([
-                    ft.Icon(ft.Icons.LABEL_ROUNDED, size=14, color=CYAN),
-                    ft.Text("SELECTED GENRES", size=10, color=CYAN, weight="bold"),
-                ], spacing=6, vertical_alignment="center"),
-                ft.Row((selected_chips + [custom]) if selected_chips else [custom],
-                       wrap=True, spacing=6, run_spacing=6),
-            ], spacing=8),
-            bgcolor=SURFACE2, border_radius=10, padding=10,
-            border=ft.Border.all(1, apply_opacity(0.35, CYAN)),
-        ))
-
-        if vocab_chips:
-            blocks.append(ft.Container(
-                content=ft.Column([
-                    ft.Row([
-                        ft.Icon(ft.Icons.BOOKMARKS_ROUNDED, size=14, color=DIM),
-                        ft.Text("USED ELSEWHERE IN YOUR LIBRARY", size=10, color=DIM, weight="bold"),
-                    ], spacing=6, vertical_alignment="center"),
-                    ft.Row(vocab_chips, wrap=True, spacing=6, run_spacing=6),
-                ], spacing=8),
-                bgcolor=SURFACE2, border_radius=10, padding=10,
-                border=ft.Border.all(1, BORDER),
-            ))
-
-        blocks.append(ft.Container(
-            content=ft.Row([
-                ft.Row([
-                    ft.Icon(ft.Icons.PUBLIC_ROUNDED, size=14, color=CYAN),
-                    ft.Text("COUNTRY", size=10, color=CYAN, weight="bold"),
-                ], spacing=6, vertical_alignment="center"),
-                ft.Container(expand=True),
-                country_flag_preview,
-                country_field,
-            ], spacing=10, vertical_alignment="center"),
-            bgcolor=SURFACE2, border_radius=10, padding=10,
-            border=ft.Border.all(1, BORDER),
-        ))
-
-        blocks.append(self._ghost_btn(
-            "Search MusicBrainz", lambda _e, n=name: self._open_mb_dialog(n),
-            fg=CYAN, icon=ft.Icons.TRAVEL_EXPLORE_ROUNDED,
-        ))
-
-        actions: list[ft.Control] = []
-        if is_review:
-            actions.append(self._ghost_btn("Reject", lambda _e, n=name: self._review_reject(n),
-                                           fg=ACCENT_RED, icon=ft.Icons.CLOSE_ROUNDED))
-        actions += [
-            ft.Container(expand=True),
-            self._ghost_btn("Cancel", lambda _e: self._collapse()),
-            self._filled_btn("Save", lambda _e, n=name: self._save_one(n), icon=ft.Icons.CHECK_ROUNDED),
-        ]
-        blocks += [
-            ft.Row(actions, vertical_alignment="center", spacing=10),
-            ft.Text("Saved as your override — kept safe from future syncs.", size=10, color=DIM, italic=True),
-        ]
-        return ft.Container(
-            content=ft.Column(blocks, spacing=11, tight=True),
-            bgcolor=SURFACE, border_radius=12, padding=14,
-            margin=ft.Margin.only(top=4, bottom=10),
-            border=ft.Border.all(1, apply_opacity(0.3, CYAN)),
+                    ft.Text(hint, size=10.5,
+                            color=CYAN if n else TEXT_TERTIARY,
+                            weight=ft.FontWeight.W_700 if n else ft.FontWeight.W_600,
+                            max_lines=1, overflow=ft.TextOverflow.ELLIPSIS, expand=True),
+                    (ft.TextButton("Clear", on_click=lambda _e: self._clear_selection(),
+                                   style=ft.ButtonStyle(color=DIM)) if n else ft.Container()),
+                ], vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                ft.Container(
+                    content=ft.Row(bins, spacing=7, scroll=ft.ScrollMode.AUTO,
+                                   vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                    # Pill (~31) + the horizontal scrollbar Flet draws UNDER the
+                    # row; at 40 the pills were clipped along their bottom edge.
+                    height=54,
+                ),
+            ], spacing=4, tight=True),
+            padding=ft.Padding.only(left=2, right=2, top=8, bottom=2),
+            border=ft.Border.only(top=ft.BorderSide(1, BORDER_SUBTLE)),
         )
 
-    # ── MusicBrainz identity dialog ────────────────────────────────────────────
+    def _bin(self, label: str, *, kind: str, count: int) -> ft.Control:
+        accent = {"genre": CYAN, "country": "#BF5AF2", "new": DIM}[kind]
+        armed = bool(self.selected)
+        text = _flag(label) + " " + label if kind == "country" else label
+
+        inner = ft.Container(
+            content=ft.Row([
+                ft.Text(text, size=12, weight=ft.FontWeight.W_600,
+                        color=accent if armed else DIM),
+                (ft.Text(str(count), size=9.5, color=TEXT_TERTIARY,
+                         font_family="monospace") if count else ft.Container()),
+            ], spacing=6, tight=True, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            bgcolor=apply_opacity(0.12, accent) if armed else SURFACE2,
+            border=ft.Border.all(1, apply_opacity(0.45 if armed else 0.25, accent)),
+            border_radius=RADIUS_PILL,
+            padding=ft.Padding.symmetric(horizontal=12, vertical=7),
+            on_click=lambda _e: self._apply_bin(label, kind),
+            ink=True,
+            alignment=ft.Alignment(0, 0),
+            animate=ft.Animation(120, ft.AnimationCurve.EASE_OUT),
+        )
+
+        def _will_accept(e):
+            inner.bgcolor = apply_opacity(0.30, accent)
+            inner.border = ft.Border.all(2, accent)
+            try:
+                inner.update()
+            except Exception:
+                pass
+
+        def _leave(_e):
+            inner.bgcolor = apply_opacity(0.12, accent) if self.selected else SURFACE2
+            inner.border = ft.Border.all(
+                1, apply_opacity(0.45 if self.selected else 0.25, accent))
+            try:
+                inner.update()
+            except Exception:
+                pass
+
+        def _accept(e):
+            _leave(e)
+            # e.src is the Draggable itself, so the payload arrives without a
+            # page.get_control round trip.
+            dragged = getattr(getattr(e, "src", None), "data", None)
+            if dragged and dragged not in self.selected:
+                self.selected = {dragged}
+            self._apply_bin(label, kind)
+
+        return ft.DragTarget(
+            group=_DRAG_GROUP, content=inner,
+            on_will_accept=_will_accept, on_leave=_leave, on_accept=_accept,
+        )
+
+    def _apply_bin(self, label: str, kind: str):
+        names = sorted(self.selected)
+        if not names:
+            self.app.show_snackbar("Select one or more artists first.", color=ACCENT_AMBER)
+            return
+        if kind == "new":
+            self._prompt_new_genre(names)
+            return
+        genre = label if kind == "genre" else None
+        country = label if kind == "country" else None
+        self._commit_tag(names, genre=genre, country=country)
+
+    def _commit_tag(self, names: list[str], *, genre=None, country=None):
+        async def _do():
+            try:
+                # Merge, never overwrite: dropping artists on a genre must not
+                # erase a country MusicBrainz already found for some of them.
+                n = await self.db.bulk_tag_artists(
+                    names, genre=genre, country=country, refresh_model=False,
+                )
+            except Exception as exc:
+                logger.exception("bulk tag failed: %s", exc)
+                self.app.show_snackbar(f"Couldn't save: {exc}", color=ACCENT_RED)
+                return
+            what = genre or _country_label(country)
+            self.app.show_snackbar(
+                f"{n} artist{'s' if n != 1 else ''} → {what}",
+                icon=ft.Icons.CHECK_CIRCLE, color=CYAN)
+            self.selected.clear()
+            await self._reload_async()
+            self._schedule_walk_refresh()
+        self.app.page.run_task(_do)
+
+    def _schedule_walk_refresh(self):
+        """Rebuild the models Auto-Play reads, once per burst.
+
+        Coalesced, so tagging six artists in a row costs one rebuild rather than
+        six full-library passes — and confirmed only when it has actually
+        landed, since that is the moment the queue would really change."""
+        refresh_walk_models(
+            self.db,
+            on_done=lambda _s: self.app.show_snackbar(
+                "Auto-Play updated.", icon=ft.Icons.AUTO_AWESOME, color=ACCENT_GREEN),
+        )
+
+    def _clear_selection(self):
+        for name in list(self.selected):
+            self._toggle_select(name, False)
+        self.selected.clear()
+        self._render_bins()
+        self._safe_update()
+
+    def _prompt_new_genre(self, names: list[str]):
+        field = ft.TextField(
+            label="Genre", autofocus=True, bgcolor=SURFACE2, border_color=BORDER,
+            focused_border_color=CYAN, border_radius=10,
+            text_style=ft.TextStyle(color=TEXT, size=14),
+        )
+
+        def _ok(_e=None):
+            val = (field.value or "").strip().lower()
+            self.app.dismiss_dialog(dlg)
+            if val:
+                self._commit_tag(names, genre=val)
+
+        field.on_submit = _ok
+        dlg = ft.AlertDialog(
+            bgcolor=SURFACE,
+            title=ft.Text(f"Tag {len(names)} artist{'s' if len(names) != 1 else ''}",
+                          color=TEXT, size=16, weight=ft.FontWeight.W_700),
+            content=ft.Column([
+                ft.Text("A tag your library already uses will be understood better "
+                        "than a new one.", size=11.5, color=DIM),
+                field,
+            ], tight=True, spacing=12, width=320),
+            actions=[
+                ft.TextButton("Cancel", on_click=lambda _e: self.app.dismiss_dialog(dlg)),
+                self._filled_btn("Apply", _ok),
+            ],
+        )
+        self.app.page.show_dialog(dlg)
+
+    # ── EDITOR (bottom sheet) ────────────────────────────────────────────────
+    def _open_editor(self, item: dict):
+        """Per-artist editor as a bottom sheet.
+
+        It used to be an inline expander that pushed the list around under the
+        user's finger and forced a full re-render on every chip tap."""
+        name = item["artist_name"]
+        genres = {g.lower() for g in _genre_names(item.get("genres"))}
+        files = item.get("source_genres") or []
+        country = {"v": (item.get("country") or "").upper()}
+
+        chips_row = ft.Row(wrap=True, spacing=6, run_spacing=6)
+        country_row = ft.Row(wrap=True, spacing=6, run_spacing=6)
+        custom = ft.TextField(
+            hint_text="Add a genre…", dense=True, width=160, bgcolor=SURFACE2,
+            border_color=BORDER, focused_border_color=CYAN, border_radius=8,
+            text_style=ft.TextStyle(color=TEXT, size=12),
+            content_padding=ft.Padding.symmetric(horizontal=10, vertical=6),
+        )
+
+        def _chip(label, *, on, accent=CYAN, prefix=""):
+            return ft.Container(
+                content=ft.Text(f"{prefix}{label}" + ("  ✕" if on else ""),
+                                size=12, color=BG if on else accent,
+                                weight=ft.FontWeight.W_600 if on else None),
+                bgcolor=accent if on else "transparent",
+                border=ft.Border.all(1, accent if on else apply_opacity(0.4, accent)),
+                border_radius=RADIUS_PILL,
+                padding=ft.Padding.symmetric(horizontal=11, vertical=6),
+                ink=True,
+            )
+
+        def _rebuild():
+            sel = []
+            for t in sorted(genres):
+                c = _chip(t, on=True)
+                c.on_click = lambda _e, t=t: (genres.discard(t), _rebuild())
+                sel.append(c)
+            sug = []
+            for t in files:
+                if t.lower() in genres:
+                    continue
+                c = _chip(t, on=False, accent=ACCENT_GREEN, prefix="+ ")
+                c.on_click = lambda _e, t=t: (genres.add(t.lower()), _rebuild())
+                sug.append(c)
+            voc = []
+            for v in self.vocab[:12]:
+                t = v["name"]
+                if t.lower() in genres or t.lower() in {f.lower() for f in files}:
+                    continue
+                c = _chip(t, on=False, accent=DIM, prefix="+ ")
+                c.on_click = lambda _e, t=t: (genres.add(t.lower()), _rebuild())
+                voc.append(c)
+            # Selected first, then what the sources suggest, then the library's
+            # vocabulary, and the free-text field LAST — it led the row before,
+            # so the first thing you saw was an empty box rather than your tags.
+            chips_row.controls = sel + sug + voc + [custom]
+
+            country_row.controls = []
+            # Tap a country, don't type an ISO code. The library already knows
+            # which countries it contains, and the answer is nearly always one.
+            for c in self.countries[:8]:
+                code = c["code"]
+                on = country["v"] == code
+                ch = _chip(f"{_flag(code)} {code}", on=on, accent="#BF5AF2")
+                ch.on_click = lambda _e, code=code: (
+                    country.__setitem__("v", "" if country["v"] == code else code),
+                    _rebuild(),
+                )
+                country_row.controls.append(ch)
+            self._safe_update()
+
+        def _add_custom(e):
+            v = (e.control.value or "").strip().lower()
+            if v:
+                genres.add(v)
+            e.control.value = ""
+            _rebuild()
+        custom.on_submit = _add_custom
+        _rebuild()
+
+        def _save(_e):
+            self.app.dismiss_dialog(sheet)
+
+            async def _do():
+                try:
+                    await self.db.set_manual_artist_enrichment(
+                        name, country=(country["v"] or None), genres=sorted(genres))
+                except Exception as exc:
+                    logger.exception("save failed for %s: %s", name, exc)
+                    self.app.show_snackbar(f"Couldn't save: {exc}", color=ACCENT_RED)
+                    return
+                self.app.show_snackbar(f"Saved {name}", icon=ft.Icons.CHECK_CIRCLE,
+                                       color=CYAN)
+                self.selected.discard(name)
+                await self._reload_async()
+                self._schedule_walk_refresh()
+            self.app.page.run_task(_do)
+
+        body = [
+            self._sheet_section("GENRES", ft.Icons.LABEL_ROUNDED, CYAN, chips_row),
+            self._sheet_section("COUNTRY", ft.Icons.PUBLIC_ROUNDED, "#BF5AF2", country_row),
+            ft.Row([
+                self._ghost_btn("Find on MusicBrainz",
+                                lambda _e: (self.app.dismiss_dialog(sheet),
+                                            self._open_mb_dialog(name)),
+                                fg=CYAN, icon=ft.Icons.TRAVEL_EXPLORE_ROUNDED),
+            ]),
+        ]
+        if self.filter == "uncertain":
+            body.append(ft.Row([
+                self._ghost_btn("Reject this match",
+                                lambda _e, n=name: (self.app.dismiss_dialog(sheet),
+                                                    self._review_reject(n)),
+                                fg=ACCENT_RED, icon=ft.Icons.CLOSE_ROUNDED),
+            ]))
+
+        sheet = ft.BottomSheet(
+            content=ft.Container(
+                content=ft.Column([
+                    ft.Container(
+                        content=ft.Container(width=36, height=5, bgcolor=SURFACE_ELEVATED,
+                                             border_radius=3),
+                        alignment=ft.Alignment(0, 0),
+                        padding=ft.Padding.only(top=10, bottom=6),
+                    ),
+                    ft.Container(
+                        content=ft.Row([
+                            ft.Text(name, size=17, weight=ft.FontWeight.W_600, color=TEXT,
+                                    overflow=ft.TextOverflow.ELLIPSIS, max_lines=1,
+                                    expand=True),
+                            self._filled_btn("Save", _save),
+                        ], vertical_alignment=ft.CrossAxisAlignment.CENTER, spacing=10),
+                        padding=ft.Padding.symmetric(horizontal=16, vertical=4),
+                    ),
+                    ft.Divider(color=BORDER_SUBTLE, height=1),
+                    ft.Container(
+                        content=ft.Column(body, spacing=14, scroll=ft.ScrollMode.AUTO),
+                        padding=16, expand=True,
+                    ),
+                ], spacing=0, expand=True),
+                bgcolor=SURFACE,
+                border_radius=ft.BorderRadius.only(top_left=20, top_right=20),
+                expand=True,
+            ),
+            bgcolor=SURFACE, draggable=True, use_safe_area=True,
+            show_drag_handle=False, scrollable=False,
+        )
+        self.app.page.show_dialog(sheet)
+
+    def _sheet_section(self, label, icon, accent, content) -> ft.Control:
+        return ft.Column([
+            ft.Row([
+                ft.Icon(icon, size=13, color=accent),
+                ft.Text(label, size=10, color=accent, weight=ft.FontWeight.W_800),
+            ], spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            content,
+        ], spacing=8)
+
+    # ── REVIEW actions ───────────────────────────────────────────────────────
+    def _review_reject(self, name: str):
+        async def _do():
+            try:
+                await self.db.confirm_artist_match(name, status="notfound", score=0)
+            except Exception as exc:
+                self.app.show_snackbar(f"Couldn't reject: {exc}", color=ACCENT_RED)
+                return
+            self.app.show_snackbar(f"Rejected {name}", color=ACCENT_AMBER)
+            await self._reload_async()
+            self._schedule_walk_refresh()
+        self.app.page.run_task(_do)
+
+    # ── MusicBrainz identity picker ──────────────────────────────────────────
     def _open_mb_dialog(self, artist: str):
-        """Roomy MusicBrainz identity picker — a dialog, not the cramped inline
-        row. Lists candidate entities with the detail you actually choose by
-        (disambiguation, country, genres, match score), and on selection does the
-        per-MBID detail fetch the shallow search omits — so a picked match lands
-        with real genres instead of the blanks that made a pick look like a no-op."""
-        # Size to the viewport so the dialog itself can't overflow a narrow
-        # portrait screen — the constraint that pushed MB out of the inline row.
         pw = self.app.page.width or 400
         ph = self.app.page.height or 720
         dlg_w = max(280, min(420, pw - 40))
         res_h = max(200, min(380, ph - 280))
 
         query_field = ft.TextField(
-            value=artist, label="Artist Name", dense=True,
-            border_color=BORDER, focused_border_color=CYAN,
-            text_style=ft.TextStyle(color=TEXT, size=13), bgcolor=SURFACE2,
+            value=artist, label="Artist name", dense=True, bgcolor=SURFACE2,
+            border_color=BORDER, focused_border_color=CYAN, border_radius=10,
+            text_style=ft.TextStyle(color=TEXT, size=13),
         )
         results = ft.Column([], scroll=ft.ScrollMode.AUTO, height=res_h, spacing=8)
 
@@ -745,92 +1068,93 @@ class MetadataWorkbenchPane(ft.Container):
             q = (query_field.value or artist).strip() or artist
 
             async def _run():
-                results.controls = [ft.Row(
-                    [ft.ProgressRing(width=16, height=16, stroke_width=2),
-                     ft.Text("Searching MusicBrainz…", size=12, color=DIM)], spacing=8)]
-                self.app.page.update()
+                results.controls = [ft.Row([
+                    ft.ProgressRing(width=15, height=15, stroke_width=2),
+                    ft.Text("Searching MusicBrainz…", size=12, color=DIM)], spacing=8)]
+                self._safe_update()
                 try:
                     cands = await search_musicbrainz_artists_candidates(q)
                 except Exception as exc:
                     logger.warning("MB search failed for %s: %s", q, exc)
-                    results.controls = [ft.Text("Lookup failed — offline?", size=12, color=ACCENT_AMBER)]
-                    self.app.page.update()
+                    results.controls = [ft.Text("Lookup failed — are you offline?",
+                                                size=12, color=ACCENT_AMBER)]
+                    self._safe_update()
                     return
-                cands = sorted(cands, key=lambda c: (bool(c.get("is_junk")), -(c.get("score") or 0)))[:8]
-                if not cands:
-                    results.controls = [ft.Text("No candidates found. Try a different spelling.",
-                                                size=12, color=DIM)]
-                else:
-                    results.controls = [self._mb_dialog_card(artist, c, dlg) for c in cands]
-                self.app.page.update()
+                cands = sorted(
+                    cands, key=lambda c: (bool(c.get("is_junk")), -(c.get("score") or 0))
+                )[:8]
+                results.controls = (
+                    [self._mb_card(artist, c, dlg) for c in cands] if cands
+                    else [ft.Text("No candidates. Try a different spelling.",
+                                  size=12, color=DIM)]
+                )
+                self._safe_update()
 
             self.app.page.run_task(_run)
 
         query_field.on_submit = _search
         dlg = ft.AlertDialog(
             bgcolor=SURFACE,
-            title=ft.Text(f"MusicBrainz · {artist}"[:40], color=TEXT, size=15, weight="bold"),
+            title=ft.Text(f"MusicBrainz · {artist}"[:40], color=TEXT, size=15,
+                          weight=ft.FontWeight.W_700),
             content=ft.Column([
-                ft.Text("Pick the correct artist — its country and genres are fetched "
-                        "and saved as a confirmed match.", color=DIM, size=11),
-                query_field,
-                results,
+                ft.Text("Pick the right act — its country and genres are fetched and "
+                        "saved as a confirmed match.", color=DIM, size=11),
+                query_field, results,
             ], tight=True, spacing=10, width=dlg_w),
             actions=[
                 ft.TextButton("Close", on_click=lambda _e: self.app.dismiss_dialog(dlg)),
                 self._filled_btn("Search", lambda _e: _search()),
             ],
         )
-        if self.app.page:
-            self.app.page.show_dialog(dlg)
+        self.app.page.show_dialog(dlg)
         _search()
 
-    def _mb_dialog_card(self, artist: str, cand: dict, dlg) -> ft.Control:
-        """One candidate row in the MB dialog — full detail, room to breathe."""
+    def _mb_card(self, artist: str, cand: dict, dlg) -> ft.Control:
         cname = cand.get("name") or artist
         disamb = (cand.get("disambiguation") or "").strip()
         cc = cand.get("country")
-        genres = [g.get("name") if isinstance(g, dict) else str(g) for g in (cand.get("genres") or [])]
-        gstr = ", ".join(g for g in genres if g)
+        gstr = ", ".join(_genre_names(cand.get("genres")))
         score = cand.get("score") or 0
+        sc = ACCENT_GREEN if score >= 80 else (ACCENT_AMBER if score >= 50 else ACCENT_RED)
 
-        score_color = ACCENT_GREEN if score >= 80 else (ACCENT_AMBER if score >= 50 else ACCENT_RED)
         head = []
         if cc:
-            head.append(ft.Text(_flag(cc), size=16))
-        head.append(ft.Text(cname, size=13.5, color=TEXT, weight="bold",
+            head.append(ft.Text(_flag(cc), size=15))
+        head.append(ft.Text(cname, size=13.5, color=TEXT, weight=ft.FontWeight.W_600,
                             overflow=ft.TextOverflow.ELLIPSIS, max_lines=1, expand=True))
         head.append(ft.Container(
-            content=ft.Text(f"{score}% match", size=10, color=score_color, weight="bold"),
-            bgcolor=apply_opacity(0.14, score_color), border_radius=6,
+            content=ft.Text(f"{score}%", size=10, color=sc, weight=ft.FontWeight.W_800),
+            bgcolor=apply_opacity(0.14, sc), border_radius=6,
             padding=ft.Padding.symmetric(horizontal=7, vertical=3),
-            border=ft.Border.all(1, apply_opacity(0.35, score_color)),
         ))
-        lines: list[ft.Control] = [ft.Row(head, spacing=6, vertical_alignment="center")]
+        lines: list[ft.Control] = [ft.Row(head, spacing=6,
+                                          vertical_alignment=ft.CrossAxisAlignment.CENTER)]
         if disamb:
-            lines.append(ft.Text(f"• {disamb}", size=11, color=TEXT, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS))
+            lines.append(ft.Text(disamb, size=11, color=TEXT, max_lines=2,
+                                 overflow=ft.TextOverflow.ELLIPSIS))
         lines.append(ft.Text(gstr or "No genres listed — fetched when you select",
                              size=10.5, color=DIM if gstr else ACCENT_AMBER,
                              max_lines=2, overflow=ft.TextOverflow.ELLIPSIS))
         lines.append(ft.Row([
             ft.Container(expand=True),
-            self._filled_btn("Use This Match", lambda _e, c=cand: self._use_mb_candidate(artist, c, dlg),
+            self._filled_btn("Use this match",
+                             lambda _e, c=cand: self._use_mb_candidate(artist, c, dlg),
                              icon=ft.Icons.CHECK_ROUNDED),
         ]))
         return ft.Container(
             content=ft.Column(lines, spacing=6, tight=True),
             bgcolor=SURFACE2, border_radius=10, padding=12,
-            border=ft.Border.all(1, apply_opacity(0.5, BORDER)),
+            border=ft.Border.all(1, BORDER_SUBTLE),
         )
 
     def _use_mb_candidate(self, artist: str, cand: dict, dlg=None):
-        """Confirm a chosen MusicBrainz candidate. Fetches full genres/country by
-        MBID first (the search payload omits them) so the artist actually
-        resolves, then writes it as a confirmed source='musicbrainz' match."""
         async def _do():
             mbid = cand.get("mbid")
             country, area, genres = cand.get("country"), cand.get("area"), cand.get("genres")
             if mbid:
+                # The search payload usually omits genres, so committing the
+                # shallow hit would store a blank and look like a no-op.
                 details = await musicbrainz_artist_details(mbid)
                 if details.get("genres"):
                     genres = details["genres"]
@@ -839,292 +1163,48 @@ class MetadataWorkbenchPane(ft.Container):
             try:
                 await self.db.confirm_artist_match(
                     artist, mbid=mbid, country=country, area=area,
-                    genres=genres, status="ok", score=cand.get("score") or 100,
-                )
-                try:
-                    await self.db.fix_and_normalize_track_genres()
-                    from utils.track_graph import build_genre_affinity
-                    await build_genre_affinity(self.db)
-                except Exception:
-                    pass
-                got = [g.get("name") if isinstance(g, dict) else str(g) for g in (genres or [])]
-                if got:
-                    self.app.show_snackbar(f"Matched {artist} · {', '.join(got[:3])}",
-                                           icon=ft.Icons.CHECK_CIRCLE, color=CYAN)
-                else:
-                    self.app.show_snackbar(
-                        f"Matched {artist}, but MusicBrainz listed no genres — add some by hand.",
-                        color=ACCENT_AMBER)
+                    genres=genres, status="ok", score=cand.get("score") or 100)
             except Exception as exc:
                 logger.exception("use_mb_candidate failed: %s", exc)
-                self.app.show_snackbar(f"Match failed: {exc}", color=ACCENT_RED)
-            self.app.dismiss_dialog(dlg)
-            self.expanded = None
-            self.selected.discard(artist)
-            self.source_cache.pop(artist, None)
-            await self._reload_async()
-        self.app.page.run_task(_do)
-
-    # ── review row + editor (low-confidence) ──────────────────────────────────
-    def _review_row(self, it: dict) -> ft.Control:
-        name = it["artist_name"]
-        tc = it.get("track_count", 0)
-        score = it.get("score", 0)
-        country = it.get("country")
-        genres = [x.get("name") if isinstance(x, dict) else str(x) for x in (it.get("genres") or [])]
-        gstr = ", ".join(genres[:3]) or "No Tags"
-        is_expanded = self.expanded == name
-
-        score_color = ACCENT_GREEN if score >= 80 else (ACCENT_AMBER if score >= 50 else ACCENT_RED)
-        return ft.Container(
-            content=ft.Row([
-                ft.Column([
-                    ft.Row([
-                        ft.Text(_flag(country), size=14) if country else ft.Container(),
-                        ft.Text(name, size=14, weight="bold", color=CYAN if is_expanded else TEXT,
-                                overflow=ft.TextOverflow.ELLIPSIS, max_lines=1, expand=True),
-                    ], spacing=6, vertical_alignment="center"),
-                    ft.Text(f"{_COUNTRY_NAMES.get(country, country) if country else 'No Country'} · {gstr}", size=11, color=DIM,
-                            overflow=ft.TextOverflow.ELLIPSIS, max_lines=1),
-                ], spacing=2, expand=True, tight=True),
-                ft.Container(
-                    content=ft.Text(f"{score}%", size=10.5, color=score_color, weight="bold"),
-                    bgcolor=apply_opacity(0.14, score_color), border_radius=6,
-                    padding=ft.Padding.symmetric(horizontal=7, vertical=3),
-                    border=ft.Border.all(1, apply_opacity(0.3, score_color)),
-                ),
-                ft.Container(
-                    content=ft.Text(f"{tc} Track{'s' if tc != 1 else ''}", size=10.5, color=DIM, font_family="monospace", weight="bold"),
-                    bgcolor=SURFACE, border_radius=6,
-                    padding=ft.Padding.symmetric(horizontal=8, vertical=4),
-                    border=ft.Border.all(1, BORDER),
-                ),
-                # One-tap accept of the match as-is — the wizard's primary review
-                # action. Keeps mbid/country/genres as source='musicbrainz' via
-                # confirm_artist_match (expand only to reject, rebind, or edit).
-                ft.Container(
-                    content=ft.Icon(ft.Icons.CHECK_ROUNDED, size=18, color=BG),
-                    bgcolor=ACCENT_GREEN, border_radius=8,
-                    padding=ft.Padding.symmetric(horizontal=10, vertical=8),
-                    on_click=lambda _e, n=name: self._review_accept(n), ink=True,
-                    tooltip="Accept this match",
-                ),
-            ], vertical_alignment="center", spacing=11),
-            padding=ft.Padding.symmetric(horizontal=10, vertical=10),
-            margin=ft.Margin.only(bottom=4),
-            bgcolor=apply_opacity(0.65, SURFACE2) if is_expanded else SURFACE2,
-            border_radius=10,
-            border=ft.Border.all(1, apply_opacity(0.65, CYAN) if is_expanded else apply_opacity(0.5, BORDER)),
-            on_click=lambda _e, n=name: self._toggle_expand(n), ink=True,
-        )
-
-    def _review_accept(self, name: str):
-        """Confirm a low-confidence MusicBrainz match, keeping its
-        source='musicbrainz' provenance. If the stored row has thin genres (the
-        weak-fallback path stores an mbid but no tags), fetch the full entity by
-        MBID first so accepting actually resolves the artist rather than
-        confirming a blank."""
-        it = next((x for x in self.low_conf if x["artist_name"] == name), None)
-        if not it:
-            return
-
-        async def _do():
-            mbid = it.get("mbid")
-            country, area = it.get("country"), it.get("area")
-            genres = it.get("genres") or []
-            if mbid and not genres:
-                details = await musicbrainz_artist_details(mbid)
-                if details.get("genres"):
-                    genres = details["genres"]
-                country = country or details.get("country")
-                area = area or details.get("area")
-            try:
-                await self.db.confirm_artist_match(
-                    name, mbid=mbid, country=country, area=area,
-                    genres=genres, status="ok", score=100,
-                )
-                try:
-                    await self.db.fix_and_normalize_track_genres()
-                    from utils.track_graph import build_genre_affinity
-                    await build_genre_affinity(self.db)
-                except Exception:
-                    pass
-                self.app.show_snackbar(f"Accepted {name}", icon=ft.Icons.CHECK_CIRCLE, color=CYAN)
-            except Exception as exc:
-                logger.exception("review_accept failed: %s", exc)
-                self.app.show_snackbar(f"Accept failed: {exc}", color=ACCENT_RED)
-            self.expanded = None
-            await self._reload_async()
-        self.app.page.run_task(_do)
-
-    def _review_reject(self, name: str):
-        async def _do():
-            await self.db.confirm_artist_match(name, status="notfound", score=0)
-            self.app.show_snackbar(f"Rejected {name}", color=ACCENT_AMBER)
-            self.expanded = None
-            await self._reload_async()
-        self.app.page.run_task(_do)
-
-    # ── event handlers ────────────────────────────────────────────────────────
-    def _on_search(self, e):
-        self.search = e.control.value or ""
-        self._render_body()
-        self.app.page.update()
-
-    def _set_filter(self, key: str):
-        self.filter = key
-        self.expanded = None
-        self._render_controls()
-        self._render_batch()
-        self._render_body()
-        self.app.page.update()
-
-    def _toggle_select(self, name: str, on: bool):
-        if on:
-            self.selected.add(name)
-        else:
-            self.selected.discard(name)
-        self._render_batch()
-        self.app.page.update()
-
-    def _clear_selection(self):
-        self.selected.clear()
-        self._render_batch()
-        self._render_body()
-        self.app.page.update()
-
-    def _toggle_expand(self, name: str):
-        if self.expanded == name:
-            self._collapse()
-            return
-        self.expanded = name
-        pool = self.low_conf if self.filter == "uncertain" else self.all_gaps
-        g = next((x for x in pool if x["artist_name"] == name), None)
-        genres = [x.get("name") if isinstance(x, dict) else str(x) for x in (g.get("genres") or [])] if g else []
-        self.edit_genres = {t.lower() for t in genres if t}
-        self.edit_country = (g.get("country") or "") if g else ""
-        self.edit_custom = ""
-
-        async def _prime():
-            # Source-file tags are useful for review artists too (they're in the
-            # library), so load them regardless of which filter we're under.
-            await self._source_tags(name)
-            self._render_body()
-            self.app.page.update()
-        self.app.page.run_task(_prime)
-
-    def _collapse(self):
-        self.expanded = None
-        self._render_body()
-        self.app.page.update()
-
-    def _edit_toggle_genre(self, tok: str):
-        low = tok.lower()
-        self.edit_genres.discard(low) if low in self.edit_genres else self.edit_genres.add(low)
-        self._render_body()
-        self.app.page.update()
-
-    def _edit_add_genre(self, tok: str):
-        self.edit_genres.add(tok.lower())
-        self._render_body()
-        self.app.page.update()
-
-    def _edit_add_custom(self, e):
-        val = (e.control.value or "").strip().lower()
-        if val:
-            self.edit_genres.add(val)
-        self.edit_custom = ""   # clear the buffer so it doesn't re-seed on render
-        self._render_body()
-        self.app.page.update()
-
-    def _save_one(self, name: str):
-        country = (self.edit_country or "").strip().upper() or None
-        genres = sorted(self.edit_genres)
-
-        async def _do():
-            try:
-                await self.db.set_manual_artist_enrichment(name, country=country, genres=genres)
-                try:
-                    await self.db.fix_and_normalize_track_genres()
-                    from utils.track_graph import build_genre_affinity
-                    await build_genre_affinity(self.db)
-                except Exception:
-                    pass
-                self.app.show_snackbar(f"Saved tags for {name}", icon=ft.Icons.CHECK_CIRCLE, color=CYAN)
-            except Exception as exc:
-                logger.exception("save_one failed: %s", exc)
-                self.app.show_snackbar(f"Save failed: {exc}", color=ACCENT_RED)
-            self.expanded = None
-            self.selected.discard(name)
-            self.source_cache.pop(name, None)
-            await self._reload_async()
-
-        self.app.page.run_task(_do)
-
-    # ── batch editor ──────────────────────────────────────────────────────────
-    def _open_batch_editor(self):
-        names = sorted(self.selected)
-        batch_genres: set[str] = set()
-        country_field = ft.TextField(label="Country ISO", hint_text="e.g. GR", width=150, dense=True,
-                                     border_color=BORDER, focused_border_color=CYAN,
-                                     text_style=ft.TextStyle(color=TEXT), bgcolor=SURFACE2)
-        chips_row = ft.Row(wrap=True, spacing=6, run_spacing=6)
-        custom = ft.TextField(hint_text="Add a genre…", dense=True, width=170,
-                              border_color=BORDER, focused_border_color=CYAN,
-                              text_style=ft.TextStyle(color=TEXT, size=12), bgcolor=SURFACE2)
-
-        def _rebuild():
-            sel = [self._chip(t, kind="on", on_click=lambda _e, t=t: _toggle(t)) for t in sorted(batch_genres)]
-            vocab = [self._chip(v["name"], kind="ghost", on_click=lambda _e, t=v["name"]: _add(t))
-                     for v in self.vocab if v["name"].lower() not in batch_genres][:12]
-            chips_row.controls = sel + [custom] + vocab
-            self.app.page.update()
-
-        def _toggle(t): batch_genres.discard(t.lower()); _rebuild()
-        def _add(t): batch_genres.add(t.lower()); _rebuild()
-        def _add_custom(e):
-            v = (e.control.value or "").strip().lower()
-            if v:
-                batch_genres.add(v)
-            e.control.value = ""
-            _rebuild()
-        custom.on_submit = _add_custom
-        _rebuild()
-
-        def _apply(_e):
-            country = (country_field.value or "").strip().upper() or None
-            genres = sorted(batch_genres)
-            if not country and not genres:
-                self.app.show_snackbar("Add a country or at least one genre first.", color=ACCENT_AMBER)
+                self.app.show_snackbar(f"Couldn't save: {exc}", color=ACCENT_RED)
                 return
+            self.app.dismiss_dialog(dlg)
+            got = _genre_names(genres)
+            self.app.show_snackbar(
+                f"Matched {artist} · {', '.join(got[:3])}" if got else
+                f"Matched {artist}, but MusicBrainz lists no genres — add one by hand.",
+                icon=ft.Icons.CHECK_CIRCLE, color=CYAN if got else ACCENT_AMBER)
+            self.selected.discard(artist)
+            await self._reload_async()
+            self._schedule_walk_refresh()
+        self.app.page.run_task(_do)
 
-            async def _do():
-                n = await self.db.set_manual_artist_enrichment_bulk(names, country=country, genres=genres)
-                try:
-                    await self.db.fix_and_normalize_track_genres()
-                except Exception:
-                    pass
-                self.app.dismiss_dialog(dlg)
-                self.app.show_snackbar(f"Tagged {n} artists", icon=ft.Icons.CHECK_CIRCLE, color=CYAN)
-                self.selected.clear()
-                await self._reload_async()
-            self.app.page.run_task(_do)
-
-        dlg = ft.AlertDialog(
-            bgcolor=SURFACE,
-            title=ft.Text(f"Tag {len(names)} Artists", color=TEXT, size=16, weight="bold"),
-            content=ft.Column([
-                ft.Text("Applies the same country and genres to every selected artist.", color=DIM, size=11),
-                ft.Text(", ".join(names[:6]) + ("…" if len(names) > 6 else ""), color=DIM, size=11, italic=True),
-                ft.Divider(color=BORDER, height=14),
-                country_field,
-                ft.Text("GENRES", size=10, color=DIM, weight="bold"),
-                chips_row,
-            ], tight=True, spacing=10, scroll=ft.ScrollMode.AUTO, width=360),
-            actions=[
-                ft.TextButton("Cancel", on_click=lambda _e: self.app.dismiss_dialog(dlg)),
-                self._filled_btn("Apply to All", _apply),
-            ],
+    # ── shared button styles ─────────────────────────────────────────────────
+    def _filled_btn(self, text, on_click, *, icon=None, disabled=False):
+        row = []
+        if icon:
+            row.append(ft.Icon(icon, size=16, color=BG))
+        row.append(ft.Text(text, weight=ft.FontWeight.W_700, size=13, color=BG))
+        return ft.Container(
+            content=ft.Row(row, spacing=7, tight=True,
+                           alignment=ft.MainAxisAlignment.CENTER),
+            bgcolor=apply_opacity(0.4, CYAN) if disabled else CYAN,
+            border_radius=RADIUS_PILL,
+            padding=ft.Padding.symmetric(horizontal=16, vertical=10),
+            on_click=None if disabled else on_click, ink=not disabled,
+            alignment=ft.Alignment(0, 0),
         )
-        if self.app.page:
-            self.app.page.show_dialog(dlg)
+
+    def _ghost_btn(self, text, on_click, *, fg=DIM, icon=None):
+        row = []
+        if icon:
+            row.append(ft.Icon(icon, size=15, color=fg))
+        row.append(ft.Text(text, weight=ft.FontWeight.W_600, size=12.5, color=fg))
+        return ft.Container(
+            content=ft.Row(row, spacing=7, tight=True,
+                           alignment=ft.MainAxisAlignment.CENTER),
+            bgcolor="transparent", border_radius=10,
+            border=ft.Border.all(1, BORDER),
+            padding=ft.Padding.symmetric(horizontal=14, vertical=10),
+            on_click=on_click, ink=True, alignment=ft.Alignment(0, 0),
+        )

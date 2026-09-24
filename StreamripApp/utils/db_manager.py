@@ -18,6 +18,67 @@ class ClosestMatchList(list):
     pass
 
 
+# Source tags that carry no genre information. 'divers' is Qobuz's French locale
+# placeholder and was long mistaken for a real genre, which split artists into a
+# phantom 'Other' family.
+_SOURCE_TAG_JUNK = {"divers", "various", "unknown", "other", "misc", "n/a"}
+
+# French localisations some sources emit, folded to the English token so they
+# join the corpus vocabulary instead of forking it — a token that appears on one
+# artist has no learned relation in the NPMI model (see get_genre_vocabulary).
+_SOURCE_TAG_LOCALISED = {
+    "électronique": "Electronic", "electronique": "Electronic",
+    "danse": "Dance", "musique du monde": "World",
+    "bandes originales": "Soundtrack",
+}
+
+
+# This app's own COARSE bucket labels, as they appear in `albums.genre`, folded
+# to the corpus's tag style. Splitting 'Rock/Alt' on the slash yields 'Alt',
+# which is a valid bucket label but not a genre anyone tags with — it would land
+# in the NPMI corpus as a singleton with no learned relation to the
+# 'alternative rock' the rest of the library uses. The walk canonicalises tags
+# to alnum-only, so 'Hip-Hop' and 'hip hop' already collapse together; these are
+# the labels that do NOT collapse on their own.
+_SOURCE_TAG_CANON = {
+    "alt": "alternative rock",
+    "folk/cntry": "folk",
+    "soul/r&b": "soul",
+    "rock/alt": "rock",
+    "asian-pop": "asian",
+}
+
+
+def _clean_source_tags(genre_strings) -> list[str]:
+    """Comma/slash-joined `albums.genre` values → de-duplicated clean tokens.
+
+    Shared by the single-artist and whole-library readers so the enrichment
+    cascade and the workbench's suggestions can never disagree about what a
+    file's tags say. This matters more than it used to: these tokens are no
+    longer only *suggestions*, they are written into artist_enrichment whenever
+    MusicBrainz has nothing, and the walk reads that table directly."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for genre_str in genre_strings:
+        raw = (genre_str or "").strip()
+        # A composite bucket label is one token, not two: split it and 'Rock/Alt'
+        # becomes the orphan 'Alt'.
+        parts = [raw] if raw.lower() in _SOURCE_TAG_CANON else re.split(r"[,/;|]", raw)
+        for part in parts:
+            tok = part.strip()
+            if not tok:
+                continue
+            low = tok.lower()
+            if low in _SOURCE_TAG_JUNK:
+                continue
+            tok = _SOURCE_TAG_CANON.get(low) or _SOURCE_TAG_LOCALISED.get(low, tok)
+            key = tok.lower()
+            if key not in seen:
+                seen.add(key)
+                out.append(tok)
+    return out
+
+
 class DatabaseManager:
     """
     Manages the music catalogue SQLite database with zero resource leaks.
@@ -2018,6 +2079,23 @@ class DatabaseManager:
                 fetched_at  REAL
             )
         ''')
+        # Per-FIELD provenance, e.g. {"country": "musicbrainz", "genres": "deezer"}.
+        # `source` is per-ROW and can only say one thing, but enrichment now
+        # fuses tiers — MusicBrainz for country, the artist's own files or Deezer
+        # for genres when MusicBrainz has none. Without this the workbench can't
+        # tell an authority answer from a supplement, and the user can't see
+        # which field to distrust when two sources disagree.
+        # Additive ALTER, guarded: a no-op on a DB that already has the column.
+        try:
+            async with conn.execute("PRAGMA table_info(artist_enrichment)") as cur:
+                cols = {r[1] for r in await cur.fetchall()}
+            if "provenance" not in cols:
+                await conn.execute(
+                    "ALTER TABLE artist_enrichment ADD COLUMN provenance TEXT"
+                )
+                logger.info("DatabaseManager: added artist_enrichment.provenance")
+        except Exception as exc:
+            logger.warning("provenance column migration skipped: %s", exc)
         # NPMI genre-similarity model, precomputed at graph generation and read
         # by the walk's metadata gate. Single-row JSON blob (small + atomic),
         # Additive: harmless on a DB that predates it.
@@ -2100,7 +2178,8 @@ class DatabaseManager:
             return None
         conn = await self.get_connection()
         async with conn.execute(
-            "SELECT artist_name, mbid, country, area, genres, source, score, status, fetched_at "
+            "SELECT artist_name, mbid, country, area, genres, source, score, status, "
+            "provenance, fetched_at "
             "FROM artist_enrichment WHERE artist_name = ?",
             (name,),
         ) as cursor:
@@ -2112,6 +2191,10 @@ class DatabaseManager:
             out["genres"] = json.loads(out["genres"]) if out["genres"] else []
         except Exception:
             out["genres"] = []
+        try:
+            out["provenance"] = json.loads(out["provenance"]) if out.get("provenance") else {}
+        except Exception:
+            out["provenance"] = {}
         return out
 
     async def upsert_artist_enrichment(
@@ -2119,12 +2202,17 @@ class DatabaseManager:
         country: str | None = None, area: str | None = None,
         genres=None, source: str = "musicbrainz",
         score: int | None = None, status: str = "ok",
-        force: bool = False,
+        force: bool = False, provenance: dict | None = None,
     ) -> None:
         """Mutation: insert/replace one artist's enrichment row. `genres` may be a
         list (stored as JSON) or None. One row per artist; cheap to re-run.
-        Guards existing source='manual' rows from being overwritten unless source is 'manual' or force is True."""
+        Guards existing source='manual' rows from being overwritten unless source is 'manual' or force is True.
+
+        `provenance` records where each FIELD came from, e.g.
+        {"country": "musicbrainz", "genres": "deezer"} — `source` is per-row and
+        can only name one origin, but enrichment fuses tiers."""
         genres_text = json.dumps(genres) if genres is not None else None
+        prov_text = json.dumps(provenance) if provenance else None
         async with self._write_lock:
             conn = await self.get_connection()
             if not force and source != "manual":
@@ -2138,9 +2226,11 @@ class DatabaseManager:
                     return
             await conn.execute('''
                 INSERT OR REPLACE INTO artist_enrichment
-                    (artist_name, mbid, country, area, genres, source, score, status, fetched_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, strftime('%s','now'))
-            ''', (artist_name, mbid, country, area, genres_text, source, score, status))
+                    (artist_name, mbid, country, area, genres, source, score, status,
+                     provenance, fetched_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%s','now'))
+            ''', (artist_name, mbid, country, area, genres_text, source, score, status,
+                  prov_text))
             await conn.commit()
 
     async def set_manual_artist_enrichment(
@@ -2159,6 +2249,8 @@ class DatabaseManager:
         await self.upsert_artist_enrichment(
             artist_name, country=(country or None), genres=genre_objs,
             source="manual", status="ok", score=100, force=True,
+            provenance={"country": "manual" if country else None,
+                        "genres": "manual" if genre_objs else None},
         )
 
     async def get_genre_vocabulary(self, limit: int = 60) -> list[dict]:
@@ -2213,12 +2305,6 @@ class DatabaseManager:
         'Various', 'Unknown') carry no genre information, and the French
         localisations some sources emit are folded to their English token so
         they join the corpus vocabulary instead of forking it."""
-        _JUNK = {"divers", "various", "unknown", "other", "misc", "n/a"}
-        _LOCALISED = {
-            "électronique": "Electronic", "electronique": "Electronic",
-            "danse": "Dance", "musique du monde": "World",
-            "bandes originales": "Soundtrack",
-        }
         conn = await self.get_connection()
         async with conn.execute(
             "SELECT al.genre FROM albums al JOIN artists ar ON ar.id = al.artist_id "
@@ -2226,60 +2312,91 @@ class DatabaseManager:
             (artist_name,),
         ) as cursor:
             rows = await cursor.fetchall()
-        out: list[str] = []
-        seen: set[str] = set()
-        for (genre_str,) in rows:
-            for part in re.split(r"[,/;|]", genre_str or ""):
-                tok = part.strip()
-                if not tok:
-                    continue
-                low = tok.lower()
-                if low in _JUNK:
-                    continue
-                tok = _LOCALISED.get(low, tok)
-                key = tok.lower()
-                if key not in seen:
-                    seen.add(key)
-                    out.append(tok)
-        return out
+        return _clean_source_tags(r[0] for r in rows)
+
+    async def get_all_artist_source_genres(self) -> dict[str, list[str]]:
+        """`get_artist_source_genres` for the WHOLE library in one query →
+        {artist_name: [tag, ...]}.
+
+        The enrichment cascade consults the artist's own files whenever
+        MusicBrainz returns no genres, which on this library is a quarter of all
+        artists. Doing that per-artist inside the sync loop would add a query per
+        iteration for data that is one cheap join."""
+        conn = await self.get_connection()
+        async with conn.execute(
+            "SELECT ar.name, al.genre FROM albums al "
+            "JOIN artists ar ON ar.id = al.artist_id "
+            "WHERE al.genre IS NOT NULL AND al.genre <> ''"
+        ) as cursor:
+            rows = await cursor.fetchall()
+        raw: dict[str, list[str]] = {}
+        for name, genre in rows:
+            if name:
+                raw.setdefault(name, []).append(genre)
+        return {n: _clean_source_tags(v) for n, v in raw.items()}
+
+    # Severity levels, ordered by how much a human is actually needed.
+    GAP_BLOCKING = 0    # nothing can place or fence this artist
+    GAP_SUGGESTED = 1   # a source proposes a value; one tap accepts it
+    GAP_THIN = 2        # works today, could be better
 
     async def get_metadata_gap_artists(self, limit: int = 200) -> list[dict]:
-        """Artists whose enrichment is missing genres and/or country, excluding
-        manual rows. Powers the wizard failure/gap resolution list.
+        """Artists the metadata workbench should offer for curation, graded by
+        whether a HUMAN is actually required.
 
-        Ordered by how much the gap HURTS the walk, not just by track count:
+        ── Why this was regraded ───────────────────────────────────────────────
+        The old grading asked "which columns are empty?" and answered in the
+        walk's internal vocabulary, which made it wildly over-eager. Measured on
+        the real 252-artist library it flagged 70 artists, of which:
 
-          1. no genres AND no country — completely invisible to the walk's pool
-             gate. Both `_pool_foreign` boundaries need evidence, so such a
-             track can never be fenced out of any queue: this is the case that
-             put Greek laiko in the middle of a Slipknot queue. Nothing but a
-             hand entry can fix it.
-          2. no genres (country known) — the genre boundary is dark, and the
-             seed side now falls back to the country fence, so these degrade
-             but are not unbounded.
-          3. country missing only — genres still gate the pool; least harmful.
+          • 32 already had a perfectly good tag in their own FILES ('Hip-Hop',
+            'Rock/Alt') that this query never looked at — they were shown as red
+            'No Tags · No Country' while the answer sat one join away;
+          • 27 more had a country (mostly GR) and no genres, shown as amber
+            'NO TAGS'. But an artist with a country is NOT dark to the walk:
+            `_pool_foreign`'s country boundary fires for a seed with no genre
+            tags at all, and `genre_graph` label-propagates a family from the
+            artist's acoustic neighbours, then splits the node by country for
+            regional scenes. These already work.
+          • only 11 were genuinely unplaceable.
+
+        So the grading now reflects what the walk can do with the row, and what
+        it would take to fix it:
+
+          GAP_BLOCKING  (0) no genres, no country, and no file tag to fall back
+                            on. `_pool_foreign` has no evidence on either
+                            boundary and `node_label` has no family — this is the
+                            case that put Greek laiko inside a Slipknot queue.
+          GAP_SUGGESTED (1) enrichment is thin, but the artist's own files carry
+                            a usable tag. One tap, no typing.
+          GAP_THIN      (2) has genres but no country, or similar. Functional;
+                            listed only when the user asks to see everything.
+
+        `source_genres` rides along on every row so the UI can show 'Files say:
+        Hip-Hop' and offer to adopt it without a second query per row.
 
         Track count breaks ties within each tier, so the artist you actually
-        listen to comes first. Ordering matters here because the list is a
-        manual work queue and nobody gets to the bottom of it."""
+        listen to comes first — the list is a work queue and nobody reaches the
+        bottom of it."""
         conn = await self.get_connection()
+        # group_concat gives us the artist's raw file tags in the same pass;
+        # _clean_source_tags does the junk/localisation folding below.
         sql = (
             "SELECT a.name AS artist_name, a.track_count AS track_count, "
-            "e.country AS country, e.genres AS genres, e.source AS source, e.status AS status, "
-            "CASE "
-            "  WHEN (e.genres IS NULL OR e.genres = '' OR e.genres = '[]') "
-            "       AND (e.country IS NULL OR e.country = '') THEN 0 "
-            "  WHEN (e.genres IS NULL OR e.genres = '' OR e.genres = '[]') THEN 1 "
-            "  ELSE 2 "
-            "END AS gap_severity "
+            "e.country AS country, e.genres AS genres, e.source AS source, "
+            "e.status AS status, e.provenance AS provenance, "
+            "(SELECT group_concat(al.genre, '|') FROM albums al "
+            "   WHERE al.artist_id = a.id AND al.genre IS NOT NULL AND al.genre <> '' "
+            ") AS raw_file_genres "
             "FROM artists a LEFT JOIN artist_enrichment e ON e.artist_name = a.name "
             "WHERE (e.artist_name IS NULL OR e.genres IS NULL OR e.genres = '' OR e.genres = '[]' "
             "       OR e.country IS NULL OR e.country = '') "
             "  AND (e.source IS NULL OR e.source <> 'manual') "
-            "ORDER BY gap_severity ASC, a.track_count DESC LIMIT ?"
+            "ORDER BY a.track_count DESC"
         )
-        async with conn.execute(sql, (limit,)) as cursor:
+        async with conn.execute(sql) as cursor:
             rows = await cursor.fetchall()
+
         out = []
         for r in rows:
             d = dict(r)
@@ -2287,17 +2404,41 @@ class DatabaseManager:
                 d["genres"] = json.loads(d["genres"]) if d["genres"] else []
             except Exception:
                 d["genres"] = []
-            out.append(d)
-        return out
+            try:
+                d["provenance"] = json.loads(d["provenance"]) if d.get("provenance") else {}
+            except Exception:
+                d["provenance"] = {}
+            d["source_genres"] = _clean_source_tags(
+                (d.pop("raw_file_genres", None) or "").split("|")
+            )
 
-    async def get_metadata_coverage(self) -> dict:
+            has_genres = bool(d["genres"])
+            has_country = bool((d.get("country") or "").strip())
+            has_files = bool(d["source_genres"])
+
+            if has_genres or has_country:
+                d["gap_severity"] = self.GAP_THIN
+            elif has_files:
+                d["gap_severity"] = self.GAP_SUGGESTED
+            else:
+                d["gap_severity"] = self.GAP_BLOCKING
+            out.append(d)
+
+        out.sort(key=lambda x: (x["gap_severity"], -(x.get("track_count") or 0)))
+        return out[:limit]
+
+    async def get_metadata_coverage(self, gaps: list[dict] | None = None) -> dict:
         """Library-wide metadata health, for the workbench summary.
 
-        The headline is TRACK-level genre coverage, because that is the field
-        the walk's pool gate reads first (the genre boundary); country is the
-        fallback the untagged-seed / regional fence uses. Artist-level severity
-        counts mirror `get_metadata_gap_artists` so the summary and the list
-        agree on what 'critical' means."""
+        The headline is how many artists Auto-Play can PLACE — an artist with a
+        genre or a country can be positioned in the journey graph and fenced by
+        `_pool_foreign`; one with neither cannot. That is the fact the user acts
+        on, and unlike a raw tag percentage it doesn't nag about artists that
+        already work.
+
+        Pass `gaps` when the caller has already run `get_metadata_gap_artists`.
+        Without it this method ran its own full-library gap scan and the pane
+        then ran a second one, scanning every artist twice per reload."""
         conn = await self.get_connection()
 
         async def scalar(sql: str) -> int:
@@ -2326,9 +2467,11 @@ class DatabaseManager:
         )
         total_artists = await scalar("SELECT COUNT(*) FROM artists")
 
-        gaps = await self.get_metadata_gap_artists(limit=1_000_000)
+        if gaps is None:
+            gaps = await self.get_metadata_gap_artists(limit=1_000_000)
         from collections import Counter
-        sev = Counter(g.get("gap_severity", 2) for g in gaps)
+        sev = Counter(g.get("gap_severity", self.GAP_THIN) for g in gaps)
+        blocking = sev.get(self.GAP_BLOCKING, 0)
         return {
             "tracks": total,
             "tracks_with_genres": with_genres,
@@ -2338,10 +2481,18 @@ class DatabaseManager:
             "genre_pct": (with_genres / total) if total else 0.0,
             "country_pct": (with_country / total) if total else 0.0,
             "artists": total_artists,
+            # The headline: artists Auto-Play can position at all. Everything
+            # except GAP_BLOCKING has either a genre or a country to work from.
+            "placeable": max(0, total_artists - blocking),
             "gap_artists": len(gaps),
-            "critical": sev.get(0, 0),   # no genres AND no country
-            "no_genres": sev.get(1, 0),  # no genres, country known
-            "no_country": sev.get(2, 0), # genres known, no country
+            "blocking": blocking,
+            "suggested": sev.get(self.GAP_SUGGESTED, 0),
+            "thin": sev.get(self.GAP_THIN, 0),
+            # Legacy aliases, kept so any caller that still reads the old keys
+            # gets a sane number rather than a KeyError.
+            "critical": blocking,
+            "no_genres": sev.get(self.GAP_SUGGESTED, 0),
+            "no_country": sev.get(self.GAP_THIN, 0),
         }
 
     async def set_manual_artist_enrichment_bulk(
@@ -2350,8 +2501,9 @@ class DatabaseManager:
     ) -> int:
         """Apply the SAME manual override to many artists at once — the batch
         move for a whole scene (e.g. a shelf of Greek artists that are all GR +
-        trap/hip hop). Rebuilds the NPMI genre model ONCE at the end rather than
-        per artist. Returns the number of artists written."""
+        trap/hip hop), and what a drag of many artists onto one genre bin calls.
+        Rebuilds the walk's derived models ONCE at the end rather than per
+        artist. Returns the number of artists written."""
         n = 0
         for name in artist_names:
             try:
@@ -2362,15 +2514,73 @@ class DatabaseManager:
             except Exception as exc:
                 logger.warning("bulk manual enrichment failed for %s: %s", name, exc)
         if refresh_model and n:
-            try:
-                from utils.track_graph import build_genre_affinity, build_journey_graph
-                await build_genre_affinity(self)
-                # Country/genre edits move nodes and regional splits, so refresh
-                # the journey graph too (coords are unchanged, so this is cheap).
-                await build_journey_graph(self)
-            except Exception as exc:
-                logger.debug("genre model refresh after bulk override failed: %s", exc)
+            # Shared with every other enrichment write path, so a bulk override
+            # and a single Save can never refresh different subsets of the
+            # derived models (they used to: only this path rebuilt the journey
+            # graph, which is the one the walk actually traverses).
+            from utils.metadata_enrich import _do_refresh_walk_models
+            await _do_refresh_walk_models(self)
         return n
+
+    async def bulk_tag_artists(
+        self, artist_names: list[str], *, genre: str | None = None,
+        country: str | None = None, refresh_model: bool = True,
+    ) -> int:
+        """MERGE one genre and/or country into many artists at once — what
+        dropping a selection onto a genre bin calls.
+
+        Unlike `set_manual_artist_enrichment_bulk`, which overwrites every
+        artist with the same values, this preserves what each artist already
+        has: dropping twenty artists on 'hip hop' must not erase the country
+        MusicBrainz already found for six of them, and tagging a country must
+        not blank the genres. Adding is the whole point — the user is asserting
+        one fact they know, not redefining the artist.
+
+        Returns the number of artists written."""
+        g = (genre or "").strip().lower() or None
+        c = (country or "").strip().upper() or None
+        if not g and not c:
+            return 0
+        n = 0
+        for name in artist_names:
+            try:
+                cur = await self.get_artist_enrichment(name) or {}
+                names_now = [
+                    (x.get("name") if isinstance(x, dict) else str(x))
+                    for x in (cur.get("genres") or [])
+                ]
+                merged = list(names_now)
+                if g and g not in {s.lower() for s in merged if s}:
+                    merged.append(g)
+                await self.set_manual_artist_enrichment(
+                    name,
+                    country=c or (cur.get("country") or None),
+                    genres=merged,
+                )
+                n += 1
+            except Exception as exc:
+                logger.warning("bulk_tag_artists failed for %s: %s", name, exc)
+        if refresh_model and n:
+            from utils.metadata_enrich import _do_refresh_walk_models
+            await _do_refresh_walk_models(self)
+        return n
+
+    async def get_library_countries(self) -> list[dict]:
+        """Countries already attested in this library, most-used first, as
+        [{'code', 'artists'}].
+
+        Powers the country picker. Typing a bare ISO code into a text field
+        means knowing that Greece is 'GR' — but the library already knows which
+        countries it contains, and the right answer is almost always one of
+        them."""
+        conn = await self.get_connection()
+        async with conn.execute(
+            "SELECT country, COUNT(*) FROM artist_enrichment "
+            "WHERE country IS NOT NULL AND country <> '' "
+            "GROUP BY country ORDER BY COUNT(*) DESC"
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [{"code": r[0], "artists": r[1]} for r in rows if r[0]]
 
     async def get_low_confidence_artists(self, limit: int = 200) -> list[dict]:
         """Artists whose enrichment has status='lowconfidence'. Powers the wizard match resolution list."""
@@ -2404,35 +2614,48 @@ class DatabaseManager:
         await self.upsert_artist_enrichment(
             artist_name, mbid=mbid, country=country, area=area,
             genres=genres, source="musicbrainz", score=score, status=status, force=True,
+            provenance={"country": "musicbrainz" if country else None,
+                        "genres": "musicbrainz" if genres else None},
         )
 
     async def get_artists_needing_enrichment(
         self, limit: int | None = None, include_failed: bool = False,
+        retry_incomplete: bool = False,
     ) -> list[str]:
-        """Lock-free read: distinct artist names that have no cached enrichment
-        yet (or, with include_failed, also those whose last attempt errored /
-        wasn't found / came back INCOMPLETE — empty genres). The incomplete case
-        lets a re-sync heal rows the old MusicBrainz search populated from the
-        wrong entity (e.g. a tribute band → empty genres). Rows the user filled
-        by hand (source='manual') are never re-fetched. Drives the batch pass."""
+        """Lock-free read: artist names the next enrichment pass should fetch.
+        Rows the user filled by hand (source='manual') are never re-fetched.
+
+        Three widening scopes, because the callers want different things:
+
+          default            artists with NO enrichment row at all. What the
+                             background pass after a library index uses — cheap,
+                             and it only touches genuinely new artists.
+          include_failed     also rows whose last attempt ERRORED, i.e. a
+                             transient offline/rate-cap failure worth retrying.
+          retry_incomplete   also rows that succeeded but came back with EMPTY
+                             GENRES. This is what lets a re-sync heal an artist
+                             MusicBrainz has no tags for by trying the other
+                             tiers (the artist's files, then Deezer).
+
+        NB `retry_incomplete` used to be *described* here as part of
+        `include_failed` while the SQL did no such thing, so rows that resolved
+        to nothing were never revisited and the documented healing never
+        happened. It is now an explicit, separate scope."""
         conn = await self.get_connection()
+        clauses = ["e.artist_name IS NULL"]
         if include_failed:
-            # Re-fetch artists with no enrichment row OR whose last attempt errored (transient failures).
-            # Processed rows (status='ok', 'lowconfidence', 'notfound') are preserved so sync decreases monotonically.
-            sql = (
-                "SELECT a.name FROM artists a "
-                "LEFT JOIN artist_enrichment e ON e.artist_name = a.name "
-                "WHERE (e.artist_name IS NULL OR e.status = 'error') "
-                "  AND (e.source IS NULL OR e.source <> 'manual') "
-                "ORDER BY a.track_count DESC"
+            clauses.append("e.status = 'error'")
+        if retry_incomplete:
+            clauses.append(
+                "(e.genres IS NULL OR e.genres = '' OR e.genres = '[]')"
             )
-        else:
-            sql = (
-                "SELECT a.name FROM artists a "
-                "LEFT JOIN artist_enrichment e ON e.artist_name = a.name "
-                "WHERE e.artist_name IS NULL "
-                "ORDER BY a.track_count DESC"
-            )
+        sql = (
+            "SELECT a.name FROM artists a "
+            "LEFT JOIN artist_enrichment e ON e.artist_name = a.name "
+            f"WHERE ({' OR '.join(clauses)}) "
+            "  AND (e.source IS NULL OR e.source <> 'manual') "
+            "ORDER BY a.track_count DESC"
+        )
         if limit is not None:
             sql += f" LIMIT {int(limit)}"
         async with conn.execute(sql) as cursor:

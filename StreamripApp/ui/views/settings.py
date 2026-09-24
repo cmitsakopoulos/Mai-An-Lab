@@ -794,10 +794,15 @@ class SettingsView:
             ],
             expand=True,
         )
+        # 28pt side gutters suit a list of setting cards. A full-height data
+        # pane needs the width back (at 390pt that gutter is 14% of the screen),
+        # so `_show_sub_page_full` narrows it and everything else restores it.
+        self._page_padding = ft.Padding.symmetric(horizontal=28, vertical=20)
+        self._page_padding_tight = ft.Padding.only(left=12, right=12, top=20, bottom=0)
         self.main_content = ft.Container(
             content=self._content_stack,
             expand=True, 
-            padding=ft.Padding.symmetric(horizontal=28, vertical=20),
+            padding=self._page_padding,
         )
 
     def _replace_scroll_column(self, controls: list[ft.Control] = None) -> ft.Column:
@@ -1298,8 +1303,7 @@ class SettingsView:
 
     def _show_hub(self):
         """Displays the main settings menu (the 'hub')."""
-        if getattr(self, "_enrichment_wizard_pane", None) and self._enrichment_wizard_pane.step == 5:
-            self._enrichment_wizard_pane = None
+        self.main_content.padding = self._page_padding
         # Leaving a subpage has to clear the marker _show_sub_page sets, or
         # "am I inside a subpage?" reads True forever after the first visit —
         # which would trap back-navigation on this rung and never let it fall
@@ -1317,6 +1321,7 @@ class SettingsView:
         self._current_subpage_name = title
         self._baseline_subpage_state = self._get_subpage_state(title)
         self._hide_save_bar()
+        self.main_content.padding = self._page_padding
         subpage_controls = [
             ft.Row([
                 ft.IconButton(ft.Icons.ARROW_BACK_IOS_NEW_ROUNDED, icon_color=CYAN, icon_size=16, 
@@ -1332,6 +1337,41 @@ class SettingsView:
 
         if title == "About" and hasattr(self, "page") and self.page and hasattr(self.page, "run_task"):
             self.page.run_task(self._scroll_about_to_bottom)
+
+    def _show_sub_page_full(self, title: str, pane: ft.Control):
+        """Mount a sub-page that owns its OWN full-height scroll.
+
+        `_show_sub_page` drops its content into the hub's shared
+        `ft.Column(scroll=AUTO)`. That is right for a list of setting cards, but
+        wrong for a pane that contains a ListView: the list then has no bounded
+        height, so you get two competing scroll controllers and — per the rule
+        recorded in library.py — an effectively unbounded subtree. The metadata
+        workbench was mounted that way, which is why scrolling it felt like it
+        was fighting back.
+
+        Here the scroll column is replaced by a NON-scrolling Column whose last
+        child expands, so the pane's ListView is a direct child of an expanding
+        Column and gets a tight height. The back-chevron header and the
+        `_current_subpage_name` marker (which back-navigation and swipe-back
+        both read) behave exactly as in `_show_sub_page`."""
+        self._current_subpage_name = title
+        self._baseline_subpage_state = None
+        self._hide_save_bar()
+        self.main_content.padding = self._page_padding_tight
+        header = ft.Row([
+            ft.IconButton(ft.Icons.ARROW_BACK_IOS_NEW_ROUNDED, icon_color=CYAN, icon_size=16,
+                          on_click=lambda _: self._show_hub()),
+            ft.Text(title, size=18, weight=ft.FontWeight.W_700, color=TEXT,
+                    overflow=ft.TextOverflow.ELLIPSIS, max_lines=1, expand=True),
+        ], spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER)
+
+        self._scroll_column = ft.Column(
+            [header, ft.Container(height=10), pane],
+            expand=True, spacing=0,
+        )
+        if hasattr(self, "_content_stack") and self._content_stack.controls:
+            self._content_stack.controls[0] = self._scroll_column
+        self.app.safe_update(lambda: None)
 
     async def _scroll_about_to_bottom(self):
         """Auto-scroll the About section smoothly to the bottom to highlight contact info."""
@@ -2051,22 +2091,24 @@ class SettingsView:
             color=CYAN,
         )
 
-    def _on_launch_enrichment_wizard_click(self, _e=None):
-        from ui.player.enrichment_wizard import MetadataEnrichmentWizardPane
-        if not getattr(self, "_enrichment_wizard_pane", None):
-            self._enrichment_wizard_pane = MetadataEnrichmentWizardPane(self.app, on_back=lambda: self._show_hub())
-        self._show_sub_page("Enrich Metadata", self._enrichment_wizard_pane)
-
-    def _on_open_metadata_workbench_click(self, _e=None):
+    def _on_open_metadata_workbench_click(self, _e=None, focus_artist: str | None = None):
         """Standing metadata-curation surface — sync, review, and manual tagging
         in one place. Reuses the standing pane instance so background MusicBrainz
-        sync tasks continue uninterrupted when switching tabs or navigating away."""
+        sync tasks continue uninterrupted when switching tabs or navigating away.
+
+        `focus_artist` scrolls to and opens that artist, which is how the
+        Library's per-artist edit button arrives here instead of opening a
+        second, separate editor."""
         from ui.player.metadata_workbench import MetadataWorkbenchPane
         if not getattr(self, "_metadata_workbench_pane", None):
             self._metadata_workbench_pane = MetadataWorkbenchPane(self.app, on_back=lambda: self._show_hub())
         elif not self._metadata_workbench_pane.syncing:
             self._metadata_workbench_pane._reload()
-        self._show_sub_page("Metadata", self._metadata_workbench_pane)
+        if focus_artist:
+            self._metadata_workbench_pane.focus_artist(focus_artist)
+        # Full-height mount: the pane owns a ListView, which must not be nested
+        # inside the hub's scrolling Column (see _show_sub_page_full).
+        self._show_sub_page_full("Metadata", self._metadata_workbench_pane)
 
     # ── State bundle (export/import) ────────────────────────────────────────
     def _on_export_state_click(self, _e):
