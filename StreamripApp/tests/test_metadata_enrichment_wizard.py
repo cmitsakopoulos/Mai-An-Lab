@@ -400,3 +400,181 @@ def test_qobuz_slugs_fold_onto_the_corpus_vocabulary():
     # Unknown genre object shapes must never raise.
     assert toks({}) == []
     assert toks(None) == []
+
+
+@pytest.mark.asyncio
+async def test_enrich_library_musicbrainz_isolation(monkeypatch):
+    """MusicBrainz provider queries MusicBrainz exclusively and does not fall back to Qobuz."""
+    from utils.metadata_enrich import enrich_library
+
+    qobuz_called = []
+    async def fake_lookup_qobuz(*args, **kwargs):
+        qobuz_called.append(True)
+        return {"genres": [{"name": "dance", "count": 2}], "reason": None}
+    monkeypatch.setattr("utils.metadata_qobuz.lookup_artist_genres", fake_lookup_qobuz)
+
+    class FakeMBClient:
+        def __init__(self, session, contact=None):
+            pass
+        async def lookup_artist(self, name, with_genres=True):
+            return {
+                "status": "ok", "mbid": "fake-mbid", "country": "GR",
+                "area": "Athens", "genres": [{"name": "greek rap", "count": 4}],
+                "score": 100, "reason": None,
+            }
+    monkeypatch.setattr("utils.metadata_enrich.MusicBrainzClient", FakeMBClient)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = DatabaseManager(os.path.join(tmpdir, "test.db"))
+        await db.initialize()
+        conn = await db.get_connection()
+        await conn.execute("INSERT INTO artists (id, name, track_count) VALUES (1, 'Light', 5)")
+        await conn.commit()
+
+        summary = await enrich_library(db, provider="musicbrainz", with_genres=True)
+        assert summary["status"] == "completed"
+        assert summary["enriched"] == 1
+        assert summary["provider"] == "musicbrainz"
+        assert len(qobuz_called) == 0, "Qobuz must not be queried when provider='musicbrainz'"
+
+        row = await db.get_artist_enrichment("Light")
+        assert row["source"] == "musicbrainz"
+        assert row["country"] == "GR"
+        assert row["genres"][0]["name"] == "greek rap"
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_enrich_library_musicbrainz_no_tags_no_silent_fallback(monkeypatch):
+    """When MusicBrainz has no tags, it records no_tags and does NOT silently query Qobuz."""
+    from utils.metadata_enrich import enrich_library
+
+    qobuz_called = []
+    async def fake_open_client(*args, **kwargs):
+        qobuz_called.append(True)
+        return object()
+    monkeypatch.setattr("utils.metadata_qobuz.open_client", fake_open_client)
+
+    class FakeMBClient:
+        def __init__(self, session, contact=None):
+            pass
+        async def lookup_artist(self, name, with_genres=True):
+            return {
+                "status": "ok", "mbid": "fake-mbid", "country": "US",
+                "area": "Atlanta", "genres": [], "score": 90, "reason": "no_tags",
+            }
+    monkeypatch.setattr("utils.metadata_enrich.MusicBrainzClient", FakeMBClient)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = DatabaseManager(os.path.join(tmpdir, "test.db"))
+        await db.initialize()
+        conn = await db.get_connection()
+        await conn.execute("INSERT INTO artists (id, name, track_count) VALUES (1, 'Underground Producer', 2)")
+        await conn.commit()
+
+        summary = await enrich_library(db, provider="musicbrainz", with_genres=True)
+        assert summary["status"] == "completed"
+        assert summary["enriched"] == 1
+        assert summary["reasons"].get("no_tags") == 1
+        assert len(qobuz_called) == 0, "Must not silently fall back to Qobuz"
+
+        row = await db.get_artist_enrichment("Underground Producer")
+        assert row["source"] == "musicbrainz"
+        assert row["country"] == "US"
+        assert row["genres"] == []
+        prov = row["provenance"] if isinstance(row["provenance"], dict) else json.loads(row["provenance"])
+        assert prov == {"country": "musicbrainz", "genres": None}
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_enrich_library_qobuz_isolation(monkeypatch):
+    """Qobuz provider queries Qobuz exclusively and records provenance without touching MusicBrainz."""
+    from utils.metadata_enrich import enrich_library
+
+    mb_called = []
+    class FakeMBClient:
+        def __init__(self, *args, **kwargs):
+            mb_called.append(True)
+    monkeypatch.setattr("utils.metadata_enrich.MusicBrainzClient", FakeMBClient)
+
+    class FakeQobuzClient:
+        pass
+    fake_client = FakeQobuzClient()
+
+    async def fake_open_client(*, raise_on_error=False):
+        return fake_client
+    async def fake_close_client(c):
+        pass
+    async def fake_lookup_artist_genres(c, name):
+        return {
+            "genres": [{"name": "house", "count": 5}, {"name": "techno", "count": 3}],
+            "qobuz_id": 12345, "matched_name": name, "albums_seen": 12, "reason": None,
+        }
+
+    monkeypatch.setattr("utils.metadata_qobuz.open_client", fake_open_client)
+    monkeypatch.setattr("utils.metadata_qobuz.close_client", fake_close_client)
+    monkeypatch.setattr("utils.metadata_qobuz.lookup_artist_genres", fake_lookup_artist_genres)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = DatabaseManager(os.path.join(tmpdir, "test.db"))
+        await db.initialize()
+        conn = await db.get_connection()
+        await conn.execute("INSERT INTO artists (id, name, track_count) VALUES (1, 'Franky Rizardo', 10)")
+        await conn.commit()
+
+        summary = await enrich_library(db, provider="qobuz", with_genres=True)
+        assert summary["status"] == "completed"
+        assert summary["enriched"] == 1
+        assert summary["provider"] == "qobuz"
+        assert len(mb_called) == 0, "MusicBrainz must not be queried when provider='qobuz'"
+
+        row = await db.get_artist_enrichment("Franky Rizardo")
+        assert row["source"] == "qobuz"
+        assert row["country"] is None
+        assert row["genres"][0]["name"] == "house"
+        prov = row["provenance"] if isinstance(row["provenance"], dict) else json.loads(row["provenance"])
+        assert prov == {"country": None, "genres": "qobuz"}
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_enrich_library_qobuz_loud_failure_on_open_client(monkeypatch):
+    """When Qobuz credentials fail, enrich_library fails loudly with an explicit error status."""
+    from utils.metadata_enrich import enrich_library
+
+    async def fake_open_client_fail(*, raise_on_error=False):
+        if raise_on_error:
+            raise RuntimeError("Qobuz client initialization failed (AuthError: Invalid credentials)")
+        return None
+    monkeypatch.setattr("utils.metadata_qobuz.open_client", fake_open_client_fail)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = DatabaseManager(os.path.join(tmpdir, "test.db"))
+        await db.initialize()
+        conn = await db.get_connection()
+        await conn.execute("INSERT INTO artists (id, name, track_count) VALUES (1, 'DJ Seinfeld', 5)")
+        await conn.commit()
+
+        summary = await enrich_library(db, provider="qobuz", with_genres=True)
+        assert summary["enriched"] == 0
+        assert summary["status"].startswith("error: Qobuz connection failed:")
+        assert "Invalid credentials" in summary["status"]
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_fetch_qobuz_artist_metadata_loud_failure(monkeypatch):
+    """fetch_qobuz_artist_metadata raises RuntimeError loudly on client init failure."""
+    from utils.metadata_qobuz import fetch_qobuz_artist_metadata
+
+    async def fake_open_client_fail(*, raise_on_error=False):
+        if raise_on_error:
+            raise RuntimeError("Qobuz client initialization failed (NetworkError: Connection refused)")
+        return None
+    monkeypatch.setattr("utils.metadata_qobuz.open_client", fake_open_client_fail)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await fetch_qobuz_artist_metadata("Any Artist")
+    assert "Connection refused" in str(exc_info.value)
+

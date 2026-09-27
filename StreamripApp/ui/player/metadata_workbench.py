@@ -50,7 +50,7 @@ from ui.tokens import (
     SURFACE_ELEVATED, CYAN, BG, RADIUS_CARD, RADIUS_PILL,
     ACCENT_GREEN, ACCENT_AMBER, ACCENT_RED, apply_opacity,
 )
-from ui.widgets import CupertinoSegmentedBar
+from ui.widgets import CupertinoSegmentedBar, dialog_handoff
 from utils.metadata_enrich import (
     enrich_library,
     refresh_walk_models,
@@ -102,9 +102,8 @@ _TRACKS_W = 26
 
 def _flag(cc: str | None) -> str:
     if not cc or len(cc) != 2 or not cc.isalpha():
-        return "🌐"
-    cc = cc.upper()
-    return chr(0x1F1E6 + ord(cc[0]) - 65) + chr(0x1F1E6 + ord(cc[1]) - 65)
+        return ""
+    return cc.upper()
 
 
 def _country_label(cc: str | None) -> str:
@@ -149,6 +148,8 @@ class MetadataWorkbenchPane(ft.Column):
         self._row_refs: dict[str, ft.Control] = {}
 
         # ── sync state ──
+        prefs = getattr(self.app, "_prefs", None) or {}
+        self.sync_provider = prefs.get("sync_provider", "musicbrainz")
         self.syncing = False
         self.cancel_event: asyncio.Event | None = None
         self.s_cur = self.s_total = 0
@@ -192,7 +193,14 @@ class MetadataWorkbenchPane(ft.Column):
         self._search_field.value = name
         self._reload()
 
-    # ── data ─────────────────────────────────────────────────────────────────
+    def filter_genre(self, genre_name: str):
+        """Filter workbench by genre tag or name."""
+        self._pending_focus = None
+        self.filter = "all"
+        self.search = genre_name
+        self._search_field.value = genre_name
+        self._reload()
+
     async def _reload_async(self):
         try:
             # One gap scan, shared with coverage. Previously coverage ran its
@@ -204,10 +212,32 @@ class MetadataWorkbenchPane(ft.Column):
             self.countries = await self.db.get_library_countries()
         except Exception as exc:
             logger.exception("Metadata workbench load failed: %s", exc)
+        if self.search:
+            try:
+                if not any(g["artist_name"].lower() == self.search.lower() for g in self.all_gaps):
+                    item = await self.db.get_artist_workbench_item(self.search)
+                    if item:
+                        self.all_gaps.append(item)
+                genre_artists = await self.db.get_artists_by_genre(self.search)
+                existing_names = {g["artist_name"] for g in self.all_gaps}
+                for ga in genre_artists[:30]:
+                    ganame = ga["name"]
+                    if ganame not in existing_names:
+                        item = await self.db.get_artist_workbench_item(ganame)
+                        if item:
+                            self.all_gaps.append(item)
+                            existing_names.add(ganame)
+            except Exception as e:
+                logger.debug("Failed populating additional workbench items for search: %s", e)
         self._render()
         if self._pending_focus:
             name, self._pending_focus = self._pending_focus, None
             row = next((g for g in self.all_gaps if g["artist_name"] == name), None)
+            if not row:
+                row = await self.db.get_artist_workbench_item(name)
+                if row:
+                    self.all_gaps.append(row)
+                    self._render()
             if row:
                 self._open_editor(row)
 
@@ -216,7 +246,10 @@ class MetadataWorkbenchPane(ft.Column):
 
     def _safe_update(self):
         try:
-            self.app.page.update()
+            if hasattr(self.app, "safe_update"):
+                self.app.safe_update(lambda: None)
+            elif self.app.page:
+                self.app.page.update()
         except Exception:
             pass
 
@@ -237,9 +270,6 @@ class MetadataWorkbenchPane(ft.Column):
         if self.syncing:
             body = self._sync_banner()
         else:
-            # An outcome, not a percentage: "can Auto-Play position this artist
-            # at all" is the fact the user can act on, and it doesn't nag about
-            # the artists that already work.
             if artists == 0:
                 headline, sub, tone = "No artists yet", "Index your library to begin.", DIM
             elif blocking == 0:
@@ -250,9 +280,54 @@ class MetadataWorkbenchPane(ft.Column):
                 headline = f"{placeable:,} of {artists:,} artists placeable"
                 sub = f"{blocking} still need a genre or a country."
                 tone = ACCENT_AMBER
-            # The button sits on its OWN row. Inline, it stole ~120pt from the
-            # headline, which then wrapped to two lines and pushed the subtitle
-            # to three — a 230pt card for two short sentences.
+
+            def _select_provider(p: str):
+                if self.sync_provider != p:
+                    self.sync_provider = p
+                    if hasattr(self.app, "set_pref"):
+                        self.app.set_pref("sync_provider", p)
+                    elif hasattr(self.app, "_prefs") and isinstance(self.app._prefs, dict):
+                        self.app._prefs["sync_provider"] = p
+                    self._render_hero()
+                    self._safe_update()
+
+            mb_active = self.sync_provider == "musicbrainz"
+            qz_active = self.sync_provider == "qobuz"
+
+            mb_btn = ft.Container(
+                content=ft.Row([
+                    ft.Icon(ft.Icons.PUBLIC_ROUNDED, size=13, color=CYAN if mb_active else DIM),
+                    ft.Text("MusicBrainz", size=12, weight=ft.FontWeight.W_600 if mb_active else ft.FontWeight.W_400,
+                            color=TEXT if mb_active else DIM),
+                ], spacing=6, alignment=ft.MainAxisAlignment.CENTER),
+                bgcolor=apply_opacity(0.15, CYAN) if mb_active else "transparent",
+                border=ft.Border.all(1, CYAN if mb_active else BORDER),
+                border_radius=RADIUS_PILL,
+                padding=ft.Padding.symmetric(horizontal=12, vertical=6),
+                ink=True,
+                on_click=lambda _e: _select_provider("musicbrainz"),
+            )
+
+            qz_btn = ft.Container(
+                content=ft.Row([
+                    ft.Icon(ft.Icons.STOREFRONT_ROUNDED, size=13, color="#FF9F0A" if qz_active else DIM),
+                    ft.Text("Qobuz", size=12, weight=ft.FontWeight.W_600 if qz_active else ft.FontWeight.W_400,
+                            color=TEXT if qz_active else DIM),
+                ], spacing=6, alignment=ft.MainAxisAlignment.CENTER),
+                bgcolor=apply_opacity(0.15, "#FF9F0A") if qz_active else "transparent",
+                border=ft.Border.all(1, "#FF9F0A" if qz_active else BORDER),
+                border_radius=RADIUS_PILL,
+                padding=ft.Padding.symmetric(horizontal=12, vertical=6),
+                ink=True,
+                on_click=lambda _e: _select_provider("qobuz"),
+            )
+
+            provider_desc = (
+                "MusicBrainz: Open community DB · Authoritative country & community tags"
+                if mb_active else
+                "Qobuz: Curated store catalog · Deep album genre consensus"
+            )
+
             body = ft.Column([
                 ft.Row([
                     ft.Container(width=3, height=34, bgcolor=tone, border_radius=2),
@@ -265,11 +340,14 @@ class MetadataWorkbenchPane(ft.Column):
                     ], spacing=2, expand=True, tight=True),
                 ], spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER),
                 ft.Row([
+                    mb_btn,
+                    qz_btn,
                     ft.Container(expand=True),
                     self._filled_btn("Sync", lambda _e: self._start_sync(),
                                      icon=ft.Icons.CLOUD_SYNC_ROUNDED,
                                      disabled=(artists == 0)),
-                ]),
+                ], vertical_alignment=ft.CrossAxisAlignment.CENTER, spacing=8),
+                ft.Text(provider_desc, size=10.5, color=DIM),
             ], spacing=6, tight=True)
 
         self._h_hero.content = ft.Column([
@@ -286,19 +364,16 @@ class MetadataWorkbenchPane(ft.Column):
     def _sync_banner(self) -> ft.Control:
         pct = (self.s_cur / self.s_total) if self.s_total else None
         self._sync_bar = ft.ProgressBar(value=pct, color=CYAN, bgcolor=SURFACE2, height=5)
+        provider_title = self.sync_provider.capitalize()
         self._sync_label = ft.Text(
-            f"Looking up {self.s_cur} of {self.s_total} · {self.s_name}"[:64],
+            f"{provider_title}: {self.s_cur} of {self.s_total} · {self.s_name}"[:64],
             size=12.5, color=TEXT, weight=ft.FontWeight.W_600,
             overflow=ft.TextOverflow.ELLIPSIS, max_lines=1,
         )
-        # Four counters, not three. 'No tags found' and 'Connection failed' are
-        # completely different situations that the old UI collapsed into one ✗,
-        # so an outage looked exactly like a library full of untagged artists.
         self._sync_counts = ft.Row([
             self._counter("matched", self.s_ok, ACCENT_GREEN),
-            self._counter("from other sources", self.s_sup, "#BF5AF2"),
             self._counter("no tags found", self.s_blank, DIM),
-            self._counter("connection failed", self.s_err, ACCENT_RED),
+            self._counter("failed", self.s_err, ACCENT_RED),
         ], spacing=14, wrap=True, run_spacing=4)
         return ft.Column([
             self._sync_label,
@@ -321,12 +396,13 @@ class MetadataWorkbenchPane(ft.Column):
         if not self.syncing or getattr(self, "_sync_bar", None) is None:
             return
         self._sync_bar.value = (self.s_cur / self.s_total) if self.s_total else None
+        provider_title = self.sync_provider.capitalize()
         self._sync_label.value = (
-            f"Looking up {self.s_cur} of {self.s_total} · {self.s_name}"[:64]
+            f"{provider_title}: {self.s_cur} of {self.s_total} · {self.s_name}"[:64]
         )
         for ctrl, n in zip(
             self._sync_counts.controls,
-            (self.s_ok, self.s_sup, self.s_blank, self.s_err),
+            (self.s_ok, self.s_blank, self.s_err),
         ):
             ctrl.controls[0].value = str(n)
         self._safe_update()
@@ -347,51 +423,54 @@ class MetadataWorkbenchPane(ft.Column):
     async def _do_sync(self):
         def cb(i, total, name, res):
             self.s_cur, self.s_total, self.s_name = i, total, name
-            st, reason = res.get("status"), res.get("reason")
-            if st == "error":
+            st = res.get("status")
+            reason = res.get("reason")
+            if st == "error" or (reason and str(reason).startswith("error:")):
                 self.s_err += 1
             elif not res.get("genres"):
                 self.s_blank += 1
-            elif reason in ("files", "qobuz"):
-                self.s_sup += 1
             else:
                 self.s_ok += 1
             self._update_sync_banner()
 
+        from utils.progress_notify import (
+            ProgressNotifier, metadata_progress_cb, metadata_summary_text,
+        )
+        notifier = ProgressNotifier("metadata", "Syncing artist metadata")
         summary: dict = {}
         try:
             summary = await enrich_library(
-                self.db, with_genres=True, include_failed=True,
-                retry_incomplete=True, progress=cb,
+                self.db, provider=self.sync_provider,
+                with_genres=True, include_failed=True,
+                retry_incomplete=True, progress=metadata_progress_cb(notifier, cb),
                 cancel_event=self.cancel_event,
             )
         except Exception as exc:
             logger.exception("Workbench sync failed: %s", exc)
             summary = {"status": f"error: {exc}"}
         finally:
+            notifier.finish(metadata_summary_text(summary))
             self.syncing = False
             await self._reload_async()
             self._report_sync(summary)
 
     def _report_sync(self, summary: dict):
-        """Say what actually happened.
-
-        The summary used to be discarded entirely, so an aborted pass, a
-        cancelled one and a missing aiohttp all reported "Sync done · 0 matched"
-        — indistinguishable from a library that genuinely has no metadata."""
+        """Say what actually happened loudly."""
         status = (summary or {}).get("status")
+        provider_name = (summary or {}).get("provider", self.sync_provider).capitalize()
         if status == "no_aiohttp":
             self.app.show_snackbar(
                 "Can't sync — networking is unavailable in this build.",
                 color=ACCENT_RED)
             return
         if isinstance(status, str) and status.startswith("error:"):
-            self.app.show_snackbar(f"Sync failed — {status[6:].strip()}", color=ACCENT_RED)
+            # Loud failure reporting
+            self.app.show_snackbar(f"{provider_name} sync failed: {status[6:].strip()}", color=ACCENT_RED)
             return
         if status == "aborted":
             self.app.show_snackbar(
-                f"Stopped after {self.s_cur} of {self.s_total} — no connection. "
-                f"Nothing was lost; run Sync again when you're back online.",
+                f"Stopped after {self.s_cur} of {self.s_total} — connection failed. "
+                f"Run Sync again when you're back online.",
                 color=ACCENT_RED)
             return
         if status == "cancelled":
@@ -400,24 +479,22 @@ class MetadataWorkbenchPane(ft.Column):
                 f"{summary.get('enriched', 0)} artists saved.", color=ACCENT_AMBER)
             return
         if status == "uptodate":
-            self.app.show_snackbar("Everything is already up to date.",
+            self.app.show_snackbar(f"All artists are already up to date on {provider_name}.",
                                    icon=ft.Icons.CHECK_CIRCLE, color=CYAN)
             return
 
         parts = [f"{self.s_ok} matched"]
-        srcs = [("your files", summary.get("from_files", 0) or 0),
-                ("Qobuz", summary.get("from_qobuz", 0) or 0)]
-        filled = [f"{n} from {label}" for label, n in srcs if n]
-        if filled:
-            parts.append(", ".join(filled))
         if self.s_blank:
-            parts.append(f"{self.s_blank} still blank")
-        self.app.show_snackbar("Sync done · " + ", ".join(parts),
+            parts.append(f"{self.s_blank} blank/unmatched")
+        if self.s_err:
+            parts.append(f"{self.s_err} failed")
+        self.app.show_snackbar(f"{provider_name} Sync done · " + ", ".join(parts),
                                icon=ft.Icons.CHECK_CIRCLE, color=CYAN)
 
     def _cancel_sync(self):
         if self.cancel_event:
             self.cancel_event.set()
+
 
     # ── FILTER ───────────────────────────────────────────────────────────────
     def _render_filter(self):
@@ -467,7 +544,17 @@ class MetadataWorkbenchPane(ft.Column):
             elif self.filter == "suggested":
                 pool = [g for g in pool if g.get("gap_severity") == 1]
         if q:
-            pool = [g for g in pool if q in g["artist_name"].lower()]
+            def _matches_q(g):
+                if q in (g.get("artist_name") or "").lower():
+                    return True
+                for gn in _genre_names(g.get("genres")):
+                    if q in gn.lower():
+                        return True
+                for gn in (g.get("source_genres") or []):
+                    if q in str(gn).lower():
+                        return True
+                return False
+            pool = [g for g in pool if _matches_q(g)]
         return pool
 
     def _render_list(self):
@@ -573,10 +660,15 @@ class MetadataWorkbenchPane(ft.Column):
         # 'Vasilis Karras, Pantelis Pantelidis' has no useful one-line form at
         # this width, and a truncated name is not something you can act on.
         name_cell = ft.Row([
-            ft.Text(_flag(country), size=11) if country else ft.Container(width=0),
+            ft.Container(
+                content=ft.Text(country.upper(), size=9.5, weight=ft.FontWeight.W_700, color="#BF5AF2"),
+                bgcolor=apply_opacity(0.14, "#BF5AF2"),
+                border_radius=4,
+                padding=ft.Padding.symmetric(horizontal=4, vertical=1),
+            ) if country else ft.Container(width=0),
             ft.Text(name, size=13, weight=ft.FontWeight.W_600, color=TEXT,
                     max_lines=2, overflow=ft.TextOverflow.ELLIPSIS, expand=True),
-        ], spacing=4, vertical_alignment=ft.CrossAxisAlignment.START, tight=True)
+        ], spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER, tight=True)
 
         genre_cell = ft.Column([
             ft.Text(gtext, size=11.5, color=gcolor,
@@ -746,7 +838,7 @@ class MetadataWorkbenchPane(ft.Column):
     def _bin(self, label: str, *, kind: str, count: int) -> ft.Control:
         accent = {"genre": CYAN, "country": "#BF5AF2", "new": DIM}[kind]
         armed = bool(self.selected)
-        text = _flag(label) + " " + label if kind == "country" else label
+        text = label
 
         inner = ft.Container(
             content=ft.Row([
@@ -821,11 +913,11 @@ class MetadataWorkbenchPane(ft.Column):
                 self.app.show_snackbar(f"Couldn't save: {exc}", color=ACCENT_RED)
                 return
             what = genre or _country_label(country)
+            self.selected.clear()
+            await self._reload_async()
             self.app.show_snackbar(
                 f"{n} artist{'s' if n != 1 else ''} → {what}",
                 icon=ft.Icons.CHECK_CIRCLE, color=CYAN)
-            self.selected.clear()
-            await self._reload_async()
             self._schedule_walk_refresh()
         self.app.page.run_task(_do)
 
@@ -835,6 +927,8 @@ class MetadataWorkbenchPane(ft.Column):
         Coalesced, so tagging six artists in a row costs one rebuild rather than
         six full-library passes — and confirmed only when it has actually
         landed, since that is the moment the queue would really change."""
+        if hasattr(self.app, "library_view") and self.app.library_view:
+            self.app.library_view._needs_reload = True
         refresh_walk_models(
             self.db,
             on_done=lambda _s: self.app.show_snackbar(
@@ -849,6 +943,9 @@ class MetadataWorkbenchPane(ft.Column):
         self._safe_update()
 
     def _prompt_new_genre(self, names: list[str]):
+        dlg = None
+        _on_dismiss, _close = dialog_handoff(self.app, lambda: dlg)
+
         field = ft.TextField(
             label="Genre", autofocus=True, bgcolor=SURFACE2, border_color=BORDER,
             focused_border_color=CYAN, border_radius=10,
@@ -857,9 +954,10 @@ class MetadataWorkbenchPane(ft.Column):
 
         def _ok(_e=None):
             val = (field.value or "").strip().lower()
-            self.app.dismiss_dialog(dlg)
             if val:
-                self._commit_tag(names, genre=val)
+                _close(lambda: self._commit_tag(names, genre=val))
+            else:
+                _close()
 
         field.on_submit = _ok
         dlg = ft.AlertDialog(
@@ -872,9 +970,10 @@ class MetadataWorkbenchPane(ft.Column):
                 field,
             ], tight=True, spacing=12, width=320),
             actions=[
-                ft.TextButton("Cancel", on_click=lambda _e: self.app.dismiss_dialog(dlg)),
+                ft.TextButton("Cancel", on_click=lambda _e: _close()),
                 self._filled_btn("Apply", _ok),
             ],
+            on_dismiss=_on_dismiss,
         )
         self.app.page.show_dialog(dlg)
 
@@ -884,6 +983,9 @@ class MetadataWorkbenchPane(ft.Column):
 
         It used to be an inline expander that pushed the list around under the
         user's finger and forced a full re-render on every chip tap."""
+        sheet = None
+        _on_sheet_dismissed, _close = dialog_handoff(self.app, lambda: sheet)
+
         name = item["artist_name"]
         genres = {g.lower() for g in _genre_names(item.get("genres"))}
         files = item.get("source_genres") or []
@@ -942,25 +1044,38 @@ class MetadataWorkbenchPane(ft.Column):
             for c in self.countries[:8]:
                 code = c["code"]
                 on = country["v"] == code
-                ch = _chip(f"{_flag(code)} {code}", on=on, accent="#BF5AF2")
+                ch = _chip(code, on=on, accent="#BF5AF2")
                 ch.on_click = lambda _e, code=code: (
                     country.__setitem__("v", "" if country["v"] == code else code),
                     _rebuild(),
                 )
                 country_row.controls.append(ch)
-            self._safe_update()
+            try:
+                chips_row.update()
+                country_row.update()
+            except Exception:
+                self._safe_update()
 
         def _add_custom(e):
             v = (e.control.value or "").strip().lower()
             if v:
-                genres.add(v)
+                for part in v.split(","):
+                    p = part.strip()
+                    if p:
+                        genres.add(p)
             e.control.value = ""
             _rebuild()
         custom.on_submit = _add_custom
         _rebuild()
 
         def _save(_e):
-            self.app.dismiss_dialog(sheet)
+            # Capture any unsubmitted genre left in the custom input field
+            unsubmitted = (custom.value or "").strip().lower()
+            if unsubmitted:
+                for part in unsubmitted.split(","):
+                    p = part.strip()
+                    if p:
+                        genres.add(p)
 
             async def _do():
                 try:
@@ -970,28 +1085,62 @@ class MetadataWorkbenchPane(ft.Column):
                     logger.exception("save failed for %s: %s", name, exc)
                     self.app.show_snackbar(f"Couldn't save: {exc}", color=ACCENT_RED)
                     return
-                self.app.show_snackbar(f"Saved {name}", icon=ft.Icons.CHECK_CIRCLE,
-                                       color=CYAN)
                 self.selected.discard(name)
                 await self._reload_async()
+                self.app.show_snackbar(f"Saved {name}", icon=ft.Icons.CHECK_CIRCLE,
+                                       color=CYAN)
                 self._schedule_walk_refresh()
-            self.app.page.run_task(_do)
+
+            _close(lambda: self.app.page.run_task(_do))
+
+        async def _fetch_qobuz_action():
+            self.app.show_snackbar(f"Querying Qobuz for '{name}'…", color=CYAN)
+            try:
+                from utils.metadata_qobuz import fetch_qobuz_artist_metadata
+                res = await fetch_qobuz_artist_metadata(name)
+            except Exception as exc:
+                logger.error("Qobuz lookup failed for %s: %s", name, exc)
+                self.app.show_snackbar(f"Qobuz error: {exc}", color=ACCENT_RED)
+                return
+
+            qgenres = res.get("genres") or []
+            reason = res.get("reason")
+            if qgenres:
+                count_added = 0
+                for g in qgenres:
+                    gn = g.get("name") if isinstance(g, dict) else str(g)
+                    if gn and gn.strip():
+                        tag = gn.strip().lower()
+                        if tag not in genres:
+                            genres.add(tag)
+                            count_added += 1
+                _rebuild()
+                self.app.show_snackbar(
+                    f"Qobuz: found {len(qgenres)} genres ({count_added} added)",
+                    icon=ft.Icons.CHECK_CIRCLE, color=CYAN
+                )
+            else:
+                msg = f"No genres found on Qobuz for '{name}'"
+                if reason:
+                    msg += f" ({reason})"
+                self.app.show_snackbar(msg, color=ACCENT_AMBER)
 
         body = [
             self._sheet_section("GENRES", ft.Icons.LABEL_ROUNDED, CYAN, chips_row),
             self._sheet_section("COUNTRY", ft.Icons.PUBLIC_ROUNDED, "#BF5AF2", country_row),
             ft.Row([
                 self._ghost_btn("Find on MusicBrainz",
-                                lambda _e: (self.app.dismiss_dialog(sheet),
-                                            self._open_mb_dialog(name)),
+                                lambda _e: _close(lambda: self._open_mb_dialog(name)),
                                 fg=CYAN, icon=ft.Icons.TRAVEL_EXPLORE_ROUNDED),
-            ]),
+                self._ghost_btn("Fetch from Qobuz",
+                                lambda _e: self.app.page.run_task(_fetch_qobuz_action),
+                                fg="#FF9F0A", icon=ft.Icons.CLOUD_DOWNLOAD_ROUNDED),
+            ], spacing=8, wrap=True),
         ]
         if self.filter == "uncertain":
             body.append(ft.Row([
                 self._ghost_btn("Reject this match",
-                                lambda _e, n=name: (self.app.dismiss_dialog(sheet),
-                                                    self._review_reject(n)),
+                                lambda _e, n=name: _close(lambda: self._review_reject(n)),
                                 fg=ACCENT_RED, icon=ft.Icons.CLOSE_ROUNDED),
             ]))
 
@@ -1006,11 +1155,18 @@ class MetadataWorkbenchPane(ft.Column):
                     ),
                     ft.Container(
                         content=ft.Row([
+                            ft.IconButton(
+                                icon=ft.Icons.CLOSE_ROUNDED,
+                                icon_color=DIM,
+                                icon_size=20,
+                                tooltip="Close",
+                                on_click=lambda _e: _close(),
+                            ),
                             ft.Text(name, size=17, weight=ft.FontWeight.W_600, color=TEXT,
                                     overflow=ft.TextOverflow.ELLIPSIS, max_lines=1,
                                     expand=True),
                             self._filled_btn("Save", _save),
-                        ], vertical_alignment=ft.CrossAxisAlignment.CENTER, spacing=10),
+                        ], vertical_alignment=ft.CrossAxisAlignment.CENTER, spacing=8),
                         padding=ft.Padding.symmetric(horizontal=16, vertical=4),
                     ),
                     ft.Divider(color=BORDER_SUBTLE, height=1),
@@ -1025,6 +1181,7 @@ class MetadataWorkbenchPane(ft.Column):
             ),
             bgcolor=SURFACE, draggable=True, use_safe_area=True,
             show_drag_handle=False, scrollable=False,
+            on_dismiss=_on_sheet_dismissed,
         )
         self.app.page.show_dialog(sheet)
 
@@ -1045,8 +1202,9 @@ class MetadataWorkbenchPane(ft.Column):
             except Exception as exc:
                 self.app.show_snackbar(f"Couldn't reject: {exc}", color=ACCENT_RED)
                 return
-            self.app.show_snackbar(f"Rejected {name}", color=ACCENT_AMBER)
+            self.selected.discard(name)
             await self._reload_async()
+            self.app.show_snackbar(f"Rejected {name}", color=ACCENT_AMBER)
             self._schedule_walk_refresh()
         self.app.page.run_task(_do)
 
@@ -1056,6 +1214,9 @@ class MetadataWorkbenchPane(ft.Column):
         ph = self.app.page.height or 720
         dlg_w = max(280, min(420, pw - 40))
         res_h = max(200, min(380, ph - 280))
+
+        dlg = None
+        _on_dlg_dismissed, _close_dlg = dialog_handoff(self.app, lambda: dlg)
 
         query_field = ft.TextField(
             value=artist, label="Artist name", dense=True, bgcolor=SURFACE2,
@@ -1084,7 +1245,7 @@ class MetadataWorkbenchPane(ft.Column):
                     cands, key=lambda c: (bool(c.get("is_junk")), -(c.get("score") or 0))
                 )[:8]
                 results.controls = (
-                    [self._mb_card(artist, c, dlg) for c in cands] if cands
+                    [self._mb_card(artist, c, _close_dlg) for c in cands] if cands
                     else [ft.Text("No candidates. Try a different spelling.",
                                   size=12, color=DIM)]
                 )
@@ -1103,14 +1264,15 @@ class MetadataWorkbenchPane(ft.Column):
                 query_field, results,
             ], tight=True, spacing=10, width=dlg_w),
             actions=[
-                ft.TextButton("Close", on_click=lambda _e: self.app.dismiss_dialog(dlg)),
+                ft.TextButton("Close", on_click=lambda _e: _close_dlg()),
                 self._filled_btn("Search", lambda _e: _search()),
             ],
+            on_dismiss=_on_dlg_dismissed,
         )
         self.app.page.show_dialog(dlg)
         _search()
 
-    def _mb_card(self, artist: str, cand: dict, dlg) -> ft.Control:
+    def _mb_card(self, artist: str, cand: dict, close_fn=None) -> ft.Control:
         cname = cand.get("name") or artist
         disamb = (cand.get("disambiguation") or "").strip()
         cc = cand.get("country")
@@ -1120,7 +1282,12 @@ class MetadataWorkbenchPane(ft.Column):
 
         head = []
         if cc:
-            head.append(ft.Text(_flag(cc), size=15))
+            head.append(ft.Container(
+                content=ft.Text(cc.upper(), size=10, weight=ft.FontWeight.W_700, color="#BF5AF2"),
+                bgcolor=apply_opacity(0.14, "#BF5AF2"),
+                border_radius=4,
+                padding=ft.Padding.symmetric(horizontal=5, vertical=2),
+            ))
         head.append(ft.Text(cname, size=13.5, color=TEXT, weight=ft.FontWeight.W_600,
                             overflow=ft.TextOverflow.ELLIPSIS, max_lines=1, expand=True))
         head.append(ft.Container(
@@ -1139,7 +1306,7 @@ class MetadataWorkbenchPane(ft.Column):
         lines.append(ft.Row([
             ft.Container(expand=True),
             self._filled_btn("Use this match",
-                             lambda _e, c=cand: self._use_mb_candidate(artist, c, dlg),
+                             lambda _e, c=cand: self._use_mb_candidate(artist, c, close_fn),
                              icon=ft.Icons.CHECK_ROUNDED),
         ]))
         return ft.Container(
@@ -1148,7 +1315,7 @@ class MetadataWorkbenchPane(ft.Column):
             border=ft.Border.all(1, BORDER_SUBTLE),
         )
 
-    def _use_mb_candidate(self, artist: str, cand: dict, dlg=None):
+    def _use_mb_candidate(self, artist: str, cand: dict, close_fn=None):
         async def _do():
             mbid = cand.get("mbid")
             country, area, genres = cand.get("country"), cand.get("area"), cand.get("genres")
@@ -1168,16 +1335,19 @@ class MetadataWorkbenchPane(ft.Column):
                 logger.exception("use_mb_candidate failed: %s", exc)
                 self.app.show_snackbar(f"Couldn't save: {exc}", color=ACCENT_RED)
                 return
-            self.app.dismiss_dialog(dlg)
             got = _genre_names(genres)
+            self.selected.discard(artist)
+            await self._reload_async()
             self.app.show_snackbar(
                 f"Matched {artist} · {', '.join(got[:3])}" if got else
                 f"Matched {artist}, but MusicBrainz lists no genres — add one by hand.",
                 icon=ft.Icons.CHECK_CIRCLE, color=CYAN if got else ACCENT_AMBER)
-            self.selected.discard(artist)
-            await self._reload_async()
             self._schedule_walk_refresh()
-        self.app.page.run_task(_do)
+
+        if close_fn:
+            close_fn(lambda: self.app.page.run_task(_do))
+        else:
+            self.app.page.run_task(_do)
 
     # ── shared button styles ─────────────────────────────────────────────────
     def _filled_btn(self, text, on_click, *, icon=None, disabled=False):

@@ -526,11 +526,14 @@ class SettingsView:
         # Landing Page Customization
         self._show_most_listened_switch = ft.Switch(value=True, active_color=CYAN, on_change=self._on_appearance_change)
         self._show_library_stats_switch  = ft.Switch(value=True, active_color=CYAN, on_change=self._on_appearance_change)
+        self._show_top_artists_switch    = ft.Switch(value=True, active_color=CYAN, on_change=self._on_appearance_change)
+        self._show_top_genres_switch     = ft.Switch(value=True, active_color=CYAN, on_change=self._on_appearance_change)
 
         # Library Pane Customization & Jarvis
         self._show_jarvis_switch = ft.Switch(value=True, active_color=CYAN, on_change=self._on_appearance_change)
         self._show_network_switch = ft.Switch(value=False, active_color=CYAN, on_change=self._on_appearance_change)
         self._show_playlists_switch = ft.Switch(value=True, active_color=CYAN, on_change=self._on_appearance_change)
+        self._show_genres_switch = ft.Switch(value=True, active_color=CYAN, on_change=self._on_appearance_change)
         self._show_artists_switch = ft.Switch(value=True, active_color=CYAN, on_change=self._on_appearance_change)
         self._show_albums_switch = ft.Switch(value=False, active_color=CYAN, on_change=self._on_appearance_change)
         self._show_tracks_switch = ft.Switch(value=True, active_color=CYAN, on_change=self._on_appearance_change)
@@ -856,9 +859,12 @@ class SettingsView:
                 "pill_style": getattr(self, "_pill_style_dropdown", None) and self._pill_style_dropdown.value,
                 "most_listened": bool(getattr(self, "_show_most_listened_switch", None) and self._show_most_listened_switch.value),
                 "library_stats": bool(getattr(self, "_show_library_stats_switch", None) and self._show_library_stats_switch.value),
+                "top_artists": bool(getattr(self, "_show_top_artists_switch", None) and self._show_top_artists_switch.value),
+                "top_genres": bool(getattr(self, "_show_top_genres_switch", None) and self._show_top_genres_switch.value),
                 "jarvis": bool(getattr(self, "_show_jarvis_switch", None) and self._show_jarvis_switch.value),
                 "network": bool(getattr(self, "_show_network_switch", None) and self._show_network_switch.value),
                 "playlists": bool(getattr(self, "_show_playlists_switch", None) and self._show_playlists_switch.value),
+                "genres": bool(getattr(self, "_show_genres_switch", None) and self._show_genres_switch.value),
                 "artists": bool(getattr(self, "_show_artists_switch", None) and self._show_artists_switch.value),
                 "albums": bool(getattr(self, "_show_albums_switch", None) and self._show_albums_switch.value),
                 "tracks": bool(getattr(self, "_show_tracks_switch", None) and self._show_tracks_switch.value),
@@ -996,7 +1002,8 @@ class SettingsView:
                 keywords=[
                     "accent", "color", "theme", "dark", "light", "visual", "ui",
                     "appearance", "font", "startup", "sort", "landing", "default sort",
-                    "history", "stats", "display", "style", "pill", "pills", "tabs", "glow"
+                    "history", "stats", "display", "style", "pill", "pills", "tabs", "glow",
+                    "most played", "most listened", "top artists", "top genres"
                 ]
             ),
             SettingSearchEntry(
@@ -1562,9 +1569,12 @@ class SettingsView:
         self._pill_style_dropdown.on_select = save_cb
         self._show_most_listened_switch.on_change = save_cb
         self._show_library_stats_switch.on_change = save_cb
+        self._show_top_artists_switch.on_change = save_cb
+        self._show_top_genres_switch.on_change = save_cb
         self._show_jarvis_switch.on_change = save_cb
         self._show_network_switch.on_change = save_cb
         self._show_playlists_switch.on_change = save_cb
+        self._show_genres_switch.on_change = save_cb
         self._show_artists_switch.on_change = save_cb
         self._show_albums_switch.on_change = save_cb
         self._show_tracks_switch.on_change = save_cb
@@ -1577,6 +1587,8 @@ class SettingsView:
             ft.Divider(color=BORDER, height=20),
             ft.Text("Landing Page Sections", color=CYAN, size=12, weight=ft.FontWeight.BOLD),
             ft.Row([self._show_most_listened_switch, ft.Text("Show Most Listened Tracks", color=TEXT, size=12)], spacing=10),
+            ft.Row([self._show_top_artists_switch, ft.Text("Show Most Listened Artists", color=TEXT, size=12)], spacing=10),
+            ft.Row([self._show_top_genres_switch, ft.Text("Show Most Listened Genres", color=TEXT, size=12)], spacing=10),
             ft.Row([self._show_library_stats_switch, ft.Text("Show Library Stats", color=TEXT, size=12)], spacing=10),
             ft.Divider(color=BORDER, height=20),
             ft.Text("Library Tabs Visibility", color=CYAN, size=12, weight=ft.FontWeight.BOLD),
@@ -1591,6 +1603,7 @@ class SettingsView:
                 )
             ], spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER),
             ft.Row([self._show_playlists_switch, ft.Text("Playlists", color=TEXT, size=12)], spacing=10),
+            ft.Row([self._show_genres_switch, ft.Text("Genres", color=TEXT, size=12)], spacing=10),
             ft.Row([self._show_artists_switch, ft.Text("Artists", color=TEXT, size=12)], spacing=10),
             ft.Row([self._show_albums_switch, ft.Text("Albums", color=TEXT, size=12)], spacing=10),
             ft.Row([self._show_tracks_switch, ft.Text("Tracks", color=TEXT, size=12)], spacing=10),
@@ -1965,6 +1978,8 @@ class SettingsView:
             logger.exception("Advanced: missing-feature query failed: %s", exc)
             self.app.show_snackbar(f"DSP query failed: {exc}", color="#FF4444")
             return
+        from utils.progress_notify import ProgressNotifier, dsp_progress_cb
+        notifier = ProgressNotifier("dsp", "Analysing library")
 
         if missing:
             self.app.show_snackbar(
@@ -1975,10 +1990,12 @@ class SettingsView:
                 await tg.bulk_analyze_library(
                     self.app.db_manager,
                     audio_engine.audio_service,
+                    progress_cb=dsp_progress_cb(notifier),
                 )
             except Exception as exc:
                 logger.exception("Advanced: bulk_analyze_library failed: %s", exc)
                 self.app.show_snackbar(f"DSP analysis failed: {exc}", color="#FF4444")
+                notifier.finish(f"Analysis failed: {exc}")
                 return
         else:
             self.app.show_snackbar(
@@ -1986,13 +2003,16 @@ class SettingsView:
                 icon=ft.Icons.GRAPHIC_EQ_ROUNDED,
             )
 
+        notifier.stage("Linking similar tracks…")
         try:
             await tg.build_metadata_edges(self.app.db_manager)
             await tg.build_acoustic_edges(self.app.db_manager)
         except Exception as exc:
             logger.exception("Advanced: graph/PCA rebuild failed: %s", exc)
             self.app.show_snackbar(f"Graph rebuild failed: {exc}", color="#FF4444")
+            notifier.finish(f"Graph rebuild failed: {exc}")
             return
+        notifier.finish("Analysis complete. Similarity walks are ready.")
 
         if hasattr(self.app, "library_view") and self.app.library_view:
             self.app.library_view._cached_unanalysed = None
@@ -2034,6 +2054,8 @@ class SettingsView:
             logger.exception("Advanced: missing-feature query failed: %s", exc)
             self.app.show_snackbar(f"DSP query failed: {exc}", color="#FF4444")
             return
+        from utils.progress_notify import ProgressNotifier, dsp_progress_cb
+        notifier = ProgressNotifier("dsp", "Analysing library")
 
         if missing:
             self.app.show_snackbar(
@@ -2044,19 +2066,24 @@ class SettingsView:
                 await tg.bulk_analyze_library(
                     self.app.db_manager,
                     audio_engine.audio_service,
+                    progress_cb=dsp_progress_cb(notifier),
                 )
             except Exception as exc:
                 logger.exception("Advanced: bulk_analyze_library failed: %s", exc)
                 self.app.show_snackbar(f"DSP analysis failed: {exc}", color="#FF4444")
+                notifier.finish(f"Analysis failed: {exc}")
                 return
 
+        notifier.stage("Linking similar tracks…")
         try:
             await tg.build_metadata_edges(self.app.db_manager)
             await tg.build_acoustic_edges(self.app.db_manager)
         except Exception as exc:
             logger.exception("Advanced: graph/PCA rebuild failed: %s", exc)
             self.app.show_snackbar(f"Graph rebuild failed: {exc}", color="#FF4444")
+            notifier.finish(f"Graph rebuild failed: {exc}")
             return
+        notifier.finish("Analysis complete. Similarity walks are ready.")
 
         if hasattr(self.app, "library_view") and self.app.library_view:
             self.app.library_view._cached_unanalysed = None
@@ -2091,7 +2118,7 @@ class SettingsView:
             color=CYAN,
         )
 
-    def _on_open_metadata_workbench_click(self, _e=None, focus_artist: str | None = None):
+    def _on_open_metadata_workbench_click(self, _e=None, focus_artist: str | None = None, genre_filter: str | None = None):
         """Standing metadata-curation surface — sync, review, and manual tagging
         in one place. Reuses the standing pane instance so background MusicBrainz
         sync tasks continue uninterrupted when switching tabs or navigating away.
@@ -2106,6 +2133,8 @@ class SettingsView:
             self._metadata_workbench_pane._reload()
         if focus_artist:
             self._metadata_workbench_pane.focus_artist(focus_artist)
+        elif genre_filter:
+            self._metadata_workbench_pane.filter_genre(genre_filter)
         # Full-height mount: the pane owns a ListView, which must not be nested
         # inside the hub's scrolling Column (see _show_sub_page_full).
         self._show_sub_page_full("Metadata", self._metadata_workbench_pane)
@@ -2400,6 +2429,8 @@ class SettingsView:
             landing = cfg.get("landing", {})
             self._show_most_listened_switch.value = bool(landing.get("show_search_history", True))
             self._show_library_stats_switch.value  = bool(landing.get("show_library_stats", True))
+            self._show_top_artists_switch.value    = bool(landing.get("show_top_artists", True))
+            self._show_top_genres_switch.value     = bool(landing.get("show_top_genres", True))
 
             appearance = cfg.get("appearance", {})
             raw_accent = appearance.get("accent_color", "#FFD60A")
@@ -2414,6 +2445,7 @@ class SettingsView:
             self._show_jarvis_switch.value = _to_bool(appearance.get("show_jarvis"), True)
             self._show_network_switch.value = _to_bool(appearance.get("show_network"), False)
             self._show_playlists_switch.value = _to_bool(appearance.get("show_playlists"), True)
+            self._show_genres_switch.value = _to_bool(appearance.get("show_genres"), True)
             self._show_artists_switch.value = _to_bool(appearance.get("show_artists"), True)
             self._show_albums_switch.value = _to_bool(appearance.get("show_albums"), False)
             self._show_tracks_switch.value = _to_bool(appearance.get("show_tracks"), True)
@@ -2459,12 +2491,16 @@ class SettingsView:
     def _save_landing_settings(self):
         show_history = getattr(self, "_show_most_listened_switch", None) and self._show_most_listened_switch.value
         show_stats   = getattr(self, "_show_library_stats_switch", None) and self._show_library_stats_switch.value
-        
+        show_artists = getattr(self, "_show_top_artists_switch", None) and self._show_top_artists_switch.value
+        show_genres  = getattr(self, "_show_top_genres_switch", None) and self._show_top_genres_switch.value
+
         from utils.streamrip_api import update_config_params
         update_config_params({
             "landing": {
                 "show_search_history": show_history,
-                "show_library_stats": show_stats
+                "show_library_stats": show_stats,
+                "show_top_artists": bool(show_artists),
+                "show_top_genres": bool(show_genres),
             }
         })
         self.app.show_snackbar("Landing page settings updated.")
@@ -2524,13 +2560,16 @@ class SettingsView:
                 "show_jarvis": bool(self._show_jarvis_switch.value),
                 "show_network": bool(self._show_network_switch.value),
                 "show_playlists": bool(self._show_playlists_switch.value),
+                "show_genres": bool(self._show_genres_switch.value),
                 "show_artists": bool(self._show_artists_switch.value),
                 "show_albums": bool(self._show_albums_switch.value),
                 "show_tracks": bool(self._show_tracks_switch.value),
             },
             "landing": {
                 "show_search_history": bool(self._show_most_listened_switch.value),
-                "show_library_stats": bool(self._show_library_stats_switch.value)
+                "show_library_stats": bool(self._show_library_stats_switch.value),
+                "show_top_artists": bool(self._show_top_artists_switch.value),
+                "show_top_genres": bool(self._show_top_genres_switch.value),
             },
             "general": {
                 "startup_page": self._startup_page_dropdown.value,

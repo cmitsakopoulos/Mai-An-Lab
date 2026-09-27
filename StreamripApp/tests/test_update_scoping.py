@@ -329,3 +329,44 @@ class TestQuietScan(unittest.TestCase):
         self.assertEqual(len(found), 1)
         self.assertTrue(any(k.arg == "quiet" and k.value.value is True
                             for k in found[0].keywords))
+
+
+class TestNetworkPulseBattery(unittest.TestCase):
+    """The now-playing ring is the Network view's one continuous draw: it must
+    STOP (not idle-poll) when off screen or paused, and restart on a kick."""
+
+    def _view(self, playing=True, tab=2, background=False):
+        from ui.views import library as lib
+        v = lib.LibraryView.__new__(lib.LibraryView)
+        v.app = MagicMock(is_background=background, _current_tab=tab)
+        v.page = MagicMock()
+        v.view_mode = "network"
+        v._net_pulse_overlay = MagicMock(visible=True)
+        v._net_pulse_token = 1
+        v._net_pulse_running = False
+        self._engine = patch.object(lib.audio_engine, "is_playing", playing)
+        self._engine.start()
+        self.addCleanup(self._engine.stop)
+        return v
+
+    def test_loop_exits_when_paused_and_clears_running(self):
+        v = self._view(playing=False)
+        asyncio.run(v._run_net_pulse(1, 0.0))
+        self.assertFalse(v._net_pulse_running)
+        self.assertEqual(v._net_pulse_overlay.opacity, 0.9)   # settled once
+
+    def test_loop_exits_on_another_tab_without_touching_the_ring(self):
+        v = self._view(tab=1)
+        asyncio.run(v._run_net_pulse(1, 0.0))
+        self.assertFalse(v._net_pulse_running)
+        v._net_pulse_overlay.update.assert_not_called()
+
+    def test_kick_starts_only_when_visible_and_playing(self):
+        v = self._view(background=True)
+        v.kick_net_pulse()
+        v.page.run_task.assert_not_called()
+        v.app.is_background = False
+        v.kick_net_pulse()
+        v.page.run_task.assert_called_once()
+        v.kick_net_pulse()                       # already running → no second loop
+        v.page.run_task.assert_called_once()

@@ -289,10 +289,18 @@ class QueueSheet:
             for idx in range(cur_idx, len(audio_engine.queue)):
                 upcoming.append((idx, audio_engine.queue[idx]))
 
+        visible = upcoming[:15]
         rows = [
             track_row(idx, t, position_offset=pos)
-            for pos, (idx, t) in enumerate(upcoming[:15])
+            for pos, (idx, t) in enumerate(visible)
         ]
+        # Auto-play section header, Apple Music style: above the first
+        # recommendation, or at the end while the next block is on its way.
+        self._header_at = None
+        if is_similar and rows:
+            first = next((p for p, (_i, t) in enumerate(visible) if p > 0 and t.get("_autoplay")), None)
+            self._header_at = first if first is not None else len(rows)
+            rows.insert(self._header_at, self._autoplay_header(pending=first is None))
 
         is_empty = len(rows) == 0
         self._empty_label.visible = is_empty
@@ -300,10 +308,6 @@ class QueueSheet:
         if is_repeat_one:
             self._status_icon.name = ft.Icons.REPEAT_ONE_ROUNDED
             self._status_text.value = "Repeat Current Song is active. Normal queue progression is paused."
-            self._status_notice.visible = True
-        elif is_similar:
-            self._status_icon.name = ft.Icons.ALL_INCLUSIVE_ROUNDED
-            self._status_text.value = "Similar Tracks Walk is active. Jarvis will dynamically append acoustically matching recommendations."
             self._status_notice.visible = True
         elif is_shuffle and is_repeat_all:
             self._status_icon.name = ft.Icons.SHUFFLE_ROUNDED
@@ -334,9 +338,42 @@ class QueueSheet:
         except Exception:
             pass
 
+    def _autoplay_header(self, pending: bool) -> ft.Control:
+        from ui.player.autoplay_sheet import anchor_label
+        label = anchor_label(self.app)
+        detail = "finding similar songs…" if pending else (f"from {label}" if label else "similar songs")
+        return ft.Container(
+            key="q_autoplay_header",
+            content=ft.Row(
+                [
+                    ft.Icon(ft.Icons.ALL_INCLUSIVE_ROUNDED, color=CYAN, size=14),
+                    ft.Text("AUTO-PLAY", color=CYAN, size=11, weight=ft.FontWeight.W_700),
+                    ft.Text(detail, color=DIM, size=12, max_lines=1,
+                            overflow=ft.TextOverflow.ELLIPSIS, expand=True),
+                    ft.Icon(ft.Icons.CHEVRON_RIGHT_ROUNDED, color=DIM, size=16),
+                ],
+                spacing=6,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            padding=ft.Padding.only(left=10, right=6, top=12, bottom=4),
+            on_click=lambda e: self._open_autoplay_sheet(),
+        )
+
+    def _open_autoplay_sheet(self):
+        from ui.player.autoplay_sheet import AutoPlaySheet
+        AutoPlaySheet(self.app).open()
+
     def _handle_queue_reorder(self, e: ft.OnReorderEvent):
-        old_idx = e.old_index
-        new_idx = e.new_index
+        # Control indices -> positions in the visible track list: the
+        # Auto-play header row is a control but not a track.
+        hdr = getattr(self, "_header_at", None)
+        if hdr is not None and e.old_index == hdr:
+            self.refresh()
+            return
+        def _to_track_pos(ctrl_i):
+            return ctrl_i - 1 if hdr is not None and ctrl_i > hdr else ctrl_i
+        old_idx = _to_track_pos(e.old_index)
+        new_idx = _to_track_pos(e.new_index)
         if new_idx > old_idx:
             new_idx -= 1
 
@@ -369,19 +406,20 @@ class QueueSheet:
         from_queue_idx = visible_upcoming[old_idx][0]
         to_queue_idx = visible_upcoming[new_idx][0]
 
-        # Update visual controls list in-place first to prevent flicker
+        # Move the control in place first (control space, header included) so
+        # the row doesn't flicker back before the refresh lands.
         controls = e.control.controls
-        item = controls.pop(e.old_index)
-        controls.insert(new_idx, item)
+        dest = e.new_index - 1 if e.new_index > e.old_index else e.new_index
+        controls.insert(dest, controls.pop(e.old_index))
 
         audio_engine.move_queue_item(from_queue_idx, to_queue_idx)
         self.app.safe_update(self.refresh)
 
-    def _move(self, from_idx: int, to_idx: int):
-        audio_engine.move_queue_item(from_idx, to_idx)
-        self.app.safe_update(self.refresh)
-
     def _remove(self, idx: int):
+        # Removing an auto-play recommendation is a "not this": the refill
+        # that replaces it must not pick it again this session.
+        if 0 <= idx < len(audio_engine.queue) and audio_engine.queue[idx].get("_autoplay"):
+            self.app.autoplay.reject(audio_engine.queue[idx].get("path") or "")
         audio_engine.remove_from_queue(idx)
         self.app.safe_update(self.refresh)
 

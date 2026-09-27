@@ -51,10 +51,21 @@ for P in 1 2; do
             echo "   VERDICT: macOS BLOCKED the data transports."
             echo "            System Settings > Privacy & Security >"
             echo "            'Allow accessories to connect' -> Always, then replug."
-        elif echo "$tprov" | grep -q USB2 && ! echo "$tactive" | grep -q USB2; then
+        elif echo "$tprov" | grep -q USB2; then
+            # Authorised + USB2 provisioned + nothing enumerated = the phone
+            # never presented a USB device. Whether the Mac's own USB2 lane
+            # reads as active (it can, with the phone's data signalling off)
+            # doesn't change the side: the block is on the phone.
+            if echo "$tactive" | grep -q USB2; then
+                lane="brought its USB2 lane up"
+            else
+                lane="provisioned USB2/USB3"
+            fi
             echo "   VERDICT: PHONE-SIDE BLOCK. The Mac attached the phone, authorised it"
-            echo "            and provisioned USB2/USB3 — but the phone never brought its"
-            echo "            data lines up. Nothing on the Mac can fix this. On the phone:"
+            echo "            and $lane — but no USB device ever"
+            echo "            enumerated: the phone's USB data is off. If the phone offers"
+            echo "            only 'Charging', that confirms it. Nothing on the Mac can fix"
+            echo "            this. On the phone:"
             echo "              1. Settings > Security & privacy > Advanced Protection."
             echo "                 Android 16+/17 disables USB DATA under this; charging"
             echo "                 and CC keep working, which is exactly this state."

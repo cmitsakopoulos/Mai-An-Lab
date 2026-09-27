@@ -59,7 +59,6 @@ class AudioServiceControl(Service):
     # Internal-use event for STT transcription results.
     on_stt_result: Optional[EventHandler] = None
     on_equalizer_bands_result: Optional[EventHandler] = None
-    on_custom_action: Optional[EventHandler] = None
     # Internal-use event: acknowledgement that a serialized queue mutation
     # (set_playlist / add / remove / move / skip / set_shuffle) has landed on
     # the Dart side. Payload: {request_id, ok, epoch, current_index, queue_len,
@@ -76,7 +75,6 @@ class AudioServiceControl(Service):
         on_state_change_cb = kwargs.pop("on_state_change", None)
         on_position_change_cb = kwargs.pop("on_position_change", None)
         on_error_cb = kwargs.pop("on_error", None)
-        on_custom_action_cb = kwargs.pop("on_custom_action", None)
 
         src_val = kwargs.pop("src", None)
         title_val = kwargs.pop("title", None)
@@ -89,7 +87,6 @@ class AudioServiceControl(Service):
         self.on_state_change = on_state_change_cb
         self.on_position_change = on_position_change_cb
         self.on_error = on_error_cb
-        self.on_custom_action = on_custom_action_cb
         self.src = src_val
         self.title = title_val
         self.artist = artist_val
@@ -280,12 +277,19 @@ class AudioServiceControl(Service):
         progress: int,
         total: int,
         done: bool = False,
+        job: str = "dsp",
     ):
-        """Displays a native Android notification showing progress of a task (e.g. DSP scan)."""
+        """Show / update / finish a native Android progress notification.
+
+        `job` keys the notification ("dsp", "metadata", ...) so concurrent
+        tasks each get their own. total <= 0 shows an indeterminate bar.
+        done=True with empty content cancels it; done=True with content leaves
+        a short-lived, dismissible summary."""
         await self._wait_ready()
         await self._invoke_method(
             "show_progress_notification",
             {
+                "job": job,
                 "title": title,
                 "content": content,
                 "progress": progress,
@@ -480,6 +484,14 @@ class AudioServiceControl(Service):
         """Sets the repeat mode: 'none', 'one', or 'all'."""
         await self._wait_ready()
         await self._invoke_method("set_repeat_mode", {"mode": mode})
+
+    async def set_play_log_path(self, path: str):
+        """Tell the native handler where to append its play ledger (one JSON
+        line per finished listen: {id, ms, dur, start, end}). The handler
+        outlives the Flet session, so listens are captured even while Python
+        can't hear events; the caller drains the file into its DB."""
+        await self._wait_ready()
+        await self._invoke_method("set_play_log_path", {"path": path})
 
     async def decode_pcm(self, path: str) -> dict[str, Any]:
         """Decode an audio file to mono 16-bit little-endian PCM via the

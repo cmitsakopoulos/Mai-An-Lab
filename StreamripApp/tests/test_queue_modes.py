@@ -85,6 +85,11 @@ def tearDownModule():
 def run_async(coro):
     return asyncio.run(coro)
 
+
+def _brief_rows(paths):
+    return {p: {"path": p, "title": "Walk Title", "artist": "Walk Artist", "album": "Walk Album"}
+            for p in paths}
+
 class TestQueueModes(unittest.TestCase):
     def setUp(self):
         # Create temp dir for each test run to ensure total isolation
@@ -121,12 +126,9 @@ class TestQueueModes(unittest.TestCase):
         self.app = MagicMock(spec=main.StreamripFletApp)
         self.app.page = self.mock_page
         self.app.play_similar_mode = False
-        self.app.auto_dj_mode = False
         self.app._play_similar_gen = 0
         self.app._play_similar_recommendation_in_progress = False
-        self.app._session_bad_paths = []
         self.app.db_manager = AsyncMock()
-        self.app._initiate_play_similar_queue_async = AsyncMock()
         
         # UI Mocks
         self.app.now_playing = MagicMock()
@@ -156,6 +158,8 @@ class TestQueueModes(unittest.TestCase):
         self.app._save_queue_to_file = main.StreamripFletApp._save_queue_to_file.__get__(self.app, main.StreamripFletApp)
         self.app._load_queue_from_file = main.StreamripFletApp._load_queue_from_file.__get__(self.app, main.StreamripFletApp)
         self.app._save_queue_state = main.StreamripFletApp._save_queue_state.__get__(self.app, main.StreamripFletApp)
+        self.app._position_state_path = main.StreamripFletApp._position_state_path.__get__(self.app, main.StreamripFletApp)
+        self.app._save_position_state = main.StreamripFletApp._save_position_state.__get__(self.app, main.StreamripFletApp)
         
         # Mock the scheduled partition save to write synchronously in tests
         def _mock_schedule_partition_save(filename, queue_list, current_index, position, duration):
@@ -165,14 +169,15 @@ class TestQueueModes(unittest.TestCase):
         self.app.toggle_shuffle = main.StreamripFletApp.toggle_shuffle.__get__(self.app, main.StreamripFletApp)
         self.app._toggle_shuffle_async = main.StreamripFletApp._toggle_shuffle_async.__get__(self.app, main.StreamripFletApp)
         self.app.set_play_similar_mode = main.StreamripFletApp.set_play_similar_mode.__get__(self.app, main.StreamripFletApp)
-        self.app._autoplay_buffer_paths = main.StreamripFletApp._autoplay_buffer_paths.__get__(self.app, main.StreamripFletApp)
-        self.app._drop_autoplay_buffer = main.StreamripFletApp._drop_autoplay_buffer.__get__(self.app, main.StreamripFletApp)
-        self.app.set_auto_dj_mode = main.StreamripFletApp.set_auto_dj_mode.__get__(self.app, main.StreamripFletApp)
-        self.app._initiate_auto_dj_queue_async = main.StreamripFletApp._initiate_auto_dj_queue_async.__get__(self.app, main.StreamripFletApp)
-        self.app._auto_dj_auto_continue_queue = main.StreamripFletApp._auto_dj_auto_continue_queue.__get__(self.app, main.StreamripFletApp)
-        self.app._on_feedback_click = main.StreamripFletApp._on_feedback_click.__get__(self.app, main.StreamripFletApp)
-        self.app._explicit_feedback_cache = {}
-        self.app._refresh_feedback_buttons = MagicMock()
+        # Real auto-play controller. Its fills are COLLECTED, not run, so a
+        # test decides when a walk lands (see _drain_autoplay).
+        from utils.autoplay import AutoPlay
+        self.autoplay_tasks = []
+        self.app.autoplay = AutoPlay(
+            audio_engine, self.app.db_manager,
+            run_task=lambda fn, *a: self.autoplay_tasks.append((fn, a)),
+            notify=MagicMock(),
+        )
         self.app.wipe_database = main.StreamripFletApp.wipe_database.__get__(self.app, main.StreamripFletApp)
         self.app.clear_library_index = main.StreamripFletApp.clear_library_index.__get__(self.app, main.StreamripFletApp)
 
@@ -292,6 +297,37 @@ class TestQueueModes(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(self.test_dir, ".cache", "queue_shuffle.json")))
         self.assertFalse(os.path.exists(os.path.join(self.test_dir, "queue_state.json")))
 
+    def _drain_autoplay(self, walk_result):
+        """Run the auto-play fills queued so far against a stubbed walk."""
+        self.app.db_manager.get_tracks_brief = AsyncMock(side_effect=_brief_rows)
+        self.app.db_manager.has_current_features = AsyncMock(return_value=True)
+        with patch("utils.track_graph.walk", new_callable=AsyncMock) as mock_walk:
+            mock_walk.return_value = walk_result
+            while self.autoplay_tasks:
+                fn, args = self.autoplay_tasks.pop(0)
+                run_async(fn(*args))
+            return mock_walk
+
+    def test_lifecycle_reads_flet_state_enum(self):
+        """Flet 0.86 sends e.state (AppLifecycleState) with e.data None. The
+        old e.data check never matched, so the app never knew it was hidden."""
+        from flet.controls.types import AppLifecycleState
+        self.app._BACKGROUND_STATES = main.StreamripFletApp._BACKGROUND_STATES
+        self.app._on_lifecycle = main.StreamripFletApp._on_lifecycle.__get__(self.app, main.StreamripFletApp)
+        self.app.is_background = False
+        self.app.autoplay = MagicMock()
+        ev = lambda s: MagicMock(state=s, data=None)
+
+        self.app._on_lifecycle(ev(AppLifecycleState.INACTIVE))   # split-screen: still visible
+        self.assertFalse(self.app.is_background)
+        self.app._on_lifecycle(ev(AppLifecycleState.HIDE))
+        self.assertTrue(self.app.is_background)
+        self.app._on_lifecycle(ev(AppLifecycleState.PAUSE))
+        self.assertTrue(self.app.is_background)
+        self.assertEqual(self.app.autoplay.prefill_for_background.call_count, 2)
+        self.app._on_lifecycle(ev(AppLifecycleState.RESUME))
+        self.assertFalse(self.app.is_background)
+
     def test_play_similar_toggle_and_session_recovery(self):
         # 1. Start sequential play in regular mode
         run_async(self.app._play_track_core("/music/song1.mp3"))
@@ -304,7 +340,6 @@ class TestQueueModes(unittest.TestCase):
         self.app.set_play_similar_mode(True)
         self.assertTrue(self.app.play_similar_mode)
         self.assertEqual(len(audio_engine.queue), 3)          # untouched
-        self.assertIsNone(getattr(self.app, "play_similar_saved_queue", None))
 
         # 3. Simulate the walk inserting a buffer track after current
         audio_engine.queue = list(audio_engine.queue) + [{"path": "/music/walk1.mp3", "title": "Walk 1", "artist": "Artist W", "album": "Walk Album", "_autoplay": True}]
@@ -385,18 +420,8 @@ class TestQueueModes(unittest.TestCase):
             {"path": "/music/walk1.mp3", "track_title": "Walk 1", "artist_name": "W", "_autoplay": True},
         ])
 
-        self.app._initiate_play_similar_queue_async = (
-            main.StreamripFletApp._initiate_play_similar_queue_async.__get__(self.app, main.StreamripFletApp)
-        )
-        async def _get_tf(p):
-            return {"path": p, "title": "T", "artist": "A", "album": "Al"}
-        self.app.db_manager.get_track_full.side_effect = _get_tf
-
-        with patch("utils.track_graph.walk", new_callable=AsyncMock) as mock_walk:
-            mock_walk.return_value = ["/music/walk1.mp3", "/music/walk2.mp3"]
-            run_async(self.app._initiate_play_similar_queue_async(
-                "/music/song1.mp3", self.app._play_similar_gen))
-            self.assertIn("/music/walk1.mp3", mock_walk.call_args.kwargs["avoid"])
+        mock_walk = self._drain_autoplay(["/music/walk1.mp3", "/music/walk2.mp3"])
+        self.assertIn("/music/walk1.mp3", mock_walk.call_args.kwargs["avoid"])
 
         paths = [t["path"] for t in audio_engine.queue]
         self.assertEqual(paths.count("/music/walk1.mp3"), 1)
@@ -410,7 +435,6 @@ class TestQueueModes(unittest.TestCase):
         # 2. Toggle Play Similar ON (non-destructive: queue is NOT saved/replaced)
         self.app.set_play_similar_mode(True)
         self.assertTrue(self.app.play_similar_mode)
-        self.assertIsNone(getattr(self.app, "play_similar_saved_queue", None))
 
         # 3. Simulate playing a completely new track (e.g. from an album click)
         new_album_tracks = [
@@ -429,7 +453,6 @@ class TestQueueModes(unittest.TestCase):
         self.assertEqual(len(audio_engine.queue), 2)
         self.assertEqual(audio_engine.queue[0]["path"], "/music/album1.mp3")
         self.assertEqual(audio_engine.current_index, 0)
-        self.assertIsNone(getattr(self.app, "play_similar_saved_queue", None))
 
         # 5. Toggle Play Similar OFF — nothing to restore; the queue is untouched.
         self.app.set_play_similar_mode(False)
@@ -440,58 +463,31 @@ class TestQueueModes(unittest.TestCase):
         self.assertEqual(audio_engine.current_index, 0)
 
     def test_play_similar_autoreplenish_non_jarvis(self):
-        # Setup real callbacks and bindings for on_similar_continue
-        self.app._session_bad_paths = []
-        self.app._on_similar_continue = main.StreamripFletApp._on_similar_continue.__get__(self.app, main.StreamripFletApp)
-        self.app._similar_auto_continue_queue = main.StreamripFletApp._similar_auto_continue_queue.__get__(self.app, main.StreamripFletApp)
-        self.app._run_continuation = main.StreamripFletApp._run_continuation.__get__(self.app, main.StreamripFletApp)
-        audio_engine.bind(on_similar_continue=self.app._on_similar_continue)
+        audio_engine.bind(on_similar_continue=lambda _i, _v: self.app.autoplay.on_queue_dry())
 
-        # 1. Start sequential play in Play Similar mode
         run_async(self.app._play_track_core("/music/song1.mp3"))
         self.app.set_play_similar_mode(True)
         self.assertTrue(self.app.play_similar_mode)
+        self._drain_autoplay([])  # the enable-time fill finds nothing
 
-        # Truncate queue to just the active track so next advance will run it dry
+        # Truncate queue to just the active track so next advance runs it dry
         audio_engine.queue = [{"path": "/music/song1.mp3", "title": "Song 1", "artist": "Artist A", "album": "Album 1"}]
         audio_engine.current_index = 0
-        audio_engine.play_similar_seed_path = "/music/song1.mp3"
 
-        # Mock graph walker & database lookup for replenishment
-        new_walk_tracks = ["/music/walk1.mp3", "/music/walk2.mp3"]
-        async def _get_tf_walk(p):
-            return {"path": p, "title": "Walk Title", "artist": "Walk Artist", "album": "Walk Album"}
-        self.app.db_manager.get_track_full.side_effect = _get_tf_walk
+        audio_engine.next()
+        self._drain_autoplay(["/music/walk1.mp3", "/music/walk2.mp3"])
 
-        # Patch walk to return our mocked walk tracks
-        with patch("utils.track_graph.walk", new_callable=AsyncMock) as mock_walk:
-            mock_walk.return_value = new_walk_tracks
-            
-            # 2. Advance the queue dry (should trigger silent replenishment)
-            audio_engine.next()
-            
-            # Wait for loop cycles so the async replenishment task completes
-            async def wait_cycles():
-                await asyncio.sleep(0.01)
-            run_async(wait_cycles())
-            
-            # Verify replenishment successfully resolved and appended walk tracks
-            # Queue size should be 1 (original) + 2 (appended) = 3 tracks
-            self.assertEqual(len(audio_engine.queue), 3)
-            # It should have skipped to index 1 (the first newly appended walk track)
-            self.assertEqual(audio_engine.current_index, 1)
-            self.assertEqual(audio_engine.queue[audio_engine.current_index]["path"], "/music/walk1.mp3")
+        # Appended after the dry queue and jumped to the first new track.
+        self.assertEqual(len(audio_engine.queue), 3)
+        self.assertEqual(audio_engine.current_index, 1)
+        self.assertEqual(audio_engine.queue[audio_engine.current_index]["path"], "/music/walk1.mp3")
 
     def test_play_similar_proactive_replenishment(self):
-        self.app._session_bad_paths = []
-        self.app._replenish_similar_queue_if_needed = main.StreamripFletApp._replenish_similar_queue_if_needed.__get__(self.app, main.StreamripFletApp)
-        self.app._recommend_similar_async = AsyncMock()
-        
-        self.app.play_similar_mode = True
-        
-        # Scenario 1: auto-play BUFFER of 4 (the _autoplay run after current) ->
-        # no replenishment. Only _autoplay-tagged tracks count as the buffer; the
-        # current track and any library tail do not.
+        ap = self.app.autoplay
+        ap.enabled = True
+        ap.anchor = "/music/song1.mp3"
+
+        # Buffer of 4 (only _autoplay-tagged tracks ahead count) -> no refill.
         audio_engine.queue = [
             {"path": "/music/song1.mp3"},
             {"path": "/music/song2.mp3", "_autoplay": True},
@@ -501,126 +497,39 @@ class TestQueueModes(unittest.TestCase):
         ]
         audio_engine.current_index = 0
         audio_engine.current_path = "/music/song1.mp3"
+        ap.ensure_buffer()
+        self.assertEqual(self.autoplay_tasks, [])
 
-        self.app._replenish_similar_queue_if_needed()
-        self.app._recommend_similar_async.assert_not_called()
+        # Buffer of 3 (< 4) -> top up to 8. Seeded from the ANCHOR, not the
+        # unheard end of the buffer (chained refills are what drifted).
+        audio_engine.queue = audio_engine.queue[:4]
+        ap.ensure_buffer()
+        self.assertEqual(len(self.autoplay_tasks), 1)
+        _fn, args = self.autoplay_tasks[0]
+        self.assertEqual(args[:2], ("/music/song1.mp3", 5))
 
-        # Scenario 2: buffer of 3 (< 4) -> replenish 5 more, seeded from the LAST
-        # buffered track so the walk continues from the end of the buffer.
-        audio_engine.queue = [
-            {"path": "/music/song1.mp3"},
-            {"path": "/music/song2.mp3", "_autoplay": True},
-            {"path": "/music/song3.mp3", "_autoplay": True},
-            {"path": "/music/song4.mp3", "_autoplay": True},
-        ]
-        audio_engine.current_index = 0
-        audio_engine.current_path = "/music/song1.mp3"
+        # A fill in flight blocks a second one.
+        ap.ensure_buffer()
+        self.assertEqual(len(self.autoplay_tasks), 1)
 
-        self.app._play_similar_recommendation_in_progress = False
-        self.app._replenish_similar_queue_if_needed()
-        self.app._recommend_similar_async.assert_called_once_with("/music/song4.mp3", 5, 0)
-
-        # Scenario 3: Recommendation in progress flag is True -> no new recommendation is scheduled
-        self.app._recommend_similar_async.reset_mock()
-        self.app._replenish_similar_queue_if_needed()
-        self.app._recommend_similar_async.assert_not_called()
-
-        # Scenario 4: Reset the flag -> replenishment is scheduled again
-        self.app._play_similar_recommendation_in_progress = False
-        self.app._replenish_similar_queue_if_needed()
-        self.app._recommend_similar_async.assert_called_once_with("/music/song4.mp3", 5, 0)
-
-    def test_auto_dj_mode(self):
-        # 1. Start sequential playback in normal mode
+    def test_position_file_wins_over_older_queue_snapshot(self):
+        """The 10 s position loop writes only queue_pos.json; a restore must
+        resume from it, not from the (older) index in queue_state.json."""
         run_async(self.app._play_track_core("/music/song1.mp3"))
-        self.assertEqual(len(audio_engine.queue), 3)
-        self.assertEqual(audio_engine.current_index, 0)
+        self.app._save_queue_state()                       # index 0 in both files
+        audio_engine.current_index = 2
+        audio_engine._sync_metadata_for_current()
+        audio_engine.position = 42.0
+        self.app._save_position_state()                    # only the small file moves
+        with open(os.path.join(self.test_dir, "queue_state.json")) as fh:
+            self.assertEqual(json.load(fh)["current_index"], 0)
 
-        # Mock PCA projection space
-        import numpy as np
-        self.app.db_manager.get_tracks_with_features.return_value = [
-            {"path": "/music/song1.mp3", "title": "Song 1", "artist": "Artist A", "album": "Album 1"},
-            {"path": "/music/song2.mp3", "title": "Song 2", "artist": "Artist B", "album": "Album 2"},
-            {"path": "/music/song3.mp3", "title": "Song 3", "artist": "Artist C", "album": "Album 3"},
-        ]
-        self.app.db_manager.get_track_full.side_effect = lambda p: next(
-            (t for t in self.sample_tracks if t["path"] == p), None
-        )
-
-        # 2. Toggle Auto-DJ ON
-        self.app.set_auto_dj_mode(True)
-        self.assertTrue(self.app.auto_dj_mode)
-        
-        # Wait for the async task to populate the Auto-DJ queue
-        async def wait_cycles():
-            await asyncio.sleep(0.01)
-        run_async(wait_cycles())
-
-        # Auto-DJ should have populated the queue
-        self.assertGreater(len(audio_engine.queue), 0)
-        self.assertEqual(audio_engine.queue[0]["path"], "/music/song1.mp3")
-
-        # Play Similar should be mutually exclusive (False)
-        self.assertFalse(self.app.play_similar_mode)
-
-        # Toggle Play Similar ON should disable Auto-DJ
-        self.app.set_play_similar_mode(True)
-        self.assertTrue(self.app.play_similar_mode)
-        self.assertFalse(self.app.auto_dj_mode)
-
-        # Toggle Auto-DJ back ON should disable Play Similar
-        self.app.set_auto_dj_mode(True)
-        self.assertTrue(self.app.auto_dj_mode)
-        self.assertFalse(self.app.play_similar_mode)
-
-        # 3. Toggle Auto-DJ OFF
-        self.app.set_auto_dj_mode(False)
-        self.assertFalse(self.app.auto_dj_mode)
-
-        # Original queue must be restored sequential play
-        self.assertEqual(len(audio_engine.queue), 3)
-        self.assertEqual(audio_engine.queue[0]["path"], "/music/song1.mp3")
-        self.assertEqual(audio_engine.queue[1]["path"], "/music/song2.mp3")
-        self.assertEqual(audio_engine.current_index, 0)
-
-    def test_dislike_advance_ownership(self):
-        # Mock PCA projection space
-        import numpy as np
-        self.app.db_manager.get_tracks_with_features.return_value = [
-            {"path": "/music/song1.mp3", "title": "Song 1", "artist": "Artist A", "album": "Album 1"},
-            {"path": "/music/song2.mp3", "title": "Song 2", "artist": "Artist B", "album": "Album 2"},
-            {"path": "/music/song3.mp3", "title": "Song 3", "artist": "Artist C", "album": "Album 3"},
-        ]
-        async def _get_tf(p):
-            return next((t for t in self.sample_tracks if t["path"] == p), None)
-        self.app.db_manager.get_track_full.side_effect = _get_tf
-
-        # Setup initial sequential queue
-        run_async(self.app._play_track_core("/music/song1.mp3"))
-        self.assertEqual(len(audio_engine.queue), 3)
-        self.assertEqual(audio_engine.current_index, 0)
-
-        # 1. Play Similar active: disliking should NOT skip/advance
-        self.app.set_play_similar_mode(True)
-        self.assertTrue(self.app.play_similar_mode)
-        
-        # Click dislike (like=False)
-        self.app._on_feedback_click(False)
-        # Should remain at index 0 (no advance)
-        self.assertEqual(audio_engine.current_index, 0)
-
-        # 2. Auto-DJ active: disliking MUST skip/advance to next track
-        self.app.set_auto_dj_mode(True)
-        self.assertTrue(self.app.auto_dj_mode)
-        self.assertFalse(self.app.play_similar_mode)
-
-        # Re-set queue to clear index for clean skip test
-        audio_engine.current_index = 0
-        
-        # Click dislike (like=False)
-        self.app._on_feedback_click(False)
-        # Auto-DJ should have advanced index to 1 (skipped track)
-        self.assertEqual(audio_engine.current_index, 1)
+        audio_engine.clear_queue()
+        self.app._read_queue_state = main.StreamripFletApp._read_queue_state.__get__(self.app, main.StreamripFletApp)
+        self.app._restore_queue_state_async = main.StreamripFletApp._restore_queue_state_async.__get__(self.app, main.StreamripFletApp)
+        run_async(self.app._restore_queue_state_async())
+        self.assertEqual(audio_engine.current_index, 2)
+        self.assertEqual(audio_engine.current_path, "/music/song3.mp3")
 
     def test_sigkill_atomic_queue_state_durability(self):
         # 1. Setup a valid queue state file
@@ -683,17 +592,6 @@ class TestQueueModes(unittest.TestCase):
         self.assertTrue(len(audio_engine.queue) > 0)
         self.assertIn(audio_engine.repeat_mode, ["none", "all", "one"])
 
-    def test_dj_deprecation_graceful_no_op(self):
-        # Even if a deprecated set_auto_dj_mode(True) is invoked, it should not crash the player thread.
-        # Verify set_auto_dj_mode toggles gracefully or is a standard safe flow.
-        self.app.set_auto_dj_mode(True)
-        self.assertTrue(self.app.auto_dj_mode)
-        
-        # When set_play_similar_mode(True) is triggered, Auto-DJ should turn off as usual.
-        self.app.set_play_similar_mode(True)
-        self.assertTrue(self.app.play_similar_mode)
-        self.assertFalse(self.app.auto_dj_mode)
-
     def test_chaotic_crash_restoration_loop(self):
         # Helper to simulate a hard SIGKILL and app restart
         def crash_and_restart():
@@ -706,9 +604,6 @@ class TestQueueModes(unittest.TestCase):
             audio_engine.is_shuffle = False
             audio_engine.repeat_mode = "none"
             self.app.play_similar_mode = False
-            self.app.play_similar_saved_queue = None
-            self.app.play_similar_saved_index = None
-            self.app.play_similar_saved_shuffle = False
             
             # 3. Reload preferences from flet_prefs.json to simulate cold boot loading
             self.app._prefs = {}
@@ -722,7 +617,7 @@ class TestQueueModes(unittest.TestCase):
             audio_engine.is_shuffle = bool(self.app._prefs.get("is_shuffle", False))
             audio_engine.repeat_mode = self.app._prefs.get("repeat_mode", "none")
             self.app.play_similar_mode = bool(self.app._prefs.get("play_similar_mode", False))
-            self.app.auto_dj_mode = bool(self.app._prefs.get("auto_dj_mode", False))
+            self.app.autoplay.enabled = self.app.play_similar_mode
             
             # 4. Restore state (simulating fresh app boot)
             self.app.is_restoring_session = False
@@ -801,9 +696,6 @@ class TestQueueModes(unittest.TestCase):
             audio_engine.is_shuffle = False
             audio_engine.repeat_mode = "none"
             self.app.play_similar_mode = False
-            self.app.play_similar_saved_queue = None
-            self.app.play_similar_saved_index = None
-            self.app.play_similar_saved_shuffle = False
             
             # 3. Reload preferences from flet_prefs.json to simulate cold boot loading
             self.app._prefs = {}
@@ -815,7 +707,7 @@ class TestQueueModes(unittest.TestCase):
             audio_engine.is_shuffle = bool(self.app._prefs.get("is_shuffle", False))
             audio_engine.repeat_mode = self.app._prefs.get("repeat_mode", "none")
             self.app.play_similar_mode = bool(self.app._prefs.get("play_similar_mode", False))
-            self.app.auto_dj_mode = bool(self.app._prefs.get("auto_dj_mode", False))
+            self.app.autoplay.enabled = self.app.play_similar_mode
             
             # 4. Restore state (simulating fresh app boot)
             self.app.is_restoring_session = False
@@ -868,27 +760,12 @@ class TestQueueModes(unittest.TestCase):
         audio_engine.queue = [{"path": "/music/song2.mp3", "title": "Song 2", "artist": "Artist B", "album": "Album 2"}]
         audio_engine.current_index = 0
         audio_engine.play_similar_seed_path = "/music/song2.mp3"
-        self.app._session_bad_paths = []
-        self.app._on_similar_continue = main.StreamripFletApp._on_similar_continue.__get__(self.app, main.StreamripFletApp)
-        self.app._similar_auto_continue_queue = main.StreamripFletApp._similar_auto_continue_queue.__get__(self.app, main.StreamripFletApp)
-        self.app._run_continuation = main.StreamripFletApp._run_continuation.__get__(self.app, main.StreamripFletApp)
-        audio_engine.bind(on_similar_continue=self.app._on_similar_continue)
+        audio_engine.bind(on_similar_continue=lambda _i, _v: self.app.autoplay.on_queue_dry())
+        self.autoplay_tasks.clear()
+        self.app.autoplay._filling = False
 
-        new_walk_tracks = ["/music/walk1.mp3", "/music/walk2.mp3"]
-        async def _get_tf_walk(p):
-            return {"path": p, "title": "Walk Title", "artist": "Walk Artist", "album": "Walk Album"}
-        self.app.db_manager.get_track_full.side_effect = _get_tf_walk
-
-        with patch("utils.track_graph.walk", new_callable=AsyncMock) as mock_walk:
-            mock_walk.return_value = new_walk_tracks
-            
-            # Skip triggers replenishment
-            audio_engine.next()
-            
-            # Wait for replenishment tasks
-            async def wait_cycles():
-                await asyncio.sleep(0.01)
-            run_async(wait_cycles())
+        audio_engine.next()
+        self._drain_autoplay(["/music/walk1.mp3", "/music/walk2.mp3"])
 
         # Verify walk tracks were appended
         self.assertEqual(len(audio_engine.queue), 3)
@@ -931,7 +808,11 @@ class TestQueueModes(unittest.TestCase):
         # OS KILL & RESTORE
         crash_and_restart()
         self.assertFalse(audio_engine.is_shuffle)
-        self.assertEqual(len(audio_engine.queue), 4)
+        # Regular queue saved at shuffle-on was [song2, walk1]: turning shuffle
+        # on switched auto-play off, which dropped the still-pending walk2 (a
+        # continuation track is a tagged recommendation like any other). The
+        # shuffled-to track is re-inserted -> 3.
+        self.assertEqual(len(audio_engine.queue), 3)
 
     def test_jarvis_init_caching_and_concurrency(self):
         # Stress-test Jarvis (AssistantView) cache-gating, edge rebuilds, and concurrency controls

@@ -94,18 +94,18 @@ async def test_queue_remove_and_move():
     engine.current_index = 0
     runner = AssistantRunner(db, engine)
 
-    # Remove track 2
+    # Remove track 2 — must go through the engine (native removal + index
+    # shift), never a bare queue.pop() the player never hears about.
     intent = ai.parse("remove track 2 from queue")
     res = await runner.dispatch(intent)
     assert res.success is True
-    assert len(engine.queue) == 2
-    assert engine.queue[1]["track_title"] == "Track 3"
+    engine.remove_from_queue.assert_called_once_with(1)
 
-    # Move track 3 to top
+    # Move track 3 to play next (right after the playing row 0)
     intent = ai.parse("move Track 3 to top")
     res = await runner.dispatch(intent)
     assert res.success is True
-    assert engine.queue[1]["track_title"] == "Track 3"
+    engine.move_queue_item.assert_called_once_with(2, 1)
 
 
 @pytest.mark.asyncio

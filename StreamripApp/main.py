@@ -2,11 +2,6 @@
 StreamripApp; Full Fidelity Flet Rewrite.
 Replaces all Kivy / KivyMD code while maintaining 1:1 UX parity, 
 animations, and functional details from the original.
-
-- [x] Fix SELinux denial by setting `PYTHONMALLOC=malloc` in `main.py`
-- [x] Improve `AudioEngine` initialization robustness in `audio_engine.py`
-- [/] Add diagnostic logging to `_load_src`
-- [ ] Verify build configuration in `pyproject.toml`
 """
 import os
 import sys
@@ -171,6 +166,8 @@ from ui.player.download_dock import DownloadDock
 from ui.player.dialogs import PlaylistEditorDialog
 debug_log("importing queue_controller and error_boundary")
 from utils.queue_controller import QueueController
+from utils import play_ledger
+from utils.autoplay import AutoPlay, ANCHOR_MODES, FOLLOW
 from utils.error_boundary import ErrorBoundary
 debug_log("all main.py imports completed successfully")
 
@@ -196,52 +193,15 @@ class StreamripFletApp:
         self.is_background  = False
         self.is_restoring_session = False
 
-        # Taste-model / playback-event tracking. _last_played_path holds the
-        # path that was most recently *playing* so we can fire a single
-        # record_play_event when playback transitions away from it (via skip,
-        # natural end, or stop). _last_play_position is the latest reported
-        # position on that track. _last_play_duration is its total duration.
-        # _explicit_feedback_cache is a per-process map of path -> True/False
-        # used to keep the playback-bar like/dislike buttons in sync without
-        # re-querying the DB on every track change.
+        # Listen capture for engines WITHOUT a native play ledger (macOS): the
+        # path that was last playing and how far into it we got, so the
+        # transition away from it can be classified as a listen or a skip.
         self._last_played_path: str = ""
         self._last_play_position: float = 0.0
         self._last_play_duration: float = 0.0
-        self._explicit_feedback_cache: dict[str, bool] = {}
+        # Mirrors self.autoplay.enabled (persisted as the "play_similar_mode"
+        # pref); the AutoPlay controller is created in _heavy_init.
         self.play_similar_mode: bool = False
-        self._play_similar_gen: int = 0
-        self._play_similar_recommendation_in_progress: bool = False
-
-        # ── Session-scoped negative centroid ─────────────────────────────
-        # DORMANT BY DESIGN — collected, not consumed. Keep it that way unless
-        # you are deliberately reviving the taste model.
-        #
-        # `_record_play_event_safe` still fills these on every track transition,
-        # but nothing reads them: the trip-wire and the Jarvis continuation that
-        # used them were removed in the Jarvis debloat (8ddff64). That was a
-        # deliberate simplification — a slim, debuggable walk beat a taste model
-        # that was hard to reason about — and the capture is retained so the
-        # signal is there if we choose to wire it back up.
-        #
-        # So this is NOT a bug to "fix" by hunting down the missing consumer.
-        # The cost is three small in-memory deques per session.
-        #
-        # Transient signal that powers the "this chain went bad" guardrail
-        # on top of the global taste model. None of this is persisted —
-        # the goal is to react inside one listening session, then reset.
-        #   * _session_bad_paths: paths the user just rejected (skip/dislike).
-        #     Fed into walk()'s `avoid` set so they are excluded outright.
-        #   * _session_last_liked_path: most recent track that earned a
-        #     positive signal in this session. Used as a fallback seed
-        #     when the trip-wire trips, so we anchor back to something
-        #     known-good instead of the bad track currently playing.
-        #   * _session_recent_outcomes: rolling label for the last few
-        #     continuation picks (True = kept/engaged, False = rejected).
-        #     Trip-wire fires when ≥2 of the last 3 went bad.
-        from collections import deque
-        self._session_bad_paths: deque[str] = deque(maxlen=10)
-        self._session_last_liked_path: str | None = None
-        self._session_recent_outcomes: deque[bool] = deque(maxlen=3)
 
     def _show_error(self, e=None):
         """Surfaces critical errors to the full-screen ErrorBoundary."""
@@ -250,30 +210,45 @@ class StreamripFletApp:
         else:
             self.show_snackbar(f"Critical Error: {e}")
 
+    # Flet 0.86 delivers the state as `e.state` (an AppLifecycleState whose
+    # values are "show"/"resume"/"hide"/"inactive"/"pause"/"detach"/"restart")
+    # with `e.data` None. The old check compared e.data against "hidden"/
+    # "detached", so is_background was never set: UI updates kept flowing with
+    # the screen off and the resume path below never ran. "inactive" is NOT
+    # background — split-screen keeps a visible app inactive.
+    _BACKGROUND_STATES = ("hide", "pause", "detach")
+
     def _on_lifecycle(self, e):
-        # e.data can be: "resumed", "inactive", "hidden", "detached"
-        # We suspend UI updates when hidden or inactive (background/multitasking)
-        was_bg = self.is_background
-        self.is_background = e.data in ("hidden", "inactive", "detached")
-        
-        if self.is_background != was_bg:
-            if self.is_background:
-                logger.info(f"App lifecycle: {e.data} - Suspending UI updates")
-                if hasattr(self, "assistant_view") and self.assistant_view:
-                    self.assistant_view.handle_app_background()
-            else:
-                logger.info(f"App lifecycle: {e.data} - Resuming UI updates")
-                if hasattr(self, "assistant_view") and self.assistant_view:
-                    self.assistant_view.handle_app_resume()
-                # Force-sync current highlights when returning to foreground
-                if hasattr(self, "library_view"):
-                    self.library_view.refresh_now_playing()
-                if hasattr(self, "search_view"):
-                    self.search_view.refresh_now_playing()
-                # When returning to foreground, force a single update to sync state
-                self.safe_update(lambda: None)
-                # Prune caches asynchronously when returning to foreground
-                self.page.run_task(self._prune_caches_async)
+        state = getattr(e, "state", None)
+        state = getattr(state, "value", state) or e.data or ""
+        if state in self._BACKGROUND_STATES:
+            # The session may be torn down from here on, and nothing refills
+            # auto-play without it: queue enough to ride it out. Runs on every
+            # background state (hide then pause); a full buffer makes it a no-op.
+            self.autoplay.prefill_for_background()
+            now_bg = True
+        elif state == "resume":
+            now_bg = False
+        else:
+            return  # show / inactive / restart are transitional
+        if now_bg == self.is_background:
+            return
+        self.is_background = now_bg
+        if now_bg:
+            logger.info("App lifecycle: %s - Suspending UI updates", state)
+            if hasattr(self, "assistant_view") and self.assistant_view:
+                self.assistant_view.handle_app_background()
+            return
+        logger.info("App lifecycle: %s - Resuming UI updates", state)
+        if hasattr(self, "assistant_view") and self.assistant_view:
+            self.assistant_view.handle_app_resume()
+        # Player handlers skip UI work while backgrounded, so the mini player
+        # and Now Playing may show a stale track, play/pause state or duration.
+        # One refresh (also re-highlights the playing rows) and a full flush.
+        self.safe_update(self._refresh_now_playing_ui)
+        self.page.run_task(self._prune_caches_async)
+        # Pick up listens that finished while we were in the background.
+        self._schedule_ledger_drain(0.0)
 
     async def initialize(self):
         # PHASE 1: Immediate Splash Render (< 50ms)
@@ -451,27 +426,38 @@ class StreamripFletApp:
         self.assistant_view      = AssistantView(self)
 
         # wire ft.Audio into the page
+        audio_engine.play_log_path = play_ledger.ledger_path(DATA_DIR)
         audio_engine.setup(self.page, self.db_manager)
 
         # Restore saved shuffle, repeat and similar playback preferences
         audio_engine.is_shuffle = bool(self._prefs.get("is_shuffle", False))
         audio_engine.repeat_mode = self._prefs.get("repeat_mode", "none")
         self.play_similar_mode = bool(self._prefs.get("play_similar_mode", False))
-        self.auto_dj_mode = bool(self._prefs.get("auto_dj_mode", False))
+        # One controller per process: a UI restart re-runs _heavy_init, and the
+        # session's history/rejections must survive it.
+        if getattr(self, "autoplay", None) is None:
+            self.autoplay = AutoPlay(
+                audio_engine, self.db_manager,
+                run_task=lambda fn, *a: self.page.run_task(fn, *a),
+                notify=lambda msg: self.safe_update(lambda: self.show_snackbar(msg)),
+            )
+        self.autoplay.db = self.db_manager
+        self.autoplay.set_anchor_mode(self._prefs.get("autoplay_anchor", FOLLOW))
+        # Restored silently: the restored queue already carries its buffer, and
+        # refills resume on the next track change.
+        self.autoplay.enabled = self.play_similar_mode
         self.now_playing.update_shuffle(audio_engine.is_shuffle)
         self.now_playing.update_repeat(audio_engine.repeat_mode)
         self.now_playing.update_play_similar(self.play_similar_mode)
-        self.now_playing.update_auto_dj(self.auto_dj_mode)
-        self.mini_player.update_auto_dj(self.auto_dj_mode)
 
         # bind audio engine events
         audio_engine.bind(
             current_path=self._on_current_path,
+            current_art=self._on_current_art,
             position=self._on_position,
             is_playing=self._on_is_playing,
             duration=self._on_duration,
             loudness_boost_db=self._on_loudness_boost_change,
-            on_custom_action=self._on_media_custom_action,
         )
         def _on_queue_mutated(_inst, _val):
             self.safe_update(self.queue_sheet.refresh)
@@ -479,12 +465,14 @@ class StreamripFletApp:
             # memory reaping or process death) leaves a recoverable snapshot
             # on disk instead of the stale state from the previous launch.
             self._schedule_queue_save()
-            self._replenish_similar_queue_if_needed()
+            if not self.is_restoring_session:
+                self.autoplay.ensure_buffer()
 
         audio_engine.bind(
             on_playback_error=lambda _, d: self._on_playback_error_toast(d),
             on_queue_mutated=_on_queue_mutated,
-            on_similar_continue=self._on_similar_continue,
+            on_similar_continue=lambda _i, _v: self.autoplay.on_queue_dry(),
+            on_native_ready=lambda _i, _v: self._schedule_ledger_drain(0.0),
         )
 
         # build and mount UI
@@ -618,10 +606,18 @@ class StreamripFletApp:
             # Background pass: NEW artists only (no include_failed /
             # retry_incomplete). Re-checking blanks and retrying failures is
             # deliberate work the user asks for with Sync in the workbench, not
-            # something to repeat on every boot at 1 req/s.
-            summary = await enrich_library(self.db_manager, with_genres=True)
+            from utils.progress_notify import (
+                ProgressNotifier, metadata_progress_cb, metadata_summary_text,
+            )
+            provider = self._prefs.get("sync_provider", "musicbrainz")
+            notifier = ProgressNotifier("metadata", "Fetching artist metadata")
+            summary = await enrich_library(
+                self.db_manager, provider=provider, with_genres=True,
+                progress=metadata_progress_cb(notifier),
+            )
+            notifier.finish(metadata_summary_text(summary))
             if summary.get("enriched"):
-                logger.info("Metadata enrichment complete: %s", summary)
+                logger.info("Metadata enrichment complete (%s): %s", provider, summary)
         except Exception as exc:
             logger.warning("Metadata enrichment failed: %s", exc)
         finally:
@@ -783,6 +779,7 @@ class StreamripFletApp:
                 os.path.join(app_dir, "library.db-wal"),
                 os.path.join(app_dir, "library.db-shm"),
                 os.path.join(app_dir, "queue_state.json"),
+                os.path.join(app_dir, "queue_pos.json"),
                 os.path.join(app_dir, "flet_prefs.json"),
                 os.path.join(app_dir, "user_prefs.json"),
                 os.path.join(app_dir, "recent_searches.json"),
@@ -859,8 +856,6 @@ class StreamripFletApp:
             self.library_folder = ""
             self.target_folder = ""
             self.download_history_list = []
-            if hasattr(self, "_explicit_feedback_cache"):
-                self._explicit_feedback_cache.clear()
 
             # 5. Brief delay to ensure I/O settles, then restart UI
             await asyncio.sleep(0.2)
@@ -901,8 +896,6 @@ class StreamripFletApp:
                     await conn.execute("DELETE FROM playlist_tracks")
                     await conn.execute("DELETE FROM playlists")
                     await conn.execute("DELETE FROM track_partitions")
-                    await conn.execute("DELETE FROM mood_feedback")
-                    await conn.execute("DELETE FROM mood_profiles")
                     await conn.execute("DELETE FROM playback_history")
                     await conn.execute("DELETE FROM track_neighbors")
                     await conn.execute("DELETE FROM play_counts")
@@ -942,8 +935,8 @@ class StreamripFletApp:
 
             # Clear all queue state files
             audio_engine.clear_queue()
-            for filename in ("queue_state.json", "queue_regular.json", "queue_shuffle.json", "queue_similar.json"):
-                q_path = os.path.join(os.environ["XDG_CACHE_HOME"] if filename != "queue_state.json" else DATA_DIR, filename)
+            for filename in ("queue_state.json", "queue_pos.json", "queue_regular.json", "queue_shuffle.json", "queue_similar.json"):
+                q_path = os.path.join(os.environ["XDG_CACHE_HOME"] if filename not in ("queue_state.json", "queue_pos.json") else DATA_DIR, filename)
                 try:
                     if os.path.exists(q_path):
                         os.remove(q_path)
@@ -1507,578 +1500,100 @@ class StreamripFletApp:
             self.settings_view.update_loudness_boost(value)
 
     def _on_current_path(self, _instance, path: str):
-        if path and not getattr(self, "is_restoring_session", False):
+        native_log = getattr(audio_engine, "has_native_play_log", False)
+        restoring = getattr(self, "is_restoring_session", False)
+        if native_log:
+            # Plays are counted from the native ledger (real listening time,
+            # captured even while this session is deaf). The outgoing track's
+            # line lands a moment after the index change, hence the delay.
+            self._schedule_ledger_drain()
+        elif path and not restoring:
             # Increment play count in background
             asyncio.create_task(self.db_manager.increment_play_count(path))
 
-        # Track changed (manual skip or auto-advance); flush queue state so
-        # the persisted current_index points at the right slot if the OS
-        # kills us before the next mutation event.
-        self._schedule_queue_save()
+        # Track changed (manual skip or auto-advance): only the index moved,
+        # so persist the small position file, not the whole queue.
+        self._schedule_position_save()
 
-        # ── Implicit play-event capture ──────────────────────────────────
-        # Every transition of `current_path` (skip, natural end via
-        # _on_track_ended → next(), or stop which sets path to "") fires
-        # exactly once for the outgoing track; forward unconditionally
-        # whenever we had a previous track.
-        prev_path = self._last_played_path
-        prev_pos  = self._last_play_position
-        prev_dur  = self._last_play_duration
-        if (
-            prev_path
-            and prev_path != path
-            and not getattr(self, "is_restoring_session", False)
-        ):
-            self.page.run_task(
-                self._record_play_event_safe, prev_path, prev_pos, prev_dur
-            )
+        if not native_log:
+            self._capture_listen_without_ledger(path, restoring)
 
-        # Reset trackers for the incoming track. Duration may arrive a beat
-        # later via _on_duration; that's fine — _on_position will overwrite
-        # _last_play_duration as soon as a valid duration is reported.
-        self._last_played_path    = path or ""
-        self._last_play_position  = 0.0
-        self._last_play_duration  = float(audio_engine.duration or 0.0)
+        if not restoring:
+            self.autoplay.on_track_changed(path)
 
-        # Refresh playback-bar like/dislike state for the new track.
-        self._refresh_feedback_buttons(path)
+        self.safe_update(self._refresh_now_playing_ui)
 
-        # Play Similar dynamic queue replenishment hook
-        if self.play_similar_mode and path and not getattr(self, "is_restoring_session", False):
-            self._replenish_similar_queue_if_needed()
+    def _on_current_art(self, _instance, art: str):
+        """Art can arrive after the track change (the native resolver is
+        asynchronous); apply it if it still belongs to the playing track."""
+        if art and not self.is_background:
+            self._apply_artwork_if_current(audio_engine.current_path, art)
 
-        def _atomic_update():
-            track  = audio_engine.current_track  or ""
-            artist = audio_engine.current_artist or ""
-            album  = audio_engine.current_album  or ""
-
-            self.mini_player.update_meta(track, artist)
-            self.now_playing.update_meta(track, artist, album)
-            
-            is_playing = audio_engine.is_playing
-            self.mini_player.update_state(is_playing)
-            self.now_playing.update_state(is_playing)
-
-            img_url = ""
-            if audio_engine.queue and audio_engine.current_index < len(audio_engine.queue):
-                img_url = audio_engine.queue[audio_engine.current_index].get("image_url", "")
-            
-            # Use cached local artwork if available, avoiding redundant background extraction
-            art_val = audio_engine.current_art or img_url
-            self.mini_player.update_artwork(art_val)
-            self.now_playing.update_artwork(art_val)
-
-            # Highlight the currently-playing row in both views
-            self.search_view.refresh_now_playing()
-            self.library_view.refresh_now_playing()
-
-            if isinstance(img_url, str) and img_url.startswith("http"):
-                self._fetch_artwork_url_async(img_url)
-            elif not audio_engine.current_art and track and path:
-                self._extract_artwork_async(path)
-
-        self.safe_update(_atomic_update)
-
-    def _on_media_custom_action(self, _instance, data: dict):
-        """Called when the user clicks a custom button in the media notification."""
-        name = data.get("name")
-        if name == "replenish_queue":
-            self.page.run_task(self._force_replenish_similar_queue)
-
-    async def _record_play_event_safe(self, path: str, played: float, duration: float):
-        """Background-safe tracker updates that feed the session-scoped
-        negative centroid / trip-wire so consecutive bad continuations
-        get steered away from in the next walk."""
-        # Session signal tracks engagement (similar to skip detection)
-        # to identify what the centroid treats as bad.
+    def _refresh_now_playing_ui(self):
+        """Push the engine's current track/state/art into the mini player and
+        Now Playing and re-highlight the playing rows. Runs inside a
+        safe_update flush."""
+        path   = audio_engine.current_path
+        track  = audio_engine.current_track  or ""
+        artist = audio_engine.current_artist or ""
+        album  = audio_engine.current_album  or ""
+        self.mini_player.update_meta(track, artist)
+        self.now_playing.update_meta(track, artist, album)
+        is_playing = audio_engine.is_playing
+        self.mini_player.update_state(is_playing)
+        self.now_playing.update_state(is_playing)
         try:
-            played_seconds = float(played or 0.0)
-            duration_seconds = float(duration or 0.0)
-            y = None
-            if played_seconds >= 5.0:
-                if played_seconds >= 45.0 or (duration_seconds > 0.0 and (played_seconds / duration_seconds) >= 0.30):
-                    y = 1
-                else:
-                    y = 0
-        except Exception:
-            y = None
-        if y == 1:
-            self._session_last_liked_path = path
-            self._session_recent_outcomes.append(True)
-        elif y == 0:
-            if path and path not in self._session_bad_paths:
-                self._session_bad_paths.append(path)
-            self._session_recent_outcomes.append(False)
-
-    def _refresh_feedback_buttons(self, path: str):
-        """Sync the playback-bar like/dislike icons to whatever explicit
-        feedback we have cached for `path`. Hollow = neutral, filled = active."""
-        like_state = self._explicit_feedback_cache.get(path) if path else None
-
-        def _apply(btn_like, btn_dislike):
-            if btn_like is None or btn_dislike is None:
-                return
-            if like_state is True:
-                btn_like.icon       = ft.Icons.THUMB_UP_ROUNDED
-                btn_like.icon_color = CYAN
-                btn_dislike.icon       = ft.Icons.THUMB_DOWN_OUTLINED
-                btn_dislike.icon_color = DIM
-            elif like_state is False:
-                btn_like.icon       = ft.Icons.THUMB_UP_OUTLINED
-                btn_like.icon_color = DIM
-                btn_dislike.icon       = ft.Icons.THUMB_DOWN_ROUNDED
-                btn_dislike.icon_color = CYAN
-            else:
-                btn_like.icon       = ft.Icons.THUMB_UP_OUTLINED
-                btn_like.icon_color = DIM
-                btn_dislike.icon       = ft.Icons.THUMB_DOWN_OUTLINED
-                btn_dislike.icon_color = DIM
-
-        try:
-            _apply(getattr(self.mini_player, "_like_btn", None),
-                   getattr(self.mini_player, "_dislike_btn", None))
-            if getattr(self.now_playing, "_initialized", False):
-                _apply(getattr(self.now_playing, "_like_btn", None),
-                       getattr(self.now_playing, "_dislike_btn", None))
-        except Exception as exc:
-            logger.debug("Failed to refresh feedback buttons: %s", exc)
-
-        def _push():
-            for btn in (
-                getattr(self.mini_player, "_like_btn", None),
-                getattr(self.mini_player, "_dislike_btn", None),
-                getattr(self.now_playing, "_like_btn", None),
-                getattr(self.now_playing, "_dislike_btn", None),
-            ):
-                if btn is not None and getattr(btn, "page", None):
-                    try:
-                        btn.update()
-                    except Exception:
-                        pass
-        try:
-            _push()
+            self.now_playing.update_duration(audio_engine.duration)
         except Exception:
             pass
 
-    def _on_feedback_click(self, like: bool):
-        """Click handler for the playback-bar like/dislike buttons. Mirrors
-        the library-tile mood like/dislike behaviour when the user is viewing
-        a mood partition."""
-        if self.play_similar_mode:
-            return
-        current_path = audio_engine.current_path
-        if not current_path:
-            return
+        img_url = ""
+        if audio_engine.queue and audio_engine.current_index < len(audio_engine.queue):
+            img_url = audio_engine.queue[audio_engine.current_index].get("image_url", "")
+        # Use cached local artwork if available, avoiding redundant extraction
+        art_val = audio_engine.current_art or img_url
+        self.mini_player.update_artwork(art_val)
+        self.now_playing.update_artwork(art_val)
 
-        # Toggle off if the user clicks the same state again, otherwise flip
-        # to the new state. Cache update is optimistic — the DB call below
-        # is the source of truth.
-        prev_state = self._explicit_feedback_cache.get(current_path)
-        if prev_state == like:
-            self._explicit_feedback_cache.pop(current_path, None)
-            new_state = None
-        else:
-            self._explicit_feedback_cache[current_path] = like
-            new_state = like
+        self.search_view.refresh_now_playing()
+        self.library_view.refresh_now_playing()
 
-        # Explicit click is a stronger signal than an implicit skip — feed
-        # it straight into the session centroid / last-liked anchor.
-        if new_state is True:
-            self._session_last_liked_path = current_path
-        elif new_state is False:
-            if current_path not in self._session_bad_paths:
-                self._session_bad_paths.append(current_path)
+        if isinstance(img_url, str) and img_url.startswith("http"):
+            self._fetch_artwork_url_async(img_url)
+        elif not audio_engine.current_art and track and path:
+            self._extract_artwork_async(path)
 
-        self._refresh_feedback_buttons(current_path)
+    def _capture_listen_without_ledger(self, path: str, restoring: bool):
+        """Listen/skip signal for engines with no native play ledger (macOS),
+        from the position mirror. On Android the ledger supplies it instead
+        (see _schedule_ledger_drain): Dart stops emitting positions while the
+        app is backgrounded, so this mirror would misread a song that finished
+        with the screen off as a 10-second skip."""
+        prev = self._last_played_path
+        if prev and prev != path and not restoring:
+            self.autoplay.on_listen(prev, self._last_play_position, self._last_play_duration)
+        self._last_played_path = path or ""
+        self._last_play_position = 0.0
+        self._last_play_duration = float(audio_engine.duration or 0.0)
 
-        if not like and getattr(self, "auto_dj_mode", False):
-            audio_engine.next()
-
-    async def _initiate_play_similar_queue_async(self, path: str, gen: int = 0):
-        """Cheap acoustic-only initial fill for Play Similar.
-
-        No taste model, no percentile matrix, no negative-embedding load.
-        The avoid set already blocks session-disliked tracks; the walk is the
-        library ranked by acoustic proximity to the seed, so the first queue is
-        tight, deterministic and predictable.
-        """
-        import os
-        from utils import track_graph as tg
-        try:
-            # Race guard: bail if the mode was toggled while we were awaiting
-            if gen != self._play_similar_gen or not self.play_similar_mode:
+    def _apply_artwork_if_current(self, for_path: str, art: str):
+        """Show `art` only if `for_path` is still the playing track when the
+        flush runs. Artwork loads finish on worker threads after arbitrary
+        delays (and cancelling a to_thread task does not stop its thread), so an
+        unguarded apply let a skipped track's cover overwrite the current one."""
+        def _apply():
+            if audio_engine.current_path != for_path:
                 return
-
-            avoid = {path}
-            # Session-rejected paths go straight into the avoid set — no
-            # embedding fetch needed; the graph won't visit them at all.
-            avoid.update(self._session_bad_paths)
-            # Anything still sitting in the auto-play buffer is not a candidate
-            # either. The walk is deterministic, so without this a re-enable
-            # from an unchanged seed returns
-            # the exact block already queued and inserts a duplicate copy of it —
-            # the queue "not updating" on the first press. Only the tagged buffer
-            # is excluded; the library tail below it MUST stay eligible.
-            avoid.update(self._autoplay_buffer_paths())
-            # Play Similar leans purely on graph topology + DSP similarity +
-            # metadata. The 7-day recent-played window is deliberately kept
-            # out of the avoid set so a large library's natural listening
-            # history doesn't strip the seed's top-K neighbours mid-walk.
-            # `recent_played_paths` stays in db_manager for future features.
-
-            # Seed-anchored similarity queue: the library ranked by acoustic
-            # proximity to the seed, filtered by the metadata pool gate and
-            # capped per artist/album.
-            walk_paths = await tg.walk(
-                self.db_manager,
-                path,
-                length=8,
-                avoid=avoid,
-            )
-
-            # Re-check after the await — user may have toggled off mid-walk
-            if gen != self._play_similar_gen or not self.play_similar_mode:
-                return
-
-            if walk_paths:
-                engine_tracks = []
-                for p in walk_paths:
-                    row = await self.db_manager.get_track_full(p)
-                    if not row:
-                        continue
-                    engine_tracks.append({
-                        "path":        row.get("path"),
-                        "track_title": row.get("title") or row.get("track_title") or os.path.basename(p),
-                        "artist_name": row.get("artist") or row.get("artist_name") or "Unknown Artist",
-                        "album_title": row.get("album")  or row.get("album_title")  or "Unknown Album",
-                        "duration":    row.get("duration", 0.0) or 0.0,
-                        "image_url":   row.get("image_url", "") or "",
-                    })
-                if engine_tracks:
-                    # Final race check before mutating queue
-                    if gen != self._play_similar_gen or not self.play_similar_mode:
-                        return
-                    # NON-DESTRUCTIVE: drop the similar block in right AFTER the
-                    # current track via the native insert — the current source is
-                    # NOT reloaded, so playback is never cut. The queue tail (e.g.
-                    # the rest of the library) is preserved below the block. Dedup
-                    # against the current track + the existing buffer + this
-                    # block; NOT the tail, or nothing from the library could ever
-                    # be recommended.
-                    seen = {audio_engine.current_path}
-                    # Re-read the buffer here, not from the pre-walk avoid set:
-                    # a replenish or a manual add may have landed while we were
-                    # awaiting the walk.
-                    seen.update(self._autoplay_buffer_paths())
-                    block = []
-                    for et in engine_tracks:
-                        p = et.get("path")
-                        if p and p not in seen:
-                            et["_autoplay"] = True
-                            block.append(et)
-                            seen.add(p)
-                    if block:
-                        # queue_after_current dispatches on_queue_mutated, whose
-                        # handler routes the sheet rebuild through safe_update —
-                        # refreshing again here was duplicate work, and unguarded
-                        # (a raise inside refresh() aborted the rest of this block
-                        # and logged a misleading "failed to initiate").
-                        audio_engine.queue_after_current(block)
-                        logger.info("Auto-play: inserted %d similar tracks after the current song.", len(block))
-                    else:
-                        logger.info(
-                            "Auto-play: walk from %s returned only tracks already queued; nothing inserted.",
-                            os.path.basename(path),
-                        )
-        except Exception as exc:
-            logger.exception("Play Similar: Failed to initiate similar queue: %s", exc)
-
-    async def _recommend_similar_async(self, path: str, count: int = 1, gen: int = 0):
-        """Lightweight block recommendation for Play Similar.
-
-        Runs a minimal acoustic walk with no taste model and no embedding fetch.
-        Appends up to `count` new unique similar tracks.
-        """
-        import os
-        from utils import track_graph as tg
-        try:
-            # Race guard: bail if the mode was toggled while we were awaiting
-            if gen != self._play_similar_gen or not self.play_similar_mode:
-                return
-
-            # Avoid the current track + tracks already in the auto-play buffer +
-            # session rejects — NOT the whole queue. The queue holds the entire
-            # library tail; avoiding all of it would leave the walk with zero
-            # candidates. Library tracks MUST stay eligible (they're what gets
-            # promoted into the buffer).
-            avoid = {t["path"] for t in audio_engine.queue if t.get("_autoplay") and t.get("path")}
-            avoid.add(path)
-            if audio_engine.current_path:
-                avoid.add(audio_engine.current_path)
-            avoid.update(self._session_bad_paths)
-            # Play Similar leans purely on graph topology + DSP similarity +
-            # metadata. The 7-day recent-played window is deliberately kept
-            # out of the avoid set so a large library's natural listening
-            # history doesn't strip the seed's top-K neighbours mid-walk.
-            # `recent_played_paths` stays in db_manager for future features.
-
-            walk_len = max(count + 4, count * 2)
-            walk_tracks = await tg.walk(
-                self.db_manager,
-                path,
-                length=walk_len,
-                avoid=avoid,
-            )
-
-            # Re-check after the await
-            if gen != self._play_similar_gen or not self.play_similar_mode:
-                return
-
-            if walk_tracks:
-                # Dedup against the current track + the existing buffer only.
-                queued = {t["path"] for t in audio_engine.queue if t.get("_autoplay") and t.get("path")}
-                if audio_engine.current_path:
-                    queued.add(audio_engine.current_path)
-                batch: list[dict] = []
-                for wt in walk_tracks:
-                    if wt not in queued:
-                        row = await self.db_manager.get_track_full(wt)
-                        if row:
-                            if gen != self._play_similar_gen or not self.play_similar_mode:
-                                return
-                            track_dict = {
-                                "path":        row.get("path"),
-                                "track_title": row.get("title") or row.get("track_title") or os.path.basename(wt),
-                                "artist_name": row.get("artist") or row.get("artist_name") or "Unknown Artist",
-                                "album_title": row.get("album")  or row.get("album_title")  or "Unknown Album",
-                                "duration":    row.get("duration", 0.0) or 0.0,
-                                "image_url":   row.get("image_url", "") or "",
-                                "_autoplay":   True,
-                            }
-                            batch.append(track_dict)
-                            queued.add(wt)
-                            if len(batch) >= count:
-                                break
-                # Insert right AFTER the existing auto-play buffer (keeps ordering,
-                # stays ahead of the library tail) via the non-destructive native
-                # insert — no source reload, no playback cut.
-                if batch and gen == self._play_similar_gen and self.play_similar_mode:
-                    # Insert after the LAST buffered track anywhere ahead of
-                    # current (robust to a manual "Play Next" splitting the run;
-                    # that untagged track stays put and plays before the buffer).
-                    ci = audio_engine.current_index
-                    q = audio_engine.queue
-                    after = ci
-                    for idx in range(ci + 1, len(q)):
-                        if q[idx].get("_autoplay"):
-                            after = idx
-                    audio_engine.queue_after_current(batch, after_index=after)
-                    logger.info("Auto-play: queued %d more similar tracks (buffer refill).", len(batch))
-        except Exception as exc:
-            logger.exception("Play Similar: Failed to generate dynamic recommendations: %s", exc)
-        finally:
-            self._play_similar_recommendation_in_progress = False
-
-    def _autoplay_buffer_paths(self) -> set[str]:
-        """Paths of the `_autoplay` tracks currently queued AHEAD of the playing
-        track. This is the only part of the queue a walk must avoid: the tail
-        below it is the whole library, and avoiding that would leave the walk
-        with no candidates at all."""
-        q  = audio_engine.queue
-        ci = audio_engine.current_index
-        return {t["path"] for t in q[ci + 1:] if t.get("_autoplay") and t.get("path")}
-
-    def _drop_autoplay_buffer(self) -> int:
-        """Remove the pending auto-play buffer — every `_autoplay` track queued
-        AFTER the current one — and return how many were dropped.
-
-        Turning Auto-play off has to actually take the recommendations out of the
-        queue, otherwise the toggle reads as a no-op: the same up-next list keeps
-        playing, and re-enabling from the same seed re-runs a walk that is
-        deterministic, producing the identical
-        block a second time. Still non-destructive where it matters: the playing
-        track is never touched (no source reload, no cut) and the library tail
-        below the buffer is preserved, so playback simply resumes down the
-        library once this song ends."""
-        q  = audio_engine.queue
-        ci = audio_engine.current_index
-        victims = [i for i in range(ci + 1, len(q)) if q[i].get("_autoplay")]
-        if not victims:
-            return 0
-        audio_engine.remove_indices(victims)
-        logger.info("Auto-play: dropped %d pending recommendation(s) on toggle-off.", len(victims))
-        return len(victims)
-
-    def _replenish_similar_queue_if_needed(self):
-        """Keep an ~8-track auto-play buffer of similar songs queued right after
-        the current track. The buffer is the RUN of _autoplay-tagged tracks after
-        current; the library tail below it is ignored (and preserved), so a full
-        library queue no longer masks an empty buffer."""
-        if not self.play_similar_mode or getattr(self, "is_restoring_session", False):
-            return
-        if getattr(self, "_play_similar_recommendation_in_progress", False):
-            return
-        q = audio_engine.queue
-        ci = audio_engine.current_index
-        # Count EVERY _autoplay track ahead of current — do NOT stop at the first
-        # non-buffer track: a manual "Play Next" inserts an untagged track at
-        # current+1, which just plays before the similars and must not be read as
-        # an empty buffer.
-        buffer = 0
-        last_buf_path = None
-        for t in q[ci + 1:]:
-            if t.get("_autoplay"):
-                buffer += 1
-                last_buf_path = t.get("path") or last_buf_path
-        if buffer < 4:
-            needed = 8 - buffer
-            # Continue the walk from the end of the buffer (or the current track
-            # when the buffer is empty).
-            seed = last_buf_path or audio_engine.current_path
-            if seed:
-                self._play_similar_recommendation_in_progress = True
-                self.page.run_task(self._recommend_similar_async, seed, needed, self._play_similar_gen)
-
-    async def _force_replenish_similar_queue(self):
-        """Force replenish / extend the queue using the graph walk, waking up in the background."""
-        if self.play_similar_mode:
-            path = None
-            if audio_engine.queue:
-                path = audio_engine.queue[-1].get("path")
-            if not path:
-                path = audio_engine.current_path
-            if path:
-                self._play_similar_recommendation_in_progress = True
-                try:
-                    await self._recommend_similar_async(path, 8, self._play_similar_gen)
-                finally:
-                    self._play_similar_recommendation_in_progress = False
-        elif getattr(self, "auto_dj_mode", False):
-            await self._auto_dj_auto_continue_queue()
-        else:
-            path = audio_engine.current_path
-            if path:
-                self.play_similar_mode = True
-                audio_engine.play_similar_seed_path = path
-                self.now_playing.update_play_similar(True)
-                self._play_similar_recommendation_in_progress = True
-                try:
-                    await self._recommend_similar_async(path, 8, self._play_similar_gen)
-                finally:
-                    self._play_similar_recommendation_in_progress = False
-
-    async def _run_continuation(self, coro):
-        """Wrap a dry-queue continuation so the in-progress flag is always
-        cleared, even on early return / exception."""
-        try:
-            await coro()
-        finally:
-            self._continuation_in_progress = False
-
-    def _on_similar_continue(self, _inst, _val=None):
-        """Sync callback dispatched by AudioEngine when the manually-initiated
-        Play Similar or Auto-DJ queue runs dry. Bridges into the async
-        continuation coroutine safely.
-
-        Guarded against double-dispatch: at end-of-queue BOTH next() and the
-        `completed` state event can fire on_similar_continue; a second concurrent
-        continuation would double-append and double-skip the queue."""
-        if not self.page:
-            return
-        if getattr(self, "_continuation_in_progress", False):
-            return
-        if self.play_similar_mode:
-            self._continuation_in_progress = True
-            self.page.run_task(self._run_continuation, self._similar_auto_continue_queue)
-        elif getattr(self, "auto_dj_mode", False):
-            self._continuation_in_progress = True
-            self.page.run_task(self._run_continuation, self._auto_dj_auto_continue_queue)
-
-    async def _similar_auto_continue_queue(self):
-        """Silently extend the Play Similar queue when it runs dry.
-
-        Cheap path: pure acoustic graph walk, no taste model, no embedding
-        fetch. Session-rejected paths are in the avoid set so they won't be
-        visited regardless of the negative centroid term.
-        """
-        import asyncio
-        import os
-        from utils import track_graph as tg
-
-        seed_path = audio_engine.current_path
-        if not seed_path and audio_engine.queue:
-            seed_path = audio_engine.queue[-1].get("path", "")
-        if not seed_path:
-            logger.warning("Play Similar continuation: no seed path found; skipping.")
-            audio_engine.stop()
-            return
-
-        # Build avoid set — session rejects go in here, not as embeddings
-        avoid: set[str] = set()
-        avoid.add(seed_path)
-        for t in audio_engine.queue:
-            if t.get("path"):
-                avoid.add(t["path"])
-        avoid.update(self._session_bad_paths)
-        # Play Similar continuation also skips the recent-played avoid window
-        # (see _initiate_play_similar_queue_async for rationale).
-
-        try:
-            walk_paths = await tg.walk(
-                self.db_manager,
-                seed_path,
-                length=8,
-                avoid=avoid,
-            )
-        except Exception as exc:
-            logger.warning("Play Similar continuation: graph walk failed: %s", exc)
-            walk_paths = []
-
-        if not walk_paths:
-            logger.info("Play Similar continuation: no neighbours found for seed %s", seed_path)
-            audio_engine.stop()
-            return
-
-        first_new_index = len(audio_engine.queue)
-        appended_tracks: list[dict] = []
-        for p in walk_paths:
-            try:
-                row = await self.db_manager.get_track_full(p)
-            except Exception:
-                row = None
-            if not row:
-                continue
-            track_dict = {
-                "path":        row.get("path"),
-                "track_title": row.get("title") or row.get("track_title") or os.path.basename(p),
-                "artist_name": row.get("artist") or row.get("artist_name") or "Unknown Artist",
-                "album_title": row.get("album")  or row.get("album_title")  or "Unknown Album",
-                "duration":    row.get("duration", 0.0) or 0.0,
-                "image_url":   row.get("image_url", "") or "",
-            }
-            appended_tracks.append(track_dict)
-
-        if len(appended_tracks) == 0:
-            logger.info("Play Similar continuation: metadata lookup failed for all neighbours.")
-            audio_engine.stop()
-            return
-
-        # Single batched append (one queue-sheet rebuild) before resuming.
-        audio_engine.queue_extend(appended_tracks)
-
-        # Resume playback at the first newly appended slot
-        audio_engine.play_track_at(first_new_index)
-
-
+            self.mini_player.update_artwork(art)
+            self.now_playing.update_artwork(art)
+        self.safe_update(_apply)
 
     def _fetch_artwork_url_async(self, img_url: str):
+        for_path = audio_engine.current_path
         # Check in-memory cache first; avoids any disk/network I/O
         cached = _ARTWORK_CACHE.get(img_url)
         if cached:
-            self.safe_update(lambda p=cached: (
-                self.mini_player.update_artwork(p),
-                self.now_playing.update_artwork(p),
-            ))
+            self._apply_artwork_if_current(for_path, cached)
             return
 
         def _worker():
@@ -2088,27 +1603,22 @@ class StreamripFletApp:
                 if not os.path.exists(tmp):
                     urllib.request.urlretrieve(img_url, tmp)
                 _ARTWORK_CACHE.put(img_url, tmp)
-                self.safe_update(lambda p=tmp: (
-                    self.mini_player.update_artwork(p),
-                    self.now_playing.update_artwork(p),
-                ))
+                self._apply_artwork_if_current(for_path, tmp)
             except Exception as exc:
                 logger.error("Artwork URL fetch failed: %s", exc)
         asyncio.create_task(asyncio.to_thread(_worker))
 
     def _extract_artwork_async(self, path: str):
+        # Android: the native resolver already decodes this art for the
+        # notification and hands it over as current_art (see _on_current_art).
+        # Decoding it again here with PIL was pure duplicate work per track.
+        if getattr(audio_engine, "has_native_art", False):
+            return
         # Check in-memory cache; avoids PIL decode + disk write on repeat plays
         cached = _ARTWORK_CACHE.get(path)
         if cached:
-            self.safe_update(lambda p=cached: (
-                self.mini_player.update_artwork(p),
-                self.now_playing.update_artwork(p),
-            ))
+            self._apply_artwork_if_current(path, cached)
             return
-
-        # Debounce: cancel any pending extraction for rapid track switches
-        if hasattr(self, '_artwork_timer') and self._artwork_timer:
-            self._artwork_timer.cancel()
 
         def _worker():
             raw_bytes = None
@@ -2151,10 +1661,7 @@ class StreamripFletApp:
                     logger.error("Artwork write failed: %s", exc)
                     art_path = ""
 
-            self.safe_update(lambda p=art_path: (
-                self.mini_player.update_artwork(p),
-                self.now_playing.update_artwork(p),
-            ))
+            self._apply_artwork_if_current(path, art_path)
 
         # Debounce: cancel any pending extraction for rapid track switches
         if hasattr(self, '_artwork_task') and self._artwork_task:
@@ -2228,6 +1735,8 @@ class StreamripFletApp:
         def _update():
             self.mini_player.update_state(is_playing)
             self.now_playing.update_state(is_playing)
+            if is_playing:
+                self.library_view.kick_net_pulse()
         self.safe_update(_update)
 
     # ── queue state persistence ───────────────────────────────────────────────
@@ -2246,17 +1755,19 @@ class StreamripFletApp:
             dur   = state.get("duration", 0.0)
             if not queue:
                 return
-
-            # Issue A: Restore "Play Similar" saved queue and index
-            self.play_similar_saved_queue = state.get("play_similar_saved_queue", None)
-            self.play_similar_saved_index = state.get("play_similar_saved_index", None)
-            self.play_similar_saved_shuffle = state.get("play_similar_saved_shuffle", False)
-
-            if self.play_similar_mode and not self.play_similar_saved_queue:
-                fallback_state = self._load_queue_from_file("queue_shuffle.json" if self.play_similar_saved_shuffle else "queue_regular.json")
-                if fallback_state:
-                    self.play_similar_saved_queue = fallback_state.get("queue", None)
-                    self.play_similar_saved_index = fallback_state.get("current_index", None)
+            # The position file is written far more often than the queue file
+            # (every track change / 10 s of play) and is never older than it.
+            # Trust it when its track is still in this queue.
+            pstate = await asyncio.to_thread(self._read_queue_state, self._position_state_path())
+            if pstate and pstate.get("path"):
+                pi = pstate.get("current_index")
+                if not (isinstance(pi, int) and 0 <= pi < len(queue)
+                        and queue[pi].get("path") == pstate["path"]):
+                    pi = next((i for i, t in enumerate(queue) if t.get("path") == pstate["path"]), None)
+                if pi is not None:
+                    index = pi
+                    pos = pstate.get("position", 0.0)
+                    dur = pstate.get("duration", 0.0)
 
             # Bound `index` defensively; a stale snapshot may reference a
             # row that no longer exists in the persisted queue.
@@ -2279,6 +1790,7 @@ class StreamripFletApp:
             restored_path = queue[index].get("path")
             if restored_path:
                 self._extract_artwork_async(restored_path)
+                self.autoplay.adopt_anchor(restored_path)
 
             # Manually drive the now-playing UI since restore_queue runs
             # entirely synchronously. _set("current_path", ...) dispatches
@@ -2330,8 +1842,6 @@ class StreamripFletApp:
             "current_index": current_index,
             "position":      position,
             "duration":      duration,
-            "play_similar_saved_queue": getattr(self, "play_similar_saved_queue", None),
-            "play_similar_saved_index": getattr(self, "play_similar_saved_index", None),
         }
         tmp = path + ".tmp"
         try:
@@ -2357,17 +1867,6 @@ class StreamripFletApp:
             logger.warning("Could not load context queue from %s: %s", filename, exc)
             return None
 
-    def _restore_queue_state(self):
-        """Synchronous compat wrapper kept for any external callers; the
-        runtime path now uses _restore_queue_state_async on the event loop
-        so observer dispatches actually update the UI."""
-        try:
-            asyncio.get_event_loop().run_until_complete(
-                self._restore_queue_state_async()
-            )
-        except RuntimeError:
-            pass
-
     def _save_queue_state(self):
         """Write the current queue snapshot to disk atomically.
 
@@ -2379,7 +1878,7 @@ class StreamripFletApp:
         that an explicit `stop()` doesn't leave a phantom session for the
         next launch to "restore" into nothing.
 
-        Partition files (queue_regular/shuffle/similar.json) are refreshed
+        Partition files (queue_regular/shuffle.json) are refreshed
         only at mode-transition points — mirroring them on every save just
         duplicates the I/O without buying any extra recoverability.
         """
@@ -2390,6 +1889,7 @@ class StreamripFletApp:
                     os.remove(path)
             except Exception:
                 pass
+            self._save_position_state()  # removes it too
             return
 
         state = {
@@ -2401,16 +1901,15 @@ class StreamripFletApp:
             # duration_ms. Without this the slider's max defaults to 0 and
             # any pre-load scrub computes a meaningless target.
             "duration":      audio_engine.duration,
-            # Issue A: Persist "Play Similar" saved queue and index
-            "play_similar_saved_queue": getattr(self, "play_similar_saved_queue", None),
-            "play_similar_saved_index": getattr(self, "play_similar_saved_index", None),
-            "play_similar_saved_shuffle": getattr(self, "play_similar_saved_shuffle", False),
         }
         tmp = path + ".tmp"
         try:
             with open(tmp, "w") as fh:
                 safe_json_dump(state, fh)
             os.replace(tmp, path)
+            # Keep the position file at least as new as the queue file, so a
+            # restore can always trust it (see _restore_queue_state_async).
+            self._save_position_state()
         except Exception as exc:
             logger.warning("Could not save queue state: %s", exc)
             try:
@@ -2418,6 +1917,56 @@ class StreamripFletApp:
                     os.remove(tmp)
             except Exception:
                 pass
+
+    def _position_state_path(self) -> str:
+        return os.path.join(DATA_DIR, "queue_pos.json")
+
+    def _save_position_state(self):
+        """Persist where we are in the queue (track, index, offset) without
+        rewriting the queue itself. Atomic like _save_queue_state."""
+        path = self._position_state_path()
+        if not audio_engine.queue:
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                pass
+            except Exception:
+                pass
+            return
+        ci = audio_engine.current_index
+        q = audio_engine.queue
+        state = {
+            # The row the index points at — the same key the queue file uses.
+            "path":          (q[ci].get("path") or "") if 0 <= ci < len(q) else "",
+            "current_index": ci,
+            "position":      audio_engine.position,
+            "duration":      audio_engine.duration,
+        }
+        tmp = path + ".tmp"
+        try:
+            with open(tmp, "w") as fh:
+                json.dump(state, fh)
+            os.replace(tmp, path)
+        except Exception as exc:
+            logger.warning("Could not save position state: %s", exc)
+
+    def _schedule_position_save(self, delay: float = 0.4):
+        """Coalesced like _schedule_queue_save; a queue save supersedes it."""
+        existing = getattr(self, "_pos_save_task", None)
+        if existing is not None and not existing.done():
+            existing.cancel()
+
+        async def _do_save():
+            try:
+                await asyncio.sleep(delay)
+                await asyncio.to_thread(self._save_position_state)
+            except asyncio.CancelledError:
+                pass
+
+        try:
+            self._pos_save_task = asyncio.create_task(_do_save())
+        except RuntimeError:
+            self._save_position_state()
 
     def _schedule_queue_save(self, delay: float = 0.4):
         """Coalesce save requests over a short window. A burst of mutations
@@ -2440,6 +1989,32 @@ class StreamripFletApp:
             # Called before the loop is running (e.g. during shutdown);
             # fall back to a synchronous write so we don't lose the snapshot.
             self._save_queue_state()
+
+    def _schedule_ledger_drain(self, delay: float = 3.0):
+        """Ingest the native play ledger into the DB. Coalescing: if a drain is
+        already pending, it will pick up anything appended before it runs, and
+        a later line is caught by the next track change / resume / ready."""
+        if not getattr(audio_engine, "has_native_play_log", False):
+            return
+        existing = getattr(self, "_ledger_drain_task", None)
+        if existing is not None and not existing.done():
+            return
+
+        async def _do_drain():
+            try:
+                await asyncio.sleep(delay)
+                await play_ledger.drain_ledger(DATA_DIR, self.db_manager,
+                                               on_entries=self.autoplay.on_listens)
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                # The ledger file is kept on failure and retried next drain.
+                logger.error("play ledger drain failed: %s", exc)
+
+        try:
+            self._ledger_drain_task = asyncio.create_task(_do_drain())
+        except RuntimeError:
+            pass
 
     def _schedule_partition_save(self, filename: str, queue_list: list[dict], current_index: int, position: float, duration: float):
         # Snapshot the queue list now so a later mutation on the event loop
@@ -2478,7 +2053,10 @@ class StreamripFletApp:
                     continue
                 last_path = cur_path
                 last_pos = pos
-                await asyncio.to_thread(self._save_queue_state)
+                # Only the position changed: a ~150-byte write. This used to
+                # rewrite queue_state.json — the WHOLE queue (the entire
+                # library tail, ~1.6 MB for 5k tracks) — every 10 s of play.
+                await asyncio.to_thread(self._save_position_state)
             except asyncio.CancelledError:
                 return
             except Exception as exc:
@@ -2507,6 +2085,7 @@ class StreamripFletApp:
                     break
             if existing_idx != -1:
                 audio_engine.play_track_at(existing_idx)
+                self.autoplay.on_user_played(target_path)
                 return
 
         db = self.db_manager
@@ -2542,6 +2121,9 @@ class StreamripFletApp:
                 elif source and source[0] == "playlist":
                     _, pl_id = source
                     view_items = await db.get_tracks_in_playlist(pl_id)
+                elif source and source[0] == "genre":
+                    _, genre_name = source
+                    view_items = await db.get_tracks_by_genre(genre_name)
                 else:
                     lv = self.library_view
                     want_key = (lv.view_mode, lv.search_query, lv.sort_mode)
@@ -2584,6 +2166,9 @@ class StreamripFletApp:
         elif source and source[0] == "playlist":
             _, pl_id = source
             items = await db.get_tracks_in_playlist(pl_id)
+        elif source and source[0] == "genre":
+            _, genre_name = source
+            items = await db.get_tracks_by_genre(genre_name)
         else:
             lv = self.library_view
             want_key = (lv.view_mode, lv.search_query, lv.sort_mode)
@@ -2626,300 +2211,60 @@ class StreamripFletApp:
                     "album_title": t.get("album")  or "Unknown",
                 })
 
-        if self.play_similar_mode:
-            target_track = tracks[target_idx]
-            # NON-DESTRUCTIVE: play the tapped song within the FULL library queue
-            # (starting a chosen song is expected), then insert similar tracks
-            # right after it. No queue wipe, no saved-queue bookkeeping.
-            audio_engine.set_queue(tracks, start_index=target_idx)
-            self._play_similar_gen += 1
-            audio_engine.play_similar_seed_path = target_track.get("path") or ""
-            self.page.run_task(self._initiate_play_similar_queue_async, target_track.get("path"), self._play_similar_gen)
-        elif getattr(self, "auto_dj_mode", False):
-            target_track = tracks[target_idx]
-            
-            # 1. Update pre-similar backup queues in memory
-            self.play_similar_saved_queue = list(tracks)
-            self.play_similar_saved_index = target_idx
-            
-            # 2. Partition Cache: Write this new context queue to disk immediately
-            if getattr(self, "play_similar_saved_shuffle", False):
-                self._schedule_partition_save("queue_shuffle.json", tracks, target_idx, 0.0, 0.0)
-            else:
-                self._schedule_partition_save("queue_regular.json", tracks, target_idx, 0.0, 0.0)
-            
-            # 3. Set active queue to just the clicked track and start play
-            audio_engine.set_queue([target_track], start_index=0)
-            
-            # 4. Trigger new Auto-DJ curation starting with this track
-            self.page.run_task(self._initiate_auto_dj_queue_async)
-        else:
-            audio_engine.set_queue(tracks, start_index=target_idx)
+        # NON-DESTRUCTIVE: the tapped song plays within the FULL list; with
+        # auto-play on, similar tracks are then inserted right after it.
+        audio_engine.set_queue(tracks, start_index=target_idx)
+        self.autoplay.on_user_played(target_path)
 
-    def set_play_similar_mode(self, enabled: bool, transitioning_to_shuffle: bool = False):
+    def set_play_similar_mode(self, enabled: bool):
+        """Auto-play on/off (UI: the chain icon in Now Playing)."""
         if self.play_similar_mode == enabled:
             return
-
-        # Turn off auto_dj if active
-        if enabled and getattr(self, "auto_dj_mode", False):
-            self.set_auto_dj_mode(False)
-
-        # Bump the generation counter FIRST so any in-flight async tasks
-        # from the previous session see a stale gen and bail out before
-        # they mutate the queue.
-        self._play_similar_gen += 1
-        self._play_similar_recommendation_in_progress = False
-        gen = self._play_similar_gen
-
         self.play_similar_mode = enabled
         self._save_pref("play_similar_mode", enabled)
-        
         self.now_playing.update_play_similar(enabled)
-
-        if enabled:
-            # NON-DESTRUCTIVE model: no save / replace / restore of the queue.
-            # Similar tracks are inserted right after the current song (see
-            # _initiate_play_similar_queue_async) and the library tail is left in
-            # place, so turning Auto-play off later needs no restore — the library
-            # simply resumes below the buffer. Shuffle must be off, though:
-            # similars play in walk order right after the current track, which
-            # Dart's shuffle order would otherwise scatter.
-            if audio_engine.is_shuffle:
-                audio_engine.is_shuffle = False
-                self.now_playing.update_shuffle(False)
-                self._save_pref("is_shuffle", False)
-            path = audio_engine.current_path
-            audio_engine.play_similar_seed_path = path or ""
-            if path:
-                self.page.run_task(self._initiate_play_similar_queue_async, path, gen)
-        else:
-            # Nothing to RESTORE — the library was never removed, it is still
-            # sitting below the buffer. But the buffer itself must go: leaving it
-            # queued made "off" look like a dead button (the same recommendations
-            # kept playing) and made the NEXT "on" look dead too, because the
-            # deterministic walk re-inserted the very tracks still sitting there.
-            # The gen bump above already cancels in-flight fills.
-            audio_engine.play_similar_seed_path = ""
-            self._drop_autoplay_buffer()
-
+        # Similar tracks play in walk order right after the current one;
+        # Dart's shuffle order would scatter them.
+        if enabled and audio_engine.is_shuffle:
+            audio_engine.is_shuffle = False
+            self.now_playing.update_shuffle(False)
+            self._save_pref("is_shuffle", False)
+        # Non-destructive both ways: on inserts a buffer after the current
+        # track; off drops only that buffer (the queue tail was never removed).
+        self.autoplay.set_enabled(enabled, audio_engine.current_path)
         if hasattr(self, "queue_sheet") and self.queue_sheet and self.queue_sheet._initialized:
             self.safe_update(self.queue_sheet.refresh)
 
-    def set_auto_dj_mode(self, enabled: bool):
-        if self.auto_dj_mode == enabled:
+    def set_autoplay_anchor_mode(self, mode: str):
+        """UI hook: "follow" (a chosen track restarts the station; refills
+        drift along accepted tracks) or "stay" (the station keeps its anchor)."""
+        if mode not in ANCHOR_MODES:
             return
+        self.autoplay.set_anchor_mode(mode)
+        self._save_pref("autoplay_anchor", mode)
 
-        # Turn off play_similar if active
-        if enabled and self.play_similar_mode:
-            self.set_play_similar_mode(False)
-
-        self.auto_dj_mode = enabled
-        self._save_pref("auto_dj_mode", enabled)
-
-        self.now_playing.update_auto_dj(enabled)
-        self.mini_player.update_auto_dj(enabled)
-
-        if enabled:
-            # 1. Mutual exclusivity: turn off shuffle
-            was_shuffle = bool(audio_engine.is_shuffle)
-            self.play_similar_saved_shuffle = was_shuffle
-            if was_shuffle:
-                audio_engine.is_shuffle = False
-                self.now_playing.update_shuffle(False)
-                self._save_pref("is_shuffle", False)
-
-            # 2. Save original queue
-            self.play_similar_saved_queue = list(audio_engine.queue)
-            self.play_similar_saved_index = audio_engine.current_index
-
-            # Save to partitioned files for recovery
-            if was_shuffle:
-                self._schedule_partition_save("queue_shuffle.json", self.play_similar_saved_queue, self.play_similar_saved_index, audio_engine.position, audio_engine.duration)
-            else:
-                self._schedule_partition_save("queue_regular.json", self.play_similar_saved_queue, self.play_similar_saved_index, audio_engine.position, audio_engine.duration)
-
-            # 3. Initiate Auto-DJ curation
-            self.page.run_task(self._initiate_auto_dj_queue_async)
+    async def start_radio(self, path: str):
+        """UI hook (long-press → Start radio): play `path` now and restart
+        auto-play from it, turning auto-play on if needed."""
+        if not path:
+            return
+        if audio_engine.current_path != path:
+            idx = next((i for i, t in enumerate(audio_engine.queue) if t.get("path") == path), -1)
+            if idx == -1:
+                row = (await self.db_manager.get_tracks_brief([path])).get(path) or {}
+                audio_engine.queue_after_current([{
+                    "path":        path,
+                    "track_title": row.get("title") or os.path.basename(path),
+                    "artist_name": row.get("artist") or "Unknown Artist",
+                    "album_title": row.get("album") or "Unknown Album",
+                    "duration":    row.get("duration") or 0.0,
+                }])
+                idx = audio_engine.current_index + 1 if len(audio_engine.queue) > 1 else 0
+            audio_engine.play_track_at(idx)
+        if self.play_similar_mode:
+            self.autoplay.restart_from(path)
         else:
-            # Save current Auto-DJ queue
-            self._schedule_partition_save("queue_similar.json", audio_engine.queue, audio_engine.current_index, audio_engine.position, audio_engine.duration)
-
-            # Restore original queue
-            saved_q = getattr(self, "play_similar_saved_queue", None)
-            saved_idx = getattr(self, "play_similar_saved_index", 0)
-            saved_shuf = getattr(self, "play_similar_saved_shuffle", False)
-
-            if not saved_q:
-                if saved_shuf:
-                    state = self._load_queue_from_file("queue_shuffle.json")
-                else:
-                    state = self._load_queue_from_file("queue_regular.json")
-                if state:
-                    saved_q = state.get("queue", [])
-                    saved_idx = state.get("current_index", 0)
-
-            if saved_q:
-                cur_path = audio_engine.current_path
-                orig_idx = -1
-                if cur_path:
-                    for idx, t in enumerate(saved_q):
-                        if t.get("path") == cur_path:
-                            orig_idx = idx
-                            break
-                if orig_idx != -1:
-                    saved_idx = orig_idx
-
-                # Preserve current track and position
-                pos = audio_engine.position
-                is_p = audio_engine.is_playing
-                audio_engine.set_queue(saved_q, start_index=saved_idx)
-                if is_p:
-                    audio_engine.play()
-                    if pos > 0:
-                        audio_engine.seek(pos)
-
-            if saved_shuf:
-                audio_engine.is_shuffle = True
-                self.now_playing.update_shuffle(True)
-                self._save_pref("is_shuffle", True)
-
-            # Clear memory state
-            self.play_similar_saved_queue = None
-            self.play_similar_saved_index = None
-            self.play_similar_saved_shuffle = False
-
-            # Notify UI
-            audio_engine._sync_metadata_for_current()
-            audio_engine.dispatch("on_queue_mutated")
-
-        if hasattr(self, "queue_sheet") and self.queue_sheet and self.queue_sheet._initialized:
-            self.safe_update(self.queue_sheet.refresh)
-
-    async def _initiate_auto_dj_queue_async(self):
-        """Build the initial Auto-DJ queue of curated tracks and start playing."""
-        import os
-        from utils import track_graph as tg
-        try:
-            if not self.auto_dj_mode:
-                return
-
-            rows = await self.db_manager.get_tracks_with_features(tg.FEATURES_VERSION)
-
-            # Preserve current playing track if any
-            cur_path = audio_engine.current_path
-            cur_track_dict = None
-            if cur_path:
-                cur_row = await self.db_manager.get_track_full(cur_path)
-                if cur_row:
-                    cur_track_dict = {
-                        "path":        cur_path,
-                        "track_title": cur_row.get("title") or cur_row.get("track_title") or os.path.basename(cur_path),
-                        "artist_name": cur_row.get("artist") or cur_row.get("artist_name") or "Unknown Artist",
-                        "album_title": cur_row.get("album")  or cur_row.get("album_title")  or "Unknown Album",
-                        "duration":    cur_row.get("duration", 0.0) or 0.0,
-                        "image_url":   cur_row.get("image_url", "") or "",
-                    }
-
-            avoid = set()
-            if cur_path:
-                avoid.add(cur_path)
-            for bad in self._session_bad_paths:
-                avoid.add(bad)
-            try:
-                recent = await self.db_manager.recent_played_paths(window_seconds=7 * 86400)
-                avoid.update(recent)
-            except Exception:
-                pass
-
-            if rows:
-                # Pick random tracks (unbiased, taste model removed)
-                import random
-                pool = [r for r in rows if r["path"] not in avoid]
-                selected = random.sample(pool, min(10, len(pool))) if pool else []
-
-                engine_tracks = []
-                # Place current track first if any
-                if cur_track_dict:
-                    engine_tracks.append(cur_track_dict)
-                
-                # Fill remaining spots with recommendations
-                for r in selected:
-                    engine_tracks.append({
-                        "path":        r.get("path"),
-                        "track_title": r.get("title") or r.get("track_title") or os.path.basename(r.get("path")),
-                        "artist_name": r.get("artist") or r.get("artist_name") or "Unknown Artist",
-                        "album_title": r.get("album")  or r.get("album_title")  or "Unknown Album",
-                        "duration":    r.get("duration", 0.0) or 0.0,
-                        "image_url":   r.get("image_url", "") or "",
-                    })
-
-                if engine_tracks:
-                    # Race check
-                    if not self.auto_dj_mode:
-                        return
-                    
-                    pos = audio_engine.position if cur_track_dict else 0
-                    audio_engine.set_queue(engine_tracks, start_index=0)
-                    if cur_track_dict:
-                        audio_engine.play()
-                        if pos > 0:
-                            audio_engine.seek(pos)
-                    else:
-                        audio_engine.play()
-                    
-                    logger.info("Auto-DJ: Successfully built initial queue with %d curated tracks.", len(engine_tracks))
-                    
-                    if hasattr(self, "queue_sheet") and self.queue_sheet and self.queue_sheet._initialized:
-                        self.queue_sheet.refresh()
-        except Exception as exc:
-            logger.exception("Auto-DJ: Failed to build initial queue: %s", exc)
-
-    async def _auto_dj_auto_continue_queue(self):
-        """Automatically extend the Auto-DJ queue with 5 random tracks."""
-        import os
-        from utils import track_graph as tg
-        try:
-            if not self.auto_dj_mode:
-                return
-
-            avoid = {t["path"] for t in audio_engine.queue if t.get("path")}
-            for bad in self._session_bad_paths:
-                avoid.add(bad)
-            try:
-                recent = await self.db_manager.recent_played_paths(window_seconds=7 * 86400)
-                avoid.update(recent)
-            except Exception:
-                pass
-
-            rows = await self.db_manager.get_tracks_with_features(tg.FEATURES_VERSION)
-            
-            if rows:
-                import random
-                pool = [r for r in rows if r["path"] not in avoid]
-                selected = random.sample(pool, min(5, len(pool))) if pool else []
-                engine_tracks = []
-                for r in selected:
-                    engine_tracks.append({
-                        "path":        r.get("path"),
-                        "track_title": r.get("title") or r.get("track_title") or os.path.basename(r.get("path")),
-                        "artist_name": r.get("artist") or r.get("artist_name") or "Unknown Artist",
-                        "album_title": r.get("album")  or r.get("album_title")  or "Unknown Album",
-                        "duration":    r.get("duration", 0.0) or 0.0,
-                        "image_url":   r.get("image_url", "") or "",
-                    })
-
-                if engine_tracks:
-                    # Double check mode wasn't toggled off
-                    if not self.auto_dj_mode:
-                        return
-                    for track in engine_tracks:
-                        audio_engine.queue_last(track)
-                    logger.info("Auto-DJ: Automatically appended %d curated tracks to the queue.", len(engine_tracks))
-                    
-                    if hasattr(self, "queue_sheet") and self.queue_sheet and self.queue_sheet._initialized:
-                        self.queue_sheet.refresh()
-        except Exception as exc:
-            logger.exception("Auto-DJ: Failed to auto continue queue: %s", exc)
+            self.set_play_similar_mode(True)
 
     def toggle_shuffle(self):
         self.page.run_task(self._toggle_shuffle_async)
@@ -2930,9 +2275,7 @@ class StreamripFletApp:
         self._save_pref("is_shuffle", new_shuffle)
         if new_shuffle:
             if self.play_similar_mode:
-                self.set_play_similar_mode(False, transitioning_to_shuffle=True)
-            if getattr(self, "auto_dj_mode", False):
-                self.set_auto_dj_mode(False)
+                self.set_play_similar_mode(False)
 
         # ── Toggle ON: regular queue -> entire library shuffle queue ─────────
         if new_shuffle:
@@ -3029,10 +2372,6 @@ class StreamripFletApp:
         self.page.update()
 
     # ── download queue UI relay ───────────────────────────────────────────────
-    def refresh_queue_ui(self):
-        """Kept for existing call sites; the dock owns download presentation."""
-        self.download_dock.refresh()
-
     # ── metadata editor ──────────────────────────────────────────────────────
     def open_artist_metadata_editor(self, artist_name: str, on_saved=None):
         """Route an artist to THE metadata editor — the Settings workbench.
@@ -3045,80 +2384,10 @@ class StreamripFletApp:
         self.switch_tab(3)
         self.settings_view._on_open_metadata_workbench_click(focus_artist=artist_name)
 
-    def show_play_similar_dialog(self):
-        def close_dialog(e):
-            dlg.open = False
-            self.page.update()
-
-        dlg = ft.AlertDialog(
-            modal=False,
-            bgcolor="transparent",
-            content_padding=0,
-            content=ft.Container(
-                content=ft.Column(
-                    [
-                        # Pulsing/Glowing Icon container
-                        ft.Container(
-                            content=ft.Icon(
-                                ft.Icons.ALL_INCLUSIVE_ROUNDED,
-                                color=CYAN,
-                                size=44,
-                            ),
-                            alignment=ft.Alignment(0, 0),
-                            padding=18,
-                            border_radius=26,
-                            bgcolor=apply_opacity(0.1, CYAN),
-                            margin=ft.margin.only(bottom=16),
-                        ),
-                        # Title
-                        ft.Text(
-                            "Similarity Walk Active",
-                            color=TEXT,
-                            size=18,
-                            weight=ft.FontWeight.W_800,
-                            text_align=ft.TextAlign.CENTER,
-                        ),
-                        ft.Container(height=10),
-                        # Description with text wrapping enabled
-                        ft.Text(
-                            "Jarvis has initiated an acoustic similarity walk. "
-                            "We will dynamically analyze acoustic features and append recommended, "
-                            "acoustically matching tracks to keep your playback going indefinitely, sir.",
-                            color=DIM,
-                            size=13,
-                            text_align=ft.TextAlign.CENTER,
-                            max_lines=6,
-                            expand=True,
-                        ),
-                        ft.Divider(color=BORDER, height=24),
-                        # Action button
-                        ft.Container(
-                            content=ft.Button(
-                                content=ft.Text("EXCELLENT, JARVIS", weight=ft.FontWeight.BOLD, color=BG),
-                                style=ft.ButtonStyle(
-                                    bgcolor=CYAN,
-                                    color=BG,
-                                    padding=ft.Padding.symmetric(vertical=12, horizontal=24),
-                                    shape=ft.RoundedRectangleBorder(radius=18),
-                                ),
-                                on_click=close_dialog,
-                            ),
-                            alignment=ft.Alignment(0, 0),
-                        ),
-                    ],
-                    spacing=0,
-                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                    tight=True,
-                ),
-                bgcolor=SURFACE,
-                border_radius=20,
-                border=ft.Border.all(1, apply_opacity(0.25, CYAN)),
-                padding=24,
-                width=320,
-            ),
-        )
-        if self.page:
-            self.page.show_dialog(dlg)
+    def open_genre_metadata_workbench(self, genre_name: str):
+        """Route a genre to the Settings metadata workbench with search filtered."""
+        self.switch_tab(3)
+        self.settings_view._on_open_metadata_workbench_click(genre_filter=genre_name)
 
     def dismiss_dialog(self, dialog) -> bool:
         """Close ONE specific dialog. Returns False if it was already closed.
@@ -3378,8 +2647,8 @@ class StreamripFletApp:
 
             # Clear all queue state files
             audio_engine.clear_queue()
-            for filename in ("queue_state.json", "queue_regular.json", "queue_shuffle.json", "queue_similar.json"):
-                q_path = os.path.join(os.environ["XDG_CACHE_HOME"] if filename != "queue_state.json" else DATA_DIR, filename)
+            for filename in ("queue_state.json", "queue_pos.json", "queue_regular.json", "queue_shuffle.json", "queue_similar.json"):
+                q_path = os.path.join(os.environ["XDG_CACHE_HOME"] if filename not in ("queue_state.json", "queue_pos.json") else DATA_DIR, filename)
                 try:
                     if os.path.exists(q_path):
                         os.remove(q_path)

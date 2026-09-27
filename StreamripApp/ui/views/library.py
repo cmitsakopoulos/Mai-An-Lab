@@ -10,7 +10,7 @@ from ui.tokens import (
     BG, SURFACE, SURFACE2, SURFACE_ELEVATED, CYAN, AMBER, TEXT, DIM, TEXT_TERTIARY,
     BORDER, BORDER_SUBTLE, RADIUS_CARD, RADIUS_PILL, RADIUS_THUMB,
     SOURCE_COLORS, LIB_ARTIST_COLOR, LIB_ALBUM_COLOR, LIB_TRACK_COLOR,
-    LIB_PLAYLIST_COLOR, apply_opacity, lerp_hex
+    LIB_PLAYLIST_COLOR, LIB_GENRE_COLOR, apply_opacity, lerp_hex
 )
 from ui.widgets import AnimatedEntry, AccordionCard, src_color, dialog_handoff, fmt_time, CupertinoSegmentedBar, _ARTWORK_CACHE
 
@@ -255,6 +255,7 @@ class LibraryView:
             return bool(val)
 
         show_playlists = _to_bool(appearance.get("show_playlists"), True)
+        show_genres = _to_bool(appearance.get("show_genres"), True)
         show_artists = _to_bool(appearance.get("show_artists"), True)
         show_albums = _to_bool(appearance.get("show_albums"), False)
         show_tracks = _to_bool(appearance.get("show_tracks"), True)
@@ -266,6 +267,8 @@ class LibraryView:
             self.view_mode = "albums"
         elif show_artists:
             self.view_mode = "artists"
+        elif show_genres:
+            self.view_mode = "genres"
         elif show_playlists:
             self.view_mode = "playlists"
         elif show_network:
@@ -374,6 +377,7 @@ class LibraryView:
         self._net_pressed: dict | None = None     # node under last tap-down
         self._net_pulse_overlay: ft.Control | None = None
         self._net_pulse_token: int = 0
+        self._net_pulse_running: bool = False
         # Fixed bottom-left readout naming the SELECTED node (persistent, not a
         # tap tooltip — nodes carry no titles).
         self._net_readout: ft.Control | None = None
@@ -621,6 +625,14 @@ class LibraryView:
         self._update_view_tabs()
         self.page.run_task(self.load_library)
 
+    def show_filtered(self, mode: str, query: str):
+        """Open `mode` (e.g. 'artists', 'genres') with the search box pre-filled
+        with `query`. Used by the landing page's most-listened cards."""
+        self._search_field.value = query
+        self.search_query = query
+        self._lib_clear_btn.visible = bool(query)
+        self._set_view_mode(mode)
+
     def _clear_search(self, _e=None):
         self._search_field.value = ""
         self.search_query = ""
@@ -632,12 +644,8 @@ class LibraryView:
     # ── Walk overlay: resolving the ordered sequence under the graph ─────────
     def _live_autoplay_buffer(self) -> list[str]:
         """The real `_autoplay` buffer queued ahead of the current track, in
-        play order. Mirrors _replenish_similar_queue_if_needed's definition:
-        EVERY tagged track after current, not just the first unbroken run (a
-        manual 'Play Next' can split it)."""
-        q = audio_engine.queue
-        ci = audio_engine.current_index
-        return [t["path"] for t in q[ci + 1:] if t.get("_autoplay") and t.get("path")]
+        play order (see AutoPlay.buffer_paths)."""
+        return self.app.autoplay.buffer_paths()
 
     def _live_queue_ahead(self) -> list[str]:
         """What Now-Playing mode shows: the tracks genuinely queued after the
@@ -1632,7 +1640,10 @@ class LibraryView:
 
         # Start pulse animation token
         self._net_pulse_token += 1
+        self._net_pulse_running = False
         if self._net_pulse_overlay is not None:
+            # Claimed now so a kick in the same tick can't start a second loop.
+            self._net_pulse_running = True
             self.page.run_task(self._run_net_pulse, self._net_pulse_token)
 
         # Split layout: graph on top (fixed height), ordered track list below
@@ -2411,54 +2422,64 @@ class LibraryView:
         # the list underneath is now showing the wrong kind of future.
         self._schedule_net_walk_refresh(self._net_selected_path or cur, delay=0.0)
 
-    async def _run_net_pulse(self, token: int):
-        """Pulse the now-playing ring until a newer build supersedes this token.
-        The scale/opacity transitions are animated client-side; we just toggle
-        the targets each beat. Tokened so only one loop runs at a time.
+    def _net_pulse_on_screen(self, ov) -> bool:
+        return (
+            not getattr(self.app, "is_background", False)
+            and getattr(self.app, "_current_tab", 2) == 2   # Library tab showing
+            and self.view_mode == "network"
+            and getattr(ov, "visible", True)
+        )
 
-        Battery: while the app is backgrounded or the Network view isn't the
-        active library mode, we stop pushing updates (and idle at a slow tick),
-        so an off-screen pulse never drives the Flet→Flutter bridge. The loop
-        resumes pushing the moment the view is foregrounded again."""
-        await asyncio.sleep(1.0)  # let finalize mount the overlay first
-        big = True
-        settled = False
-        while token == self._net_pulse_token:
-            ov = self._net_pulse_overlay
-            if ov is None:
-                return
-            # Only animate (and drive the bridge) when the ring is actually on
-            # screen AND the track is advancing. Off-screen / backgrounded /
-            # ring-hidden / paused all idle without pushing updates — the pulse
-            # animation is this view's one continuous draw, so freezing it while
-            # a track is paused is the main remaining battery saving.
-            on_screen = (
-                not getattr(self.app, "is_background", False)
-                and self.view_mode == "network"
-                and getattr(ov, "visible", True)
-            )
-            if not on_screen or not getattr(audio_engine, "is_playing", True):
-                # Settle the ring to a calm, fully-formed state once so a paused
-                # track doesn't freeze mid-fade; then idle without pushing.
-                if not settled and on_screen:
-                    try:
-                        ov.scale = 1.0
-                        ov.opacity = 0.9
-                        ov.update()
-                    except Exception:
-                        return
-                    settled = True
-                await asyncio.sleep(0.6)
-                continue
-            settled = False
-            try:
-                ov.scale = 1.4 if big else 1.0
-                ov.opacity = 0.25 if big else 0.9
-                ov.update()
-            except Exception:
-                return
-            big = not big
-            await asyncio.sleep(0.7)
+    def kick_net_pulse(self):
+        """(Re)start the pulse if it should be running and isn't: called on
+        play, resume, track change and when the Library tab is shown."""
+        ov = getattr(self, "_net_pulse_overlay", None)
+        if (ov is None or getattr(self, "_net_pulse_running", False)
+                or not audio_engine.is_playing or not self._net_pulse_on_screen(ov)):
+            return
+        self._net_pulse_running = True
+        self.page.run_task(self._run_net_pulse, self._net_pulse_token, 0.0)
+
+    async def _run_net_pulse(self, token: int, delay: float = 1.0):
+        """Pulse the now-playing ring while it is on screen AND the track is
+        playing. The scale/opacity transitions are animated client-side; we
+        just toggle the targets each beat. Tokened so a rebuild supersedes it.
+
+        Battery: the ring is this view's one continuous draw, so the loop EXITS
+        (settling the ring once) the moment it is off screen, backgrounded or
+        paused, instead of idle-polling forever; kick_net_pulse() restarts it.
+        """
+        self._net_pulse_running = True
+        try:
+            await asyncio.sleep(delay)  # on a fresh build: let finalize mount the overlay
+            big = True
+            while token == self._net_pulse_token:
+                ov = self._net_pulse_overlay
+                if ov is None:
+                    return
+                on_screen = self._net_pulse_on_screen(ov)
+                if not on_screen or not getattr(audio_engine, "is_playing", True):
+                    if on_screen:
+                        # Settle to a calm, fully-formed ring so a paused track
+                        # doesn't freeze mid-fade.
+                        try:
+                            ov.scale = 1.0
+                            ov.opacity = 0.9
+                            ov.update()
+                        except Exception:
+                            pass
+                    return
+                try:
+                    ov.scale = 1.4 if big else 1.0
+                    ov.opacity = 0.25 if big else 0.9
+                    ov.update()
+                except Exception:
+                    return
+                big = not big
+                await asyncio.sleep(0.7)
+        finally:
+            if token == self._net_pulse_token:
+                self._net_pulse_running = False
 
     def _update_view_tabs(self):
         from utils.streamrip_api import load_config
@@ -2475,6 +2496,7 @@ class LibraryView:
             return bool(val)
 
         show_playlists = _to_bool(appearance.get("show_playlists"), True)
+        show_genres = _to_bool(appearance.get("show_genres"), True)
         show_artists = _to_bool(appearance.get("show_artists"), True)
         show_albums = _to_bool(appearance.get("show_albums"), False)
         show_tracks = _to_bool(appearance.get("show_tracks"), True)
@@ -2483,6 +2505,7 @@ class LibraryView:
         visible_modes = []
         if show_network: visible_modes.append("network")
         if show_playlists: visible_modes.append("playlists")
+        if show_genres: visible_modes.append("genres")
         if show_artists: visible_modes.append("artists")
         if show_albums: visible_modes.append("albums")
         if show_tracks: visible_modes.append("tracks")
@@ -2496,6 +2519,7 @@ class LibraryView:
 
         icons = {
             "playlists": ft.Icons.QUEUE_MUSIC_ROUNDED,
+            "genres":    ft.Icons.STYLE_ROUNDED,
             "artists":   ft.Icons.PERSON_ROUNDED,
             "albums":    ft.Icons.ALBUM_ROUNDED,
             "tracks":    ft.Icons.MUSIC_NOTE_ROUNDED,
@@ -2504,6 +2528,7 @@ class LibraryView:
         pill_style = str(appearance.get("pill_style", "category")).lower()
         accents = {
             "playlists": CYAN if pill_style == "unified" else LIB_PLAYLIST_COLOR,
+            "genres":    CYAN if pill_style == "unified" else LIB_GENRE_COLOR,
             "artists":   CYAN if pill_style == "unified" else LIB_ARTIST_COLOR,
             "albums":    CYAN if pill_style == "unified" else LIB_ALBUM_COLOR,
             "tracks":    CYAN if pill_style == "unified" else LIB_TRACK_COLOR,
@@ -2513,6 +2538,7 @@ class LibraryView:
         all_modes = [
             ("network", "Network", show_network),
             ("playlists", "Playlists", show_playlists),
+            ("genres", "Genres", show_genres),
             ("artists", "Artists", show_artists),
             ("albums", "Albums", show_albums),
             ("tracks", "Tracks", show_tracks),
@@ -2547,6 +2573,8 @@ class LibraryView:
     def _open_sort_menu(self, _e):
         if self.view_mode == "artists":
             options = [("Artist (A–Z)", "artist"), ("Most Tracks", "tracks"), ("Most Albums", "albums")]
+        elif self.view_mode == "genres":
+            options = [("Genre (A–Z)", "name"), ("Most Tracks", "tracks"), ("Most Albums", "albums"), ("Most Artists", "artists")]
         elif self.view_mode == "playlists":
             options = [("Name (A–Z)", "name"), ("Date Created", "date")]
         else:
@@ -2618,6 +2646,31 @@ class LibraryView:
                             if alb_exp:
                                 for t in await db.get_tracks_by_album(al['album'], al['artist']):
                                     yield self._track_row(t, depth=2, album_context=(al['artist'], al['album']))
+            return _gen(), stats_text
+
+        elif self.view_mode == "genres":
+            genres = await db.get_all_genres(search_query=self.search_query, sort_mode=self.sort_mode)
+            suffix = " (CLOSEST MATCH)" if getattr(genres, "is_closest", False) else ""
+            stats_text = f"{len(genres)} {'GENRE' if len(genres) == 1 else 'GENRES'}{suffix}"
+
+            async def _gen():
+                for g in genres:
+                    node_id = f"genre_{g['name']}"
+                    expanded = node_id in self.expanded_nodes
+                    yield self._genre_row(g, node_id, expanded)
+                    if expanded:
+                        for a in await db.get_artists_by_genre(g['name']):
+                            art_id = f"{node_id}_artist_{a['name']}"
+                            art_exp = art_id in self.expanded_nodes
+                            yield self._artist_row(a, art_id, art_exp, depth=1, genre_context=g['name'])
+                            if art_exp:
+                                for al in await db.get_albums_by_artist(a['name'], genre=g['name']):
+                                    alb_id = f"{art_id}_album_{al['artist']}_{al['album']}"
+                                    alb_exp = alb_id in self.expanded_nodes
+                                    yield self._album_row(al, alb_id, alb_exp, depth=2)
+                                    if alb_exp:
+                                        for t in await db.get_tracks_by_album(al['album'], al['artist']):
+                                            yield self._track_row(t, depth=3, album_context=(al['artist'], al['album']))
             return _gen(), stats_text
 
         elif self.view_mode == "albums":
@@ -3191,6 +3244,17 @@ class LibraryView:
                             self._empty_label.content.controls[4].content.controls[1].value = "CREATE PLAYLIST"
                             self._empty_label.content.controls[4].on_click = lambda e: self._create_playlist_dialog()
                             self._empty_label.content.controls[4].style = ft.ButtonStyle(color=LIB_PLAYLIST_COLOR)
+                        elif self.view_mode == "genres":
+                            self._empty_label.content.controls[0].icon = ft.Icons.STYLE_ROUNDED
+                            self._empty_label.content.controls[0].color = apply_opacity(0.3, LIB_GENRE_COLOR)
+                            self._empty_label.content.controls[1].value = "No genres found."
+                            self._empty_label.content.controls[2].value = "Enrich artist tags in Settings to classify genres."
+                            self._empty_label.content.controls[3].visible = True
+                            self._empty_label.content.controls[4].visible = True
+                            self._empty_label.content.controls[4].content.controls[0].icon = ft.Icons.TUNE_ROUNDED
+                            self._empty_label.content.controls[4].content.controls[1].value = "METADATA WORKBENCH"
+                            self._empty_label.content.controls[4].on_click = lambda e: self.app.open_genre_metadata_workbench("")
+                            self._empty_label.content.controls[4].style = ft.ButtonStyle(color=LIB_GENRE_COLOR)
                         else:
                             self._empty_label.content.controls[0].icon = ft.Icons.LIBRARY_MUSIC_OUTLINED
                             self._empty_label.content.controls[0].color = apply_opacity(0.3, CYAN)
@@ -3230,9 +3294,17 @@ class LibraryView:
             db = self.app.db_manager
             new_rows = []
             if expanding:
-                if node_type == "artist":
-                    res = await db.get_albums_by_artist(node_data.get("name", ""))
-                    new_rows = [self._album_row(a, f"album_{a['artist']}_{a['album']}", False, depth + 1) for a in res]
+                if node_type == "genre":
+                    gname = node_data.get("name", "")
+                    res = await db.get_artists_by_genre(gname)
+                    new_rows = [
+                        self._artist_row(a, f"{nid}_artist_{a['name']}", False, depth=depth + 1, genre_context=gname)
+                        for a in res
+                    ]
+                elif node_type == "artist":
+                    g_ctx = node_data.get("genre_context")
+                    res = await db.get_albums_by_artist(node_data.get("name", ""), genre=g_ctx)
+                    new_rows = [self._album_row(a, f"{nid}_album_{a['artist']}_{a['album']}", False, depth + 1) for a in res]
                 elif node_type == "album":
                     alb  = node_data.get("album", "")
                     arti = node_data.get("artist", "")
@@ -3268,11 +3340,12 @@ class LibraryView:
                         controls.insert(idx + 1 + i, row)
                     
                     accent = {
+                        "genre": _genre_color(node_data.get("name")),
                         "artist": LIB_ARTIST_COLOR,
                         "album": LIB_ALBUM_COLOR,
                         "playlist": LIB_PLAYLIST_COLOR
                     }.get(node_type, CYAN)
-                    ctrl.bgcolor = apply_opacity(0.07 if node_type == "artist" else 0.06, accent)
+                    ctrl.bgcolor = apply_opacity(0.07 if node_type in ("artist", "genre") else 0.06, accent)
                     
                     icon = getattr(ctrl, "_chevron", None)
                     if icon:
@@ -3310,7 +3383,8 @@ class LibraryView:
         finally:
             self._toggling_nodes.discard(nid)
 
-    def _artist_row(self, a: dict, node_id: str, expanded: bool) -> ft.Control:
+    def _artist_row(self, a: dict, node_id: str, expanded: bool, depth: int = 0,
+                    genre_context: str | None = None) -> ft.Control:
         name = a.get("name") or "Unknown Artist"
         tc   = a.get("track_count", 0)
         ac   = a.get("album_count", 0)
@@ -3324,14 +3398,84 @@ class LibraryView:
             animate_rotation=ft.Animation(200, ft.AnimationCurve.DECELERATE),
             data="chevron"
         )
+        leading_ctrl = (
+            ft.Row(
+                [
+                    ft.Container(width=depth * 16),
+                    ft.Icon(ft.Icons.PERSON_ROUNDED, color=accent),
+                ],
+                tight=True,
+            )
+            if depth > 0 else ft.Icon(ft.Icons.PERSON_ROUNDED, color=accent)
+        )
         tile = ft.ListTile(
-            data={"node_id": node_id, "depth": 0, "type": "artist", "name": name},
-            leading=ft.Icon(ft.Icons.PERSON_ROUNDED, color=accent),
+            data={"node_id": node_id, "depth": depth, "type": "artist", "name": name, "genre_context": genre_context},
+            leading=leading_ctrl,
             title=ft.Text(name, color=TEXT, size=14, weight=ft.FontWeight.W_600, max_lines=3),
             subtitle=ft.Text(sub, color=DIM, size=12, max_lines=2),
             trailing=ft.Row(
                 [
                     self._edit_btn(name),
+                    Che,
+                ],
+                tight=True, spacing=0,
+            ),
+            bgcolor=apply_opacity(0.07, accent) if expanded else "transparent",
+        )
+        tile._chevron = Che
+        tile.on_click = lambda e: self.page.run_task(self._toggle_node, node_id, tile)
+        return tile
+
+    def _genre_row(self, g: dict, node_id: str, expanded: bool) -> ft.Control:
+        name = g.get("name") or "Unknown Genre"
+        tc   = g.get("track_count", 0)
+        ac   = g.get("album_count", 0)
+        arc  = g.get("artist_count", 0)
+        sub  = f"{arc} artists  ·  {ac} albums  ·  {tc} tracks"
+        accent = _genre_color(name)
+
+        Che = ft.Icon(
+            ft.Icons.CHEVRON_RIGHT_ROUNDED,
+            color=accent if expanded else DIM,
+            size=18,
+            rotate=ft.Rotate(1.57) if expanded else ft.Rotate(0),
+            animate_rotation=ft.Animation(200, ft.AnimationCurve.DECELERATE),
+            data="chevron"
+        )
+
+        def _play_genre(_e):
+            async def _do_play():
+                tracks = await self.app.db_manager.get_tracks_by_genre(name)
+                if tracks:
+                    await self.app.play_track(tracks[0]["path"], source=("genre", name))
+                else:
+                    self.app.show_snackbar(f"No tracks found for {name}")
+            self.page.run_task(_do_play)
+
+        def _curate_genre(_e):
+            self.app.open_genre_metadata_workbench(name)
+
+        tile = ft.ListTile(
+            data={"node_id": node_id, "depth": 0, "type": "genre", "name": name},
+            leading=ft.Icon(ft.Icons.STYLE_ROUNDED, color=accent),
+            title=ft.Text(name, color=TEXT, size=14, weight=ft.FontWeight.W_600, max_lines=2),
+            subtitle=ft.Text(sub, color=DIM, size=12, max_lines=2),
+            trailing=ft.Row(
+                [
+                    ft.IconButton(
+                        icon=ft.Icons.PLAY_ARROW_ROUNDED,
+                        icon_color=apply_opacity(0.85, accent),
+                        icon_size=20,
+                        tooltip=f"Play {name}",
+                        on_click=_play_genre,
+                    ),
+                    ft.IconButton(
+                        icon=ft.Icons.TUNE_ROUNDED,
+                        icon_color=apply_opacity(0.6, DIM),
+                        icon_size=18,
+                        tooltip=f"Curate {name} in Workbench",
+                        on_click=_curate_genre,
+                    ),
                     Che,
                 ],
                 tight=True, spacing=0,
@@ -3552,6 +3696,7 @@ class LibraryView:
         """Optimized highlight update using the path map."""
         if self.app.is_background:
             return
+        self.kick_net_pulse()
 
         current_path = audio_engine.current_path
         prev_path = getattr(self, "_last_highlighted_path", None)
@@ -4019,6 +4164,13 @@ class LibraryView:
             audio_engine.queue_last(meta)
             self.app.trigger_haptic("swipe_queue")
 
+        def _start_radio(_e):
+            # Plays the track now and (re)starts auto-play from it.
+            _close()
+            if meta.get("path"):
+                self.page.run_task(self.app.start_radio, meta["path"])
+                self.app.trigger_haptic("swipe_queue")
+
         def _add_to_playlist(_e):
             # Picker goes up as its own dialog, once this menu is really gone.
             _close(lambda: self.page.run_task(self._open_add_to_playlist_sheet, meta))
@@ -4083,6 +4235,12 @@ class LibraryView:
                             on_click=_add_to_queue,
                         ),
                         ft.ListTile(
+                            leading=ft.Icon(ft.Icons.ALL_INCLUSIVE_ROUNDED, color=CYAN),
+                            title=ft.Text("Start Radio", color=TEXT),
+                            subtitle=ft.Text("Play this, then similar songs", color=DIM, size=12),
+                            on_click=_start_radio,
+                        ),
+                        ft.ListTile(
                             leading=ft.Icon(ft.Icons.PLAYLIST_ADD_ROUNDED, color=LIB_PLAYLIST_COLOR),
                             title=ft.Text("Add to Playlist", color=TEXT),
                             on_click=_add_to_playlist,
@@ -4105,6 +4263,7 @@ class LibraryView:
                 padding=ft.Padding.only(left=16, right=16, top=0, bottom=24),
             ),
             bgcolor=SURFACE,
+            draggable=True,  # the grab handle promises swipe-down
             on_dismiss=_on_sheet_dismissed,
         )
         self.page.show_dialog(bs)
@@ -4290,6 +4449,7 @@ class LibraryView:
         if getattr(self, "_needs_reload", False):
             self._needs_reload = False
             self.page.run_task(self.load_library)
+        self.kick_net_pulse()
 
 
     def _on_compute_dsp_click(self, _e):
@@ -4339,11 +4499,15 @@ class LibraryView:
         total = len(missing)
         failures = 0
         import time
+        from utils.progress_notify import ProgressNotifier, dsp_progress_cb
         start_time = time.time()
+        notifier = ProgressNotifier("dsp", "Analysing library")
+        notify_cb = dsp_progress_cb(notifier)
 
         async def _on_progress(done, total_, current, failures_):
             nonlocal failures
             failures = failures_
+            notify_cb(done, total_, current, failures_)
             
             # Compute dynamic estimated time remaining (ETA)
             eta_str = ""
@@ -4374,24 +4538,33 @@ class LibraryView:
         except Exception as exc:
             logger.exception("Library network compute: bulk_analyze_library failed: %s", exc)
             self.app.show_snackbar(f"DSP analysis failed: {exc}", color="#FF4444")
+            notifier.finish(f"Analysis failed: {exc}")
             self._analyzing_dsp = False
             self.page.run_task(self.load_library)
             return
 
         self._analyzer_progress = None
         self._analyzer_status = "Linking similar tracks..."
+        notifier.stage("Linking similar tracks…")
         self.page.run_task(self.load_library)
 
+        graph_ok = True
         try:
             await tg.build_metadata_edges(self.app.db_manager)
             await tg.build_acoustic_edges(self.app.db_manager)
         except Exception as exc:
+            graph_ok = False
             logger.exception("Library network compute: graph rebuild failed: %s", exc)
             self.app.show_snackbar(f"Graph rebuild failed: {exc}", color="#FF4444")
         
         self._analyzing_dsp = False
         self._cached_unanalysed = None
         self.page.run_task(self.load_library)
+        suffix = f", {failures} failed" if failures else ""
+        notifier.finish(
+            f"Analysed {total} tracks{suffix}. Similarity walks are ready."
+            if graph_ok else f"Analysed {total} tracks{suffix}; graph rebuild failed."
+        )
         self.app.show_snackbar("DSP features, edges, and PCA space built.", icon=ft.Icons.CHECK_CIRCLE, color=CYAN)
 
     def _ui(self, fn):

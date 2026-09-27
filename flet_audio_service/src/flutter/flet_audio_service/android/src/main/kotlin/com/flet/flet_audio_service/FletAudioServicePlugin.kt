@@ -1,8 +1,14 @@
 package com.flet.flet_audio_service
 
+import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.content.Context
+import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.media.MediaMetadataRetriever
 import android.media.AudioFormat
 import android.media.MediaCodec
 import android.media.MediaExtractor
@@ -16,6 +22,8 @@ import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import java.io.File
+import java.io.FileOutputStream
+import java.security.MessageDigest
 import java.io.RandomAccessFile
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -47,6 +55,9 @@ class FletAudioServicePlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
     // Single-thread executor: MediaCodec instances are not thread-safe and we
     // don't want concurrent decodes thrashing the device's hardware decoder.
     private val executor = Executors.newSingleThreadExecutor()
+    // Artwork gets its own worker so a track change never waits behind a
+    // multi-second PCM decode during library analysis.
+    private val artExecutor = Executors.newSingleThreadExecutor()
     // MethodChannel.Result callbacks MUST be invoked on the main thread.
     // Replying from the decode worker silently drops the reply on some
     // Flutter/Android combos: the Dart side then sees `null`, emits a
@@ -85,14 +96,28 @@ class FletAudioServicePlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                 }
             }
         } else if (call.method == "showProgressNotification") {
+            val job = call.argument<String>("job") ?: "library"
             val title = call.argument<String>("title") ?: ""
             val content = call.argument<String>("content") ?: ""
             val progress = call.argument<Int>("progress") ?: 0
             val total = call.argument<Int>("total") ?: 0
             val done = call.argument<Boolean>("done") ?: false
-            
-            showProgressNotification(title, content, progress, total, done)
+
+            showProgressNotification(job, title, content, progress, total, done)
             result.success(null)
+        } else if (call.method == "resolveArtwork") {
+            val audioPath = call.argument<String>("path") ?: ""
+            val sidecar = call.argument<String>("sidecar")
+            val key = call.argument<String>("key") ?: audioPath
+            artExecutor.submit {
+                val out = try {
+                    resolveArtwork(audioPath, sidecar, key)
+                } catch (t: Throwable) {
+                    Log.w(TAG, "resolveArtwork failed for $audioPath", t)
+                    null
+                }
+                mainHandler.post { result.success(out) }
+            }
         } else {
             result.notImplemented()
         }
@@ -360,45 +385,182 @@ class FletAudioServicePlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         return null
     }
 
-    private fun showProgressNotification(title: String, content: String, progress: Int, total: Int, done: Boolean) {
-        val context = appContext ?: return
-        val channelId = "dsp_scan_channel"
-        val notificationId = 9999
-        
-        val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                channelId,
-                "Library Scan Progress",
-                NotificationManager.IMPORTANCE_LOW
-            ).apply {
-                description = "Shows progress for the background DSP library scan"
-                setShowBadge(false)
-            }
-            notificationManager.createNotificationChannel(channel)
+    // ── Now-playing artwork ────────────────────────────────────────────────
+    // audio_service decodes MediaItem.artUri itself, but on our side that URI
+    // was only ever a sidecar cover.jpg in shared storage: tracks with embedded
+    // art got none, and on Android 13+ a sidecar image is unreadable without
+    // READ_MEDIA_IMAGES / All-files access (we only hold READ_MEDIA_AUDIO), so
+    // BitmapFactory silently returned null. Resolve here instead: embedded
+    // picture first (readable under READ_MEDIA_AUDIO), sidecar as fallback,
+    // downscaled into the app's private cache where audio_service can always
+    // read it. Cached per album key, so each album is decoded once.
+
+    private val artMaxPx = 512
+
+    private fun resolveArtwork(audioPath: String, sidecar: String?, key: String): String? {
+        val context = appContext ?: return null
+        val dir = File(context.cacheDir, "np_art").apply { mkdirs() }
+        val out = File(dir, sha1(key) + ".jpg")
+        // The key is album-level and the file persists across launches, so an
+        // art or tag edit (metadata workbench) must invalidate it: reuse only
+        // while neither the audio file nor the sidecar is newer than the cache.
+        // lastModified() is one stat and returns 0 when unreadable (→ reuse).
+        if (out.exists() && out.length() > 0) {
+            val audioMod = if (audioPath.isNotEmpty() && !audioPath.startsWith("http"))
+                File(audioPath).lastModified() else 0L
+            val sideMod = if (!sidecar.isNullOrEmpty()) File(sidecar).lastModified() else 0L
+            if (maxOf(audioMod, sideMod) <= out.lastModified()) return out.absolutePath
         }
-        
-        if (done) {
-            notificationManager.cancel(notificationId)
+
+        var bitmap: Bitmap? = null
+        if (audioPath.isNotEmpty() && !audioPath.startsWith("http")) {
+            val mmr = MediaMetadataRetriever()
+            try {
+                mmr.setDataSource(audioPath)
+                mmr.embeddedPicture?.let { bytes -> bitmap = decodeScaled(bytes, null) }
+            } catch (t: Throwable) {
+                Log.d(TAG, "no embedded art for $audioPath: ${t.message}")
+            } finally {
+                try { mmr.release() } catch (_: Throwable) {}
+            }
+        }
+        if (bitmap == null && !sidecar.isNullOrEmpty()) {
+            try {
+                bitmap = decodeScaled(null, sidecar)
+            } catch (t: Throwable) {
+                Log.d(TAG, "sidecar art unreadable $sidecar: ${t.message}")
+            }
+        }
+        val bmp = bitmap ?: return null
+        val tmp = File(dir, out.name + ".tmp")
+        FileOutputStream(tmp).use { bmp.compress(Bitmap.CompressFormat.JPEG, 88, it) }
+        bmp.recycle()
+        return if (tmp.renameTo(out)) out.absolutePath else null
+    }
+
+    private fun decodeScaled(bytes: ByteArray?, path: String?): Bitmap? {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        if (bytes != null) BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        else BitmapFactory.decodeFile(path, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+        var sample = 1
+        while (bounds.outWidth / (sample * 2) >= artMaxPx && bounds.outHeight / (sample * 2) >= artMaxPx) {
+            sample *= 2
+        }
+        val opts = BitmapFactory.Options().apply { inSampleSize = sample }
+        val decoded = (if (bytes != null) BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
+                       else BitmapFactory.decodeFile(path, opts)) ?: return null
+        val longest = max(decoded.width, decoded.height)
+        if (longest <= artMaxPx) return decoded
+        val scale = artMaxPx.toFloat() / longest
+        val scaled = Bitmap.createScaledBitmap(
+            decoded, (decoded.width * scale).toInt(), (decoded.height * scale).toInt(), true)
+        if (scaled !== decoded) decoded.recycle()
+        return scaled
+    }
+
+    private fun sha1(s: String): String =
+        MessageDigest.getInstance("SHA-1").digest(s.toByteArray())
+            .joinToString("") { "%02x".format(it) }
+
+    // ── Library-task progress notifications ────────────────────────────────
+    // One notification per job ("dsp", "metadata", ...) so concurrent tasks
+    // don't overwrite each other. On Android 16+ (API 36) this uses the
+    // platform ProgressStyle; older releases get the classic progress bar.
+    // Deliberately NOT promoted to a Live Update: a library scan isn't the kind
+    // of time-sensitive activity the status-bar chip is meant for.
+
+    private val progressChannelId = "library_tasks"
+
+    private fun notificationIdFor(job: String): Int = when (job) {
+        "dsp" -> 9999          // kept: the id the old single-job version used
+        "metadata" -> 9998
+        else -> 9000 + (job.hashCode() and 0x3FF)
+    }
+
+    private fun showProgressNotification(
+        job: String, title: String, content: String, progress: Int, total: Int, done: Boolean,
+    ) {
+        val context = appContext ?: return
+        val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val notificationId = notificationIdFor(job)
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            nm.createNotificationChannel(
+                NotificationChannel(
+                    progressChannelId, "Library tasks", NotificationManager.IMPORTANCE_LOW
+                ).apply {
+                    description = "Progress of track analysis and metadata sync"
+                    setShowBadge(false)
+                }
+            )
+            // Superseded by library_tasks; drop it so Settings doesn't list a dead channel.
+            nm.deleteNotificationChannel("dsp_scan_channel")
+        }
+        if (!nm.areNotificationsEnabled()) {
+            Log.w(TAG, "notifications disabled for app; progress for '$job' not shown")
+        }
+
+        if (done && content.isEmpty()) {
+            nm.cancel(notificationId)
             return
         }
-        
-        val iconId = context.applicationInfo.icon
-        val builder = NotificationCompat.Builder(context, channelId)
-            .setSmallIcon(if (iconId != 0) iconId else android.R.drawable.stat_notify_sync)
-            .setContentTitle(title)
-            .setContentText(content)
-            .setOngoing(true)
-            .setOnlyAlertOnce(true)
-            .setAutoCancel(false)
-        
-        if (total > 0) {
-            builder.setProgress(total, progress, false)
-        } else {
-            builder.setProgress(0, 0, true)
+
+        val launch = context.packageManager.getLaunchIntentForPackage(context.packageName)
+            ?.apply { flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP }
+        val tapIntent = launch?.let {
+            PendingIntent.getActivity(
+                context, notificationId, it,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
         }
-        
-        notificationManager.notify(notificationId, builder.build())
+
+        val notification: Notification =
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.BAKLAVA) {
+                val b = Notification.Builder(context, progressChannelId)
+                    .setSmallIcon(R.drawable.ic_stat_library)
+                    .setContentTitle(title)
+                    .setContentText(content)
+                    .setOnlyAlertOnce(true)
+                    .setCategory(Notification.CATEGORY_PROGRESS)
+                if (tapIntent != null) b.setContentIntent(tapIntent)
+                if (done) {
+                    // Final state: leave a short-lived, dismissible summary.
+                    b.setOngoing(false).setAutoCancel(true).setTimeoutAfter(15_000)
+                } else {
+                    val style = Notification.ProgressStyle()
+                    if (total > 0) {
+                        style.setProgressSegments(listOf(Notification.ProgressStyle.Segment(total)))
+                        style.setProgress(progress.coerceIn(0, total))
+                    } else {
+                        style.setProgressIndeterminate(true)
+                    }
+                    b.setStyle(style).setOngoing(true)
+                }
+                b.build()
+            } else {
+                val b = NotificationCompat.Builder(context, progressChannelId)
+                    .setSmallIcon(R.drawable.ic_stat_library)
+                    .setContentTitle(title)
+                    .setContentText(content)
+                    .setOnlyAlertOnce(true)
+                    .setCategory(NotificationCompat.CATEGORY_PROGRESS)
+                if (tapIntent != null) b.setContentIntent(tapIntent)
+                if (done) {
+                    b.setOngoing(false).setAutoCancel(true).setTimeoutAfter(15_000)
+                } else {
+                    b.setOngoing(true)
+                    if (total > 0) b.setProgress(total, progress.coerceIn(0, total), false)
+                    else b.setProgress(0, 0, true)
+                }
+                b.build()
+            }
+
+        try {
+            nm.notify(notificationId, notification)
+        } catch (e: SecurityException) {
+            // POST_NOTIFICATIONS revoked (Android 13+).
+            Log.w(TAG, "notify denied for '$job': ${e.message}")
+        }
     }
 }

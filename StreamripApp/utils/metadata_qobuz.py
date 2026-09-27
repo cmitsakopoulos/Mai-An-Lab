@@ -176,9 +176,9 @@ async def lookup_artist_genres(client, name: str) -> dict:
     try:
         pages = await client.search("artist", raw, limit=5)
     except Exception as exc:
-        logger.warning("Qobuz artist search failed for %r: %s: %s",
-                       raw, type(exc).__name__, exc)
-        return {"genres": [], "reason": "offline"}
+        logger.error("Qobuz artist search failed for %r: %s: %s",
+                     raw, type(exc).__name__, exc)
+        return {"genres": [], "reason": f"error: {type(exc).__name__}: {exc}"}
 
     items = []
     for page in pages or []:
@@ -191,8 +191,9 @@ async def lookup_artist_genres(client, name: str) -> dict:
     try:
         detail = await client.get_metadata(str(aid), "artist")
     except Exception as exc:
-        logger.warning("Qobuz artist/get failed for %r (%s): %s", raw, aid, exc)
-        return {"genres": [], "reason": "offline"}
+        logger.error("Qobuz artist/get failed for %r (%s): %s: %s",
+                     raw, aid, type(exc).__name__, exc)
+        return {"genres": [], "reason": f"error: {type(exc).__name__}: {exc}"}
 
     albums = ((detail.get("albums") or {}).get("items") or [])[:_ALBUM_SAMPLE]
     counts: dict[str, int] = {}
@@ -223,20 +224,23 @@ async def lookup_artist_genres(client, name: str) -> dict:
     }
 
 
-async def open_client():
-    """A logged-in `QobuzClient`, or None when Qobuz isn't usable.
+async def open_client(*, raise_on_error: bool = False):
+    """A logged-in `QobuzClient`, or None/raises when Qobuz isn't usable.
 
-    Never raises: Qobuz is one tier of a cascade, and an unconfigured or
-    unreachable store must simply mean "this tier contributes nothing"."""
+    If raise_on_error=True, raises RuntimeError with the exact error so callers
+    can fail loudly at runtime rather than silently swallowing."""
     try:
         from utils.config import Config
         from utils.streamrip_api import get_config_path
         from utils.qobuz import QobuzClient
-        client = QobuzClient(Config(get_config_path()))
+        cfg_path = get_config_path()
+        client = QobuzClient(Config(cfg_path))
         await client.login()
         return client
     except Exception as exc:
-        logger.warning("Qobuz tier unavailable (%s: %s)", type(exc).__name__, exc)
+        logger.error("Qobuz client initialization failed (%s: %s)", type(exc).__name__, exc)
+        if raise_on_error:
+            raise RuntimeError(f"Qobuz client initialization failed ({type(exc).__name__}: {exc})") from exc
         return None
 
 
@@ -247,3 +251,14 @@ async def close_client(client) -> None:
         await client.close()
     except Exception as exc:
         logger.debug("Qobuz client close failed: %s", exc)
+
+
+async def fetch_qobuz_artist_metadata(name: str) -> dict:
+    """Standalone lookup for a single artist from Qobuz.
+
+    Fails loudly: raises RuntimeError if the client cannot initialize or log in."""
+    client = await open_client(raise_on_error=True)
+    try:
+        return await lookup_artist_genres(client, name)
+    finally:
+        await close_client(client)

@@ -6,7 +6,10 @@ import asyncio
 import json
 import logging
 import re
+import time
 from typing import TYPE_CHECKING
+
+from utils import play_ledger
 
 if TYPE_CHECKING:
     import numpy as np
@@ -16,6 +19,12 @@ logger = logging.getLogger(__name__)
 
 class ClosestMatchList(list):
     pass
+
+
+# A listen counts toward play_counts once it passes this many seconds (or half
+# the track, for tracks shorter than twice this). Last.fm-style scrobble rule:
+# long enough that skipping through a queue doesn't inflate counts.
+LISTEN_COUNT_MIN_S = 30.0
 
 
 # Source tags that carry no genre information. 'divers' is Qobuz's French locale
@@ -300,6 +309,24 @@ class DatabaseManager:
                     "CREATE INDEX IF NOT EXISTS idx_history_track "
                     "ON playback_history(track_path, event)"
                 )
+                # Real listening time for listen events ('completed' /
+                # 'skipped_early'), written by record_listens from the player's
+                # play ledger. NULL for enqueue-time 'played' rows.
+                try:
+                    await conn.execute(
+                        "ALTER TABLE playback_history ADD COLUMN listened_s REAL"
+                    )
+                except Exception:
+                    pass
+                # Makes ledger ingestion idempotent: a drain that crashed after
+                # commit but before deleting the ledger file replays harmlessly.
+                # Partial so legacy 'played' rows (which may repeat within a
+                # second) can't block index creation.
+                await conn.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_history_listen_uniq "
+                    "ON playback_history(track_path, played_at, event) "
+                    "WHERE event IN ('completed', 'skipped_early')"
+                )
 
                 # Track partitions cache table (mood subsets + acoustic islets)
                 await conn.execute('''
@@ -312,31 +339,10 @@ class DatabaseManager:
                 await conn.execute("CREATE INDEX IF NOT EXISTS idx_tp_mood ON track_partitions(mood)")
                 await conn.execute("CREATE INDEX IF NOT EXISTS idx_tp_islet_id ON track_partitions(islet_id)")
 
-                # Mood feedback and profile adaptation tables
-                await conn.execute('''
-                    CREATE TABLE IF NOT EXISTS mood_feedback (
-                        track_path TEXT,
-                        mood       TEXT,
-                        feedback   INTEGER,
-                        PRIMARY KEY (track_path, mood)
-                    )
-                ''')
-                await conn.execute('''
-                    CREATE TABLE IF NOT EXISTS mood_profiles (
-                        mood    TEXT,
-                        feature TEXT,
-                        target  REAL,
-                        weight  REAL DEFAULT 1.0,
-                        PRIMARY KEY (mood, feature)
-                    )
-                ''')
-                # Migration for pre-v2 mood_profiles rows (target only).
-                try:
-                    await conn.execute(
-                        "ALTER TABLE mood_profiles ADD COLUMN weight REAL DEFAULT 1.0"
-                    )
-                except Exception:
-                    pass  # column already exists
+                # The regression-era mood feedback/profile tables were only ever
+                # written by removed code; drop them from existing databases.
+                await conn.execute("DROP TABLE IF EXISTS mood_feedback")
+                await conn.execute("DROP TABLE IF EXISTS mood_profiles")
 
                 # Note: legacy `mood_regressors` table is no longer created on
                 # new DBs (islet membership now uses cosine + JSON blacklist).
@@ -916,16 +922,130 @@ class DatabaseManager:
             rows = await cursor.fetchall()
             return [dict(r) for r in rows]
 
-    async def get_albums_by_artist(self, artist_name):
+    async def get_albums_by_artist(self, artist_name, genre=None):
         """Lock-free read."""
-        sql = '''
+        params = [artist_name]
+        genre_clause = ""
+        if genre:
+            genre_clause = "AND ((',' || COALESCE(al.genre_bucket, al.genre, '') || ',') LIKE ? OR al.genre LIKE ?)"
+            params.extend([f"%,{genre},%", f"%{genre}%"])
+        sql = f'''
             SELECT al.id, al.title AS album, al.year, al.genre, ar.name AS artist, al.track_count,
                    (SELECT MAX(added_date) FROM tracks WHERE album_id = al.id) AS latest_added
             FROM albums al JOIN artists ar ON al.artist_id = ar.id
-            WHERE ar.name = ? ORDER BY al.title ASC
+            WHERE ar.name = ? {genre_clause} ORDER BY al.title ASC
         '''
         conn = await self.get_connection()
-        async with conn.execute(sql, (artist_name,)) as cursor:
+        async with conn.execute(sql, tuple(params)) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(r) for r in rows]
+
+    async def get_all_genres(self, search_query="", sort_mode="name"):
+        """Lock-free read of canonical enriched genres, aggregating artists, albums, and tracks."""
+        sort_map = {
+            "name": "name COLLATE NOCASE ASC",
+            "tracks": "track_count DESC, name ASC",
+            "albums": "album_count DESC, name ASC",
+            "artists": "artist_count DESC, name ASC",
+        }
+        order = sort_map.get(sort_mode, "name COLLATE NOCASE ASC")
+
+        base = '''
+            WITH RECURSIVE split_genres(album_id, artist_id, genre_token, rest, track_count) AS (
+                SELECT id, artist_id,
+                       TRIM(SUBSTR(COALESCE(NULLIF(genre_bucket, ""), genre, "Other"), 1, INSTR(COALESCE(NULLIF(genre_bucket, ""), genre, "Other") || ",", ",") - 1)) AS genre_token,
+                       SUBSTR(COALESCE(NULLIF(genre_bucket, ""), genre, "Other") || ",", INSTR(COALESCE(NULLIF(genre_bucket, ""), genre, "Other") || ",", ",") + 1) AS rest,
+                       track_count
+                FROM albums
+                WHERE (genre_bucket IS NOT NULL AND genre_bucket != "") OR (genre IS NOT NULL AND genre != "")
+                UNION ALL
+                SELECT album_id, artist_id,
+                       TRIM(SUBSTR(rest, 1, INSTR(rest, ",") - 1)) AS genre_token,
+                       SUBSTR(rest, INSTR(rest, ",") + 1) AS rest,
+                       track_count
+                FROM split_genres
+                WHERE rest != ""
+            )
+            SELECT genre_token AS name,
+                   COUNT(DISTINCT artist_id) AS artist_count,
+                   COUNT(DISTINCT album_id) AS album_count,
+                   SUM(track_count) AS track_count
+            FROM split_genres
+            WHERE genre_token != "" AND LOWER(genre_token) NOT IN ("unknown", "various", "divers", "misc", "other")
+            GROUP BY genre_token
+        '''
+        conn = await self.get_connection()
+        if not search_query:
+            async with conn.execute(f"{base} ORDER BY {order}") as cursor:
+                rows = await cursor.fetchall()
+                return [dict(r) for r in rows]
+
+        like_q = f"%{search_query}%"
+        sql = f"{base} HAVING name LIKE ? ORDER BY {order}"
+        async with conn.execute(sql, (like_q,)) as cursor:
+            rows = await cursor.fetchall()
+            results = [dict(r) for r in rows]
+
+        if not results and search_query:
+            async with conn.execute(f"{base} ORDER BY {order}") as cursor:
+                all_rows = await cursor.fetchall()
+            scored_rows = []
+            for r in all_rows:
+                gname = r["name"] or ""
+                score = self._kmer_similarity(search_query, gname)
+                if score >= 0.25:
+                    scored_rows.append((score, dict(r)))
+            scored_rows.sort(key=lambda x: x[0], reverse=True)
+            results = ClosestMatchList(item for _, item in scored_rows)
+            results.is_closest = True
+
+        return results
+
+    async def get_artists_by_genre(self, genre_name, search_query="", sort_mode="name"):
+        """Lock-free read of artists contributing to a specific genre."""
+        sort_map = {
+            "name": "ar.name COLLATE NOCASE ASC",
+            "tracks": "track_count DESC, ar.name ASC",
+            "albums": "album_count DESC, ar.name ASC",
+        }
+        order = sort_map.get(sort_mode, "ar.name COLLATE NOCASE ASC")
+
+        base = '''
+            SELECT ar.id, ar.name,
+                   COUNT(DISTINCT al.id) AS album_count,
+                   SUM(al.track_count) AS track_count
+            FROM artists ar
+            JOIN albums al ON al.artist_id = ar.id
+            WHERE ("," || COALESCE(al.genre_bucket, al.genre, "") || ",") LIKE ?
+               OR (al.genre LIKE ?)
+            GROUP BY ar.id, ar.name
+        '''
+        params = [f"%,{genre_name},%", f"%{genre_name}%"]
+        conn = await self.get_connection()
+        if not search_query:
+            async with conn.execute(f"{base} ORDER BY {order}", params) as cursor:
+                rows = await cursor.fetchall()
+                return [dict(r) for r in rows]
+
+        sql = f"{base} HAVING ar.name LIKE ? ORDER BY {order}"
+        params.append(f"%{search_query}%")
+        async with conn.execute(sql, params) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(r) for r in rows]
+
+    async def get_tracks_by_genre(self, genre_name):
+        """Lock-free read of all tracks belonging to albums tagged with genre_name."""
+        sql = '''
+            SELECT t.*, al.title AS album, ar.name AS artist, al.year, al.genre, al.genre_bucket
+            FROM tracks t
+            JOIN albums al ON t.album_id = al.id
+            JOIN artists ar ON al.artist_id = ar.id
+            WHERE ("," || COALESCE(al.genre_bucket, al.genre, "") || ",") LIKE ?
+               OR (al.genre LIKE ?)
+            ORDER BY t.added_date DESC
+        '''
+        conn = await self.get_connection()
+        async with conn.execute(sql, (f"%,{genre_name},%", f"%{genre_name}%")) as cursor:
             rows = await cursor.fetchall()
             return [dict(r) for r in rows]
 
@@ -1046,23 +1166,6 @@ class DatabaseManager:
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_tp_mood ON track_partitions(mood)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_tp_islet_id ON track_partitions(islet_id)")
 
-        # Create mood_feedback and mood_profiles tables
-        await conn.execute('''
-            CREATE TABLE IF NOT EXISTS mood_feedback (
-                track_path TEXT,
-                mood       TEXT,
-                feedback   INTEGER,
-                PRIMARY KEY (track_path, mood)
-            )
-        ''')
-        await conn.execute('''
-            CREATE TABLE IF NOT EXISTS mood_profiles (
-                mood    TEXT,
-                feature TEXT,
-                target  REAL,
-                PRIMARY KEY (mood, feature)
-            )
-        ''')
         await conn.commit()
 
     # ─── Playlist CRUD ─────────────────────────────────────────────────────────
@@ -1324,60 +1427,64 @@ class DatabaseManager:
             rows = await cursor.fetchall()
             return [dict(r) for r in rows]
 
-    async def get_autoplaylist_hot_set(self) -> list[dict]:
-        """
-        Retrieves the 'Hot Set' for the KNN auto-playlist selector.
-        Filters tracks based on play count quartiles.
-        Rule: count >= 1/2 of Q1 (lowest quartile).
-
-        Returns all hot-set entries regardless of whether their DSP features
-        are populated; the caller is expected to invoke the DSP analyser
-        for any entry whose `features_version` is missing or stale and then
-        persist via `update_track_features`.
-        """
-        import numpy as np
+    async def get_most_played_artists(self, limit=5) -> list[dict]:
+        """Artists ranked by summed track plays, for the landing page."""
         conn = await self.get_connection()
-
-        # 1. Fetch all counts to calculate Q1
-        async with conn.execute("SELECT count FROM play_counts") as cursor:
-            rows = await cursor.fetchall()
-            if not rows:
-                return []
-            counts = [r[0] for r in rows]
-
-        # 2. Calculate Q1 (25th percentile)
-        q1 = np.percentile(counts, 25)
-        threshold = q1 / 2.0
-
-        # 3. Fetch tracks that meet the 'Hot Set' threshold, including
-        #    artist and album names for the string-similarity blending step
-        #    in the auto-playlist KNN selector. LEFT JOINs are used so a
-        #    missing tracks row (shouldn't happen) still returns the play_count
-        #    entry with NULL artist/album rather than silently dropping it.
         sql = '''
-            SELECT pc.track_path AS path,
-                   pc.bpm, pc.energy, pc.brightness,
-                   COALESCE(pc.rolloff, 0)         AS rolloff,
-                   COALESCE(pc.beat_strength, 0)   AS beat_strength,
-                   COALESCE(pc.spectral_flatness, 0) AS spectral_flatness,
-                   COALESCE(pc.spectral_contrast, 0) AS spectral_contrast,
-                   COALESCE(pc.key_index, 0)         AS key_index,
-                   pc.timbre,
-                   COALESCE(pc.features_version, 0) AS features_version,
-                   pc.count,
-                   ar.name  AS artist,
-                   al.title AS album
+            SELECT ar.name AS name, SUM(pc.count) AS plays,
+                   COUNT(DISTINCT pc.track_path) AS tracks_played
             FROM play_counts pc
-            INNER JOIN tracks  t  ON t.path       = pc.track_path
-            LEFT JOIN albums  al ON al.id         = t.album_id
-            LEFT JOIN artists ar ON ar.id         = al.artist_id
-            WHERE pc.count >= ?
-            ORDER BY pc.count DESC
+            JOIN tracks t   ON t.path = pc.track_path
+            JOIN albums al  ON al.id  = t.album_id
+            JOIN artists ar ON ar.id  = al.artist_id
+            WHERE pc.count > 0
+            GROUP BY ar.id
+            ORDER BY plays DESC, MAX(pc.last_played) DESC
+            LIMIT ?
         '''
-        async with conn.execute(sql, (threshold,)) as cursor:
-            rows = await cursor.fetchall()
-            return [dict(r) for r in rows]
+        async with conn.execute(sql, (limit,)) as cursor:
+            return [dict(r) for r in await cursor.fetchall()]
 
+    async def get_most_played_genres(self, limit=5) -> list[dict]:
+        """Genres ranked by summed track plays, using the same album genre
+        tokens as get_all_genres (genre_bucket, else genre; comma-split, junk
+        filtered) so names match the Library's Genres tab. A multi-genre album
+        credits its plays to each of its genres."""
+        conn = await self.get_connection()
+        sql = '''
+            WITH RECURSIVE album_plays(album_id, plays) AS (
+                SELECT t.album_id, SUM(pc.count)
+                FROM play_counts pc
+                JOIN tracks t ON t.path = pc.track_path
+                WHERE pc.count > 0
+                GROUP BY t.album_id
+            ),
+            split_genres(album_id, genre_token, rest) AS (
+                SELECT id,
+                       TRIM(SUBSTR(COALESCE(NULLIF(genre_bucket, ""), genre, "Other"), 1, INSTR(COALESCE(NULLIF(genre_bucket, ""), genre, "Other") || ",", ",") - 1)),
+                       SUBSTR(COALESCE(NULLIF(genre_bucket, ""), genre, "Other") || ",", INSTR(COALESCE(NULLIF(genre_bucket, ""), genre, "Other") || ",", ",") + 1)
+                FROM albums
+                WHERE id IN (SELECT album_id FROM album_plays)
+                  AND ((genre_bucket IS NOT NULL AND genre_bucket != "") OR (genre IS NOT NULL AND genre != ""))
+                UNION ALL
+                SELECT album_id,
+                       TRIM(SUBSTR(rest, 1, INSTR(rest, ",") - 1)),
+                       SUBSTR(rest, INSTR(rest, ",") + 1)
+                FROM split_genres
+                WHERE rest != ""
+            )
+            SELECT sg.genre_token AS name, SUM(ap.plays) AS plays,
+                   COUNT(DISTINCT sg.album_id) AS albums_played
+            FROM split_genres sg
+            JOIN album_plays ap ON ap.album_id = sg.album_id
+            WHERE sg.genre_token != ""
+              AND LOWER(sg.genre_token) NOT IN ("unknown", "various", "divers", "misc", "other")
+            GROUP BY sg.genre_token
+            ORDER BY plays DESC, name COLLATE NOCASE ASC
+            LIMIT ?
+        '''
+        async with conn.execute(sql, (limit,)) as cursor:
+            return [dict(r) for r in await cursor.fetchall()]
 
     async def update_track_features(
         self,
@@ -1669,6 +1776,60 @@ class DatabaseManager:
             )
             await conn.commit()
 
+    async def record_listens(self, entries: list[dict]) -> int:
+        """Persist a batch of finished listens in ONE transaction.
+
+        Each entry: {path, listened_s, duration_s, ended_at}. A listen counts
+        (play_counts +1, event 'completed') when it passes the scrobble rule —
+        at least LISTEN_COUNT_MIN_S seconds, or half the track for short
+        tracks; otherwise it's logged as 'skipped_early' and play_counts is left
+        alone. Replayed entries are ignored via idx_history_listen_uniq, so
+        only newly inserted rows bump counts. Returns the number counted."""
+        if not entries:
+            return 0
+        counted = 0
+        async with self._write_lock:
+            conn = await self.get_connection()
+            try:
+                for e in entries:
+                    path = e.get("path") or ""
+                    if not path:
+                        continue
+                    listened = float(e.get("listened_s") or 0.0)
+                    duration = float(e.get("duration_s") or 0.0)
+                    ended_at = int(e.get("ended_at") or time.time())
+                    is_listen = play_ledger.is_listen(listened, duration, LISTEN_COUNT_MIN_S)
+                    event = "completed" if is_listen else "skipped_early"
+                    cur = await conn.execute(
+                        "INSERT OR IGNORE INTO playback_history "
+                        "(track_path, played_at, event, listened_s) VALUES (?, ?, ?, ?)",
+                        (path, ended_at, event, round(listened, 1)),
+                    )
+                    if not is_listen or cur.rowcount != 1:
+                        continue
+                    # Same feature propagation increment_play_count does.
+                    await conn.execute(
+                        '''
+                        INSERT INTO play_counts (track_path, count, last_played, bpm, energy, brightness)
+                        SELECT ?, 1, ?, COALESCE(t.bpm, 0), COALESCE(t.energy, 0), COALESCE(t.brightness, 0)
+                        FROM (SELECT 1) LEFT JOIN tracks t ON t.path = ?
+                        WHERE true
+                        ON CONFLICT(track_path) DO UPDATE SET
+                            count = count + 1,
+                            last_played = MAX(COALESCE(last_played, 0), EXCLUDED.last_played),
+                            bpm = EXCLUDED.bpm,
+                            energy = EXCLUDED.energy,
+                            brightness = EXCLUDED.brightness
+                        ''',
+                        (path, ended_at, path),
+                    )
+                    counted += 1
+                await conn.commit()
+            except Exception:
+                await conn.rollback()
+                raise
+        return counted
+
     async def recent_played_paths(self, window_seconds: int = 7 * 86400) -> set[str]:
         """Distinct track paths that have a 'played' event within the last
         `window_seconds`. Used by the assistant as a long-term avoid set so
@@ -1683,7 +1844,8 @@ class DatabaseManager:
             return {r[0] for r in await cursor.fetchall()}
 
     async def get_recent_tracks(self, limit: int = 15) -> list[dict]:
-        """Distinct tracks most-recently 'played', newest first, with metadata.
+        """Distinct tracks most-recently played (queued by the assistant, or
+        actually listened to per the play ledger), newest first, with metadata.
         Unlike recent_played_paths (an unordered set for the avoid-list), this
         preserves recency order so the assistant can answer 'what did I just
         play' / 'play what I was listening to earlier'."""
@@ -1695,7 +1857,7 @@ class DatabaseManager:
             JOIN tracks t   ON t.path = ph.track_path
             JOIN albums al  ON al.id  = t.album_id
             JOIN artists ar ON ar.id  = al.artist_id
-            WHERE ph.event = 'played'
+            WHERE ph.event IN ('played', 'completed')
             GROUP BY t.path
             ORDER BY last_played DESC
             LIMIT ?
@@ -1703,6 +1865,38 @@ class DatabaseManager:
         async with conn.execute(sql, (limit,)) as cursor:
             rows = await cursor.fetchall()
             return [dict(r) for r in rows]
+
+    async def get_tracks_brief(self, paths: list[str]) -> dict[str, dict]:
+        """Batched title/artist/album/duration lookup: {path: row}. One query
+        per 500 paths instead of one per path (auto-play fills 8–24 at once)."""
+        out: dict[str, dict] = {}
+        if not paths:
+            return out
+        conn = await self.get_connection()
+        for i in range(0, len(paths), 500):
+            chunk = paths[i:i + 500]
+            sql = f'''
+                SELECT t.path, t.title, t.duration,
+                       ar.name AS artist, al.title AS album
+                FROM tracks t
+                LEFT JOIN albums  al ON al.id = t.album_id
+                LEFT JOIN artists ar ON ar.id = al.artist_id
+                WHERE t.path IN ({",".join("?" * len(chunk))})
+            '''
+            async with conn.execute(sql, chunk) as cursor:
+                for r in await cursor.fetchall():
+                    out[r["path"]] = dict(r)
+        return out
+
+    async def has_current_features(self, path: str, features_version: int) -> bool:
+        """True when `path` has DSP features the walk can use as a seed."""
+        conn = await self.get_connection()
+        async with conn.execute(
+            "SELECT 1 FROM play_counts WHERE track_path = ? AND timbre IS NOT NULL "
+            "AND COALESCE(features_version, 0) >= ?",
+            (path, features_version),
+        ) as cursor:
+            return (await cursor.fetchone()) is not None
 
     async def get_track_full(self, path: str) -> dict | None:
         """Single-row lookup returning title/artist/album/genre and the DSP
@@ -2197,6 +2391,49 @@ class DatabaseManager:
             out["provenance"] = {}
         return out
 
+    async def get_artist_workbench_item(self, name: str) -> dict | None:
+        """Lock-free read of one artist's workbench row, whether in gaps or already complete."""
+        if not name:
+            return None
+        conn = await self.get_connection()
+        sql = (
+            "SELECT a.name AS artist_name, a.track_count AS track_count, "
+            "e.country AS country, e.genres AS genres, e.source AS source, "
+            "e.status AS status, e.provenance AS provenance, "
+            "(SELECT group_concat(al.genre, '|') FROM albums al "
+            "   WHERE al.artist_id = a.id AND al.genre IS NOT NULL AND al.genre <> '' "
+            ") AS raw_file_genres "
+            "FROM artists a LEFT JOIN artist_enrichment e ON e.artist_name = a.name "
+            "WHERE a.name = ?"
+        )
+        async with conn.execute(sql, (name,)) as cursor:
+            row = await cursor.fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        try:
+            d["genres"] = json.loads(d["genres"]) if d["genres"] else []
+        except Exception:
+            d["genres"] = []
+        try:
+            d["provenance"] = json.loads(d["provenance"]) if d.get("provenance") else {}
+        except Exception:
+            d["provenance"] = {}
+        from utils.metadata_enrich import _clean_source_tags
+        d["source_genres"] = _clean_source_tags(
+            (d.pop("raw_file_genres", None) or "").split("|")
+        )
+        has_genres = bool(d["genres"])
+        has_country = bool((d.get("country") or "").strip())
+        has_files = bool(d["source_genres"])
+        if has_genres or has_country:
+            d["gap_severity"] = self.GAP_THIN
+        elif has_files:
+            d["gap_severity"] = self.GAP_SUGGESTED
+        else:
+            d["gap_severity"] = self.GAP_BLOCKING
+        return d
+
     async def upsert_artist_enrichment(
         self, artist_name: str, *, mbid: str | None = None,
         country: str | None = None, area: str | None = None,
@@ -2550,8 +2787,10 @@ class DatabaseManager:
                     for x in (cur.get("genres") or [])
                 ]
                 merged = list(names_now)
-                if g and g not in {s.lower() for s in merged if s}:
-                    merged.append(g)
+                if g:
+                    for piece in [p.strip().lower() for p in g.split(",") if p.strip()]:
+                        if piece not in {s.lower() for s in merged if s}:
+                            merged.append(piece)
                 await self.set_manual_artist_enrichment(
                     name,
                     country=c or (cur.get("country") or None),

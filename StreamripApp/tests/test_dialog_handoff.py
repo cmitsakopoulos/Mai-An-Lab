@@ -14,6 +14,7 @@ topmost, and `NotificationSystem.show()` puts every toast in that same stack.
 import os
 import sys
 from unittest.mock import MagicMock
+import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -238,5 +239,211 @@ def test_main_app_confirm_delete_playlist_dialog_behavior():
     delete_btn.on_click(None)
     assert app.dismiss_dialog.call_count == 2
     app.page.run_task.assert_called_once_with(app._delete_playlist, 42)
+
+
+def test_metadata_workbench_open_editor_handoff():
+    from ui.player.metadata_workbench import MetadataWorkbenchPane
+    import flet as ft
+    from unittest.mock import MagicMock
+
+    app = MagicMock()
+    app.page = MagicMock()
+    app.db_manager = MagicMock()
+    app.dismiss_dialog.return_value = True
+
+    pane = MetadataWorkbenchPane.__new__(MetadataWorkbenchPane)
+    pane.app = app
+    pane.db = app.db_manager
+    pane.vocab = []
+    pane.countries = []
+    pane.filter = "all"
+    pane.selected = set()
+    pane.all_gaps = []
+    pane.coverage = {}
+    pane.low_conf = []
+    pane._row_refs = {}
+    pane._list = ft.Column()
+    pane._seg = MagicMock()
+    pane._schedule_walk_refresh = MagicMock()
+    pane._reload_async = MagicMock()
+    pane._safe_update = MagicMock()
+
+    item = {"artist_name": "Pink Floyd", "genres": ["Classic Rock"], "source_genres": ["Rock"], "country": "GB"}
+    pane._open_editor(item)
+
+    # Sheet should have been presented
+    app.page.show_dialog.assert_called_once()
+    sheet = app.page.show_dialog.call_args[0][0]
+    assert isinstance(sheet, ft.BottomSheet)
+    assert sheet.on_dismiss is not None
+
+    # Find the Save button in the sheet header
+    content_col = sheet.content.content
+    header_row = content_col.controls[1].content
+    save_container = next(c for c in header_row.controls if isinstance(c, ft.Container) and getattr(c, "on_click", None))
+
+    # Click save
+    save_container.on_click(None)
+
+    # dismiss_dialog should have been called, but task not run yet (waiting for on_dismiss)
+    app.dismiss_dialog.assert_called_once_with(sheet)
+    app.page.run_task.assert_not_called()
+
+    # Now simulate Flutter firing on_dismiss
+    sheet.on_dismiss()
+    app.page.run_task.assert_called_once()
+
+
+def test_metadata_workbench_visible_genre_filter():
+    from ui.player.metadata_workbench import MetadataWorkbenchPane
+
+    pane = MetadataWorkbenchPane.__new__(MetadataWorkbenchPane)
+    pane.filter = "all"
+    pane.search = "psychedelic"
+    pane.all_gaps = [
+        {"artist_name": "Pink Floyd", "genres": ["Classic Rock", "Psychedelic Rock"], "source_genres": []},
+        {"artist_name": "Metallica", "genres": ["Heavy Metal"], "source_genres": ["Metal"]},
+        {"artist_name": "The Doors", "genres": [], "source_genres": ["psychedelic rock"]},
+    ]
+    visible = pane._visible()
+    assert len(visible) == 2
+    names = {v["artist_name"] for v in visible}
+    assert names == {"Pink Floyd", "The Doors"}
+
+
+@pytest.mark.asyncio
+async def test_metadata_workbench_focus_artist_non_gap():
+    from ui.player.metadata_workbench import MetadataWorkbenchPane
+    from unittest.mock import AsyncMock
+
+    app = MagicMock()
+    app.page = MagicMock()
+    app.db_manager = MagicMock()
+    app.dismiss_dialog.return_value = True
+
+    pane = MetadataWorkbenchPane.__new__(MetadataWorkbenchPane)
+    pane.app = app
+    pane.db = app.db_manager
+    pane._pending_focus = "Pink Floyd"
+    pane.search = "Pink Floyd"
+    pane.all_gaps = []
+    pane.coverage = {}
+    pane.low_conf = []
+    pane.vocab = []
+    pane.countries = []
+    pane._row_refs = {}
+    pane._list = MagicMock()
+    pane._render = MagicMock()
+    pane._open_editor = MagicMock()
+
+    app.db_manager.get_metadata_gap_artists = AsyncMock(return_value=[])
+    app.db_manager.get_metadata_coverage = AsyncMock(return_value={})
+    app.db_manager.get_low_confidence_artists = AsyncMock(return_value=[])
+    app.db_manager.get_genre_vocabulary = AsyncMock(return_value=[])
+    app.db_manager.get_library_countries = AsyncMock(return_value=[])
+    app.db_manager.get_artists_by_genre = AsyncMock(return_value=[])
+    app.db_manager.get_artist_workbench_item = AsyncMock(return_value={
+        "artist_name": "Pink Floyd", "genres": ["Rock"], "source_genres": [], "country": "GB"
+    })
+
+    await pane._reload_async()
+
+    app.db_manager.get_artist_workbench_item.assert_called_with("Pink Floyd")
+    pane._open_editor.assert_called_once()
+    assert any(g["artist_name"] == "Pink Floyd" for g in pane.all_gaps)
+
+
+@pytest.mark.asyncio
+async def test_metadata_workbench_unsubmitted_and_comma_genres():
+    from ui.player.metadata_workbench import MetadataWorkbenchPane
+    import flet as ft
+    from unittest.mock import MagicMock, AsyncMock
+
+    app = MagicMock()
+    app.page = MagicMock()
+    app.db_manager = MagicMock()
+    app.library_view = MagicMock()
+    app.dismiss_dialog.return_value = True
+
+    pane = MetadataWorkbenchPane.__new__(MetadataWorkbenchPane)
+    pane.app = app
+    pane.db = app.db_manager
+    pane.vocab = []
+    pane.countries = [{"code": "GB"}]
+    pane.filter = "all"
+    pane.selected = set()
+    pane.all_gaps = []
+    pane.coverage = {}
+    pane.low_conf = []
+    pane._row_refs = {}
+    pane._list = ft.Column()
+    pane._reload_async = AsyncMock()
+    pane._safe_update = MagicMock()
+
+    item = {"artist_name": "New Order", "genres": ["Post-Punk"], "source_genres": [], "country": "GB"}
+    pane._open_editor(item)
+
+    sheet = app.page.show_dialog.call_args[0][0]
+    content_col = sheet.content.content
+    body_col = content_col.controls[3].content
+    chips_row = body_col.controls[0].controls[1]
+    custom_field = chips_row.controls[-1]
+    assert isinstance(custom_field, ft.TextField)
+
+    # User types comma-separated tags and clicks save WITHOUT pressing enter
+    custom_field.value = "Synthpop, New Wave"
+
+    header_row = content_col.controls[1].content
+    save_container = next(c for c in header_row.controls if isinstance(c, ft.Container) and getattr(c, "on_click", None))
+
+    save_container.on_click(None)
+    app.dismiss_dialog.assert_called_once_with(sheet)
+
+    # Simulate Flutter dismissal
+    sheet.on_dismiss()
+    task_fn = app.page.run_task.call_args[0][0]
+
+    app.db_manager.set_manual_artist_enrichment = AsyncMock()
+    await task_fn()
+
+    app.db_manager.set_manual_artist_enrichment.assert_called_once()
+    called_kwargs = app.db_manager.set_manual_artist_enrichment.call_args[1]
+    saved_genres = called_kwargs["genres"]
+    # Must contain original plus both parsed tags
+    assert "post-punk" in saved_genres
+    assert "synthpop" in saved_genres
+    assert "new wave" in saved_genres
+    # Must flag library view reload
+    assert app.library_view._needs_reload is True
+
+    from utils.metadata_enrich import _refresh_pending
+    for t in list(_refresh_pending.values()):
+        t.cancel()
+    _refresh_pending.clear()
+
+
+@pytest.mark.asyncio
+async def test_bulk_tag_artists_comma_separated():
+    from utils.db_manager import DatabaseManager
+    import tempfile
+
+    tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+    db = DatabaseManager(tmp.name)
+    await db.initialize()
+
+    conn = await db.get_connection()
+    await conn.execute("INSERT INTO artists (id, name, track_count) VALUES (1, 'Joy Division', 10)")
+    await conn.commit()
+
+    n = await db.bulk_tag_artists(["Joy Division"], genre="Goth, Post-Punk", refresh_model=False)
+    assert n == 1
+
+    item = await db.get_artist_enrichment("Joy Division")
+    genre_names = [g["name"] if isinstance(g, dict) else g for g in item["genres"]]
+    assert "goth" in genre_names
+    assert "post-punk" in genre_names
+    await db.close()
+
+
 
 

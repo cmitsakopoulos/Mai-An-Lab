@@ -1835,22 +1835,24 @@ class AssistantRunner:
         )
 
     async def _handle_play_similar(self, intent: ai.Intent) -> AssistantResponse:
-        try:
-            missing = await self.db.get_tracks_missing_features(track_graph.FEATURES_VERSION)
-            if len(missing) > 0:
-                return AssistantResponse(
-                    spoken=f"I notice {len(missing)} tracks are not analyzed yet, sir. Please complete the DSP analysis before initiating a similarity walk.",
-                    displayed=f"Play Similar is unavailable. {len(missing)} tracks lack DSP features. Run the Jarvis analyzer first.",
-                    success=False,
-                )
-        except Exception as exc:
-            logger.warning("Failed to verify missing features in assistant: %s", exc)
-
         seed_path = intent.extras.get("seed_path_override") or self.engine.current_path
         if not seed_path:
             return AssistantResponse(
                 spoken="Nothing is playing right now.",
                 displayed="No current track — start something first, then ask for similar tracks.",
+                success=False,
+            )
+        # Only the SEED needs DSP features (unanalysed tracks simply aren't
+        # candidates); a library-wide gate blocked this after every download.
+        try:
+            analysed = await self.db.has_current_features(seed_path, track_graph.FEATURES_VERSION)
+        except Exception as exc:
+            logger.warning("Failed to check seed features in assistant: %s", exc)
+            analysed = True
+        if analysed is False:
+            return AssistantResponse(
+                spoken="This track isn't analysed yet, sir, so I can't find its neighbours.",
+                displayed="This track lacks DSP features. Run the Jarvis analyzer, or pick an analysed track.",
                 success=False,
             )
  
@@ -2272,24 +2274,31 @@ class AssistantRunner:
                 success=False,
             )
         q = (intent.query or "").strip().lower()
-        removed_track = None
+        idx = None
 
         if q.isdigit():
-            idx = int(q) - 1
-            if 0 <= idx < len(self.engine.queue):
-                removed_track = self.engine.queue.pop(idx)
+            n = int(q) - 1
+            if 0 <= n < len(self.engine.queue):
+                idx = n
 
-        if not removed_track:
+        if idx is None:
             if q in ("last", "the last song", "the last track", "last track"):
-                removed_track = self.engine.queue.pop(-1)
+                idx = len(self.engine.queue) - 1
             elif q in ("first", "the first song", "the first track"):
-                removed_track = self.engine.queue.pop(0)
+                idx = 0
             else:
                 for i, tr in enumerate(self.engine.queue):
                     t_title = (tr.get("track_title") or tr.get("title") or "").lower()
                     if q in t_title:
-                        removed_track = self.engine.queue.pop(i)
+                        idx = i
                         break
+
+        removed_track = self.engine.queue[idx] if idx is not None else None
+        if removed_track is not None:
+            # Through the engine, never queue.pop(): a bare pop skipped the
+            # native removal and the current_index shift, so Python and the
+            # player disagreed on every row after it for the rest of the session.
+            self.engine.remove_from_queue(idx)
 
         if not removed_track:
             return AssistantResponse(
@@ -2334,10 +2343,15 @@ class AssistantRunner:
                 success=False,
             )
 
-        track = self.engine.queue.pop(target_idx)
+        track = self.engine.queue[target_idx]
         curr_idx = getattr(self.engine, "current_index", 0)
-        insert_at = min(curr_idx + 1, len(self.engine.queue))
-        self.engine.queue.insert(insert_at, track)
+        # Final position directly after the playing track: removing a row above
+        # it shifts the playing track up by one first.
+        insert_at = curr_idx if target_idx < curr_idx else min(curr_idx + 1, len(self.engine.queue) - 1)
+        if target_idx != curr_idx:
+            # Through the engine (native move + current_index tracking), not a
+            # bare pop/insert that the player never heard about.
+            self.engine.move_queue_item(target_idx, insert_at)
 
         title = track.get("track_title") or track.get("title") or "Track"
         return AssistantResponse(

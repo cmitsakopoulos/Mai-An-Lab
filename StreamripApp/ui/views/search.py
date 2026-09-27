@@ -807,6 +807,8 @@ class SearchView:
         landing_cfg = cfg.get("landing", {})
         show_most_listened = bool(landing_cfg.get("show_search_history", True))
         show_stats   = bool(landing_cfg.get("show_library_stats", True))
+        show_artists = bool(landing_cfg.get("show_top_artists", True))
+        show_genres  = bool(landing_cfg.get("show_top_genres", True))
 
         def _apply():
             search_field = getattr(self, "_search_field", None)
@@ -831,32 +833,60 @@ class SearchView:
                 is_empty = not bool(self._search_field.value)
                 self._landing_container.visible = is_empty
                 if is_empty:
-                    self.page.run_task(self._refresh_landing_page, show_most_listened, show_stats)
+                    self.page.run_task(
+                        self._refresh_landing_page, show_most_listened, show_stats,
+                        show_artists, show_genres,
+                    )
         
         if update:
             self.app.safe_update(_apply)
         else:
             _apply()
 
-    async def _refresh_landing_page(self, show_most_listened, show_stats):
+    async def _refresh_landing_page(self, show_most_listened, show_stats,
+                                    show_artists=True, show_genres=True):
         if getattr(self.app, "_is_restarting", False):
             return
             
         self._landing_container.controls.clear()
         
         try:
-            stats_content = await self._get_library_stats_content()
-            self._landing_container.controls.append(
-                self._build_landing_card("Library at a Glance", ft.Icons.INSERT_CHART_OUTLINED_ROUNDED, stats_content)
-            )
+            db = self.app.db_manager
+            if show_stats:
+                stats_content = await self._get_library_stats_content()
+                self._landing_container.controls.append(
+                    self._build_landing_card("Library at a Glance", ft.Icons.INSERT_CHART_OUTLINED_ROUNDED, stats_content)
+                )
             
             if show_most_listened:
-                most_played_tracks = await self.app.db_manager.get_most_played(limit=5)
+                most_played_tracks = await db.get_most_played(limit=5)
                 if most_played_tracks:
                     most_played_content = self._build_most_played_content(most_played_tracks)
                     self._landing_container.controls.append(
                         self._build_landing_card("Most Listened Tracks", ft.Icons.REPLAY_ROUNDED, most_played_content)
                     )
+
+            if show_artists:
+                top_artists = await db.get_most_played_artists(limit=5)
+                if top_artists:
+                    self._landing_container.controls.append(self._build_landing_card(
+                        "Most Listened Artists", ft.Icons.PERSON_ROUNDED,
+                        self._build_top_list_content(
+                            top_artists, ft.Icons.PERSON_OUTLINE_ROUNDED, "artists",
+                            lambda r: f"{r['plays']} plays • {r['tracks_played']} tracks",
+                        ),
+                    ))
+
+            if show_genres:
+                top_genres = await db.get_most_played_genres(limit=5)
+                if top_genres:
+                    self._landing_container.controls.append(self._build_landing_card(
+                        "Most Listened Genres", ft.Icons.CATEGORY_ROUNDED,
+                        self._build_top_list_content(
+                            top_genres, ft.Icons.LABEL_OUTLINE_ROUNDED, "genres",
+                            lambda r: f"{r['plays']} plays • {r['albums_played']} albums",
+                        ),
+                    ))
 
         except Exception as e:
             logger.warning(f"Failed to refresh landing page during transition: {e}")
@@ -881,6 +911,34 @@ class SearchView:
                 )
             )
         return ft.Column(items, spacing=0)
+
+    def _build_top_list_content(self, rows, icon, library_mode: str, subtitle):
+        """Ranked name + play-count rows. Tapping one opens that artist/genre
+        in the Library, filtered to it."""
+        items = []
+        for rank, r in enumerate(rows, start=1):
+            items.append(
+                ft.Container(
+                    content=ft.Row([
+                        ft.Text(str(rank), color=DIM, size=12, width=14,
+                                text_align=ft.TextAlign.CENTER),
+                        ft.Icon(icon, color=CYAN, size=16),
+                        ft.Column([
+                            ft.Text(r['name'], color=TEXT, size=13, weight="bold", no_wrap=True),
+                            ft.Text(subtitle(r), color=DIM, size=11),
+                        ], spacing=1, expand=True),
+                    ], spacing=12),
+                    padding=ft.Padding.symmetric(vertical=8),
+                    on_click=lambda e, n=r['name']: self._open_in_library(library_mode, n),
+                )
+            )
+        return ft.Column(items, spacing=0)
+
+    def _open_in_library(self, mode: str, name: str):
+        self.app.switch_tab(2)
+        lib = getattr(self.app, "library_view", None)
+        if lib is not None and hasattr(lib, "show_filtered"):
+            lib.show_filtered(mode, name)
 
     def _build_landing_card(self, title: str, icon: str, content: ft.Control):
         return ft.Container(

@@ -370,7 +370,6 @@ class TestSettingsEqualizerUI(unittest.TestCase):
         self.app.safe_update = lambda fn: fn()
         self.app.trigger_haptic = MagicMock()
         self.app.play_similar_mode = False
-        self.app.auto_dj_mode = False
         
         class DummyControl:
             def __init__(self, *args, **kwargs):

@@ -768,50 +768,28 @@ def refresh_walk_models(db_manager, *, on_done=None) -> None:
 
 
 async def enrich_library(
-    db_manager, *, with_genres: bool = True, limit=None,
+    db_manager, *,
+    provider: str = "musicbrainz",
+    with_genres: bool = True, limit=None,
     contact: str = DEFAULT_CONTACT, include_failed: bool = False,
     max_consecutive_errors: int = 3, progress=None,
     cancel_event: asyncio.Event | None = None,
-    use_qobuz: bool = True, source_genres=None,
     retry_incomplete: bool = False,
+    **_kwargs,
 ) -> dict:
-    """Incrementally enrich artists that have no cached metadata yet, from a
-    CASCADE of sources.
+    """Incrementally enrich artists from an explicit provider: 'musicbrainz' or 'qobuz'.
 
-    Only artists without an enrichment row are fetched, so calling this after
-    each library index enriches just the *new* artists. Transient request
-    failures (offline / rate cap) are NOT persisted — the artist stays
-    'needing' and is retried on the next index — and the pass aborts after a few
-    consecutive errors (almost certainly offline).
+    Strictly no silent fallbacks:
+      - When provider='musicbrainz', queries MusicBrainz exclusively. If no genres
+        or country are found, records the exact reason without falling back to Qobuz.
+      - When provider='qobuz', queries Qobuz exclusively. If Qobuz credentials or
+        network fail, fails loudly at runtime with an explicit error status.
+      - File tags are baseline (already indexed into the library database) and
+        never conflated with an external sync pass.
 
-    ── The cascade ─────────────────────────────────────────────────────────────
-    MusicBrainz is the authority and always runs first, but on this library a
-    quarter of artists match it perfectly and come back with NO genres at all —
-    concentrated in the Greek scene, which is exactly where the walk's pool gate
-    most needs them. So when MusicBrainz yields no genres we fall through:
-
-      1. MusicBrainz   country (authoritative) + curated genres
-      2. your own FILES  `albums.genre`, already on disk from the download source
-      3. Qobuz         the store this library came from — see `utils.metadata_qobuz`
-
-    A Deezer tier sat at the end of this cascade briefly and was removed: it
-    contributed ZERO across the whole 252-artist library, because tier 2 already
-    carries whatever the download source wrote at download time (Deezer's own
-    genre included, for a Deezer-sourced album) and Qobuz covers the rest.
-
-    Country is never taken from tiers 2-3: it is the field the walk's regional
-    fence reads, and neither source carries a trustworthy one. Each field records
-    where it came from in `provenance`, so the workbench can show the origin and
-    the user can tell a hand-checkable guess from an authority.
-
-    A tier-2/3 genre is only ever written when MusicBrainz supplied NONE, so an
-    authority answer is never overwritten by a weaker one.
-
-    Returns a summary dict — including `aborted`, `cancelled` and `reasons`, all
-    of which the caller is expected to SHOW rather than discard. Never raises."""
-    if aiohttp is None:
-        logger.error("enrich_library: aiohttp unavailable, cannot enrich")
-        return {"enriched": 0, "status": "no_aiohttp"}
+    Returns a summary dict — including `aborted`, `cancelled`, `status` and `reasons`,
+    all of which the caller is expected to display loudly rather than discard.
+    """
     try:
         try:
             artists = await db_manager.get_artists_needing_enrichment(
@@ -829,129 +807,144 @@ async def enrich_library(
     if not artists:
         return {"enriched": 0, "status": "uptodate"}
 
-    # File tags for the whole library in one query, rather than a lookup per
-    # artist inside the loop.
-    if source_genres is None:
-        source_genres = {}
-        if hasattr(db_manager, "get_all_artist_source_genres"):
-            try:
-                source_genres = await db_manager.get_all_artist_source_genres()
-            except Exception as exc:
-                logger.warning("source-tag preload failed: %s", exc)
-
     counts: Counter = Counter()
     reasons: Counter = Counter()
     done = 0
     consecutive_errors = 0
     status = "completed"
-    # Opened on first use and shared for the pass — logging in per artist would
-    # cost a round trip each. `qobuz_tried` stops a failed login retrying for
-    # every remaining artist.
-    qobuz_client = None
-    qobuz_tried = False
-    async with aiohttp.ClientSession() as session:
-        client = MusicBrainzClient(session, contact=contact)
-        for i, name in enumerate(artists, 1):
-            if cancel_event and cancel_event.is_set():
-                counts["cancelled"] = 1
-                status = "cancelled"
-                break
-            try:
-                res = await client.lookup_artist(name, with_genres=with_genres)
-            except Exception as exc:
-                # Previously swallowed with no log at all, which made a
-                # systematic failure look like a library full of untagged artists.
-                logger.warning("lookup_artist raised for %r: %s: %s",
-                               name, type(exc).__name__, exc)
-                res = {"status": "error", "mbid": None, "country": None,
-                       "area": None, "genres": [], "score": 0,
-                       "reason": type(exc).__name__}
-            st = res["status"]
-            if st == "error":
-                consecutive_errors += 1
-                counts["error"] += 1
-                reasons[res.get("reason") or "unknown"] += 1
+
+    if provider == "qobuz":
+        from utils.metadata_qobuz import open_client, close_client, lookup_artist_genres
+        try:
+            qobuz_client = await open_client(raise_on_error=True)
+        except Exception as exc:
+            logger.error("enrich_library: failed to open Qobuz client: %s", exc)
+            return {"enriched": 0, "status": f"error: Qobuz connection failed: {exc}", "total": len(artists)}
+
+        try:
+            for i, name in enumerate(artists, 1):
+                if cancel_event and cancel_event.is_set():
+                    counts["cancelled"] = 1
+                    status = "cancelled"
+                    break
+                try:
+                    qres = await lookup_artist_genres(qobuz_client, name)
+                except Exception as exc:
+                    logger.error("lookup_artist_genres raised for %r: %s", name, exc)
+                    qres = {"genres": [], "reason": f"error: {type(exc).__name__}: {exc}"}
+
+                genres = qres.get("genres") or []
+                reason = qres.get("reason")
+                if reason and reason.startswith("error:"):
+                    consecutive_errors += 1
+                    counts["error"] += 1
+                    reasons[reason] += 1
+                    if progress:
+                        progress(i, len(artists), name, {"status": "error", "reason": reason, "genres": []})
+                    if consecutive_errors >= max_consecutive_errors:
+                        counts["aborted"] = 1
+                        status = "aborted"
+                        logger.error(
+                            "enrich_library: aborting after %d consecutive Qobuz failures (last: %s)",
+                            consecutive_errors, reason
+                        )
+                        break
+                    continue
+                consecutive_errors = 0
+
+                if genres:
+                    st = "ok"
+                    provenance = {"country": None, "genres": "qobuz"}
+                    await db_manager.upsert_artist_enrichment(
+                        name, mbid=None, country=None, area=None,
+                        genres=genres, source="qobuz", score=100,
+                        status="ok", provenance=provenance,
+                    )
+                    counts["ok"] += 1
+                    counts["from_qobuz"] += 1
+                    done += 1
+                else:
+                    st = "lowconfidence"
+                    r_key = reason or "no_tags"
+                    reasons[r_key] += 1
+                    counts["no_tags"] += 1
+                    await db_manager.upsert_artist_enrichment(
+                        name, mbid=None, country=None, area=None,
+                        genres=[], source="qobuz", score=0,
+                        status="lowconfidence", provenance={"country": None, "genres": None},
+                    )
+                if progress:
+                    progress(i, len(artists), name, {
+                        "status": st, "reason": reason, "genres": genres,
+                        "source": "qobuz"
+                    })
+        finally:
+            await close_client(qobuz_client)
+
+    else:
+        # MusicBrainz provider
+        if aiohttp is None:
+            logger.error("enrich_library: aiohttp unavailable, cannot enrich")
+            return {"enriched": 0, "status": "no_aiohttp"}
+        async with aiohttp.ClientSession() as session:
+            client = MusicBrainzClient(session, contact=contact)
+            for i, name in enumerate(artists, 1):
+                if cancel_event and cancel_event.is_set():
+                    counts["cancelled"] = 1
+                    status = "cancelled"
+                    break
+                try:
+                    res = await client.lookup_artist(name, with_genres=with_genres)
+                except Exception as exc:
+                    logger.error("MusicBrainz lookup_artist raised for %r: %s: %s",
+                                 name, type(exc).__name__, exc)
+                    res = {"status": "error", "mbid": None, "country": None,
+                           "area": None, "genres": [], "score": 0,
+                           "reason": f"error: {type(exc).__name__}: {exc}"}
+                st = res["status"]
+                if st == "error":
+                    consecutive_errors += 1
+                    counts["error"] += 1
+                    reasons[res.get("reason") or "unknown"] += 1
+                    if progress:
+                        progress(i, len(artists), name, res)
+                    if consecutive_errors >= max_consecutive_errors:
+                        counts["aborted"] = 1
+                        status = "aborted"
+                        logger.error(
+                            "enrich_library: aborting after %d consecutive MusicBrainz failures (last: %s)",
+                            consecutive_errors, res.get("reason"),
+                        )
+                        break
+                    continue
+                consecutive_errors = 0
+
+                genres = res.get("genres") or []
+                provenance = {
+                    "country": "musicbrainz" if res.get("country") else None,
+                    "genres": "musicbrainz" if genres else None,
+                }
+                if not genres:
+                    reasons[res.get("reason") or "no_tags"] += 1
+                    counts["no_tags"] += 1
+                else:
+                    counts["ok"] += 1
+
+                await db_manager.upsert_artist_enrichment(
+                    name, mbid=res.get("mbid"), country=res.get("country"),
+                    area=res.get("area"), genres=genres, source="musicbrainz",
+                    score=res.get("score"), status=st, provenance=provenance,
+                )
+                done += 1
                 if progress:
                     progress(i, len(artists), name, res)
-                if consecutive_errors >= max_consecutive_errors:
-                    counts["aborted"] = 1
-                    status = "aborted"
-                    logger.error(
-                        "enrich_library: aborting after %d consecutive failures "
-                        "(last reason: %s) — %d/%d artists processed",
-                        consecutive_errors, res.get("reason"), i, len(artists),
-                    )
-                    break
-                continue
-            consecutive_errors = 0
-
-            genres = res.get("genres") or []
-            provenance = {"country": "musicbrainz" if res.get("country") else None,
-                          "genres": "musicbrainz" if genres else None}
-
-            # ── Tier 2: the artist's own files ──────────────────────────────
-            if not genres:
-                file_tags = source_genres.get(name) or []
-                if file_tags:
-                    genres = [{"name": t, "count": 1} for t in file_tags[:8]]
-                    provenance["genres"] = "files"
-                    counts["from_files"] += 1
-
-            # ── Tier 3: Qobuz — the store this library was bought from ──────
-            # Ahead of Deezer deliberately. On the nine artists that survived
-            # MusicBrainz + file tags, Qobuz resolved seven and Deezer two: the
-            # artist strings ARE Qobuz's own spellings (most of this library was
-            # downloaded from it), and it returns 35-158 albums per artist so a
-            # genre consensus is real evidence rather than one record's label.
-            if not genres and use_qobuz:
-                if qobuz_client is None and not qobuz_tried:
-                    qobuz_tried = True
-                    from utils.metadata_qobuz import open_client
-                    qobuz_client = await open_client()
-                if qobuz_client is not None:
-                    try:
-                        from utils.metadata_qobuz import lookup_artist_genres as qz
-                        qres = await qz(qobuz_client, name)
-                    except Exception as exc:
-                        logger.warning("Qobuz tier raised for %r: %s", name, exc)
-                        qres = {"genres": []}
-                    if qres.get("genres"):
-                        genres = qres["genres"]
-                        provenance["genres"] = "qobuz"
-                        counts["from_qobuz"] += 1
-
-            if not genres:
-                reasons[res.get("reason") or "no_tags"] += 1
-
-            # A supplemented artist is resolved, not 'lowconfidence on tags'.
-            if genres and st == "lowconfidence" and res.get("mbid") is None:
-                st = "ok"
-
-            # Report the tier that actually supplied the genres, so the UI's
-            # live counters can separate "MusicBrainz knew this" from "we had
-            # to fall back" from "still nothing".
-            res = {**res, "genres": genres,
-                   "reason": provenance["genres"] if provenance["genres"] in
-                   ("files", "qobuz") else res.get("reason")}
-            await db_manager.upsert_artist_enrichment(
-                name, mbid=res.get("mbid"), country=res.get("country"),
-                area=res.get("area"), genres=genres,
-                score=res.get("score"), status=st, provenance=provenance,
-            )
-            counts[st] += 1
-            done += 1
-            if progress:
-                progress(i, len(artists), name, res)
-
-    if qobuz_client is not None:
-        from utils.metadata_qobuz import close_client
-        await close_client(qobuz_client)
 
     refresh = await _do_refresh_walk_models(db_manager) if done else {}
 
     summary = {
         "enriched": done,
         "status": status,
+        "provider": provider,
         "total": len(artists),
         "reasons": dict(reasons),
         **refresh,
@@ -960,3 +953,4 @@ async def enrich_library(
     log = logger.error if status in ("aborted",) else logger.info
     log("enrich_library: %s", summary)
     return summary
+

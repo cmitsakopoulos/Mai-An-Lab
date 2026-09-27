@@ -95,18 +95,14 @@ class NowPlayingSheet:
             icon=ft.Icons.LINK_ROUNDED if self.app.play_similar_mode else ft.Icons.LINK_OFF_ROUNDED,
             icon_color=CYAN if self.app.play_similar_mode else DIM,
             icon_size=20,
-            tooltip="Play Similar (Dynamic Recommendation Walk)",
-            on_click=self._toggle_play_similar,
+            # Tap opens the Auto-play sheet (on/off, Follow/Stay); long-press is
+            # the instant on/off shortcut. The sheet lives behind the existing
+            # icon rather than a status pill, which cost vertical space the
+            # layout doesn't have. No tooltip: on Android it claims long-press.
+            on_click=lambda e: self.open_autoplay_sheet(),
+            on_long_press=self._toggle_play_similar,
             disabled=True,
             opacity=0.4,
-        )
-        self._auto_dj_btn = ft.IconButton(
-            icon=ft.Icons.AUTO_AWESOME_ROUNDED if self.app.auto_dj_mode else ft.Icons.AUTO_AWESOME_OUTLINED,
-            icon_color=AMBER if self.app.auto_dj_mode else DIM,
-            icon_size=20,
-            tooltip="Auto-DJ (Smart AI Curation)",
-            visible=False,
-            on_click=self._toggle_auto_dj,
         )
         self._repeat_btn = ft.IconButton(
             icon=ft.Icons.REPEAT_ROUNDED,
@@ -237,7 +233,6 @@ class NowPlayingSheet:
                             self._play_similar_btn,
                             ft.Container(expand=True),
                             self._repeat_btn,
-                            self._auto_dj_btn,
                         ],
                         alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                         vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -390,22 +385,9 @@ class NowPlayingSheet:
         self.page.run_task(self._toggle_play_similar_async)
 
     async def _toggle_play_similar_async(self):
-        target = not self.app.play_similar_mode
-        if target:
-            from utils import track_graph as tg
-            try:
-                missing = await self.app.db_manager.get_tracks_missing_features(tg.FEATURES_VERSION)
-                if len(missing) > 0:
-                    self.app.show_snackbar(
-                        f"Play Similar is unavailable. {len(missing)} tracks lack DSP features. Run Jarvis analyzer first.",
-                        color=AMBER,
-                        icon=ft.Icons.WARNING_ROUNDED
-                    )
-                    return
-            except Exception as exc:
-                logger.exception("Play-Similar: Failed to verify missing features: %s", exc)
-
-        self.app.set_play_similar_mode(target)
+        # No library-wide "every track analysed" gate: only the seed needs DSP
+        # features, and AutoPlay explains it if the playing track has none.
+        self.app.set_play_similar_mode(not self.app.play_similar_mode)
 
     def update_play_similar(self, enabled: bool):
         self._ensure_initialized()
@@ -415,8 +397,8 @@ class NowPlayingSheet:
         if not self._play_similar_btn.disabled:
             self._play_similar_btn.opacity = 1.0
         
-        self._artwork_container.border = ft.Border.all(3, CYAN) if enabled else (ft.Border.all(3, AMBER) if getattr(self.app, "auto_dj_mode", False) else None)
-        self._art_placeholder.border   = ft.Border.all(3, CYAN) if enabled else (ft.Border.all(3, AMBER) if getattr(self.app, "auto_dj_mode", False) else None)
+        self._artwork_container.border = ft.Border.all(3, CYAN) if enabled else None
+        self._art_placeholder.border   = ft.Border.all(3, CYAN) if enabled else None
 
         try:
             self._play_similar_btn.update()
@@ -430,6 +412,10 @@ class NowPlayingSheet:
             self._art_placeholder.update()
         except (RuntimeError, AssertionError):
             pass
+
+    def open_autoplay_sheet(self):
+        from ui.player.autoplay_sheet import AutoPlaySheet
+        AutoPlaySheet(self.app).open()
 
     async def _check_play_similar_availability(self):
         """Background check: disable the chain button when no tracks have DSP features."""
@@ -454,39 +440,15 @@ class NowPlayingSheet:
             self._play_similar_btn.disabled = not available
             self._play_similar_btn.opacity  = 1.0 if available else 0.4
             self._play_similar_btn.tooltip  = (
-                "Play Similar (Dynamic Recommendation Walk)"
+                None
                 if available else
-                "Play Similar is unavailable \u2014 run Jarvis Analyser to compute DSP features first."
+                "Auto-play is unavailable \u2014 run the Jarvis Analyser to compute DSP features first."
             )
             try:
                 self._play_similar_btn.update()
             except (RuntimeError, AssertionError):
                 pass
         self.app.safe_update(_apply)
-
-    def _toggle_auto_dj(self, e):
-        self.app.set_auto_dj_mode(not self.app.auto_dj_mode)
-
-    def update_auto_dj(self, enabled: bool):
-        self._ensure_initialized()
-        self._auto_dj_btn.icon       = ft.Icons.AUTO_AWESOME_ROUNDED if enabled else ft.Icons.AUTO_AWESOME_OUTLINED
-        self._auto_dj_btn.icon_color = AMBER if enabled else DIM
-        
-        self._artwork_container.border = ft.Border.all(3, AMBER) if enabled else (ft.Border.all(3, CYAN) if self.app.play_similar_mode else None)
-        self._art_placeholder.border   = ft.Border.all(3, AMBER) if enabled else (ft.Border.all(3, CYAN) if self.app.play_similar_mode else None)
-
-        try:
-            self._auto_dj_btn.update()
-        except (RuntimeError, AssertionError):
-            pass
-        try:
-            self._artwork_container.update()
-        except (RuntimeError, AssertionError):
-            pass
-        try:
-            self._art_placeholder.update()
-        except (RuntimeError, AssertionError):
-            pass
 
     def update_loudness_boost(self, val: float):
         self._ensure_initialized()

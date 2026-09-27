@@ -158,18 +158,6 @@ class MiniPlayerBar:
         else:
             self._artwork.visible    = False
 
-    def update_auto_dj(self, enabled: bool):
-        self._artwork_container.border = ft.Border.all(2, AMBER) if enabled else None
-        self._music_icon_container.border = ft.Border.all(2, AMBER) if enabled else None
-        try:
-            self._artwork_container.update()
-        except (RuntimeError, AssertionError):
-            pass
-        try:
-            self._music_icon_container.update()
-        except (RuntimeError, AssertionError):
-            pass
-
     def update_state(self, is_playing: bool):
         self._play_btn.icon = ft.Icons.PAUSE if is_playing else ft.Icons.PLAY_ARROW
         try:

@@ -13,6 +13,7 @@ Creating Audio without a src is still forbidden: AudioService.update() throws
 synchronously ("Audio must have src specified"), breaking the ChangeNotifier
 listener and preventing all future events from reaching the Dart side.
 """
+import asyncio
 import json
 import os
 import time
@@ -26,6 +27,12 @@ from flet_audio_service import AudioServiceControl
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.ERROR)
 
+# Divergence repair (see AudioEngine._resync_native). A src mismatch is
+# re-checked after _VERIFY_DELAY_S before it counts, and a full re-push happens
+# at most once per _RESYNC_COOLDOWN_S so a fault that survives the repair (an
+# unreadable file, say) can never turn into a reload loop.
+_VERIFY_DELAY_S = 1.5
+_RESYNC_COOLDOWN_S = 30.0
 
 
 def _dur_secs(d: ft.Duration) -> float:
@@ -39,7 +46,19 @@ class AudioEngine:
     State changes dispatch named callbacks registered via bind().
     """
 
+    # The native handler keeps a play ledger (see utils/play_ledger.py), so
+    # listens are counted from what Dart actually played, not from Python's
+    # index mirror. The macOS engine has no such ledger.
+    has_native_play_log = True
+    # The native handler resolves now-playing art (embedded, sidecar fallback)
+    # for the notification and reports it as `current_art`; the UI reuses it
+    # instead of decoding the same image again with PIL.
+    has_native_art = True
+
     def __init__(self):
+        # Where the native handler appends finished listens; set by the app
+        # before setup() and re-sent to Dart on every `ready`.
+        self.play_log_path = ""
         self.current_track  = ""
         self.current_artist = ""
         self.current_album  = ""
@@ -78,6 +97,12 @@ class AudioEngine:
         # queue_index only when the event's epoch matches this value (Dart has
         # caught up). Deterministic replacement for the old wall-clock gate.
         self._queue_epoch: int = 0
+        # Divergence repair state: the newest native (epoch, index, src) seen,
+        # whether a delayed identity re-check is scheduled, and when the last
+        # full re-push repair ran (monotonic seconds).
+        self._last_native: tuple | None = None
+        self._verify_pending = False
+        self._last_resync_at = float("-inf")
 
         self._observers: dict[str, list] = {}
         self._obs_lock = threading.Lock()
@@ -176,7 +201,6 @@ class AudioEngine:
                 on_position_change=self._on_position_change,
                 on_error=self._on_error,
                 on_ready=self._on_ready,
-                on_custom_action=self._on_custom_action,
             )
             # Service must live in page.services
             self._page.services.append(self._audio)
@@ -199,6 +223,14 @@ class AudioEngine:
         # Unblock every pending _wait_ready() inside AudioServiceControl.
         if self._audio:
             self._audio.mark_ready()
+            # Re-sent on every ready: a session re-entry builds a fresh service
+            # object, but the (static) handler already has the path, so this
+            # is idempotent. Buffered listens flush as soon as it lands.
+            if self.play_log_path and self._page:
+                self._page.run_task(self._audio.set_play_log_path, self.play_log_path)
+        # Session (re)connected: whatever the ledger captured while Python was
+        # deaf can be drained now.
+        self.dispatch("on_native_ready")
 
     @staticmethod
     def _to_uri(p: str) -> str:
@@ -260,6 +292,34 @@ class AudioEngine:
             "duration_ms": duration_ms,
         }
 
+    @staticmethod
+    def _playable(tracks: list[dict], index: int = 0) -> tuple[list[dict], int]:
+        """Drop tracks with no path, remapping `index` onto the kept list.
+        Dart's playlist can only hold playable items, so a pathless row in the
+        Python queue would shift every later index between the two sides.
+        Returns the SAME list when nothing needs dropping (the common case)."""
+        if all(t.get("path") for t in tracks):
+            return tracks, index
+        kept = [t for t in tracks if t.get("path")]
+        new_index = sum(1 for t in tracks[:max(0, index)] if t.get("path"))
+        return kept, min(new_index, max(0, len(kept) - 1))
+
+    def _src_matches(self, idx: int, src: str) -> bool:
+        """True when queue row `idx` is the item Dart identifies as `src`. Dart's
+        MediaItem id is exactly the src string we sent, so equality is exact."""
+        return (0 <= idx < len(self.queue)
+                and self._to_uri(self.queue[idx].get("path") or "") == src)
+
+    def _find_src(self, src: str, near: int) -> int | None:
+        """Queue index of `src`, searching outward from `near` so a duplicate
+        closest to where we think we are wins."""
+        n = len(self.queue)
+        for d in range(n):
+            for i in ((near,) if d == 0 else (near + d, near - d)):
+                if self._src_matches(i, src):
+                    return i
+        return None
+
     def _build_playlist_payload(self) -> list[dict]:
         # Always LOGICAL order now — Dart applies shuffle natively and reports
         # the resulting order back. The native index Dart emits is therefore an
@@ -286,33 +346,113 @@ class AudioEngine:
             self._shuffle_indices = [int(x) for x in si]
         elif not self._is_shuffle:
             self._shuffle_indices = []
-        ci = ack.get("current_index")
+        # Latest generation ⇒ Dart has applied every mutation Python issued, so
+        # the two playlists MUST be the same length. Any difference means an op
+        # was lost or doubled, and every index past that point is wrong.
+        pl = ack.get("playlist_len")
         if (
-            isinstance(ci, int)
+            isinstance(pl, int)
             and ack.get("epoch") == self._queue_epoch
             and self.queue
+            and pl != len(self.queue)
         ):
-            ci = max(0, min(ci, len(self.queue) - 1))
-            if ci != self.current_index:
-                self.current_index = ci
-                self._sync_metadata_for_current()
-                self.dispatch("on_queue_mutated")
+            self._resync_native(f"native playlist has {pl} rows, queue has {len(self.queue)}")
+            return
+        self._mirror_native(ack.get("current_index"), ack.get("current_src"), ack.get("epoch"))
+
+    def _mirror_native(self, idx, src, epoch) -> None:
+        """Adopt Dart's current index: only for the latest generation, and only
+        when the row at that index is the track Dart says is playing. `src` is
+        absent from older native builds; the index is then trusted as before."""
+        if not isinstance(idx, int):
+            return
+        self._last_native = (epoch, idx, src)
+        if epoch != self._queue_epoch or not self.queue:
+            return
+        if src is not None and not self._src_matches(idx, src):
+            self._schedule_verify()
+            return
+        target = max(0, min(idx, len(self.queue) - 1))
+        if target != self.current_index:
+            self.current_index = target
+            self._sync_metadata_for_current()
+            self.dispatch("on_queue_mutated")
+
+    def _schedule_verify(self):
+        if self._verify_pending or not self._page:
+            return
+        self._verify_pending = True
+        self._page.run_task(self._verify_native)
+
+    async def _verify_native(self):
+        """A src mismatch can be momentary: after a remove/move above the playing
+        row, Dart's currentIndex trails its own playlist by one platform event.
+        Re-check against the NEWEST native report after a beat; only a mismatch
+        that survives is real divergence. One sleeping task, and only ever
+        scheduled on a mismatch — nothing runs while the two sides agree."""
+        try:
+            await asyncio.sleep(_VERIFY_DELAY_S)
+        finally:
+            self._verify_pending = False
+        last = self._last_native
+        if not last or last[0] != self._queue_epoch or not self.queue:
+            return  # a newer op is in flight; its own ack re-checks
+        epoch, idx, src = last
+        if src is None or self._src_matches(idx, src):
+            self._mirror_native(idx, src, epoch)
+            return
+        self._resync_native("playing track is not the mirrored queue row", playing_src=src)
+
+    def _resync_native(self, reason: str, playing_src: str | None = None):
+        """Repair a Python queue / Dart playlist divergence by re-pushing the
+        whole queue under a fresh epoch. Keeps what is audible when Python can
+        find it (plus its position), and the play/pause state. Rate-limited so
+        a fault that survives the repair can never become a reload loop."""
+        if not self.queue or not self._page:
+            return
+        now = time.monotonic()
+        if now - self._last_resync_at < _RESYNC_COOLDOWN_S:
+            logger.error("ADB_AUDIO: queue divergence (%s); repair skipped, cooling down", reason)
+            return
+        self._last_resync_at = now
+        start = self.current_index
+        position = self.position
+        if playing_src is not None:
+            found = self._find_src(playing_src, near=start)
+            if found is None:
+                position = 0.0  # the audible track isn't ours; restart the shown one
+            else:
+                start = found
+        logger.error("ADB_AUDIO: queue divergence (%s); re-pushing %d tracks at %d",
+                     reason, len(self.queue), start)
+        if start != self.current_index:
+            self.current_index = start
+            self._sync_metadata_for_current()
+            self.dispatch("on_queue_mutated")
+        self._restore_position = position
+        self._schedule_push(start, autoplay=self.is_playing)
 
     async def _dispatch_op(self, send) -> dict:
         """Register a pending ack, invoke `send(request_id)` to issue the
-        command, and await the ack. Returns the ack payload ({} / {'ok': False}
-        on failure). Dart serializes ops, so awaiting this before the next
-        command guarantees ordering."""
+        command, and await the ack. Returns the ack payload. On failure returns
+        {'ok': False} plus 'undelivered' (Dart never got the command: its epoch
+        will never arrive) or 'timeout' (Dart got it and will still apply it in
+        order). Dart serializes ops, so awaiting this before the next command
+        guarantees ordering."""
         if not self._audio:
-            return {"ok": False}
+            return {"ok": False, "undelivered": True}
         rid = uuid.uuid4().hex
         try:
             self._audio.register_op(rid)
             await send(rid)
+        except Exception as exc:
+            logger.warning("ADB_AUDIO: native op not delivered: %s", exc)
+            return {"ok": False, "undelivered": True}
+        try:
             return await self._audio.wait_for_op(rid)
         except Exception as exc:
-            logger.warning("ADB_AUDIO: native op failed: %s", exc)
-            return {"ok": False}
+            logger.warning("ADB_AUDIO: native op ack missing: %s", exc)
+            return {"ok": False, "timeout": True}
 
     def _schedule_push(self, start_index: int | None = None, autoplay: bool = True):
         """Bump the epoch synchronously (so any state event arriving before Dart
@@ -341,6 +481,12 @@ class AudioEngine:
                 logical_index, autoplay=autoplay, epoch=epoch, request_id=rid
             )
         ack = await self._dispatch_op(send)
+        if ack.get("undelivered"):
+            # Dart never saw this epoch, so every later event would be rejected.
+            self._resync_native("skip not delivered")
+            return
+        # A failed skip still carries the adopted epoch + real index: mirroring
+        # it makes the UI show what is actually playing.
         self._apply_ack(ack)
 
     async def _push_queue_native(self, start_index: int = 0, autoplay: bool = True,
@@ -373,18 +519,15 @@ class AudioEngine:
                 shuffle=self._is_shuffle, epoch=ep, request_id=rid,
             )
         ack = await self._dispatch_op(send)
+        if ack.get("undelivered"):
+            self._resync_native("playlist push not delivered")
+            return
         self._apply_ack(ack)
-
-    async def _load_src(self, path, title="", artist="", album="", artwork="",
-                        autoplay: bool = True):
-        """Compatibility shim; single-track load via the playlist machinery.
-        Used by restore_queue() to seek into a restored playlist. The
-        autoplay flag lets restore_queue prepare the source without
-        starting playback so the user can press play themselves."""
-        await self._push_queue_native(start_index=self.current_index, autoplay=autoplay)
 
     def _on_state_change(self, e):
         queue_index = None
+        current_src = None
+        native_art = None
         ev_epoch = 0
         try:
             payload = json.loads(e.data)
@@ -392,6 +535,8 @@ class AudioEngine:
             processing_state = payload.get("processing_state", "idle")
             queue_index = payload.get("queue_index")
             ev_epoch = payload.get("epoch", 0)
+            current_src = payload.get("current_src")
+            native_art = payload.get("current_art")
             si = payload.get("shuffle_indices")
             if isinstance(si, list):
                 self._shuffle_indices = [int(x) for x in si]
@@ -408,20 +553,14 @@ class AudioEngine:
 
         # Mirror the native (logical) queue index — changed by skip, notification
         # next/previous, OR gapless auto-advance — but ONLY when the event's
-        # epoch equals the latest epoch we sent. A lower epoch means Dart hasn't
-        # yet applied our most recent queue change, so its index still describes
-        # the previous generation; accepting it would flip current_index into a
-        # wrong row. This deterministic check replaces the old wall-clock gate.
-        if (
-            isinstance(queue_index, int)
-            and self.queue
-            and ev_epoch == self._queue_epoch
-        ):
-            target_idx = max(0, min(queue_index, len(self.queue) - 1))
-            if target_idx != self.current_index:
-                self.current_index = target_idx
-                self._sync_metadata_for_current()
-                self.dispatch("on_queue_mutated")
+        # epoch equals the latest epoch we sent (a lower epoch means Dart hasn't
+        # applied our most recent queue change yet) AND the row at that index is
+        # the track Dart reports playing. See _mirror_native.
+        self._mirror_native(queue_index, current_src, ev_epoch)
+        # Only for the row Python shows: art for any other track is stale.
+        if (native_art and current_src and self.queue
+                and self._src_matches(self.current_index, current_src)):
+            self._set("current_art", native_art)
 
         logger.debug(
             "ADB_AUDIO: _on_state_change status=%s, processing=%s, qi=%s, epoch=%s/%s",
@@ -521,18 +660,6 @@ class AudioEngine:
         logger.error("ADB_AUDIO error: %s", e.data)
         self.dispatch("on_playback_error", str(e.data))
 
-    def _on_custom_action(self, e):
-        """Called when a custom notification action is triggered by the Dart side."""
-        try:
-            payload = json.loads(e.data)
-            self.dispatch("on_custom_action", payload)
-        except Exception as ex:
-            logger.error("ADB_AUDIO: _on_custom_action failed: %s", ex)
-
-    def _on_loaded(self, e):
-        # flet_audio compatibility - not used by service but kept to avoid errors if triggered
-        pass
-
     # ── Observer pattern ──────────────────────────────────────────────────────
 
     def bind(self, **kwargs):
@@ -586,10 +713,13 @@ class AudioEngine:
         notification skip and background auto-advance work without Python in the
         loop. Dart applies shuffle natively per the engine's is_shuffle flag."""
         self._completed_terminal = False
+        tracks, start_index = self._playable(tracks, start_index)
         self.queue = tracks
         self.current_index = min(max(0, start_index), len(self.queue) - 1) if self.queue else 0
-        self.dispatch("on_queue_mutated")
+        # Metadata FIRST: on_queue_mutated observers (auto-play replenish) read
+        # current_path as their seed, and must see the new track, not the old.
         self._sync_metadata_for_current()
+        self.dispatch("on_queue_mutated")
         if self._page and self.queue:
             self._schedule_push(self.current_index, True)
 
@@ -745,21 +875,21 @@ class AudioEngine:
 
     # ── Queue mutation ────────────────────────────────────────────────────────
 
-    async def _run_native_mutation(self, epoch: int, send):
+    async def _run_native_mutation(self, send):
         """Await an incremental queue-mutation's ack. On success, refresh the
-        shuffle cache / reconcile the index from Dart's authoritative reply; on
-        failure, fall back to a full logical re-push (reusing the SAME epoch, so
-        the generation counter stays consistent)."""
+        shuffle cache / reconcile the index from Dart's authoritative reply. If
+        Dart rejected the op or never received it, the two playlists now differ:
+        repair with a full re-push. A mere ack timeout needs nothing — Dart
+        still applies the op in order (the old re-push here stopped playback)."""
         ack = await self._dispatch_op(send)
-        if not ack.get("ok", False):
-            logger.warning("ADB_AUDIO: native mutation failed; full re-push fallback")
-            await self._push_queue_native_unlocked(
-                start_index=self.current_index, autoplay=False, epoch=epoch
-            )
+        if ack.get("undelivered") or not (ack.get("ok") or ack.get("timeout")):
+            self._resync_native("queue mutation failed")
             return
         self._apply_ack(ack)
 
     def queue_next(self, track: dict):
+        if not track.get("path"):
+            return
         if not self.queue:
             self.set_queue([track])
             return
@@ -773,6 +903,8 @@ class AudioEngine:
             self._page.run_task(self._native_add_queue_item, track, insert_at, ep)
 
     def queue_last(self, track: dict):
+        if not track.get("path"):
+            return
         if not self.queue:
             self.set_queue([track])
             return
@@ -802,13 +934,14 @@ class AudioEngine:
                 duration_ms=item.get("duration_ms"), index=index,
                 epoch=epoch, request_id=rid,
             )
-        await self._run_native_mutation(epoch, send)
+        await self._run_native_mutation(send)
 
     def queue_extend(self, tracks: list[dict]):
         """Append several tracks in one batch. Dispatches on_queue_mutated only
         ONCE (one queue-sheet rebuild, one coalesced save) and sends every insert
         to Dart in a single serialized op. Used by Play Similar block-
         replenishment, which appends up to 8 tracks at a time."""
+        tracks, _ = self._playable(tracks)
         if not tracks:
             return
         if not self.queue:
@@ -834,6 +967,7 @@ class AudioEngine:
         current_index is unchanged (every insert lands after it). Order is kept.
         Used by Auto-play to maintain a rolling 'up next' similar buffer without
         disturbing playback or the queue tail."""
+        tracks, _ = self._playable(tracks)
         if not tracks:
             return
         if not self.queue:
@@ -878,7 +1012,7 @@ class AudioEngine:
             return
         async def send(rid):
             await self._audio.add_queue_items(payload, epoch=epoch, request_id=rid)
-        await self._run_native_mutation(epoch, send)
+        await self._run_native_mutation(send)
 
     def play_track_at(self, index: int):
         if not (0 <= index < len(self.queue)) or not self._audio or not self._page:
@@ -918,7 +1052,7 @@ class AudioEngine:
             return
         async def send(rid):
             await self._audio.remove_queue_item(index, epoch=epoch, request_id=rid)
-        await self._run_native_mutation(epoch, send)
+        await self._run_native_mutation(send)
 
     def remove_indices(self, indices: list[int]):
         """Remove several queue slots as ONE logical mutation: one local edit,
@@ -961,25 +1095,26 @@ class AudioEngine:
             async def send(rid, i=idx):
                 await self._audio.remove_queue_item(i, epoch=epoch, request_id=rid)
             ack = await self._dispatch_op(send)
-            if not ack.get("ok", False):
-                logger.warning(
-                    "ADB_AUDIO: batch remove failed at %d; full re-push fallback", idx
-                )
-                await self._push_queue_native_unlocked(
-                    start_index=self.current_index, autoplay=False, epoch=epoch
-                )
+            if ack.get("undelivered") or not (ack.get("ok") or ack.get("timeout")):
+                self._resync_native(f"batch remove failed at {idx}")
                 return
             self._apply_ack(ack)
 
     def move_queue_item(self, old_index: int, new_index: int):
         if not (0 <= old_index < len(self.queue) and 0 <= new_index < len(self.queue)):
             return
-        current_obj = self.queue[self.current_index] if self.queue else None
         item = self.queue.pop(old_index)
         self.queue.insert(new_index, item)
-        # Track the active track by identity so current_index follows it.
-        if current_obj is not None and current_obj in self.queue:
-            self.current_index = self.queue.index(current_obj)
+        # current_index follows the active row by position arithmetic. The old
+        # `queue.index(current_obj)` compared dicts by VALUE, so a duplicate of
+        # the playing track earlier in the queue stole the index.
+        cur = self.current_index
+        if old_index == cur:
+            self.current_index = new_index
+        elif old_index < cur <= new_index:
+            self.current_index = cur - 1
+        elif new_index <= cur < old_index:
+            self.current_index = cur + 1
         self.dispatch("on_queue_mutated")
         if self._page:
             ep = self._next_epoch()
@@ -995,7 +1130,7 @@ class AudioEngine:
             return
         async def send(rid):
             await self._audio.move_queue_item(old_index, new_index, epoch=epoch, request_id=rid)
-        await self._run_native_mutation(epoch, send)
+        await self._run_native_mutation(send)
 
     def clear_queue(self):
         self.stop()
@@ -1007,6 +1142,7 @@ class AudioEngine:
 
     def restore_queue(self, tracks: list[dict], index: int, position: float = 0.0,
                       duration: float = 0.0):
+        tracks, index = self._playable(tracks or [], index)
         if not tracks or not self._page:
             return
         # Restore all items (caching avoids UI blocking)
@@ -1029,6 +1165,9 @@ class AudioEngine:
         self._set("position",       max(0.0, float(position)))
         self._set("duration",       max(0.0, float(duration)))
         self._set("is_playing",     False)
+        # The engine outlives a Flet session, so without this a warm re-entry
+        # kept the PREVIOUS session's art.
+        self._set("current_art",    self._get_artwork_path(track))
         self._set("current_artist", track.get("artist_name", "Unknown Artist"))
         self._set("current_album",  track.get("album_title",  "Unknown Album"))
         self._set("current_track",  title)
@@ -1156,11 +1295,6 @@ class AudioEngine:
             return round(max(0.0, min(1.0, score)), 2)
         except (ValueError, TypeError):
             return 0.5
-
-    @staticmethod
-    def _compute_dynamism_gain_db(energy, beat_strength) -> float:
-        """Legacy compatibility wrapper."""
-        return 0.0
 
     def reapply_dsp(self):
         """Re-read configuration and re-apply combined DSP settings (EQ preset + Dynamism) for the current track."""

@@ -63,6 +63,7 @@ LIB_ALBUM_COLOR    = "#0A84FF"  # Apple System Blue
 LIB_TRACK_COLOR    = "#30D158"  # Apple System Green
 LIB_PLAYLIST_COLOR = "#FF9F0A"  # Apple System Orange / Amber
 LIB_PARTITION_COLOR = "#64D2FF" # Apple System Teal / Cyan
+LIB_GENRE_COLOR    = "#FF375F"  # Apple System Pink
 
 def lerp_hex(c0: str, c1: str, ratio: float) -> str:
     """Linear-interpolate between two #RRGGBB colours. ratio is clamped to

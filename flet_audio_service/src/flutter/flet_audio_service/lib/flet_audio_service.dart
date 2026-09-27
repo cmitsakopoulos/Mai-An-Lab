@@ -56,7 +56,6 @@ class FletAudioService extends FletService with WidgetsBindingObserver {
   StreamSubscription? _positionSub;
   StreamSubscription? _durationSub;
   StreamSubscription? _errorSub;
-  StreamSubscription? _customActionSub;
   // Fires on EVERY currentIndex change (including gapless auto-advance, which
   // playerStateStream/durationStream miss). This is the authoritative signal
   // that Python mirrors current_index from; without it Python only learned of
@@ -77,15 +76,17 @@ class FletAudioService extends FletService with WidgetsBindingObserver {
   // ConcatenatingAudioSource. Each link emits an `op_complete` ack.
   Future<void> _opChain = Future<void>.value();
 
-  // Position throttling: just_audio emits ~5x/sec which is wasted battery on
-  // mobile (each emit = IPC → Python → observer dispatch → Flet rebuild).
-  // This Dart-side throttle is the SINGLE source of position pacing — Python
-  // and UI layers no longer re-throttle. Jump detection still emits on seeks
-  // so the slider snaps immediately.
-  static const int _positionEmitMinMs = 1500;
-  static const int _positionJumpMs = 1500;
-  int _lastEmittedPositionMs = -1;
-  int _lastEmitWallClockMs = 0;
+  // Position pacing. This 1 Hz ticker is the SINGLE source of position
+  // events (Python and the UI don't re-throttle), and it only EXISTS while
+  // audio is playing and the app is visible — with the screen off nothing
+  // ticks, so the CPU can sleep between the audio path's ~1 s buffer fills.
+  // just_audio's positionStream was used before: it ticks every duration/800
+  // clamped to 16–200 ms (5 Hz for a typical song, up to 60 Hz for a short
+  // one), kept ticking in the background, and its internal timer is never
+  // stopped when the listener cancels, so every session re-entry leaked one.
+  // Seeks and track changes still emit immediately (discontinuity stream).
+  static const Duration _positionTick = Duration(seconds: 1);
+  Timer? _positionTimer;
   bool _isBackground = false;
 
   // TTS singleton: lazily initialised on first speak so cold-start cost is
@@ -294,6 +295,10 @@ class FletAudioService extends FletService with WidgetsBindingObserver {
           if (autoplay) unawaited(_handler!.play());
         });
 
+      case 'set_play_log_path':
+        final path = a['path'] as String?;
+        if (path != null && path.isNotEmpty) _handler?.setPlayLogPath(path);
+
       case 'set_repeat_mode':
         final mode = a['mode'] as String? ?? 'none';
         final repeatMode = const {
@@ -304,12 +309,14 @@ class FletAudioService extends FletService with WidgetsBindingObserver {
         _fireAndReport(_handler?.setRepeatMode(repeatMode));
 
       case 'show_progress_notification':
+        final job = (a['job'] as String?) ?? 'dsp';
         final title = (a['title'] as String?) ?? '';
         final content = (a['content'] as String?) ?? '';
         final progress = (a['progress'] as num?)?.toInt() ?? 0;
         final total = (a['total'] as num?)?.toInt() ?? 0;
         final done = (a['done'] as bool?) ?? false;
         _decodeChannel.invokeMethod('showProgressNotification', {
+          'job': job,
           'title': title,
           'content': content,
           'progress': progress,
@@ -740,6 +747,17 @@ class FletAudioService extends FletService with WidgetsBindingObserver {
     };
     final currentIdx = player.currentIndex;
     if (currentIdx != null) payload['queue_index'] = currentIdx;
+    // Identity of the row at that index, so Python can verify its mirror
+    // points at the track actually playing (not just a same-numbered row).
+    final currentSrc = _srcAt(currentIdx);
+    if (currentSrc != null) {
+      payload['current_src'] = currentSrc;
+      // The now-playing art the native resolver produced (embedded art, sidecar
+      // fallback, downscaled + cached). Python shows this instead of decoding
+      // the same image a second time with PIL.
+      final art = handler._artById[currentSrc];
+      if (art != null) payload['current_art'] = art.toFilePath();
+    }
     // shuffleIndices maps play-position → original(logical) index. Python uses
     // it to render "up next" and to compute next/previous targets in shuffle
     // mode, so it no longer maintains its own permutation.
@@ -750,6 +768,43 @@ class FletAudioService extends FletService with WidgetsBindingObserver {
     control.triggerEvent("state_change", jsonEncode(payload));
   }
 
+  /// Id (= the src Python sent) of the live playlist row at [idx], or null.
+  /// Every child is a leaf source, so a logical index is a children index.
+  /// O(1): reads our own ConcatenatingAudioSource, not player.sequence (which
+  /// rebuilds a list of the whole queue on each read).
+  String? _srcAt(int? idx) {
+    final handler = _handler;
+    if (handler == null || idx == null) return null;
+    final children = handler._playlist.children;
+    if (idx < 0 || idx >= children.length) return null;
+    final child = children[idx];
+    if (child is IndexedAudioSource) {
+      final tag = child.tag;
+      if (tag is MediaItem) return tag.id;
+    }
+    return null;
+  }
+
+  void _emitPosition() {
+    final handler = _handler;
+    if (handler == null) return;
+    control.triggerEvent(
+        "position_change", handler._player.position.inMilliseconds.toString());
+  }
+
+  /// Run the position ticker only while playing AND visible; otherwise stop it.
+  void _syncPositionTicker() {
+    final handler = _handler;
+    final want = handler != null && handler._player.playing && !_isBackground;
+    if (want && _positionTimer == null) {
+      _emitPosition();
+      _positionTimer = Timer.periodic(_positionTick, (_) => _emitPosition());
+    } else if (!want && _positionTimer != null) {
+      _positionTimer!.cancel();
+      _positionTimer = null;
+    }
+  }
+
   void _setupListeners() {
     if (_handler == null) return;
 
@@ -757,12 +812,7 @@ class FletAudioService extends FletService with WidgetsBindingObserver {
     _positionSub?.cancel();
     _durationSub?.cancel();
     _errorSub?.cancel();
-    _customActionSub?.cancel();
     _indexSub?.cancel();
-
-    _customActionSub = _handler!.customActionStream.listen((event) {
-      control.triggerEvent("custom_action", jsonEncode(event));
-    });
 
     // Authoritative index mirroring: fires on skip, notification next/previous,
     // AND gapless auto-advance (the case the other two streams miss).
@@ -773,22 +823,15 @@ class FletAudioService extends FletService with WidgetsBindingObserver {
 
     _playerStateSub = _handler!._player.playerStateStream.listen((state) {
       _emitState();
+      _syncPositionTicker();
     });
 
-    _positionSub = _handler!._player.positionStream.listen((position) {
-      if (!_handler!._player.playing) return;
-      if (_isBackground) return;
-
-      final posMs = position.inMilliseconds;
-      final nowMs = DateTime.now().millisecondsSinceEpoch;
-      final jumped = (_lastEmittedPositionMs >= 0) &&
-          ((posMs - _lastEmittedPositionMs).abs() > _positionJumpMs);
-      if (nowMs - _lastEmitWallClockMs >= _positionEmitMinMs || jumped) {
-        _lastEmitWallClockMs = nowMs;
-        _lastEmittedPositionMs = posMs;
-        control.triggerEvent("position_change", posMs.toString());
-      }
+    // Seek / track change / loop: snap the slider now rather than on the
+    // next tick.
+    _positionSub = _handler!._player.positionDiscontinuityStream.listen((_) {
+      if (!_isBackground) _emitPosition();
     });
+    _syncPositionTicker();
 
     _durationSub = _handler!._player.durationStream.listen((duration) {
       if (duration == null) return;
@@ -801,6 +844,10 @@ class FletAudioService extends FletService with WidgetsBindingObserver {
         control.triggerEvent("error", e.toString());
       },
     );
+
+    // Art resolves asynchronously after the index change; re-emit so Python
+    // gets it for the track that is actually playing.
+    _handler!.onCurrentArtResolved = _emitState;
   }
 
   // ── Serialized queue-op execution + ack ─────────────────────────────────────
@@ -821,6 +868,10 @@ class FletAudioService extends FletService with WidgetsBindingObserver {
         _emitOpComplete(requestId, true, null);
       } catch (e) {
         debugPrint("FletAudioService: queue op error → $e");
+        // Adopt on failure too: the op was PROCESSED, and the ack reports where
+        // the player really is. Keeping the old epoch made Python reject every
+        // later event (a frozen index mirror) until some other op succeeded.
+        if (epoch != null) _epoch = epoch;
         _emitOpComplete(requestId, false, e.toString());
         control.triggerEvent("error", e.toString());
       }
@@ -837,9 +888,15 @@ class FletAudioService extends FletService with WidgetsBindingObserver {
       'ok': ok,
       'epoch': _epoch,
       'queue_len': handler.queue.value.length,
+      // Length of the LIVE source (updated synchronously by insert/remove),
+      // unlike queue_len, which audio_service's stream rewrites asynchronously.
+      // Python compares it with its own queue to detect divergence.
+      'playlist_len': handler._playlist.children.length,
     };
     final currentIdx = player.currentIndex;
     if (currentIdx != null) payload['current_index'] = currentIdx;
+    final currentSrc = _srcAt(currentIdx);
+    if (currentSrc != null) payload['current_src'] = currentSrc;
     if (player.shuffleModeEnabled) {
       payload['shuffle_indices'] = player.shuffleIndices;
     }
@@ -889,11 +946,21 @@ class FletAudioService extends FletService with WidgetsBindingObserver {
           androidNotificationChannelId:
               'com.example.flet_audio_service.channel.audio',
           androidNotificationChannelName: 'Audio Playback',
-          androidStopForegroundOnPause: false,
+          // true: while PAUSED the service leaves the foreground, so Android
+          // may freeze or reclaim the idle process instead of keeping it
+          // pinned (and its timers firing) for as long as the user stays
+          // paused. The notification becomes swipe-dismissible while paused;
+          // a reclaimed process cold-starts into the saved queue.
+          androidStopForegroundOnPause: true,
           // Android 14+ MediaStyle notifications require an explicit icon;
           // omitting this can cause SystemUI to kill the foreground service
           // on screen-lock. mipmap/ic_launcher always exists in a Flet app.
           androidNotificationIcon: 'mipmap/ic_launcher',
+          // Guard for network artUris (local art arrives pre-scaled from the
+          // plugin's resolveArtwork): never hand a full-resolution cover to
+          // the notification / media session.
+          artDownscaleWidth: 512,
+          artDownscaleHeight: 512,
         ),
       );
     }
@@ -924,18 +991,25 @@ class FletAudioService extends FletService with WidgetsBindingObserver {
     control.removeInvokeMethodListener(_invokeMethod);
     _playerStateSub?.cancel();
     _positionSub?.cancel();
+    _positionTimer?.cancel();
+    _positionTimer = null;
     _durationSub?.cancel();
     _errorSub?.cancel();
-    _customActionSub?.cancel();
     _indexSub?.cancel();
+    if (_handler?.onCurrentArtResolved == _emitState) {
+      _handler?.onCurrentArtResolved = null;
+    }
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    _isBackground = (state == AppLifecycleState.paused || state == AppLifecycleState.detached);
+    _isBackground = (state == AppLifecycleState.hidden ||
+        state == AppLifecycleState.paused ||
+        state == AppLifecycleState.detached);
     debugPrint("FletAudioService: Lifecycle state changed to $state, _isBackground=$_isBackground");
+    _syncPositionTicker();
   }
 
   MediaItem _mediaItemFromMap(Map<String, dynamic> map) {
@@ -977,17 +1051,6 @@ class AudioPlayerHandler extends BaseAudioHandler with QueueHandler, SeekHandler
   final _loudnessEnhancer = AndroidLoudnessEnhancer();
   late final AudioPlayer _player;
   List<AndroidEqualizerBand>? _equalizerBands;
-
-  final _customActionController = StreamController<Map<String, dynamic>>.broadcast();
-  Stream<Map<String, dynamic>> get customActionStream => _customActionController.stream;
-
-  @override
-  Future<dynamic> customAction(String name, [Map<String, dynamic>? extras]) async {
-    if (name == 'replenish_queue') {
-      _customActionController.add({'name': name, 'extras': extras});
-    }
-    return super.customAction(name, extras);
-  }
 
   ConcatenatingAudioSource _playlist = ConcatenatingAudioSource(
     children: [],
@@ -1041,10 +1104,185 @@ class AudioPlayerHandler extends BaseAudioHandler with QueueHandler, SeekHandler
           .toList();
       queue.add(items);
       final current = state.currentSource?.tag;
-      if (current is MediaItem) mediaItem.add(current);
+      if (current is MediaItem) {
+        mediaItem.add(_withArt(current));
+        _ledgerOnItem(current);
+        _ensureArt(current);
+        final next = _player.nextIndex;
+        final seq = _player.sequence;
+        if (next != null && next < seq.length) {
+          final nextTag = seq[next].tag;
+          if (nextTag is MediaItem) _ensureArt(nextTag);
+        }
+      }
+    });
+
+    // Play ledger inputs. The clock runs only while audio is actually audible
+    // (playing AND ready), so pauses, buffering stalls and the post-queue
+    // `completed` state (where `playing` stays true) are not counted.
+    _player.playerStateStream.listen((s) {
+      _ledgerCounting =
+          s.playing && s.processingState == ProcessingState.ready;
+      if (_ledgerCounting) {
+        _ledgerClock.start();
+      } else {
+        _ledgerClock.stop();
+      }
+      if (s.processingState == ProcessingState.completed ||
+          s.processingState == ProcessingState.idle) {
+        _ledgerFinalize();
+      }
+    });
+    // A loop (repeat-one, or repeat-all over one item) replays the SAME item,
+    // so the sequence listener sees no change; autoAdvance onto the ledger's
+    // own item is the only signal that a fresh listen began.
+    _player.positionDiscontinuityStream.listen((d) {
+      if (d.reason != PositionDiscontinuityReason.autoAdvance) return;
+      final tag = _player.sequenceState.currentSource?.tag;
+      if (tag is MediaItem && tag.id == _ledgerItem?.id) {
+        _ledgerFinalize();
+        _ledgerOnItem(tag);
+      }
     });
 
     _initAudioSession();
+  }
+
+  // ── Now-playing artwork ───────────────────────────────────────────────────
+  // Python only knows sidecar images (cover.jpg), which Android 13+ won't let
+  // us read with READ_MEDIA_AUDIO alone, and it never extracted embedded art.
+  // The plugin's resolveArtwork pulls embedded art (sidecar as fallback) into
+  // a downscaled JPEG in the app cache; we swap it into the MediaItem. Done
+  // here, not in Python, so it keeps working through background auto-advance
+  // while the Flet session is torn down. Keyed by item id; null = no art found.
+  final Map<String, Uri?> _artById = {};
+  final Set<String> _artPending = {};
+  /// Set by the live FletAudioService: called when the CURRENT item's art
+  /// finishes resolving, so it can be pushed to Python.
+  void Function()? onCurrentArtResolved;
+
+  MediaItem _withArt(MediaItem item) {
+    final art = _artById[item.id];
+    return art == null ? item : item.copyWith(artUri: art);
+  }
+
+  void _ensureArt(MediaItem item) {
+    final src = item.id;
+    if (_artById.containsKey(src) || _artPending.contains(src)) return;
+    final String path;
+    if (src.startsWith('file://')) {
+      path = Uri.parse(src).toFilePath();
+    } else if (src.startsWith('/')) {
+      path = src;
+    } else {
+      return; // network stream: keep whatever artUri Python sent
+    }
+    final given = item.artUri;
+    final sidecar =
+        (given != null && given.isScheme('file')) ? given.toFilePath() : null;
+    final album = item.album ?? '';
+    // Album-level key so one decode serves every track on the album; fall back
+    // to the file itself when the album is unknown (singles folders etc.).
+    final key = (album.isEmpty || album == 'Unknown Album' || album == 'Flet Music')
+        ? path
+        : '${item.artist ?? ''}\u0000$album';
+    _artPending.add(src);
+    _decodeChannel.invokeMethod<String>('resolveArtwork', {
+      'path': path,
+      'sidecar': sidecar,
+      'key': key,
+    }).then((out) {
+      _artPending.remove(src);
+      if (_artById.length > 4000) _artById.clear();
+      _artById[src] = out == null ? null : Uri.file(out);
+      final cur = mediaItem.value;
+      if (out != null && cur != null && cur.id == src) {
+        mediaItem.add(cur.copyWith(artUri: Uri.file(out)));
+        onCurrentArtResolved?.call();
+      }
+    }).catchError((Object e) {
+      _artPending.remove(src);
+      debugPrint("FletAudioService: resolveArtwork failed → $e");
+    });
+  }
+
+  // ── Play ledger ───────────────────────────────────────────────────────────
+  // Records how long each item was actually heard, independent of the Flet
+  // session. Python used to count plays from its own mirror of the queue
+  // index, which goes deaf when Android suspends the app long enough to tear
+  // the session down — music keeps playing here, but nothing got logged. The
+  // handler outlives the session, so the ledger lives here: one JSON line per
+  // finished listen, appended to a file Python owns and drains into the DB
+  // whenever it is connected. Cost: a Stopwatch toggle on play/pause and one
+  // ~150-byte append per track. No per-tick work.
+  static const int _ledgerMinMs = 1000;
+  static const int _ledgerPendingCap = 500;
+  MediaItem? _ledgerItem;
+  final Stopwatch _ledgerClock = Stopwatch();
+  bool _ledgerCounting = false;
+  int _ledgerStartedAt = 0;
+  String? _ledgerPath;
+  final List<String> _ledgerPending = [];
+  Future<void> _ledgerWrites = Future<void>.value();
+
+  static int _nowSecs() => DateTime.now().millisecondsSinceEpoch ~/ 1000;
+
+  /// Current item reported by the sequence. Same id = same listen continuing
+  /// (queue inserts/moves and shuffle re-emit the sequence without changing
+  /// what is playing); a new id closes the previous listen and opens one.
+  void _ledgerOnItem(MediaItem item) {
+    if (_ledgerItem != null && _ledgerItem!.id == item.id) {
+      _ledgerItem = item;
+      return;
+    }
+    _ledgerFinalize();
+    _ledgerItem = item;
+    _ledgerStartedAt = _nowSecs();
+    if (_ledgerCounting) _ledgerClock.start();
+  }
+
+  void _ledgerFinalize() {
+    final item = _ledgerItem;
+    _ledgerItem = null;
+    final ms = _ledgerClock.elapsedMilliseconds;
+    _ledgerClock
+      ..stop()
+      ..reset();
+    if (item == null || ms < _ledgerMinMs) return;
+    _ledgerAppend(jsonEncode({
+      'id': item.id,
+      'ms': ms,
+      'dur': item.duration?.inMilliseconds ?? 0,
+      'start': _ledgerStartedAt,
+      'end': _nowSecs(),
+    }));
+  }
+
+  void _ledgerAppend(String line) {
+    final path = _ledgerPath;
+    if (path == null) {
+      // Python hasn't told us where the ledger lives yet (cold start before
+      // `ready`). Hold lines in memory; setPlayLogPath flushes them.
+      if (_ledgerPending.length < _ledgerPendingCap) _ledgerPending.add(line);
+      return;
+    }
+    // Chained so appends never interleave.
+    _ledgerWrites = _ledgerWrites.then((_) async {
+      try {
+        await File(path).writeAsString('$line\n',
+            mode: FileMode.append, flush: true);
+      } catch (e) {
+        debugPrint("FletAudioService: play-ledger append failed → $e");
+      }
+    });
+  }
+
+  void setPlayLogPath(String path) {
+    _ledgerPath = path;
+    if (_ledgerPending.isEmpty) return;
+    final lines = List<String>.of(_ledgerPending);
+    _ledgerPending.clear();
+    lines.forEach(_ledgerAppend);
   }
 
   bool _wasPlayingBeforeInterruption = false;
@@ -1080,19 +1318,12 @@ class AudioPlayerHandler extends BaseAudioHandler with QueueHandler, SeekHandler
       LoopMode.all: AudioServiceRepeatMode.all,
     }[_player.loopMode] ?? AudioServiceRepeatMode.none;
 
-    final replenishControl = MediaControl.custom(
-      androidIcon: 'drawable/ic_refresh',
-      label: 'Replenish Queue',
-      name: 'replenish_queue',
-    );
-
     return PlaybackState(
       controls: [
         MediaControl.skipToPrevious,
         if (_player.playing) MediaControl.pause else MediaControl.play,
         MediaControl.stop,
         MediaControl.skipToNext,
-        replenishControl,
       ],
       systemActions: const {
         MediaAction.seek,
@@ -1197,7 +1428,7 @@ class AudioPlayerHandler extends BaseAudioHandler with QueueHandler, SeekHandler
     final clampedStart = items.isEmpty
         ? 0
         : startIndex.clamp(0, items.length - 1);
-    if (items.isNotEmpty) mediaItem.add(items[clampedStart]);
+    if (items.isNotEmpty) mediaItem.add(_withArt(items[clampedStart]));
     await _player.stop();
     // Setting initialIndex inside setAudioSource avoids the race where a
     // separate seek call would be clobbered by the source-load defaulting
@@ -1305,21 +1536,5 @@ class AudioPlayerHandler extends BaseAudioHandler with QueueHandler, SeekHandler
         debugPrint('flet_audio_service: Error setting audio source: $e');
       }
     }
-  }
-
-  Future<void> _rebuildPlaylist(List<AudioSource> sources) async {
-    final currentIndex = _player.currentIndex ?? 0;
-    final currentPosition = _player.position;
-    _playlist = ConcatenatingAudioSource(
-      children: sources,
-      useLazyPreparation: true,
-    );
-    await _player.setAudioSource(
-      _playlist,
-      initialIndex:
-          currentIndex.clamp(0, sources.isEmpty ? 0 : sources.length - 1),
-      initialPosition: currentPosition,
-      preload: false,
-    );
   }
 }
