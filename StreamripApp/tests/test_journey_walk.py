@@ -2,10 +2,10 @@
 seed-affinity radius as the fallback.
 
 Uses a real DatabaseManager on a temp file (like test_live_graph) with
-interspersed Hip-Hop ↔ Pop (genuinely PAGA-adjacent) plus a distant Metal
-cluster, each with enrichment. Proves:
+interspersed Hip-Hop ↔ Pop (bridged by five rap acts also tagged pop) plus a
+distant Metal cluster, each with enrichment. Proves:
 
-  • build_journey_graph persists regional-aware nodes + adjacency;
+  • build_journey_graph persists culture-aware nodes + bridge adjacency;
   • after a build, a Hip-Hop seed's queue TRAVELS into the adjacent Pop (a genre
     the radius pool-gate would have fenced out entirely);
   • with no graph built, walk() falls back to the radius and stays in-genre;
@@ -57,12 +57,9 @@ class TestJourneyWalk(unittest.IsolatedAsyncioTestCase):
         conn = await self.db.get_connection()
         await self.db._migrate_clusters(conn)
 
-        # Hip-Hop and Pop are INTERSPERSED in one acoustic region (tag-distinct
-        # but geometrically overlapping — like real rap ↔ Greek-rap), which is
-        # what makes them genuinely PAGA-adjacent. A distant Metal cluster is the
-        # baseline sink: with only TWO nodes each is the other's sole candidate,
-        # the expected cross-rate saturates, and no pair can ever exceed chance
-        # (lift ≥ 1) — so a third, separated node is required for real adjacency.
+        # Hip-Hop and Pop are INTERSPERSED in one acoustic region, and five rap
+        # acts also carry a pop tag — the bridge artists that make the two
+        # genres adjacent. A distant Metal cluster shares no artist with either.
         # One artist/album per track so repeat caps never truncate the queue.
         self.n = 15
         hip = _cone(0, self.n, 12, 1)
@@ -72,7 +69,9 @@ class TestJourneyWalk(unittest.IsolatedAsyncioTestCase):
         self.paths = ([f"/m/hip_{i}.flac" for i in range(self.n)] +
                       [f"/m/pop_{i}.flac" for i in range(self.n)] +
                       [f"/m/met_{i}.flac" for i in range(self.n)])
-        genres = (['[{"name": "hip hop", "count": 5}, {"name": "trap", "count": 3}]'] * self.n +
+        genres = (['[{"name": "hip hop", "count": 5}, {"name": "trap", "count": 3}, '
+                   '{"name": "pop", "count": 1}]'] * 5 +
+                  ['[{"name": "hip hop", "count": 5}, {"name": "trap", "count": 3}]'] * (self.n - 5) +
                   ['[{"name": "pop", "count": 5}, {"name": "dance-pop", "count": 2}]'] * self.n +
                   ['[{"name": "metal", "count": 5}, {"name": "heavy metal", "count": 2}]'] * self.n)
 
@@ -117,10 +116,15 @@ class TestJourneyWalk(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(nodes["/m/hip_0.flac"], "Hip-Hop")
         self.assertEqual(nodes["/m/pop_0.flac"], "Pop")            # count-weighted, not folded
         self.assertEqual(nodes["/m/met_0.flac"], "Metal")
-        # Interspersed Hip-Hop ↔ Pop are genuinely adjacent; the distant Metal is
-        # the baseline sink that lets their cross-rate exceed chance.
+        # The five rap acts tagged pop bridge Hip-Hop ↔ Pop; Metal shares none.
         adj = payload.get("adj") or {}
         self.assertIn("Pop", [b for b, _ in adj.get("Hip-Hop", [])])
+        self.assertEqual(adj.get("Metal"), [])
+        self.assertEqual(len(payload["via"]["Hip-Hop\tPop"]), 5)
+        self.assertEqual(payload["version"], tg.JOURNEY_GRAPH_VERSION)
+        self.assertFalse(await tg.journey_graph_stale(self.db))
+        await self.db.save_journey_graph(dict(payload, version=1))
+        self.assertTrue(await tg.journey_graph_stale(self.db))
 
     async def test_walk_travels_across_genres_after_build(self):
         await tg.build_journey_graph(self.db)
@@ -138,6 +142,16 @@ class TestJourneyWalk(unittest.IsolatedAsyncioTestCase):
     async def test_radius_fallback_stays_in_genre(self):
         # No journey graph built: walk() must still return a queue, and the
         # pool-gate keeps it inside the seed's genre (never crosses to Pop).
+        # Without bridge acts here: with them, the library's own tags relate
+        # rap and pop, and the gate rightly lets Pop in.
+        conn = await self.db.get_connection()
+        await conn.execute(
+            "UPDATE artist_enrichment SET genres = ? WHERE artist_name IN "
+            "('Artist 0', 'Artist 1', 'Artist 2', 'Artist 3', 'Artist 4')",
+            ('[{"name": "hip hop", "count": 5}, {"name": "trap", "count": 3}]',),
+        )
+        await conn.commit()
+        await tg.build_genre_affinity(self.db)
         empty = await self.db.get_journey_graph()
         self.assertFalse(empty.get("nodes"))                       # nothing built yet
         queue = await tg.walk(self.db, self.paths[0], length=8)
@@ -231,7 +245,7 @@ class TestNodeFence(unittest.IsolatedAsyncioTestCase):
     async def test_radius_fallback_fences_untagged_foreign(self):
         # adj empty ⇒ journey returns None ⇒ walk uses the radius fallback, with
         # the partition available to the node fence.
-        await self.db.save_journey_graph({"version": 1, "nodes": self._nodes, "adj": {}})
+        await self.db.save_journey_graph({"version": tg.JOURNEY_GRAPH_VERSION, "nodes": self._nodes, "adj": {}})
         tg.invalidate_coord_graph_cache()
         queue = await tg.walk(self.db, self.hip_paths[0], length=8)
         self.assertEqual(len(queue), 8)
@@ -243,13 +257,26 @@ class TestNodeFence(unittest.IsolatedAsyncioTestCase):
         # adj present but the seed node has NO exits ⇒ journey runs and degrades;
         # the degradation must stay in the seed's node, not fill from any node.
         await self.db.save_journey_graph(
-            {"version": 1, "nodes": self._nodes, "adj": {"Hip-Hop": []}}
+            {"version": tg.JOURNEY_GRAPH_VERSION, "nodes": self._nodes, "adj": {"Hip-Hop": []}}
         )
         tg.invalidate_coord_graph_cache()
         queue = await tg.walk(self.db, self.hip_paths[0], length=8)
         self.assertTrue(queue)
         self.assertNotIn(self.foreign_path, queue,
                          "journey degradation leaked into a foreign node")
+
+    async def test_radius_fallback_never_crosses_culture(self):
+        # A Greek seed on a radius: tracks of another culture are out, not
+        # merely ranked last — even when the queue would otherwise run short.
+        gr = "Hip-Hop·GR"
+        nodes = {p: "Hip-Hop" for p in self.paths}
+        for p in self.hip_paths[:3]:
+            nodes[p] = gr
+        await self.db.save_journey_graph(
+            {"version": tg.JOURNEY_GRAPH_VERSION, "nodes": nodes, "adj": {}})
+        tg.invalidate_coord_graph_cache()
+        queue = await tg.walk(self.db, self.hip_paths[0], length=8)
+        self.assertEqual(sorted(queue), sorted(self.hip_paths[1:3]))
 
 
 if __name__ == "__main__":

@@ -115,11 +115,11 @@ class TestQueueModes(unittest.TestCase):
         # Mock AudioEngine's native push
         audio_engine._page = self.mock_page
         audio_engine._audio = MagicMock()
-        audio_engine._push_queue_native = AsyncMock()
+        audio_engine._push_native = AsyncMock()
         audio_engine.clear_queue()
         audio_engine.is_shuffle = False
         audio_engine.repeat_mode = "none"
-        audio_engine.play_similar_seed_path = ""
+        audio_engine.continues_at_end = False
         audio_engine.clear_observers()
 
         # Mock StreamripFletApp
@@ -298,15 +298,36 @@ class TestQueueModes(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(self.test_dir, "queue_state.json")))
 
     def _drain_autoplay(self, walk_result):
-        """Run the auto-play fills queued so far against a stubbed walk."""
+        """Run the auto-play fills queued so far against a stubbed station that
+        serves `walk_result` (minus its `avoid` set). The controller's current
+        station is dropped first so the stub is the one opened."""
         self.app.db_manager.get_tracks_brief = AsyncMock(side_effect=_brief_rows)
         self.app.db_manager.has_current_features = AsyncMock(return_value=True)
-        with patch("utils.track_graph.walk", new_callable=AsyncMock) as mock_walk:
-            mock_walk.return_value = walk_result
+        self.app.autoplay.station = None
+
+        class _Station:
+            node = None
+            def __init__(self, paths):
+                self.paths = list(paths)
+            async def take(self, n):
+                out, self.paths = self.paths[:n], self.paths[n:]
+                return out
+            def end_leg(self, *_a): pass
+            def exclude(self, *_a): pass
+            def accept(self, *_a): pass
+            def ban_artist_of(self, *_a): pass
+
+        async def _open(_db, _seed, **kw):
+            avoid = kw.get("avoid") or set()
+            return _Station([p for p in walk_result if p not in avoid])
+
+        ap_module = sys.modules[type(self.app.autoplay).__module__]
+        with patch.object(ap_module.track_graph, "open_station",
+                          new_callable=AsyncMock, side_effect=_open) as mock_open:
             while self.autoplay_tasks:
                 fn, args = self.autoplay_tasks.pop(0)
                 run_async(fn(*args))
-            return mock_walk
+            return mock_open
 
     def test_lifecycle_reads_flet_state_enum(self):
         """Flet 0.86 sends e.state (AppLifecycleState) with e.data None. The
@@ -408,12 +429,9 @@ class TestQueueModes(unittest.TestCase):
         self.assertEqual(audio_engine.current_index, 0)
 
     def test_reenable_does_not_requeue_the_existing_buffer(self):
-        """A walk that returns already-buffered tracks must not queue them twice.
-
-        The walk is deterministic, so an unchanged seed gives an identical
-        walk. Without the buffer in the avoid set, re-enabling inserted a second
-        copy of the block already queued — the queue "not changing" on the press.
-        """
+        """A new station must never queue a second copy of a track that is
+        already buffered: the buffer is in the station's avoid set, and the new
+        station replaces the pending buffer rather than stacking on it."""
         run_async(self.app._play_track_core("/music/song1.mp3"))
         self.app.set_play_similar_mode(True)
         audio_engine.queue_after_current([
@@ -424,7 +442,7 @@ class TestQueueModes(unittest.TestCase):
         self.assertIn("/music/walk1.mp3", mock_walk.call_args.kwargs["avoid"])
 
         paths = [t["path"] for t in audio_engine.queue]
-        self.assertEqual(paths.count("/music/walk1.mp3"), 1)
+        self.assertLessEqual(paths.count("/music/walk1.mp3"), 1)
         self.assertIn("/music/walk2.mp3", paths)
 
     def test_play_new_track_in_similar_mode(self):
@@ -463,7 +481,7 @@ class TestQueueModes(unittest.TestCase):
         self.assertEqual(audio_engine.current_index, 0)
 
     def test_play_similar_autoreplenish_non_jarvis(self):
-        audio_engine.bind(on_similar_continue=lambda _i, _v: self.app.autoplay.on_queue_dry())
+        audio_engine.bind(on_queue_end=lambda _i, _v: self.app.autoplay.on_queue_dry())
 
         run_async(self.app._play_track_core("/music/song1.mp3"))
         self.app.set_play_similar_mode(True)
@@ -487,26 +505,24 @@ class TestQueueModes(unittest.TestCase):
         ap.enabled = True
         ap.anchor = "/music/song1.mp3"
 
-        # Buffer of 4 (only _autoplay-tagged tracks ahead count) -> no refill.
+        # Buffer of 3 (only _autoplay-tagged tracks ahead count) -> no refill.
         audio_engine.queue = [
             {"path": "/music/song1.mp3"},
             {"path": "/music/song2.mp3", "_autoplay": True},
             {"path": "/music/song3.mp3", "_autoplay": True},
             {"path": "/music/song4.mp3", "_autoplay": True},
-            {"path": "/music/song5.mp3", "_autoplay": True},
         ]
         audio_engine.current_index = 0
         audio_engine.current_path = "/music/song1.mp3"
         ap.ensure_buffer()
         self.assertEqual(self.autoplay_tasks, [])
 
-        # Buffer of 3 (< 4) -> top up to 8. Seeded from the ANCHOR, not the
-        # unheard end of the buffer (chained refills are what drifted).
-        audio_engine.queue = audio_engine.queue[:4]
+        # Buffer of 2 (< 3) -> top up to 4, continuing the same station.
+        audio_engine.queue = audio_engine.queue[:3]
         ap.ensure_buffer()
         self.assertEqual(len(self.autoplay_tasks), 1)
         _fn, args = self.autoplay_tasks[0]
-        self.assertEqual(args[:2], ("/music/song1.mp3", 5))
+        self.assertEqual(args[0], 2)
 
         # A fill in flight blocks a second one.
         ap.ensure_buffer()
@@ -759,8 +775,7 @@ class TestQueueModes(unittest.TestCase):
         # Truncate queue to just the active track so next advance runs it dry
         audio_engine.queue = [{"path": "/music/song2.mp3", "title": "Song 2", "artist": "Artist B", "album": "Album 2"}]
         audio_engine.current_index = 0
-        audio_engine.play_similar_seed_path = "/music/song2.mp3"
-        audio_engine.bind(on_similar_continue=lambda _i, _v: self.app.autoplay.on_queue_dry())
+        audio_engine.bind(on_queue_end=lambda _i, _v: self.app.autoplay.on_queue_dry())
         self.autoplay_tasks.clear()
         self.app.autoplay._filling = False
 

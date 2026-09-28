@@ -1,5 +1,5 @@
-"""Auto-play settings sheet: on/off, Follow / Stay, and what the station is
-playing from. Opened by tapping the chain icon in Now Playing (long-press there
+"""Auto-play settings sheet: on/off, Deterministic / Random, and what the
+station is playing from. Opened by tapping the chain icon in Now Playing (long-press there
 is the instant on/off shortcut) and from the queue sheet's Auto-play header.
 
 All behaviour lives in utils/autoplay.py; this only presents it.
@@ -13,7 +13,7 @@ from ui.tokens import (
     BORDER, BORDER_SUBTLE, CYAN, DIM, RADIUS_CARD, SURFACE, SURFACE2, TEXT, apply_opacity,
 )
 from ui.widgets import CupertinoSegmentedBar
-from utils.autoplay import FOLLOW, STAY
+from utils.autoplay import DETERMINISTIC, RANDOM
 
 if sys.platform == "darwin":
     from utils.audio_engine_macos import audio_engine
@@ -21,12 +21,11 @@ else:
     from utils.audio_engine import audio_engine
 
 MODE_COPY = {
-    FOLLOW: "Each song you pick restarts the mix, and it drifts with the songs "
-            "you listen through.",
-    STAY:   "The mix stays anchored to the song it started from, whatever you "
-            "play in between.",
+    DETERMINISTIC: "The same song always starts the same mix: its closest "
+                   "matches first.",
+    RANDOM:        "A fresh mix every time: still close to the song, in a "
+                   "different order with different picks.",
 }
-MODE_SHORT = {FOLLOW: "Follow", STAY: "Stay"}
 
 
 def anchor_label(app) -> str:
@@ -70,14 +69,14 @@ class AutoPlaySheet:
         )
         self._mode_bar = CupertinoSegmentedBar(
             segments=[
-                (FOLLOW, "Follow", ft.Icons.EXPLORE_ROUNDED, None),
-                (STAY,   "Stay",   ft.Icons.ANCHOR_ROUNDED, None),
+                (DETERMINISTIC, "Deterministic", ft.Icons.PUSH_PIN_ROUNDED, None),
+                (RANDOM,        "Random",        ft.Icons.SHUFFLE_ROUNDED, None),
             ],
-            selected_key=ap.anchor_mode,
+            selected_key=ap.variety,
             on_change=self._on_mode,
             height=38,
         )
-        self._mode_copy = ft.Text(MODE_COPY[ap.anchor_mode], color=DIM, size=12)
+        self._mode_copy = ft.Text(MODE_COPY[ap.variety], color=DIM, size=12)
         self._anchor_text = ft.Text(
             "", color=TEXT, size=14, weight=ft.FontWeight.W_500,
             max_lines=1, overflow=ft.TextOverflow.ELLIPSIS,
@@ -165,9 +164,9 @@ class AutoPlaySheet:
         self._anchor_section.visible = enabled and bool(label)
         self._anchor_text.value = label
         n = len(self.app.autoplay.buffer_paths())
-        self._buffer_text.value = (
-            f"{n} song{'s' if n != 1 else ''} lined up" if n else "Finding similar songs…"
-        )
+        lined_up = f"{n} song{'s' if n != 1 else ''} lined up" if n else "Finding similar songs…"
+        genre = self.app.autoplay.current_genre
+        self._buffer_text.value = f"{lined_up} · now in {genre}" if genre and n else lined_up
 
     # ── events ──────────────────────────────────────────────────────────────
     def _on_toggle(self, e):
@@ -176,7 +175,7 @@ class AutoPlaySheet:
         self._safe_update(self._anchor_section)
 
     def _on_mode(self, key: str):
-        self.app.set_autoplay_anchor_mode(key)
+        self.app.set_autoplay_variety(key)
         self._mode_copy.value = MODE_COPY[key]
         self._safe_update(self._mode_copy)
 

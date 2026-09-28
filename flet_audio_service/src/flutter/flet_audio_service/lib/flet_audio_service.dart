@@ -196,6 +196,9 @@ class FletAudioService extends FletService with WidgetsBindingObserver {
         // Desired shuffle state, applied atomically with the push so the source
         // and the shuffle flag can never disagree. null = leave as-is.
         final shuffle = a['shuffle'] as bool?;
+        // A repair re-push that keeps the audible item: the reload must not be
+        // logged as a finished listen (an early skip, to auto-play).
+        final keepListen = (a['keep_listen'] as bool?) ?? false;
         // Items arrive as Map<dynamic, dynamic> from the Flet protocol; we
         // need Map<String, dynamic>. .cast<>() can't bridge that; manually
         // re-key each map.
@@ -211,7 +214,7 @@ class FletAudioService extends FletService with WidgetsBindingObserver {
             await _handler!._player.setShuffleModeEnabled(shuffle);
           }
           // setPlaylist re-shuffles internally when shuffle mode is enabled.
-          await _handler!.setPlaylist(items, startIndex);
+          await _handler!.setPlaylist(items, startIndex, keepListen: keepListen);
           // CRITICAL: do NOT await play(). just_audio's play() Future does not
           // complete until playback is paused or the track ends, so awaiting it
           // here would block this op (and the whole serialized _opChain) for the
@@ -221,35 +224,29 @@ class FletAudioService extends FletService with WidgetsBindingObserver {
           if (autoplay) unawaited(_handler!.play());
         });
 
-      case 'add_queue_item':
-        final item = _mediaItemFromMap(a);
-        final index = (a['index'] as num?)?.toInt() ??
-            (_handler?.queue.value.length ?? 0);
-        _enqueueOp(a['request_id'] as String?, (a['epoch'] as num?)?.toInt(),
-            () => _handler!.addQueueItemAt(item, index));
-
-      case 'add_queue_items':
-        // Batch insert: Python sends the whole block in one call, each item
-        // carrying its own insertion index (computed in append order). Dart
-        // performs the N inserts locally so the IPC cost is one round-trip.
-        final rawItems = (a['items'] as List<dynamic>?) ?? [];
-        final batchItems = <MediaItem>[];
-        final batchIndices = <int>[];
-        for (final raw in rawItems) {
+      case 'splice':
+        // Every insert/remove/replace is one op with one ack, however many rows
+        // it touches. Edits apply in order, each against the playlist as the
+        // previous one left it. (Batch removes used to be N ops sharing one
+        // epoch; anything interleaved between them corrupted the playlist.)
+        final rawEdits = (a['edits'] as List<dynamic>?) ?? [];
+        final edits = rawEdits.map((raw) {
           final m = raw is Map<String, dynamic>
               ? raw
               : Map<String, dynamic>.from(raw as Map);
-          batchItems.add(_mediaItemFromMap(m));
-          batchIndices.add((m['index'] as num?)?.toInt() ??
-              (_handler?.queue.value.length ?? 0));
-        }
+          final rawItems = (m['items'] as List<dynamic>?) ?? [];
+          return _QueueEdit(
+            (m['start'] as num?)?.toInt() ?? 0,
+            (m['delete_count'] as num?)?.toInt() ?? 0,
+            rawItems
+                .map((r) => _mediaItemFromMap(r is Map<String, dynamic>
+                    ? r
+                    : Map<String, dynamic>.from(r as Map)))
+                .toList(),
+          );
+        }).toList();
         _enqueueOp(a['request_id'] as String?, (a['epoch'] as num?)?.toInt(),
-            () => _handler!.addQueueItemsAt(batchItems, batchIndices));
-
-      case 'remove_queue_item':
-        final index = (a['index'] as num?)?.toInt() ?? 0;
-        _enqueueOp(a['request_id'] as String?, (a['epoch'] as num?)?.toInt(),
-            () => _handler!.removeQueueItemAt(index));
+            () => _handler!.spliceQueue(edits));
 
       case 'move_queue_item':
         final from = (a['from_index'] as num?)?.toInt() ?? 0;
@@ -267,22 +264,6 @@ class FletAudioService extends FletService with WidgetsBindingObserver {
             () async {
           await _handler!._player.setShuffleModeEnabled(enabled);
           if (enabled) await _handler!._player.shuffle();
-        });
-
-      case 'skip_to_next':
-        _enqueueOp(a['request_id'] as String?, (a['epoch'] as num?)?.toInt(),
-            () async {
-          await _handler!.skipToNext();
-          // Fire-and-forget: awaiting play() blocks until pause/end (see set_playlist).
-          unawaited(_handler!.play());
-        });
-
-      case 'skip_to_previous':
-        _enqueueOp(a['request_id'] as String?, (a['epoch'] as num?)?.toInt(),
-            () async {
-          await _handler!.skipToPrevious();
-          // Fire-and-forget: awaiting play() blocks until pause/end (see set_playlist).
-          unawaited(_handler!.play());
         });
 
       case 'skip_to_index':
@@ -864,18 +845,26 @@ class FletAudioService extends FletService with WidgetsBindingObserver {
         // Adopt the epoch only after the mutation has landed, so any events
         // emitted between command-receipt and here still carry the OLD epoch
         // and are correctly rejected by Python.
-        if (epoch != null) _epoch = epoch;
+        _adoptEpoch(epoch);
         _emitOpComplete(requestId, true, null);
       } catch (e) {
         debugPrint("FletAudioService: queue op error → $e");
         // Adopt on failure too: the op was PROCESSED, and the ack reports where
         // the player really is. Keeping the old epoch made Python reject every
         // later event (a frozen index mirror) until some other op succeeded.
-        if (epoch != null) _epoch = epoch;
+        _adoptEpoch(epoch);
         _emitOpComplete(requestId, false, e.toString());
         control.triggerEvent("error", e.toString());
       }
     });
+  }
+
+  /// Epochs only move forward. Python numbers every op before sending it, so a
+  /// lower epoch arriving late is an older op: adopting it would stamp every
+  /// later event with a stale generation that Python rejects (a frozen index
+  /// mirror, i.e. the UI stuck on the wrong track).
+  void _adoptEpoch(int? epoch) {
+    if (epoch != null && epoch > _epoch) _epoch = epoch;
   }
 
   void _emitOpComplete(String? requestId, bool ok, String? error) {
@@ -1128,6 +1117,7 @@ class AudioPlayerHandler extends BaseAudioHandler with QueueHandler, SeekHandler
       } else {
         _ledgerClock.stop();
       }
+      if (s.processingState == ProcessingState.idle && _ledgerHold) return;
       if (s.processingState == ProcessingState.completed ||
           s.processingState == ProcessingState.idle) {
         _ledgerFinalize();
@@ -1218,6 +1208,9 @@ class AudioPlayerHandler extends BaseAudioHandler with QueueHandler, SeekHandler
   static const int _ledgerMinMs = 1000;
   static const int _ledgerPendingCap = 500;
   MediaItem? _ledgerItem;
+  // Set while a repair re-push reloads the item already playing: its stop()
+  // passes through `idle`, which must not close the listen.
+  bool _ledgerHold = false;
   final Stopwatch _ledgerClock = Stopwatch();
   bool _ledgerCounting = false;
   int _ledgerStartedAt = 0;
@@ -1416,7 +1409,8 @@ class AudioPlayerHandler extends BaseAudioHandler with QueueHandler, SeekHandler
     }
   }
 
-  Future<void> setPlaylist(List<MediaItem> items, [int startIndex = 0]) async {
+  Future<void> setPlaylist(List<MediaItem> items, int startIndex,
+      {bool keepListen = false}) async {
     final sources = items
         .map((item) => _buildAudioSource(item.id, item))
         .toList();
@@ -1429,24 +1423,31 @@ class AudioPlayerHandler extends BaseAudioHandler with QueueHandler, SeekHandler
         ? 0
         : startIndex.clamp(0, items.length - 1);
     if (items.isNotEmpty) mediaItem.add(_withArt(items[clampedStart]));
-    await _player.stop();
-    // Setting initialIndex inside setAudioSource avoids the race where a
-    // separate seek call would be clobbered by the source-load defaulting
-    // back to index 0.
-    //
-    // preload: true (combined with useLazyPreparation on the parent) eagerly
-    // loads only the initial child. This is critical for session-restore:
-    // without it, the source isn't decoded until play() is called, so
-    // durationStream/processingState=ready never fire; Python's
-    // _is_loaded stays False, the slider's max stays 0, and any user scrub
-    // gets stuffed into _restore_position instead of seeking. The first
-    // play() then applies that stale scrub target; which can exceed the
-    // actual track duration and trigger auto-advance ("skip song").
-    await _player.setAudioSource(
-      _playlist,
-      preload: true,
-      initialIndex: clampedStart,
-    );
+    _ledgerHold = keepListen &&
+        items.isNotEmpty &&
+        _ledgerItem?.id == items[clampedStart].id;
+    try {
+      await _player.stop();
+      // Setting initialIndex inside setAudioSource avoids the race where a
+      // separate seek call would be clobbered by the source-load defaulting
+      // back to index 0.
+      //
+      // preload: true (combined with useLazyPreparation on the parent) eagerly
+      // loads only the initial child. This is critical for session-restore:
+      // without it, the source isn't decoded until play() is called, so
+      // durationStream/processingState=ready never fire; Python's
+      // _is_loaded stays False, the slider's max stays 0, and any user scrub
+      // gets stuffed into _restore_position instead of seeking. The first
+      // play() then applies that stale scrub target; which can exceed the
+      // actual track duration and trigger auto-advance ("skip song").
+      await _player.setAudioSource(
+        _playlist,
+        preload: true,
+        initialIndex: clampedStart,
+      );
+    } finally {
+      _ledgerHold = false;
+    }
     // The shuffle-mode flag persists across setAudioSource, but the new source
     // starts with an identity shuffle order. Re-randomise (anchored at the
     // start item) so re-pushes while shuffling stay shuffled instead of
@@ -1456,52 +1457,31 @@ class AudioPlayerHandler extends BaseAudioHandler with QueueHandler, SeekHandler
     }
   }
 
-  Future<void> addQueueItemAt(MediaItem item, int index) async {
-    // In-place insert on the live ConcatenatingAudioSource; does NOT call
-    // _player.setAudioSource, so the currently-playing source is not torn
-    // down. _rebuildPlaylist (the previous approach) reloaded the player
-    // from position 0 on every queue mutation, which the user perceived
-    // as playback "crashing" on swipe-to-queue / reorder.
-    final clamped = index.clamp(0, _playlist.children.length);
-    await _playlist.insert(
-      clamped,
-      _buildAudioSource(item.id, item),
-    );
+  /// Apply queue edits in order on the live ConcatenatingAudioSource. In-place:
+  /// the player is not reloaded, so playback continues unless an edit removes
+  /// the active item (just_audio then advances). An edit outside the playlist
+  /// throws, so Python gets ok=false and repairs instead of silently diverging.
+  Future<void> spliceQueue(List<_QueueEdit> edits) async {
     final updated = List<MediaItem>.from(queue.value);
-    updated.insert(index.clamp(0, updated.length), item);
-    queue.add(updated);
-  }
-
-  /// Batch sibling of addQueueItemAt: insert several items in one pass with a
-  /// single queue.add() at the end. Indices are applied in order (each against
-  /// the growing playlist), matching N sequential addQueueItemAt calls, so the
-  /// active source is never torn down and playback continues uninterrupted.
-  Future<void> addQueueItemsAt(List<MediaItem> items, List<int> indices) async {
-    if (items.isEmpty) return;
-    final updated = List<MediaItem>.from(queue.value);
-    for (var i = 0; i < items.length; i++) {
-      final item = items[i];
-      final idx = i < indices.length ? indices[i] : _playlist.children.length;
-      await _playlist.insert(
-        idx.clamp(0, _playlist.children.length),
-        _buildAudioSource(item.id, item),
-      );
-      updated.insert(idx.clamp(0, updated.length), item);
+    for (final e in edits) {
+      final n = _playlist.children.length;
+      if (e.start < 0 || e.deleteCount < 0 || e.start + e.deleteCount > n) {
+        throw RangeError(
+            'splice(${e.start}, ${e.deleteCount}) outside playlist of $n');
+      }
+      if (e.deleteCount > 0) {
+        await _playlist.removeRange(e.start, e.start + e.deleteCount);
+        if (e.start + e.deleteCount <= updated.length) {
+          updated.removeRange(e.start, e.start + e.deleteCount);
+        }
+      }
+      if (e.items.isNotEmpty) {
+        await _playlist.insertAll(e.start,
+            e.items.map((item) => _buildAudioSource(item.id, item)).toList());
+        updated.insertAll(e.start.clamp(0, updated.length), e.items);
+      }
     }
     queue.add(updated);
-  }
-
-  Future<void> removeQueueItemAt(int index) async {
-    if (index < 0 || index >= _playlist.children.length) return;
-    // In-place remove. just_audio auto-advances to the next source if the
-    // active item was removed, and decrements currentIndex for items
-    // before the active one. No player rebuild → no playback interruption.
-    await _playlist.removeAt(index);
-    final updated = List<MediaItem>.from(queue.value);
-    if (index < updated.length) {
-      updated.removeAt(index);
-      queue.add(updated);
-    }
   }
 
   Future<void> moveQueueItem(int fromIndex, int toIndex) async {
@@ -1537,4 +1517,13 @@ class AudioPlayerHandler extends BaseAudioHandler with QueueHandler, SeekHandler
       }
     }
   }
+}
+
+/// One step of a `splice` op: remove [deleteCount] rows at [start], then
+/// insert [items] there.
+class _QueueEdit {
+  final int start;
+  final int deleteCount;
+  final List<MediaItem> items;
+  const _QueueEdit(this.start, this.deleteCount, this.items);
 }

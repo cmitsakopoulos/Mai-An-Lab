@@ -48,7 +48,7 @@ from __future__ import annotations
 # is regional when it travels with a language, not when it is folk-adjacent.
 _REGIONAL_KEYS = (
     "laiko", "laika", "laïko", "laïka", "laiki", "λαϊκό", "λαϊκά",
-    "rebetiko", "ρεμπέτικο", "entechno", "έντεχνο", "greek folk",
+    "rebetiko", "ρεμπέτικο", "entechno", "entehno", "έντεχνο", "greek folk",
     "musiques du monde", "world music", "worldbeat",
     # Other unmistakably language/country-bound scenes. Kept deliberately
     # short and distinctive — each must be a string that cannot hide inside an
@@ -63,7 +63,9 @@ _GENRE_RULES = [
     ("Folk/Cntry", _REGIONAL_KEYS),
     ("Classical",  ("classical", "classique")),
     ("Hip-Hop",    ("rap", "hip hop", "hip-hop", "hiphop", "trap", "хип", "рэп", "grime", "boom bap", "drill")),
-    ("Electronic", ("électronique", "electronica", "electro", "électro", "house", "techno", "edm", "trance", "drum & bass", "dnb", "dubstep", "ambient")),
+    ("Electronic", ("électronique", "electronica", "electro", "électro", "house", "techno", "edm", "trance", "drum & bass", "drum and bass", "dnb", "dubstep", "ambient", "trip hop", "downtempo")),
+    # Ahead of Folk/Cntry, whose 'blues' key would otherwise claim it.
+    ("Soul/R&B",   ("rhythm and blues",)),
     ("Folk/Cntry", ("folk", "country", "blues", "bluegrass", "americana", "laiko", "laika", "laïko", "laïka", "laiki", "λαϊκό", "λαϊκά", "rebetiko", "ρεμπέτικο", "entechno", "έντεχνο", "greek folk", "world", "musiques du monde")),
     ("Soul/R&B",   ("soul", "r&b", "funk", "rnb", "motown", "neo soul")),
     ("Jazz",       ("jazz", "bebop")),
@@ -81,7 +83,7 @@ _GENRE_RULES = [
     # 'hard rock' / 'grunge' stay Metal); the split only refines which side a
     # track lands on so the journey graph can separate a 70s-classic-rock node
     # from an indie/post-punk one instead of conflating them.
-    ("Alt",        ("alternatif", "alternative", "indé", "indie", "punk", "new wave", "post-punk")),
+    ("Alt",        ("alternatif", "alternative", "indé", "indie", "punk", "new wave", "post-punk", "new romantic", "darkwave", "shoegaze", "post-hardcore")),
     ("Rock",       ("rock", "рок")),
     # Keys are matched as raw substrings against tags that have had separators
     # stripped ('folk pop' → 'folkpop'), so bare 'kpop'/'cpop' are UNSAFE — they
@@ -111,13 +113,51 @@ GENRE_BUCKET_LABELS = frozenset(label for label, _ in _GENRE_RULES) | {"Other", 
 NON_FAMILIES = frozenset({"Other", "Unknown"})
 
 
+# ── Separator-blind matching ──────────────────────────────────────────────────
+# Enrichment tags reach the taxonomy with every separator stripped ('new wave' →
+# 'newwave', 'hard rock' → 'hardrock'), while the keys above are written as
+# people spell them. A multi-word key therefore never matched its own enrichment
+# token: 'newwave' (13 artists on the 2026-09 device image) fell to Other,
+# 'hardrock' fell through to Rock instead of Metal, 'greekfolk' stopped being
+# regional — 23% of all artist tag tokens landed in Other.
+#
+# So every multi-word key is also matched in compact form against the compact
+# tag. Only compacts of ≥ _MIN_COMPACT characters: a short compound collides
+# once its separator is gone ('r&b' → 'rb' hides in 'urban', 'k-pop' → 'kpop'
+# in 'folkpop').
+_MIN_COMPACT = 6
+
+
+def _compact(s: str) -> str:
+    return "".join(ch for ch in s if ch.isalnum())
+
+
+def _compile(keys) -> tuple[tuple, tuple]:
+    compact = []
+    for k in keys:
+        ck = _compact(k)
+        if ck != k and len(ck) >= _MIN_COMPACT:
+            compact.append(ck)
+    return tuple(keys), tuple(compact)
+
+
+_RULES = [(label, _compile(keys)) for label, keys in _GENRE_RULES]
+_REGIONAL = _compile(_REGIONAL_KEYS)
+
+
+def _hit(g: str, gc: str, compiled) -> bool:
+    keys, compact = compiled
+    return any(k in g for k in keys) or any(k in gc for k in compact)
+
+
 def genre_bucket(genre: str | None) -> str:
     """Map a free-text (multi-label) genre tag to one coarse bucket."""
     g = (genre or "").strip().lower()
     if not g:
         return "Unknown"
-    for label, keys in _GENRE_RULES:
-        if any(k in g for k in keys):
+    gc = _compact(g)
+    for label, compiled in _RULES:
+        if _hit(g, gc, compiled):
             return label
     return "Other"
 
@@ -129,7 +169,8 @@ def genre_tokens(genre: str | None) -> set:
     g = (genre or "").strip().lower()
     if not g:
         return {"Unknown"}
-    toks = {label for label, keys in _GENRE_RULES if any(k in g for k in keys)}
+    gc = _compact(g)
+    toks = {label for label, compiled in _RULES if _hit(g, gc, compiled)}
     return toks or {"Other"}
 
 
@@ -173,7 +214,7 @@ def is_regional_tag(genre: str | None) -> bool:
     g = (genre or "").strip().lower()
     if not g:
         return False
-    if any(k in g for k in _REGIONAL_KEYS):
+    if _hit(g, _compact(g), _REGIONAL):
         return True
     return genre_bucket(g) in REGIONAL_BUCKETS
 
@@ -191,3 +232,55 @@ def genre_display_label(genre: str | None) -> str:
     if not g:
         return "Unknown"
     return g.title() if genre_bucket(g) == "Other" else genre_bucket(g)
+
+
+# ── Culture ───────────────────────────────────────────────────────────────────
+# A culture boundary is the one hard boundary the auto-play journey keeps: laiko
+# and Western folk share a family name, Greek rap and US rap share a family, and
+# neither acoustics nor the family says the listener crossed a language. Country
+# from enrichment is the first signal, but it is missing or wrong exactly where
+# it matters (an artist with no MusicBrainz entity, a short name matched to the
+# wrong one), so two more signals back it up — scene tags and the script of the
+# artist / album / track names. The script is the cheapest and the most robust:
+# it needs no enrichment at all.
+
+# Tags that name a culture outright. Matched separator-blind, like the families.
+_CULTURE_TAGS = {
+    "GR": _compile(("laiko", "laika", "laïko", "laïka", "laiki", "λαϊκ", "rebetiko",
+                    "ρεμπέτικο", "entechno", "entehno", "έντεχνο", "greek", "ελληνικ")),
+}
+
+# Tags that are ONLY a culture, not a genre. They must not vote for a family
+# ('greek' is a Pop key for display, but a Greek laiko artist tagged 'greek' is
+# not a pop act).
+CULTURE_WORDS = frozenset({"greek", "greece", "ελληνικά", "ελληνικο", "ελληνικό"})
+
+# Unicode blocks per culture (Greek and Coptic, Greek Extended).
+_CULTURE_SCRIPTS = {
+    "GR": ((0x0370, 0x03FF), (0x1F00, 0x1FFF)),
+}
+
+
+def tag_culture(tag: str | None) -> str | None:
+    """The culture a genre tag names ('laiko' → 'GR'), or None."""
+    g = (tag or "").strip().lower()
+    if not g:
+        return None
+    gc = _compact(g)
+    for culture, compiled in _CULTURE_TAGS.items():
+        if _hit(g, gc, compiled):
+            return culture
+    return None
+
+
+def script_culture(*texts) -> str | None:
+    """The culture whose script any of `texts` is written in, or None."""
+    for text in texts:
+        for ch in text or "":
+            o = ord(ch)
+            if o < 0x0370:
+                continue
+            for culture, blocks in _CULTURE_SCRIPTS.items():
+                if any(lo <= o <= hi for lo, hi in blocks):
+                    return culture
+    return None

@@ -13,7 +13,7 @@ import flet as ft  # noqa: E402
 import main  # noqa: E402
 from ui.player.autoplay_sheet import AutoPlaySheet, MODE_COPY, anchor_label  # noqa: E402
 from ui.player.queue_sheet import QueueSheet  # noqa: E402
-from utils.autoplay import AutoPlay, FOLLOW, STAY  # noqa: E402
+from utils.autoplay import AutoPlay, DETERMINISTIC, RANDOM  # noqa: E402
 
 audio_engine = main.audio_engine
 
@@ -65,7 +65,7 @@ class AutoPlaySheetTests(_Base):
         self.assertIsInstance(bs, ft.BottomSheet)
         self.assertTrue(bs.draggable)   # swipe-down to dismiss
         texts = _texts(bs)
-        self.assertIn(MODE_COPY[FOLLOW], texts)
+        self.assertIn(MODE_COPY[DETERMINISTIC], texts)
         self.assertIn("Alpha — X", texts)
         self.assertIn("2 songs lined up", texts)
         self.assertEqual(anchor_label(self.app), "Alpha — X")
@@ -75,9 +75,9 @@ class AutoPlaySheetTests(_Base):
         sheet._build()
         sheet._on_toggle(MagicMock(control=MagicMock(value=False)))
         self.app.set_play_similar_mode.assert_called_once_with(False)
-        sheet._on_mode(STAY)
-        self.app.set_autoplay_anchor_mode.assert_called_once_with(STAY)
-        self.assertEqual(sheet._mode_copy.value, MODE_COPY[STAY])
+        sheet._on_mode(RANDOM)
+        self.app.set_autoplay_variety.assert_called_once_with(RANDOM)
+        self.assertEqual(sheet._mode_copy.value, MODE_COPY[RANDOM])
 
     def test_anchor_hidden_while_off(self):
         self.app.play_similar_mode = False
@@ -125,6 +125,28 @@ class QueueHeaderTests(_Base):
         finally:
             audio_engine.move_queue_item = orig
 
+    def test_row_actions_resolve_the_drawn_row_after_the_queue_shifts(self):
+        qs = self._sheet()
+        gamma = audio_engine.queue[4]
+        # A refill lands between the render and the tap: every row shifts by 2.
+        audio_engine.queue[1:1] = [{"path": "/r/9"}, {"path": "/r/8"}]
+        removed, moved = MagicMock(), MagicMock()
+        saved = (audio_engine.remove_from_queue, audio_engine.move_queue_item)
+        audio_engine.remove_from_queue, audio_engine.move_queue_item = removed, moved
+        try:
+            # Drawn "Gamma" (control 5) dragged to below "Alpha" (slot 1):
+            # resolves to Gamma and Beta's CURRENT rows, not the drawn ones.
+            qs._handle_queue_reorder(MagicMock(old_index=5, new_index=1,
+                                               control=MagicMock(controls=list(qs._queue_list.controls))))
+            moved.assert_called_once_with(6, 3)
+            qs._remove(gamma)
+            removed.assert_called_once_with(6)
+            removed.reset_mock()
+            qs._remove({"path": "/m/c"})               # equal, but not a queued row
+            removed.assert_not_called()
+        finally:
+            audio_engine.remove_from_queue, audio_engine.move_queue_item = saved
+
 
 class NowPlayingChainTests(_Base):
     def test_tap_opens_sheet_and_long_press_toggles(self):
@@ -138,6 +160,27 @@ class NowPlayingChainTests(_Base):
         self.assertEqual(np._play_similar_btn.on_long_press, np._toggle_play_similar)
         # No status pill any more: nothing extra in the vertical layout.
         self.assertFalse(hasattr(np, "_autoplay_pill"))
+
+
+class AutoPlaySettingsPaneTests(unittest.TestCase):
+    def test_lists_hidden_songs_and_blocked_hops_and_resets_a_hop(self):
+        from ui.views.autoplay_hidden import HiddenTracksPane
+        app = MagicMock()
+        app.safe_update = lambda fn, target=None: fn()
+        app.db_manager.get_autoplay_hidden = AsyncMock(return_value=[
+            {"path": "/m/x.flac", "title": "X", "artist": "Y", "album": "Z", "hidden_at": 0}])
+        blocked = [{"src": "Classical", "dst": "Pop", "rejects": 3, "artists": 2}]
+        app.autoplay.blocked_hops = MagicMock(return_value=blocked)
+        app.autoplay.unblock_hops = AsyncMock()
+        pane = HiddenTracksPane(app)
+        pane.build()
+        asyncio.run(pane._load())
+        texts = _texts(pane._hops)
+        self.assertIn("Classical → Pop", texts)
+        self.assertIn("Blocked after you turned down 3 songs by 2 artists", texts)
+        self.assertIn("X", _texts(pane._list))
+        asyncio.run(pane._unblock([("Classical", "Pop")]))
+        app.autoplay.unblock_hops.assert_awaited_once_with([("Classical", "Pop")])
 
 
 class StartRadioTests(unittest.TestCase):
@@ -156,7 +199,7 @@ class StartRadioTests(unittest.TestCase):
             app.set_play_similar_mode.assert_called_once_with(True)
             app.play_similar_mode = True
             asyncio.run(main.StreamripFletApp.start_radio(app, "/m/b"))
-            app.autoplay.restart_from.assert_called_once_with("/m/b")
+            app.autoplay.start.assert_called_once_with("/m/b")
         finally:
             audio_engine.queue, audio_engine.current_index, audio_engine.play_track_at = saved
 

@@ -225,7 +225,7 @@ class QueueSheet:
                                     icon=ft.Icons.REMOVE_CIRCLE_OUTLINE_ROUNDED,
                                     icon_color="#FF453A",
                                     icon_size=16,
-                                    on_click=lambda e, idx=i: self._remove(idx),
+                                    on_click=lambda e, row=t: self._remove(row),
                                 ),
                             ],
                             spacing=0,
@@ -244,30 +244,7 @@ class QueueSheet:
             )
 
             return AnimatedEntry(
-                ft.Dismissible(
-                    key=f"qd_{i}",
-                    content=card,
-                    background=ft.Container(
-                        content=ft.Row(
-                            [ft.Icon(ft.Icons.DELETE_OUTLINE_ROUNDED, color="#FFFFFF", size=20)],
-                            alignment=ft.MainAxisAlignment.START,
-                        ),
-                        bgcolor="#FF453A",
-                        border_radius=RADIUS_CARD,
-                        padding=ft.Padding.only(left=20),
-                    ),
-                    secondary_background=ft.Container(
-                        content=ft.Row(
-                            [ft.Icon(ft.Icons.DELETE_OUTLINE_ROUNDED, color="#FFFFFF", size=20)],
-                            alignment=ft.MainAxisAlignment.END,
-                        ),
-                        bgcolor="#FF453A",
-                        border_radius=RADIUS_CARD,
-                        padding=ft.Padding.only(right=20),
-                    ),
-                    dismiss_direction=ft.DismissDirection.HORIZONTAL,
-                    on_dismiss=lambda e, idx=i: self._on_dismiss(idx),
-                ),
+                card,
                 target_height=56,
                 key=f"q_{i}",
             )
@@ -290,6 +267,10 @@ class QueueSheet:
                 upcoming.append((idx, audio_engine.queue[idx]))
 
         visible = upcoming[:15]
+        # The track dicts as drawn. Row actions resolve against these by
+        # identity at event time: a refill or native index change can land
+        # between the render and the tap, so a captured index can go stale.
+        self._rendered = [t for _i, t in visible]
         rows = [
             track_row(idx, t, position_offset=pos)
             for pos, (idx, t) in enumerate(visible)
@@ -377,25 +358,8 @@ class QueueSheet:
         if new_idx > old_idx:
             new_idx -= 1
 
-        cur_idx    = audio_engine.current_index
-        is_shuffle = bool(audio_engine.is_shuffle)
-        shuf_order = audio_engine.shuffle_indices
-        upcoming = []
-        if is_shuffle and shuf_order and len(shuf_order) == len(audio_engine.queue):
-            try:
-                curr_shuf_idx = shuf_order.index(cur_idx)
-            except ValueError:
-                curr_shuf_idx = -1
-            if curr_shuf_idx != -1:
-                shuffled_indices = shuf_order[curr_shuf_idx:]
-                for idx in shuffled_indices:
-                    upcoming.append((idx, audio_engine.queue[idx]))
-        if not upcoming:
-            for idx in range(cur_idx, len(audio_engine.queue)):
-                upcoming.append((idx, audio_engine.queue[idx]))
-
-        visible_upcoming = upcoming[:15]
-        if not (0 <= old_idx < len(visible_upcoming) and 0 <= new_idx < len(visible_upcoming)):
+        rendered = getattr(self, "_rendered", [])
+        if not (0 <= old_idx < len(rendered) and 0 <= new_idx < len(rendered)):
             self.refresh()
             return
 
@@ -403,8 +367,14 @@ class QueueSheet:
             self.refresh()
             return
 
-        from_queue_idx = visible_upcoming[old_idx][0]
-        to_queue_idx = visible_upcoming[new_idx][0]
+        from_queue_idx = _queue_index_of(rendered[old_idx])
+        to_queue_idx = _queue_index_of(rendered[new_idx])
+        if (from_queue_idx is None or to_queue_idx is None
+                or from_queue_idx == audio_engine.current_index
+                or to_queue_idx == audio_engine.current_index):
+            # The queue moved under the drawn list; redraw instead of guessing.
+            self.refresh()
+            return
 
         # Move the control in place first (control space, header included) so
         # the row doesn't flicker back before the refresh lands.
@@ -415,18 +385,25 @@ class QueueSheet:
         audio_engine.move_queue_item(from_queue_idx, to_queue_idx)
         self.app.safe_update(self.refresh)
 
-    def _remove(self, idx: int):
-        # Removing an auto-play recommendation is a "not this": the refill
-        # that replaces it must not pick it again this session.
-        if 0 <= idx < len(audio_engine.queue) and audio_engine.queue[idx].get("_autoplay"):
-            self.app.autoplay.reject(audio_engine.queue[idx].get("path") or "")
+    def _remove(self, row: dict):
+        idx = _queue_index_of(row)
+        if idx is None:  # already gone (removed, or the queue was replaced)
+            self.app.safe_update(self.refresh)
+            return
         audio_engine.remove_from_queue(idx)
+        # Removing an auto-play recommendation is a "not this": hidden from
+        # auto-play (Settings → Auto-play lists them) and a negative for the
+        # current leg. Reported after the removal so the top-up sees the gap.
+        if row.get("_autoplay"):
+            self.app.autoplay.reject(row.get("path") or "")
         self.app.safe_update(self.refresh)
-
-    def _on_dismiss(self, idx: int):
-        self.app.trigger_haptic("swipe_dismiss")
-        self._remove(idx)
 
     def _clear_all(self):
         audio_engine.clear_queue()
         self.collapse()
+
+
+def _queue_index_of(row: dict) -> int | None:
+    """Current queue index of this exact row (identity, not equality: the same
+    song can be queued twice), or None if it is no longer queued."""
+    return next((i for i, t in enumerate(audio_engine.queue) if t is row), None)

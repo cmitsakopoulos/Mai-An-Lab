@@ -597,23 +597,6 @@ class SettingsView:
                 ft.dropdown.Option("vibrate", "Vibrate (Long)"),
             ]
         )
-        self._haptic_swipe_dismiss_dropdown = ft.Dropdown(
-            label="Swipe to Remove from Queue",
-            bgcolor=SURFACE2,
-            border_color=BORDER,
-            focused_border_color=CYAN,
-            text_style=ft.TextStyle(color=TEXT, size=13),
-            label_style=ft.TextStyle(color=CYAN, size=11),
-            border_radius=10,
-            on_select=self._on_haptic_intensity_change,
-            options=[
-                ft.dropdown.Option("none", "None"),
-                ft.dropdown.Option("light", "Light"),
-                ft.dropdown.Option("medium", "Medium"),
-                ft.dropdown.Option("heavy", "Heavy"),
-                ft.dropdown.Option("vibrate", "Vibrate (Long)"),
-            ]
-        )
         self._haptic_long_press_dropdown = ft.Dropdown(
             label="Long press track",
             bgcolor=SURFACE2,
@@ -929,6 +912,7 @@ class SettingsView:
             "Appearance": self._build_appearance_group,
             "Audio & DSP": self._build_audio_dsp_group,
             "Haptic Feedback": self._build_haptics_group,
+            "Auto-play": self._build_autoplay_group,
             "Permissions": self._build_permissions_group,
             "Database Management": self._build_database_management_group,
             "Advanced": self._build_advanced_group,
@@ -1043,6 +1027,19 @@ class SettingsView:
                     "metadata", "artist", "tags", "workbench", "wizard", "enrichment",
                     "genre", "cleaning", "auto-play", "recommendations", "tagger", "id3",
                     "album artist", "mbid", "musicbrainz", "canonical", "cleaner"
+                ]
+            ),
+            SettingSearchEntry(
+                title="Auto-play",
+                subtitle="Hidden songs and blocked genre jumps",
+                category="LIBRARY INTELLIGENCE",
+                subpage_name="Auto-play",
+                icon=ft.Icons.ALL_INCLUSIVE_ROUNDED,
+                on_select=lambda: self._show_sub_page("Auto-play", self._build_autoplay_group()),
+                keywords=[
+                    "auto-play", "autoplay", "radio", "station", "hidden", "removed",
+                    "recommendations", "similar", "restore", "not for me", "dislike",
+                    "genre", "jump", "hop", "blocked", "reset",
                 ]
             ),
             SettingSearchEntry(
@@ -1208,6 +1205,9 @@ class SettingsView:
                 HubSettingItem(ft.Icons.LABEL_IMPORTANT_ROUNDED, "Metadata",
                                "Fix artist tags that power Auto-Play recommendations",
                                on_tap=self._on_open_metadata_workbench_click),
+                HubSettingItem(ft.Icons.ALL_INCLUSIVE_ROUNDED, "Auto-play",
+                               "Hidden songs and blocked genre jumps",
+                               on_tap=lambda _: self._show_sub_page("Auto-play", self._build_autoplay_group())),
                 
                 ft.Divider(color=BORDER, height=30),
                 
@@ -2461,7 +2461,6 @@ class SettingsView:
             self._haptic_feedback_switch.value = bool(haptics.get("haptic_feedback_enabled", True))
             self._haptic_eq_drag_dropdown.value = haptics.get("eq_drag_intensity", "light")
             self._haptic_swipe_queue_dropdown.value = haptics.get("swipe_queue_intensity", "medium")
-            self._haptic_swipe_dismiss_dropdown.value = haptics.get("swipe_dismiss_intensity", "medium")
             self._haptic_long_press_dropdown.value = haptics.get("long_press_intensity", "heavy")
             self._haptic_network_tap_dropdown.value = haptics.get("network_tap_intensity", "selection")
             self._haptic_network_reseed_dropdown.value = haptics.get("network_reseed_intensity", "medium")
@@ -3366,7 +3365,6 @@ class SettingsView:
             "haptics": {
                 "eq_drag_intensity": self._haptic_eq_drag_dropdown.value,
                 "swipe_queue_intensity": self._haptic_swipe_queue_dropdown.value,
-                "swipe_dismiss_intensity": self._haptic_swipe_dismiss_dropdown.value,
                 "long_press_intensity": self._haptic_long_press_dropdown.value,
                 "network_tap_intensity": self._haptic_network_tap_dropdown.value,
                 "network_reseed_intensity": self._haptic_network_reseed_dropdown.value,
@@ -3376,6 +3374,10 @@ class SettingsView:
         if e.control.value and e.control.value != "none":
             self.app.trigger_haptic(e.control.value)
         self.app.safe_update(lambda: None)
+
+    def _build_autoplay_group(self):
+        from ui.views.autoplay_hidden import HiddenTracksPane
+        return HiddenTracksPane(self.app).build()
 
     def _build_haptics_group(self):
         return ft.Column([
@@ -3408,8 +3410,6 @@ class SettingsView:
                     self._haptic_eq_drag_dropdown,
                     ft.Container(height=5),
                     self._haptic_swipe_queue_dropdown,
-                    ft.Container(height=5),
-                    self._haptic_swipe_dismiss_dropdown,
                     ft.Container(height=5),
                     self._haptic_long_press_dropdown,
                     ft.Container(height=5),

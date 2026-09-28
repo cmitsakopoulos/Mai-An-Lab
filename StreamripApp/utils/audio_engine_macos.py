@@ -80,7 +80,9 @@ class AudioEngine:
 
         self.queue: list[dict] = []
         self.current_index: int = 0
-        self.play_similar_seed_path = ""
+        # Set by auto-play while on: the queue end dispatches `on_queue_end`
+        # instead of stopping (see the Android engine).
+        self.continues_at_end = False
         self._db_manager = None
 
         self._page:  ft.Page | None = None
@@ -813,8 +815,8 @@ class AudioEngine:
                         self._page.run_task(self.play_current)
                     return
                 else:
-                    if getattr(self, "play_similar_seed_path", ""):
-                        self.dispatch("on_similar_continue")
+                    if self.continues_at_end:
+                        self.dispatch("on_queue_end")
                     else:
                         self.stop()
                     return
@@ -828,8 +830,8 @@ class AudioEngine:
                 if self._page:
                     self._page.run_task(self.play_current)
             else:
-                if getattr(self, "play_similar_seed_path", ""):
-                    self.dispatch("on_similar_continue")
+                if self.continues_at_end:
+                    self.dispatch("on_queue_end")
                 else:
                     self.stop()
 
@@ -1004,6 +1006,31 @@ class AudioEngine:
                 self.stop()
                 return
             self.dispatch("on_queue_mutated")
+
+    def replace_rows(self, indices: list[int], tracks: list[dict]):
+        """Swap the rows at `indices` (never the playing one) for `tracks` in one
+        dispatch; the block lands where the first removed row was. Parity with
+        the Android engine, where this is one native op."""
+        with self._lock:
+            targets = sorted(
+                {i for i in indices if 0 <= i < len(self.queue) and i != self.current_index},
+                reverse=True,
+            )
+            for i in targets:
+                if self._is_shuffle:
+                    self._on_track_removed_from_shuffle(i)
+                self.queue.pop(i)
+            shift = sum(1 for i in targets if i < self.current_index)
+            if shift:
+                self.current_index = max(0, self.current_index - shift)
+            if tracks and self.queue:
+                at = targets[-1] if targets else self.current_index + 1
+                at = min(max(at, self.current_index + 1), len(self.queue))
+                self.queue_after_current(tracks, after_index=at - 1)
+            elif tracks:
+                self.set_queue(tracks)
+            elif targets:
+                self.dispatch("on_queue_mutated")
 
     def move_queue_item(self, old_index: int, new_index: int):
         with self._lock:

@@ -302,7 +302,6 @@ class TestDSPPipeline(unittest.TestCase):
                 "haptic_feedback_enabled": True,
                 "eq_drag_intensity": "light",
                 "swipe_queue_intensity": "medium",
-                "swipe_dismiss_intensity": "medium",
                 "long_press_intensity": "heavy"
             }
         })

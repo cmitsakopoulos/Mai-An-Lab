@@ -167,7 +167,7 @@ from ui.player.dialogs import PlaylistEditorDialog
 debug_log("importing queue_controller and error_boundary")
 from utils.queue_controller import QueueController
 from utils import play_ledger
-from utils.autoplay import AutoPlay, ANCHOR_MODES, FOLLOW
+from utils.autoplay import AutoPlay, VARIETY_MODES, DETERMINISTIC
 from utils.error_boundary import ErrorBoundary
 debug_log("all main.py imports completed successfully")
 
@@ -442,7 +442,9 @@ class StreamripFletApp:
                 notify=lambda msg: self.safe_update(lambda: self.show_snackbar(msg)),
             )
         self.autoplay.db = self.db_manager
-        self.autoplay.set_anchor_mode(self._prefs.get("autoplay_anchor", FOLLOW))
+        variety = self._prefs.get("autoplay_variety", DETERMINISTIC)
+        self.autoplay.variety = variety if variety in VARIETY_MODES else DETERMINISTIC
+        await self.autoplay.load_feedback()
         # Restored silently: the restored queue already carries its buffer, and
         # refills resume on the next track change.
         self.autoplay.enabled = self.play_similar_mode
@@ -465,13 +467,11 @@ class StreamripFletApp:
             # memory reaping or process death) leaves a recoverable snapshot
             # on disk instead of the stale state from the previous launch.
             self._schedule_queue_save()
-            if not self.is_restoring_session:
-                self.autoplay.ensure_buffer()
 
         audio_engine.bind(
             on_playback_error=lambda _, d: self._on_playback_error_toast(d),
             on_queue_mutated=_on_queue_mutated,
-            on_similar_continue=lambda _i, _v: self.autoplay.on_queue_dry(),
+            on_queue_end=lambda _i, _v: self.autoplay.on_queue_dry(),
             on_native_ready=lambda _i, _v: self._schedule_ledger_drain(0.0),
         )
 
@@ -525,7 +525,8 @@ class StreamripFletApp:
         self.page.run_task(self._prune_caches_async)
 
     async def _ensure_graph_built_async(self):
-        """Build the similarity graph if it is MISSING — never on a schedule.
+        """Build the similarity graph if it is MISSING — never on a schedule —
+        and rebuild the journey graph if an older builder made it.
 
         Guarded on the real artifact (`coord_tracks`, i.e. persisted Zr
         coordinates), not on an edge table nobody writes and not on a sidecar
@@ -541,6 +542,13 @@ class StreamripFletApp:
             await asyncio.sleep(5)
             from utils import track_graph as tg
             status = await tg.graph_status(self.db_manager)
+            if status["coord_tracks"] > 0 and await tg.journey_graph_stale(self.db_manager):
+                # Geometry is there but the genre graph predates the current
+                # builder (e.g. v2's bridge-artist adjacency): rebuild just it.
+                await self._await_scroll_quiet()
+                await tg.build_journey_graph(self.db_manager)
+                logger.info("Graph readiness: journey graph rebuilt (stale version).")
+                return
             if status["total_tracks"] < 2 or status["coord_tracks"] > 0:
                 return  # nothing to do, or geometry already present
             analysed = len(await self.db_manager.get_tracks_with_features(tg.FEATURES_VERSION))
@@ -1002,7 +1010,6 @@ class StreamripFletApp:
             defaults = {
                 "eq_drag": "light",
                 "swipe_queue": "medium",
-                "swipe_dismiss": "medium",
                 "swipe_back": "light",
                 "long_press": "heavy",
                 "network_tap": "selection",
@@ -1790,7 +1797,7 @@ class StreamripFletApp:
             restored_path = queue[index].get("path")
             if restored_path:
                 self._extract_artwork_async(restored_path)
-                self.autoplay.adopt_anchor(restored_path)
+                self.autoplay.resume(restored_path)
 
             # Manually drive the now-playing UI since restore_queue runs
             # entirely synchronously. _set("current_path", ...) dispatches
@@ -1812,7 +1819,7 @@ class StreamripFletApp:
             # _on_position fix it once the engine reports duration.
 
             async def _delayed_refresh():
-                # 300 ms is long enough for restore_queue's _push_queue_native
+                # 300 ms is long enough for restore_queue's _push_native
                 # to have reached Dart and produced a queue list.
                 await asyncio.sleep(0.3)
                 self.safe_update(self.queue_sheet.refresh)
@@ -2085,7 +2092,7 @@ class StreamripFletApp:
                     break
             if existing_idx != -1:
                 audio_engine.play_track_at(existing_idx)
-                self.autoplay.on_user_played(target_path)
+                self.autoplay.on_user_chose(target_path)
                 return
 
         db = self.db_manager
@@ -2214,7 +2221,7 @@ class StreamripFletApp:
         # NON-DESTRUCTIVE: the tapped song plays within the FULL list; with
         # auto-play on, similar tracks are then inserted right after it.
         audio_engine.set_queue(tracks, start_index=target_idx)
-        self.autoplay.on_user_played(target_path)
+        self.autoplay.on_user_chose(target_path)
 
     def set_play_similar_mode(self, enabled: bool):
         """Auto-play on/off (UI: the chain icon in Now Playing)."""
@@ -2235,13 +2242,13 @@ class StreamripFletApp:
         if hasattr(self, "queue_sheet") and self.queue_sheet and self.queue_sheet._initialized:
             self.safe_update(self.queue_sheet.refresh)
 
-    def set_autoplay_anchor_mode(self, mode: str):
-        """UI hook: "follow" (a chosen track restarts the station; refills
-        drift along accepted tracks) or "stay" (the station keeps its anchor)."""
-        if mode not in ANCHOR_MODES:
+    def set_autoplay_variety(self, mode: str):
+        """UI hook (the Deterministic / Random pills). Switching rebuilds the
+        pending buffer as a new station from the playing track."""
+        if mode not in VARIETY_MODES:
             return
-        self.autoplay.set_anchor_mode(mode)
-        self._save_pref("autoplay_anchor", mode)
+        self.autoplay.set_variety(mode)
+        self._save_pref("autoplay_variety", mode)
 
     async def start_radio(self, path: str):
         """UI hook (long-press → Start radio): play `path` now and restart
@@ -2262,7 +2269,7 @@ class StreamripFletApp:
                 idx = audio_engine.current_index + 1 if len(audio_engine.queue) > 1 else 0
             audio_engine.play_track_at(idx)
         if self.play_similar_mode:
-            self.autoplay.restart_from(path)
+            self.autoplay.start(path)
         else:
             self.set_play_similar_mode(True)
 

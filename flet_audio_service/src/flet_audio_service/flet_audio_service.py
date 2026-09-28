@@ -60,7 +60,7 @@ class AudioServiceControl(Service):
     on_stt_result: Optional[EventHandler] = None
     on_equalizer_bands_result: Optional[EventHandler] = None
     # Internal-use event: acknowledgement that a serialized queue mutation
-    # (set_playlist / add / remove / move / skip / set_shuffle) has landed on
+    # (set_playlist / splice / move / skip / set_shuffle) has landed on
     # the Dart side. Payload: {request_id, ok, epoch, current_index, queue_len,
     # shuffle_indices?, error?}. Correlated back to a pending Future so the
     # engine can `await` a mutation and read the authoritative resulting state
@@ -341,6 +341,7 @@ class AudioServiceControl(Service):
         shuffle: Optional[bool] = None,
         epoch: Optional[int] = None,
         request_id: Optional[str] = None,
+        keep_listen: bool = False,
     ):
         """Replaces the entire playlist with a new list of tracks (in LOGICAL
         order — Dart owns any shuffling) and starts playback at start_index.
@@ -348,69 +349,34 @@ class AudioServiceControl(Service):
         skip_to_index where the seek could be clobbered by the source-load
         resetting the player to index 0. `autoplay` folds the follow-up play()
         into the same serialized op so it can't race the load. `shuffle` (when
-        given) sets the native shuffle mode atomically with the push."""
+        given) sets the native shuffle mode atomically with the push.
+        `keep_listen` tells the play ledger the item at start_index is the one
+        already playing (a repair re-push), so the reload is not logged as a
+        finished listen or an early skip."""
         await self._wait_ready()
         payload = {"items": items, "start_index": start_index, "autoplay": autoplay}
         if shuffle is not None:
             payload["shuffle"] = shuffle
+        if keep_listen:
+            payload["keep_listen"] = True
         await self._invoke_method(
             "set_playlist", self._with_meta(payload, epoch, request_id)
         )
 
-    async def add_queue_item(
+    async def splice(
         self,
-        src: str,
-        title: str,
-        artist: str,
-        album: Optional[str] = None,
-        album_art: Optional[str] = None,
-        duration_ms: Optional[int] = None,
-        index: Optional[int] = None,
+        edits: list,
         epoch: Optional[int] = None,
         request_id: Optional[str] = None,
     ):
-        """Inserts a track into the queue at the given index (appends if omitted)."""
-        await self._wait_ready()
-        payload = {
-            "src": src,
-            "title": title,
-            "artist": artist,
-            "album": album or "Unknown Album",
-            "album_art": album_art,
-            "duration_ms": duration_ms,
-        }
-        if index is not None:
-            payload["index"] = index
-        await self._invoke_method(
-            "add_queue_item", self._with_meta(payload, epoch, request_id)
-        )
-
-    async def add_queue_items(
-        self,
-        items: list,
-        epoch: Optional[int] = None,
-        request_id: Optional[str] = None,
-    ):
-        """Insert several tracks into the live queue in a single method call.
-        Each item is a dict with keys src/title/artist/album_art and an 'index'
-        giving its insertion point (computed in append order by the caller).
-        Collapses N add_queue_item IPC round-trips into one; the active source is
-        not reloaded. Used by Play Similar block-replenishment."""
+        """Apply a list of edits to the live queue as ONE serialized op with one
+        ack. Each edit is {"start", "delete_count", "items"} (items = playlist
+        dicts as for set_playlist) and is applied in order against the playlist
+        as the previous edit left it. Covers insert, remove and replace; the
+        active source is not reloaded unless an edit removes it."""
         await self._wait_ready()
         await self._invoke_method(
-            "add_queue_items", self._with_meta({"items": items}, epoch, request_id)
-        )
-
-    async def remove_queue_item(
-        self,
-        index: int,
-        epoch: Optional[int] = None,
-        request_id: Optional[str] = None,
-    ):
-        """Removes the queue item at the given index."""
-        await self._wait_ready()
-        await self._invoke_method(
-            "remove_queue_item", self._with_meta({"index": index}, epoch, request_id)
+            "splice", self._with_meta({"edits": edits}, epoch, request_id)
         )
 
     async def move_queue_item(
@@ -444,24 +410,6 @@ class AudioServiceControl(Service):
         await self._wait_ready()
         await self._invoke_method(
             "set_shuffle", self._with_meta({"enabled": enabled}, epoch, request_id)
-        )
-
-    async def skip_to_next(
-        self, epoch: Optional[int] = None, request_id: Optional[str] = None
-    ):
-        """Skips to the next track in the queue (shuffle-aware on the Dart side)."""
-        await self._wait_ready()
-        await self._invoke_method(
-            "skip_to_next", self._with_meta({}, epoch, request_id)
-        )
-
-    async def skip_to_previous(
-        self, epoch: Optional[int] = None, request_id: Optional[str] = None
-    ):
-        """Skips to the previous track in the queue (shuffle-aware on the Dart side)."""
-        await self._wait_ready()
-        await self._invoke_method(
-            "skip_to_previous", self._with_meta({}, epoch, request_id)
         )
 
     async def skip_to_index(

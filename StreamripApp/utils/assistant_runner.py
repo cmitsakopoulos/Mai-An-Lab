@@ -1858,10 +1858,7 @@ class AssistantRunner:
  
         avoid = await self._avoid_set()
         avoid.add(seed_path)
-        
-        # Save the original seed track on the engine for subsequent continuation walks
-        self.engine.play_similar_seed_path = seed_path
- 
+
         # Seed-anchored similarity queue over the acoustic graph: the library
         # ranked by proximity to the seed, gated by metadata, repeat-capped.
         try:
@@ -1906,10 +1903,11 @@ class AssistantRunner:
         seed_name = f"'{seed_row.get('title')}' by {seed_row.get('artist')}" if seed_row else "the active track"
 
         if is_queue and self.engine.queue:
+            # One mutation, one native op (not one per track).
+            self.engine.queue_extend(engine_tracks)
             for t in engine_tracks:
-                self.engine.queue_last(t)
                 self._remember(t["path"], seed_path=seed_path)
-                added += 1
+            added = len(engine_tracks)
             return AssistantResponse(
                 spoken=f"I've added {added} tracks similar to {seed_name} to the queue.",
                 displayed=(

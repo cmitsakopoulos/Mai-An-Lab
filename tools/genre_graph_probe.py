@@ -1,8 +1,8 @@
 """Read-only validation of utils.genre_graph against a real library image.
 
 Loads Zr coords + per-track genre/country straight from a library.db, runs the
-production `build_genre_graph`, and prints the regional-aware node sizes, the
-PAGA adjacency, and a few example journey queues. This is the productionised
+production `build_genre_graph`, and prints the culture-aware node sizes, the
+bridge-artist adjacency, and a few example journey queues. This is the productionised
 form of the ad-hoc scratchpad probe: it exercises the SHIPPING code paths, so a
 divergence here is a regression, not a probe artifact.
 
@@ -29,7 +29,7 @@ def load(db_path):
     c = sqlite3.connect(db_path)
     rows = c.execute(
         """
-        SELECT t.path, pc.pca_coords, t.title, ar.name AS artist,
+        SELECT t.path, pc.pca_coords, t.title, ar.name AS artist, al.title AS album,
                ae.genres AS genres, ae.country AS country
         FROM tracks t
         JOIN play_counts pc ON pc.track_path = t.path AND pc.pca_coords IS NOT NULL
@@ -39,7 +39,7 @@ def load(db_path):
         """
     ).fetchall()
     X, meta, titles, artists = [], [], [], []
-    for path, blob, title, artist, genres, country in rows:
+    for path, blob, title, artist, album, genres, country in rows:
         X.append(np.frombuffer(blob, dtype=np.float32))
         toks = set()
         if genres:
@@ -50,7 +50,8 @@ def load(db_path):
                         toks.add(tk)
             except Exception:
                 pass
-        meta.append({"genres": toks, "country": country})
+        meta.append({"genres": toks, "country": country, "artist": artist,
+                     "names": (artist, album, title)})
         titles.append(title or "?")
         artists.append(artist or "?")
     X = np.vstack(X).astype(np.float32)
@@ -60,23 +61,25 @@ def load(db_path):
 
 def main(db_path):
     X_unit, meta, titles, artists = load(db_path)
-    g = gg.build_genre_graph(X_unit, meta, k=15, min_size=10, min_lift=1.0)
+    g = gg.build_genre_graph(X_unit, meta, k=15, min_size=10)
     nodes = g["nodes"]
     N = len(nodes)
     n_inf = sum(g["inferred"])
     print(f"tracks={N}  Zr-dim={X_unit.shape[1]}  inferred-by-propagation={n_inf} "
           f"({100*n_inf/N:.1f}%)")
 
-    print("\nnode sizes (regional-aware, post-propagation):")
+    print("\nnode sizes (culture-aware, post-propagation):")
     for node, sz in g["sizes"].most_common():
         star = "  <- had inferred members" if any(
             g["inferred"][i] and nodes[i] == node for i in range(N)
         ) else ""
         print(f"  {node:16s} {sz:5d}{star}")
 
-    print("\nPAGA adjacency (node -> top neighbours by lift, size>=10):")
+    print("\nbridge adjacency (node -> exits by lift [bridge artists], size>=10):")
     for node in g["adj"]:
-        top = ", ".join(f"{b}({l:.2f})" for b, l in g["adj"][node][:3]) or "(no real exit -> radius)"
+        top = ", ".join(
+            f"{b}({l:.2f}) [{', '.join(g['via'][(node, b)][:3])}]" for b, l in g["adj"][node]
+        ) or "(no exit: stays in its genre)"
         print(f"  {node:16s} -> {top}")
 
     # example journeys from the most-central seed of a few well-populated nodes
@@ -96,7 +99,12 @@ def main(db_path):
         si = central(node)
         if si is None:
             continue
-        out = gg.journey(si, X_unit, nodes, g["adj"], length=8, hops=1)
+        journey = gg.Journey(
+            si, X_unit, nodes, g["adj"], leg_len=4,
+            artist_keys=[frozenset({a}) for a in artists],
+            via={pair: frozenset(names) for pair, names in g["via"].items()},
+        )
+        out = [si] + journey.take(7)
         print(f"\n--- JOURNEY  seed node = {node} ---")
         for k, i in enumerate(out):
             tag = "SEED" if i == si else "    "

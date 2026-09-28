@@ -9,21 +9,22 @@ parked as Phase 6 idea 1.
 Grounding (validated read-only on the 1153-track device image; the productionised
 probe is `tools/genre_graph_probe.py`):
 
-  • Genres are NODES. A node is a coarse family (`genre_taxonomy`) optionally
-    split by country for regional scenes — "Hip-Hop" vs "Hip-Hop·GR" — because
-    the coarse family alone conflates Greek laiko/rap with their Western
-    namesakes and produced culturally-incoherent transitions (Vasilis Karras →
-    Max Richter). Country split is the cheap "regional nodes" the plan called
-    for; the finer laiko/rebetiko tag split is workbench labour.
+  • Genres are NODES. A node is a coarse family (`genre_taxonomy`) split by
+    CULTURE for regional scenes — "Hip-Hop" vs "Hip-Hop·GR" — because the
+    coarse family alone conflates Greek laiko/rap with their Western namesakes
+    and produced culturally-incoherent transitions (Vasilis Karras → Max
+    Richter). Culture comes from country, scene tags or the script of the
+    artist / album / track names (`track_culture`), per artist.
 
-  • Adjacency is PAGA connectivity, NOT centroid distance: two nodes are
-    adjacent iff their tracks actually neighbour each other in the acoustic kNN
-    graph (boundary overlap), scored as a lift over chance. Centroid cosine
-    happened to agree on the device image, but it cannot represent the
-    multi-modal Folk/Cntry node (laiko + Western folk are two blobs whose mean
-    is meaningless) and it does not hand you the interface tracks the traversal
-    needs. Recorded: the timbre-bridge worry did NOT materialise here — Metal↔
-    Hip-Hop lift is 0.17, they avoid each other.
+  • Adjacency is BRIDGE ARTISTS, not acoustics: two nodes are adjacent when at
+    least `min_bridges` of the library's artists carry both genres in their own
+    tags (Alice In Chains: Rock + Metal; Depeche Mode: Alt + Electronic + Pop),
+    scored as a lift over chance. Nodes of different cultures are never
+    adjacent. The acoustic kNN lift this replaced (2026-09-28, 474-track device
+    image) was artist-dominated — Metal, Alt and Rock·GR had no exit at all — and
+    on nodes of 10–22 tracks a couple of kNN edges produced the Classical → Pop
+    → laiko chain. Acoustics still order the tracks inside a leg and pick which
+    bridge track carries a hop.
 
   • Untagged tracks (17% of the image, 81% Greek rap) are placed by kNN
     label-propagation, so they stop being a phantom "(untagged)" node and can
@@ -36,19 +37,22 @@ persistence live in `track_graph`.
 """
 from __future__ import annotations
 
+import math
 import random
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 from collections.abc import Mapping
 from typing import Optional, Sequence
 
 import numpy as np
 
-from utils.genre_taxonomy import _GENRE_RULES, NON_FAMILIES, genre_bucket
+from utils.genre_taxonomy import (
+    _GENRE_RULES, CULTURE_WORDS, NON_FAMILIES, genre_bucket, script_culture, tag_culture,
+)
 
-# Countries whose scene is culturally distinct enough to warrant its own node
-# per coarse family. GR is the demonstrated pain point (60% of the Greek
-# catalogue is untagged and its laiko/rap collide with Western families under a
-# shared bucket). Extend as other regional catalogues grow.
+# Cultures distinct enough to warrant their own node per coarse family, and a
+# hard boundary for the journey. GR is the demonstrated pain point (its
+# laiko/rap collide with Western families under a shared bucket). Extend as
+# other regional catalogues grow (with scripts / scene tags in genre_taxonomy).
 REGIONAL_COUNTRIES = frozenset({"GR"})
 
 # Taxonomy priority: rarer / more-specific families first, so a track tagged both
@@ -83,6 +87,8 @@ def primary_family(genres) -> Optional[str]:
         items = [(t, 1.0) for t in (genres or ())]
     weights: dict[str, float] = defaultdict(float)
     for tok, w in items:
+        if _is_culture_word(tok):
+            continue
         fam = genre_bucket(tok)
         if fam not in NON_FAMILIES:
             weights[fam] += float(w)
@@ -95,18 +101,72 @@ def primary_family(genres) -> Optional[str]:
     )
 
 
-def node_label(
-    family: Optional[str],
+def _is_culture_word(tok) -> bool:
+    return "".join(ch for ch in str(tok).lower() if ch.isalnum()) in CULTURE_WORDS
+
+
+def artist_families(genres) -> set[str]:
+    """Every coarse family an artist's own tags name — the bridge evidence. Two
+    thirds of the device image's tagged artists span ≥ 2 families."""
+    out = set()
+    for tok in genres or ():
+        if _is_culture_word(tok):
+            continue
+        fam = genre_bucket(tok)
+        if fam not in NON_FAMILIES:
+            out.add(fam)
+    return out
+
+
+def track_culture(
     country: Optional[str],
+    genres=(),
+    names=(),
     regional: frozenset = REGIONAL_COUNTRIES,
 ) -> Optional[str]:
-    """Node id for a track: the family, suffixed with country for regional
-    scenes ("Hip-Hop·GR"). A None family stays None so the caller propagates it
-    before it is ever turned into a node."""
+    """The regional culture a track belongs to, or None (the borderless
+    majority). Any one signal is enough: the enrichment country, a scene tag
+    ('laiko'), or names written in the culture's script. Country comes first but
+    does not veto the others — it is missing or wrong (a short name matched to
+    the wrong MusicBrainz entity) exactly for the local acts this protects."""
+    c = (country or "").strip().upper()
+    if c in regional:
+        return c
+    for tok in genres or ():
+        cu = tag_culture(tok)
+        if cu in regional:
+            return cu
+    cu = script_culture(*names)
+    return cu if cu in regional else None
+
+
+def node_label(family: Optional[str], culture: Optional[str] = None) -> Optional[str]:
+    """Node id: the family, suffixed with a regional culture ("Hip-Hop·GR"). A
+    None family stays None so the caller propagates it before it is ever turned
+    into a node."""
     if not family:
         return None
-    c = (country or "").strip().upper()
-    return f"{family}{NODE_SEP}{c}" if c in regional else family
+    c = (culture or "").strip().upper()
+    return f"{family}{NODE_SEP}{c}" if c else family
+
+
+# Display names for culture suffixes.
+CULTURE_NAMES = {"GR": "Greek"}
+
+
+def node_display(node: Optional[str]) -> str:
+    """Human label for a node id: "Folk/Cntry·GR" → "Greek Folk/Cntry"."""
+    if not node:
+        return ""
+    fam, _, culture = node.partition(NODE_SEP)
+    return f"{CULTURE_NAMES.get(culture, culture)} {fam}" if culture else fam
+
+
+def node_culture(node: Optional[str]) -> Optional[str]:
+    """The culture suffix of a node id (None for a borderless node)."""
+    if not node or NODE_SEP not in node:
+        return None
+    return node.split(NODE_SEP, 1)[1] or None
 
 
 # ── Acoustic kNN (block-chunked; never materialises N×N) ─────────────────────
@@ -176,221 +236,402 @@ def propagate_families(
     return filled, inferred, conf
 
 
-# ── PAGA connectivity ────────────────────────────────────────────────────────
+# ── Bridge-artist adjacency ──────────────────────────────────────────────────
 
-def paga_connectivity(nodes: Sequence[str], knn: np.ndarray):
-    """Symmetric lift-over-chance between nodes from kNN edge crossing.
+# Edges need this many bridge artists; one artist's tags are too noisy on their
+# own (Nickelback's span five families). A node with fewer than
+# MIN_NODE_ARTISTS artists can't meet that bar however related it is — a genre
+# the listener owns one artist of — so there one bridge is enough.
+MIN_BRIDGES = 2
+MIN_NODE_ARTISTS = 3
+# Below half of chance, two bridge artists are what two big families share by
+# accident — crossover acts and stray tags (on the device image: Hip-Hop's only
+# ties were Limp Bizkit / Linkin Park at 0.4, Rock–Electronic was Nickelback's
+# stray 'electronic' at 0.24), not a neighbourhood. Real but hub-diluted ties
+# clear it (Alt–Electronic via Depeche Mode / New Order, 0.62).
+MIN_LIFT = 0.5
 
-    lift[a, b] > 1  ⇒ a and b's tracks neighbour each other more than a random
-    graph of the same node sizes would predict — they touch / are adjacent.
-    < 1 ⇒ they avoid. Returns (node_order, idx, lift, sizes)."""
-    N, k = knn.shape
+
+def bridge_adjacency(
+    nodes: Sequence[str],
+    track_artists: Sequence[str],
+    memberships: Mapping[str, set],
+    *,
+    min_size: int = 10,
+    min_bridges: int = MIN_BRIDGES,
+    min_node_artists: int = MIN_NODE_ARTISTS,
+    min_lift: float = MIN_LIFT,
+):
+    """Adjacency between nodes of ≥ `min_size` tracks from the artists they
+    share. `memberships[artist]` is every node the artist belongs to — where its
+    tracks sit plus every family its tags name, in its own culture.
+
+    Returns (adj, via): adj[node] = [(node, lift), ...] strongest first, and
+    via[(a, b)] = the bridge artists (sorted). Lift is shared artists over what
+    chance predicts from both nodes' artist counts, so a hub like Rock (half the
+    library's artists carry a rock tag) doesn't outrank a specific tie. Nodes of
+    different cultures are never adjacent.
+
+    An edge that only exists through the small-node allowance is ONE-WAY, out of
+    the small node: it is there so a genre the listener owns one artist of is
+    not a dead end, and a single artist's lift is huge by construction — two-way,
+    every Electronic station would hop into Max Richter."""
     sizes = Counter(nodes)
-    order = [n for n, _ in sizes.most_common()]
-    idx = {n: i for i, n in enumerate(order)}
-    M = len(order)
-    lab = np.array([idx[n] for n in nodes])
-    src = np.repeat(lab, k)
-    dst = lab[knn.reshape(-1)]
-    obs = np.zeros((M, M))
-    np.add.at(obs, (src, dst), 1.0)
-    sz = np.array([sizes[n] for n in order], dtype=float)
-    exp = (sz[:, None] * k) * (sz[None, :] / (N - 1))
-    obs_s, exp_s = obs + obs.T, exp + exp.T
-    with np.errstate(divide="ignore", invalid="ignore"):
-        lift = np.where(exp_s > 0, obs_s / exp_s, 0.0)
-    return order, idx, lift, sizes
-
-
-def adjacency(order, idx, lift, sizes, min_size: int = 10, min_lift: float = 1.0):
-    """Per node (with ≥ min_size tracks), its other ≥ min_size nodes ranked by
-    connectivity, keeping only genuine adjacencies (lift ≥ min_lift). Tail nodes
-    get no edges — their tracks fall back to a pure radius, which is the honest
-    behaviour for a genre with no real neighbour (e.g. an insular Hip-Hop
-    majority whose best exit is below chance)."""
-    big = [n for n in order if sizes[n] >= min_size]
-    adj: dict[str, list[tuple[str, float]]] = {}
-    for a in big:
-        ia = idx[a]
-        ranked = sorted(
-            ((float(lift[ia, idx[b]]), b) for b in big if b != a), reverse=True
-        )
-        adj[a] = [(b, l) for l, b in ranked if l >= min_lift]
-    return adj
+    big = sorted(n for n, c in sizes.items() if c >= min_size and n != UNKNOWN_NODE)
+    home: dict[str, set] = defaultdict(set)
+    for n, a in zip(nodes, track_artists):
+        home[n].add(a)
+    members: dict[str, set] = defaultdict(set)
+    population: Counter = Counter()
+    for a, ns in memberships.items():
+        for n in ns:
+            members[n].add(a)
+        for c in {node_culture(n) for n in ns}:
+            population[c] += 1
+    adj: dict[str, list[tuple[str, float]]] = {n: [] for n in big}
+    via: dict[tuple[str, str], list[str]] = {}
+    for i, a in enumerate(big):
+        for b in big[i + 1:]:
+            culture = node_culture(a)
+            if culture != node_culture(b):
+                continue
+            shared = members[a] & members[b]
+            if not shared:
+                continue
+            lift = len(shared) * population[culture] / (len(members[a]) * len(members[b]))
+            if lift < min_lift:
+                continue
+            if len(shared) >= min_bridges:
+                ways = ((a, b), (b, a))
+            else:
+                ways = tuple((x, y) for x, y in ((a, b), (b, a))
+                             if len(home[x]) < min_node_artists)
+            for x, y in ways:
+                adj[x].append((y, lift))
+                via[(x, y)] = sorted(shared)
+    for n in adj:
+        adj[n].sort(key=lambda e: (-e[1], e[0]))
+    return adj, via
 
 
 # ── Journey traversal ────────────────────────────────────────────────────────
 
-def _split(total: int, parts: int) -> list[int]:
-    base, rem = divmod(total, parts)
-    return [base + (1 if i < rem else 0) for i in range(parts)]
+# Rank-sampling strength for a random station: pick the k-th best admissible
+# candidate with P(k) ∝ RANK_DECAY**k. Measured on the 474-track device image
+# (2026-09-28): 0.6 makes two stations from one seed share ~40% of tracks for a
+# 4% drop in similarity to the leg reference; 0.8 costs 14% for ~8 points more
+# variety, and uniform sampling ruins the queue. Sampling by RANK, not score, is
+# deliberate: near the top the cosines are nearly equal, so a score temperature
+# collapsed to "uniform over the top ~6" at every setting (the old walk slider).
+RANK_DECAY = 0.6
+# How many admissible candidates a random pick looks at. P(k ≥ 16) at 0.6 is
+# 0.03%, so the truncation is invisible while bounding the scan.
+_LOOKAHEAD = 16
 
 
-def _choose_next(current, adj, visited, rng, jump_temp):
-    """Pick the node to jump to. Deterministic argmax when rng is None; otherwise
-    softmax-sample over log-lift / temperature so repeat presses vary without
-    abandoning the ranking. Never revisits a node already in the journey."""
-    cand = [(b, l) for b, l in adj.get(current, []) if b not in visited]
-    if not cand:
+def rank_pick(n: int, rng, decay: float = RANK_DECAY) -> int:
+    """Index into a best-first list of `n` candidates: 0 without an `rng`, else
+    k with P(k) ∝ decay**k (a geometric draw, truncated to the list)."""
+    if rng is None or n <= 1 or not 0.0 < decay < 1.0:
+        return 0
+    r = rng.random() * (1.0 - decay ** n)
+    k = int(math.floor(math.log(1.0 - r) / math.log(decay)))
+    return min(max(k, 0), n - 1)
+
+
+class RollingCaps:
+    """Repeat limits over the last `window` emitted tracks (0 = the whole run):
+    at most `max_per_artist` per act and `max_per_album` per release. Artists
+    are credit-key sets, so a collab counts against every act it names. Acts in
+    `banned` never pass. A limit of 0 disables it.
+
+    Same-artist runs across albums are wanted (a refreshing slice of a
+    discography); what the album limit prevents is a walk stuck inside one
+    release. The window keeps a long station from locking an act out for good."""
+
+    def __init__(self, max_per_artist: int = 0, max_per_album: int = 0, window: int = 0):
+        self.max_per_artist = max_per_artist
+        self.max_per_album = max_per_album
+        self._recent: Optional[deque] = deque() if window > 0 else None
+        self._window = window
+        self._artists: Counter = Counter()
+        self._albums: Counter = Counter()
+        self.banned: set = set()
+
+    def ok(self, keys, album) -> bool:
+        keys = keys or ()
+        if self.banned and any(k in self.banned for k in keys):
+            return False
+        if self.max_per_artist > 0 and any(
+            self._artists[k] >= self.max_per_artist for k in keys
+        ):
+            return False
+        if self.max_per_album > 0 and album and self._albums[album] >= self.max_per_album:
+            return False
+        return True
+
+    def add(self, keys, album) -> None:
+        keys = tuple(keys or ())
+        if self._recent is not None:
+            if len(self._recent) >= self._window:
+                old_keys, old_album = self._recent.popleft()
+                for k in old_keys:
+                    self._artists[k] -= 1
+                if old_album:
+                    self._albums[old_album] -= 1
+            self._recent.append((keys, album))
+        for k in keys:
+            self._artists[k] += 1
+        if album:
+            self._albums[album] += 1
+
+
+def _choose(options, rng, jump_temp):
+    """Pick one of `options` [(node, score), ...] (best first). Deterministic
+    argmax when rng is None; otherwise softmax-sample over log-score /
+    temperature, so stations vary without abandoning the ranking."""
+    if not options:
         return None
     if rng is None or jump_temp <= 0:
-        return cand[0][0]
-    lifts = np.array([l for _, l in cand], dtype=float)
-    w = np.exp(np.log(np.maximum(lifts, 1e-6)) / jump_temp)
+        return options[0][0]
+    scores = np.array([sc for _, sc in options], dtype=float)
+    w = np.exp(np.log(np.maximum(scores, 1e-6)) / jump_temp)
     w /= w.sum()
     r = rng.random()
     cum = 0.0
-    for (b, _), wi in zip(cand, w):
+    for (b, _), wi in zip(options, w):
         cum += float(wi)
         if r <= cum:
             return b
-    return cand[-1][0]
+    return options[-1][0]
 
 
-def _fill_leg(ref, X_unit, nodes, node, used, want, cap_ok):
-    """Emit up to `want` unused tracks nearest to `ref`, restricted to `node`
-    (None = any node, the radius fallback). A track the cap rejects is skipped
-    and permanently excluded — over-cap means never-reconsider, so the leg can't
-    stall on a dominant artist. `cap_ok` commits the cap counters on accept."""
-    if want <= 0:
-        return []
-    order = np.argsort(-(X_unit @ X_unit[ref]))
-    out = []
-    for j in order:
-        j = int(j)
-        if j in used or (node is not None and nodes[j] != node):
-            continue
-        if not cap_ok(j):
-            used.add(j)
-            continue
-        out.append(j)
-        used.add(j)
-        if len(out) >= want:
-            break
-    return out
+# How many tracks after a hop (the bridge included) are blamed on the hop when
+# the listener rejects them.
+HOP_WINDOW = 3
+# Floor on the entry fit, so an exit whose best entry is acoustically far (or
+# repelled below zero) stays possible, just unlikely.
+_MIN_FIT = 0.05
 
 
-def _pick_bridge(ref, X_unit, nodes, node, used, rng, pool, cap_ok):
-    """The interface track: among the `pool` members of `node` nearest to `ref`,
-    the one that passes the cap — nearest-first when deterministic, shuffled when
-    an rng is given (stochastic entry, the anti-repetition knob). Enters B near
-    where A was left."""
-    cands = []
-    for j in np.argsort(-(X_unit @ X_unit[ref])):
-        j = int(j)
-        if j in used or nodes[j] != node:
-            continue
-        cands.append(j)
-        if len(cands) >= max(pool, 1):
-            break
-    if rng is not None and len(cands) > 1:
-        rng.shuffle(cands)
-    for j in cands:
-        if cap_ok(j):
-            used.add(j)
-            return j
-        used.add(j)
-    return None
+class Journey:
+    """A resumable traversal of the genre-adjacency graph: legs of `leg_len`
+    tracks inside one node, each ranked by proximity to the leg's reference
+    track, then a hop into an adjacent node through a BRIDGE track — by an
+    artist whose tags span both genres (`via`), nearest where the last leg
+    ended; failing that, the target node's own track nearest there.
 
+    Resumable is the point: an auto-play station calls `take()` for each refill
+    and continues where it left off — same node, same leg, nothing emitted twice
+    — instead of re-walking from the seed (which re-queued the tracks a user had
+    just removed). `end_leg()` is the negative-feedback hook: the next take hops
+    on and steers AWAY from the rejected tracks (`repel`).
 
-def journey(
-    seed_idx: int,
-    X_unit: np.ndarray,
-    nodes: Sequence[str],
-    adj: dict,
-    *,
-    length: int = 10,
-    hops: int = 1,
-    rng: Optional[random.Random] = None,
-    jump_temp: float = 0.5,
-    pool: int = 3,
-    exclude: Optional[set] = None,
-    artist_keys: Optional[Sequence] = None,
-    album_keys: Optional[Sequence] = None,
-    max_per_artist: int = 0,
-    max_per_album: int = 0,
-) -> list[int]:
-    """An ordered list of track indices that starts at the seed, fills a leg
-    within the seed's node (radius), then hops into an adjacent node *through its
-    interface* (the member nearest the last track — "leave A near B, enter B near
-    A") and fills a leg there.
+    Deterministic without an `rng` (nearest first, strongest adjacency, nearest
+    entry). With one: rank sampling inside legs (`rank_pick`), a lift-weighted
+    jump, and a shuffled entry among the `pool` nearest interface tracks.
 
-    `length` (including the seed at index 0) is split evenly across `hops + 1`
-    legs. `rng` makes the jump target and interface entry stochastic — the fix
-    for deterministic, repetitive queues; pass None for a reproducible walk.
+    Which hop: every admissible exit is scored by its lift × the listener's
+    weight × how near its best entry track sits to where the leg ended (the
+    genre graph says WHERE a station may go, acoustics say which of those fits
+    now — a Depeche Mode leg in Alt leaves for Rock through A Flock Of Seagulls,
+    not for Metal through Alice In Chains).
 
-    Repeat caps are enforced *during* selection (not as a post-filter, which
-    would truncate a leg): give `artist_keys[i]` (a frozenset of credit keys)
-    and/or `album_keys[i]` aligned to the rows, plus the max counts. The seed is
-    not counted, matching the radius walk's "cap the emitted queue, seed
-    excluded" contract.
+    A node with no admissible exit keeps going in a fresh leg of its own; one
+    that is exhausted pads from its adjacent nodes first, then from anywhere in
+    its culture, so a take only returns short when that is used up. Nodes
+    visited in the last `revisit_after` legs are not jumped back to.
 
-    Degrades to a pure radius whenever a node has no admissible adjacency or runs
-    out of members, so it never returns short by construction."""
-    used = set(exclude or ())
-    used.add(seed_idx)
-    artist_hits: dict = {}
-    album_hits: dict = {}
+    Learned hop penalties: `hop_weights[(a, b)]` scales that hop (0 blocks it),
+    and `hop_of[track]` names the hop a track came in on for the first
+    `hop_window` tracks after it — what a rejection of that track is blamed
+    on."""
 
-    def cap_ok(j: int) -> bool:
-        keys = artist_keys[j] if artist_keys is not None else ()
-        if max_per_artist > 0 and keys and any(
-            artist_hits.get(k, 0) >= max_per_artist for k in keys
-        ):
-            return False
-        alb = album_keys[j] if album_keys is not None else None
-        if max_per_album > 0 and alb and album_hits.get(alb, 0) >= max_per_album:
-            return False
-        for k in keys:
-            artist_hits[k] = artist_hits.get(k, 0) + 1
-        if alb:
-            album_hits[alb] = album_hits.get(alb, 0) + 1
-        return True
+    def __init__(
+        self,
+        seed_idx: int,
+        X_unit: np.ndarray,
+        nodes: Sequence[str],
+        adj: dict,
+        *,
+        exclude=(),
+        artist_keys: Optional[Sequence] = None,
+        album_keys: Optional[Sequence] = None,
+        caps: Optional[RollingCaps] = None,
+        rng: Optional[random.Random] = None,
+        decay: float = RANK_DECAY,
+        jump_temp: float = 0.5,
+        pool: int = 3,
+        leg_len: int = 8,
+        repel: float = 0.5,
+        revisit_after: int = 3,
+        via: Optional[Mapping] = None,
+        hop_weights: Optional[Mapping] = None,
+        hop_window: int = HOP_WINDOW,
+    ):
+        self.X = X_unit
+        self.nodes = nodes
+        self.adj = adj
+        self.artist_keys = artist_keys
+        self.album_keys = album_keys
+        self.caps = caps or RollingCaps()
+        self.rng = rng
+        self.decay = decay
+        self.jump_temp = jump_temp
+        self.pool = pool
+        self.leg_len = max(1, leg_len)
+        self.repel = repel
+        self.used: set = set(exclude)
+        self.used.add(seed_idx)
+        self.node = nodes[seed_idx]
+        self.ref = seed_idx          # what the current leg is ranked against
+        self._last = seed_idx        # the most recently emitted track
+        self._leg_n = 0
+        self._recent_nodes: deque = deque([self.node], maxlen=max(1, revisit_after))
+        self._rejected: deque = deque(maxlen=8)
+        self.via = via or {}                     # (a, b) -> bridge artists' keys
+        self.hop_weights: dict = dict(hop_weights or {})
+        self.hop_window = hop_window
+        self.hop_of: dict[int, tuple[str, str]] = {}
+        self._hop: Optional[tuple[str, str]] = None
+        self._hop_left = 0
 
-    result = [seed_idx]
-    ref = seed_idx
-    current = nodes[seed_idx]
-    visited = {current}
-    legs = _split(length, hops + 1)
+    # ── public ──────────────────────────────────────────────────────────────
+    def take(self, n: int) -> list[int]:
+        out: list[int] = []
+        while len(out) < n:
+            if self._leg_n >= self.leg_len:
+                bridge = self._next_leg()
+                if bridge is not None:
+                    out.append(bridge)
+                    continue
+            j = self._pick(self._in_node)
+            if j is None:
+                # The node is used up (for now — rolling caps may free it later).
+                bridge = self._next_leg()
+                if bridge is not None:
+                    out.append(bridge)
+                    continue
+                near = {b for b, _ in self.adj.get(self.node, [])
+                        if self.hop_weights.get((self.node, b), 1.0) > 0}
+                j = self._pick(lambda k: self.nodes[k] in near)
+                if j is None:
+                    culture = node_culture(self.node)
+                    j = self._pick(lambda k: node_culture(self.nodes[k]) == culture)
+                if j is None:
+                    break
+            self._emit(j)
+            out.append(j)
+        return out
 
-    result += _fill_leg(ref, X_unit, nodes, current, used, legs[0] - 1, cap_ok)
-    if len(result) > 1:
-        ref = result[-1]
+    def end_leg(self, reject: Sequence[int] = ()) -> None:
+        """Negative feedback: remember `reject` (every later ranking is pushed
+        away from them) and make the next take start a new leg."""
+        for j in reject:
+            self._rejected.append(int(j))
+            self.used.add(int(j))
+        self._leg_n = self.leg_len
 
-    for h in range(hops):
-        if len(result) >= length:
-            break
-        want = legs[h + 1]
-        nxt = _choose_next(current, adj, visited, rng, jump_temp)
-        if nxt is None:
-            # No admissible adjacency: extend the radius WITHIN the current node
-            # (more of the seed's own genre) rather than filling from ANY node.
-            # A pure-cosine fill across all nodes is exactly the leak that lets an
-            # acoustically-close but unrelated genre (the Hip-Hop→Electronic
-            # timbre bridge) ride into the queue. Only pad from outside the node
-            # if the node itself is exhausted, so the length guarantee still holds.
-            more = _fill_leg(ref, X_unit, nodes, current, used, want, cap_ok)
-            if len(more) < want:
-                more += _fill_leg(
-                    ref, X_unit, nodes, None, used, want - len(more), cap_ok
-                )
-            result += more
-            if more:
-                ref = result[-1]
-            continue
-        bridge = _pick_bridge(ref, X_unit, nodes, nxt, used, rng, pool, cap_ok)
-        visited.add(nxt)
-        current = nxt
-        if bridge is None:
-            continue
-        result.append(bridge)
-        ref = bridge
-        rest = _fill_leg(ref, X_unit, nodes, nxt, used, want - 1, cap_ok)
-        result += rest
-        if rest:
-            ref = result[-1]
+    def exclude(self, idxs) -> None:
+        self.used.update(int(j) for j in idxs)
 
-    return result[:length]
+    def weight_hop(self, src: str, dst: str, weight: float) -> None:
+        """Scale the src → dst hop from now on (0 = never take it)."""
+        self.hop_weights[(src, dst)] = weight
+
+    def accept(self, idx: int) -> None:
+        """A track listened through: if it belongs to the current leg's node it
+        becomes the leg's reference, so the station drifts only along songs the
+        listener accepted."""
+        if 0 <= idx < len(self.nodes) and self.nodes[idx] == self.node:
+            self.ref = idx
+
+    # ── internals ───────────────────────────────────────────────────────────
+    def _in_node(self, j: int) -> bool:
+        return self.nodes[j] == self.node
+
+    def _keys(self, j: int):
+        return self.artist_keys[j] if self.artist_keys is not None else frozenset()
+
+    def _album(self, j: int):
+        return self.album_keys[j] if self.album_keys is not None else None
+
+    def _scores(self, ref: int) -> np.ndarray:
+        s = self.X @ self.X[ref]
+        if self._rejected and self.repel > 0:
+            s = s - self.repel * (self.X @ self.X[list(self._rejected)].T).max(axis=1)
+        return s
+
+    def _candidates(self, ref: int, admit, limit: int) -> list[int]:
+        out = []
+        for j in np.argsort(-self._scores(ref)):
+            j = int(j)
+            if j in self.used or not admit(j):
+                continue
+            if not self.caps.ok(self._keys(j), self._album(j)):
+                continue
+            out.append(j)
+            if len(out) >= limit:
+                break
+        return out
+
+    def _pick(self, admit) -> Optional[int]:
+        limit = 1 if self.rng is None else _LOOKAHEAD
+        cands = self._candidates(self.ref, admit, limit)
+        if not cands:
+            return None
+        return cands[rank_pick(len(cands), self.rng, self.decay)]
+
+    def _emit(self, j: int) -> None:
+        self.used.add(j)
+        self.caps.add(self._keys(j), self._album(j))
+        self._last = j
+        self._leg_n += 1
+        if self._hop is not None and self._hop_left > 0:
+            self.hop_of[j] = self._hop
+            self._hop_left -= 1
+
+    def _entries(self, b: str) -> list[int]:
+        """The nearest tracks (to where the leg ended) that can carry a hop into
+        `b`: by one of the hop's bridge artists, else `b`'s own."""
+        pool = max(self.pool, 1)
+        keys = self.via.get((self.node, b))
+        cands = []
+        if keys:
+            cands = self._candidates(self._last, lambda j: not keys.isdisjoint(self._keys(j)), pool)
+        return cands or self._candidates(self._last, lambda j: self.nodes[j] == b, pool)
+
+    def _next_leg(self) -> Optional[int]:
+        """Start a new leg. Hops to an adjacent node when one is admissible and
+        has an entry track (returns the emitted bridge); otherwise stays in this
+        node, re-anchored on the last track (returns None)."""
+        self._leg_n = 0
+        self._hop = None
+        scores = self._scores(self._last)
+        options, entries = [], {}
+        for b, lift in self.adj.get(self.node, []):
+            w = self.hop_weights.get((self.node, b), 1.0)
+            if b in self._recent_nodes or w <= 0:
+                continue
+            cands = self._entries(b)
+            if cands:
+                entries[b] = cands
+                options.append((b, lift * w * max(float(scores[cands[0]]), _MIN_FIT)))
+        options.sort(key=lambda e: -e[1])
+        nxt = _choose(options, self.rng, self.jump_temp)
+        if nxt is not None:
+            cands = entries[nxt]
+            if self.rng is not None:
+                self.rng.shuffle(cands)
+            bridge = cands[0]
+            self._hop, self._hop_left = (self.node, nxt), self.hop_window
+            self.node = nxt
+            self._recent_nodes.append(nxt)
+            self.ref = bridge
+            self._emit(bridge)
+            return bridge
+        self.ref = self._last
+        return None
 
 
 # ── One-shot build (the cacheable payload) ───────────────────────────────────
@@ -402,35 +643,59 @@ def build_genre_graph(
     k: int = 15,
     regional: frozenset = REGIONAL_COUNTRIES,
     min_size: int = 10,
-    min_lift: float = 1.0,
+    min_bridges: int = MIN_BRIDGES,
+    min_node_artists: int = MIN_NODE_ARTISTS,
     min_conf: float = 0.0,
 ):
     """Assemble the journey scaffolding from L2-normalised coords + per-track
-    metadata. `meta[i]` is `{'genres': <tokens>, 'country': <str>}` aligned to
-    the rows of `X_unit`. Returns a dict:
+    metadata. `meta[i]` is `{'genres': <tokens>, 'country': <str>, 'artist':
+    <str>, 'names': (artist, album, title)}` aligned to the rows of `X_unit`;
+    genres and country are artist-level (enrichment). Returns a dict:
 
         nodes       list[str]  per track, post-propagation (never None)
         inferred    list[bool] which node labels came from propagation
         adj         dict       node -> [(node, lift), ...] adjacency
-        order/idx/lift/sizes   the raw PAGA connectivity, for diagnostics
+        via         dict       (node, node) -> bridge artist names
+        sizes       Counter    tracks per node
 
-    This is the once-per-rebuild payload; the per-press journey only needs
-    `nodes` + `adj` + the live `X_unit`."""
+    Culture is decided per ARTIST (over all its tracks' names), so an act never
+    straddles two cultures. The acoustic kNN serves only label propagation of
+    untagged tracks."""
     knn = knn_graph(X_unit, k=k)
     families = [primary_family(m.get("genres")) for m in meta]
     families, inferred, _conf = propagate_families(families, knn, X_unit, min_conf)
+
+    artists = [m.get("artist") or f"#{i}" for i, m in enumerate(meta)]
+    tracks_of: dict[str, list[int]] = defaultdict(list)
+    for i, a in enumerate(artists):
+        tracks_of[a].append(i)
+    # Genres and country are artist-level; take the first track that has them.
+    def first(idxs, key):
+        return next((meta[i].get(key) for i in idxs if meta[i].get(key)), None)
+
+    culture: dict[str, Optional[str]] = {}
+    for a, idxs in tracks_of.items():
+        names = [n for i in idxs for n in (meta[i].get("names") or ())]
+        culture[a] = track_culture(first(idxs, "country"), first(idxs, "genres"), names, regional)
+
     nodes = [
-        node_label(fam, meta[i].get("country"), regional) or UNKNOWN_NODE
+        node_label(fam, culture[artists[i]]) or UNKNOWN_NODE
         for i, fam in enumerate(families)
     ]
-    order, idx, lift, sizes = paga_connectivity(nodes, knn)
-    adj = adjacency(order, idx, lift, sizes, min_size=min_size, min_lift=min_lift)
+    memberships: dict[str, set] = defaultdict(set)
+    for i, a in enumerate(artists):
+        memberships[a].add(nodes[i])
+    for a, idxs in tracks_of.items():
+        for fam in artist_families(first(idxs, "genres")):
+            memberships[a].add(node_label(fam, culture[a]))
+    adj, via = bridge_adjacency(
+        nodes, artists, memberships, min_size=min_size,
+        min_bridges=min_bridges, min_node_artists=min_node_artists,
+    )
     return {
         "nodes": nodes,
         "inferred": inferred,
         "adj": adj,
-        "order": order,
-        "idx": idx,
-        "lift": lift,
-        "sizes": sizes,
+        "via": via,
+        "sizes": Counter(nodes),
     }

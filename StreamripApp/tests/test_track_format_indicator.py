@@ -122,8 +122,8 @@ class TestTrackFormatIndicator(unittest.TestCase):
             self.assertIsNotNone(ctrl)
             # Find the active track row in the reorderable list view
             active_row = sheet._queue_list.controls[0]
-            # Dig into container -> Dismissible -> card -> Row -> pos_label -> pos_indicator
-            card = active_row.content.content
+            # Dig into container -> card -> Row -> pos_label -> pos_indicator
+            card = active_row.content
             row = card.content
             pos_label = row.controls[0]
             pos_indicator = pos_label.content

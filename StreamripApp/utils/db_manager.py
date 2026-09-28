@@ -135,6 +135,8 @@ class DatabaseManager:
             await self._migrate_pca(self._conn)
             await self._migrate_clusters(self._conn)
             await self._migrate_enrichment(self._conn)
+            await self._migrate_autoplay_hidden(self._conn)
+            await self._migrate_autoplay_hop_rejects(self._conn)
             await self._migrate_album_genre_bucket(self._conn)
             await self._migrate_features_v4_to_v5(self._conn)
         return self._conn
@@ -3043,6 +3045,114 @@ class DatabaseManager:
                 payload = {}
         self._genre_graph_cache = payload
         return payload
+
+    # ── Auto-play: tracks the listener removed from recommendations ──────────
+    # Removing an auto-play recommendation from the queue is an explicit "not
+    # this". It is remembered across sessions (auto-play never recommends the
+    # track again) and is visible and reversible in Settings → Auto-play. It
+    # never hides anything from the library. Additive table: harmless on an
+    # existing DB.
+    async def _migrate_autoplay_hidden(self, conn):
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS autoplay_hidden (
+                path      TEXT PRIMARY KEY,
+                hidden_at REAL NOT NULL
+            )
+        ''')
+        await conn.commit()
+
+    async def hide_from_autoplay(self, path: str) -> None:
+        async with self._write_lock:
+            conn = await self.get_connection()
+            await conn.execute(
+                "INSERT OR REPLACE INTO autoplay_hidden (path, hidden_at) "
+                "VALUES (?, strftime('%s','now'))",
+                (path,),
+            )
+            await conn.commit()
+
+    async def unhide_from_autoplay(self, paths: list[str] | None = None) -> None:
+        """Restore `paths` to auto-play; None restores every hidden track."""
+        async with self._write_lock:
+            conn = await self.get_connection()
+            if paths is None:
+                await conn.execute("DELETE FROM autoplay_hidden")
+            elif paths:
+                await conn.execute(
+                    f"DELETE FROM autoplay_hidden WHERE path IN ({','.join('?' * len(paths))})",
+                    list(paths),
+                )
+            await conn.commit()
+
+    async def get_autoplay_hidden(self) -> list[dict]:
+        """Hidden tracks, newest first: {path, hidden_at, title, artist, album}.
+        Tracks since deleted from the library still come back (title None) so
+        they can be restored or cleared."""
+        conn = await self.get_connection()
+        async with conn.execute('''
+            SELECT h.path, h.hidden_at, t.title,
+                   ar.name AS artist, al.title AS album
+            FROM autoplay_hidden h
+            LEFT JOIN tracks  t  ON t.path = h.path
+            LEFT JOIN albums  al ON al.id  = t.album_id
+            LEFT JOIN artists ar ON ar.id  = al.artist_id
+            ORDER BY h.hidden_at DESC
+        ''') as cursor:
+            return [dict(r) for r in await cursor.fetchall()]
+
+    async def _migrate_autoplay_hop_rejects(self, conn):
+        # One row per rejected track per genre hop (a skip and a later removal
+        # of the same track count once). utils/autoplay.py decides when a hop
+        # is blocked from these.
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS autoplay_hop_rejects (
+                src         TEXT NOT NULL,
+                dst         TEXT NOT NULL,
+                path        TEXT NOT NULL,
+                artist      TEXT,
+                rejected_at REAL NOT NULL,
+                PRIMARY KEY (src, dst, path)
+            )
+        ''')
+        await conn.commit()
+
+    async def record_hop_reject(self, src: str, dst: str, path: str, artist: str) -> None:
+        async with self._write_lock:
+            conn = await self.get_connection()
+            await conn.execute(
+                "INSERT OR REPLACE INTO autoplay_hop_rejects "
+                "(src, dst, path, artist, rejected_at) "
+                "VALUES (?, ?, ?, ?, strftime('%s','now'))",
+                (src, dst, path, artist or ""),
+            )
+            await conn.commit()
+
+    async def get_hop_rejects(self) -> list[dict]:
+        """Per genre hop: {src, dst, rejects, artists (distinct), last_at},
+        most recent first."""
+        conn = await self.get_connection()
+        async with conn.execute('''
+            SELECT src, dst, COUNT(*) AS rejects,
+                   COUNT(DISTINCT NULLIF(artist, '')) AS artists,
+                   MAX(rejected_at) AS last_at
+            FROM autoplay_hop_rejects
+            GROUP BY src, dst
+            ORDER BY last_at DESC
+        ''') as cursor:
+            return [dict(r) for r in await cursor.fetchall()]
+
+    async def clear_hop_rejects(self, pairs: list[tuple[str, str]] | None = None) -> None:
+        """Forget the rejections of `pairs` [(src, dst), ...]; None forgets all."""
+        async with self._write_lock:
+            conn = await self.get_connection()
+            if pairs is None:
+                await conn.execute("DELETE FROM autoplay_hop_rejects")
+            else:
+                await conn.executemany(
+                    "DELETE FROM autoplay_hop_rejects WHERE src = ? AND dst = ?",
+                    [tuple(p) for p in pairs],
+                )
+            await conn.commit()
 
     async def get_track_clusters_bulk(
         self, paths: list[str]
