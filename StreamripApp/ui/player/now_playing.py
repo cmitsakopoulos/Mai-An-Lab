@@ -387,7 +387,16 @@ class NowPlayingSheet:
     async def _toggle_play_similar_async(self):
         # No library-wide "every track analysed" gate: only the seed needs DSP
         # features, and AutoPlay explains it if the playing track has none.
-        self.app.set_play_similar_mode(not self.app.play_similar_mode)
+        enabling = not self.app.play_similar_mode
+        self.app.set_play_similar_mode(enabling)
+        # Say where the listener's own queue went: on hold under the station,
+        # and back up next once auto-play is off (utils.queue_layout).
+        if enabling:
+            self.app.show_snackbar("Auto-play on. Your queue is on hold.",
+                                   icon=ft.Icons.ALL_INCLUSIVE_ROUNDED)
+        else:
+            self.app.show_snackbar("Auto-play off. Back to your queue.",
+                                   icon=ft.Icons.QUEUE_MUSIC_ROUNDED)
 
     def update_play_similar(self, enabled: bool):
         self._ensure_initialized()

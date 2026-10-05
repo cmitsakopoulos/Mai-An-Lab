@@ -22,12 +22,20 @@ class FakeEngine:
         self.continues_at_end = False
         self.stopped = False
         self.replace_calls = 0
+        self.insert_calls = 0
+
+    @property
+    def buffer_ops(self):
+        """Single-op buffer writes: a swap of pending rows, or an insert when
+        nothing was pending."""
+        return self.replace_calls + self.insert_calls
 
     @property
     def current_path(self):
         return self.queue[self.current_index]["path"] if self.queue else ""
 
     def queue_after_current(self, tracks, after_index=None):
+        self.insert_calls += 1
         base = self.current_index if after_index is None else after_index
         self.queue[base + 1:base + 1] = tracks
 
@@ -204,6 +212,20 @@ class AutoPlayTests(unittest.TestCase):
         _fn, args = self.tasks[0]
         self.assertEqual(args[0], ap_mod.BACKGROUND_TARGET - ap_mod.BUFFER_TARGET)
 
+    def test_a_fresh_station_lands_below_the_listeners_up_next_picks(self):
+        self.engine.queue[1:1] = [{"path": "/u/1", "_queued": True},
+                                  {"path": "/u/2", "_queued": True}]
+        self.enable()
+        self.assertEqual(self.paths()[:7],
+                         ["/lib/a", "/u/1", "/u/2", "/r/1", "/r/2", "/r/3", "/r/4"])
+
+    def test_turning_off_returns_to_up_next_then_the_held_queue(self):
+        self.engine.queue[1:1] = [{"path": "/u/1", "_queued": True}]
+        self.enable()
+        self.ap.set_enabled(False)
+        self.drain()
+        self.assertEqual(self.paths(), ["/lib/a", "/u/1", "/lib/b", "/lib/c"])
+
     # ── choosing tracks ─────────────────────────────────────────────────────
     def test_choosing_a_pending_recommendation_keeps_the_station(self):
         self.enable()
@@ -217,12 +239,12 @@ class AutoPlayTests(unittest.TestCase):
         self.enable()
         self.engine.current_index = self.paths().index("/lib/c")
         self.next_ranking = ["/x/1", "/x/2", "/x/3", "/x/4"]
-        before = self.engine.replace_calls
+        before = self.engine.buffer_ops
         self.ap.on_user_chose("/lib/c")
         self.drain()
         self.assertEqual(self.ap.anchor, "/lib/c")
         self.assertEqual(self.open_calls[-1][0], "/lib/c")
-        self.assertEqual(self.engine.replace_calls, before + 1)
+        self.assertEqual(self.engine.buffer_ops, before + 1)
         i = self.paths().index("/lib/c")
         self.assertEqual(self.paths()[i + 1:], ["/x/1", "/x/2", "/x/3", "/x/4"])
 
@@ -362,7 +384,7 @@ class AutoPlayTests(unittest.TestCase):
         self.assertEqual(len(self.open_calls), 2)
         self.assertIsNotNone(self.open_calls[1][1]["rng"])
         self.assertIsNotNone(self.ap.station_seed)
-        self.assertEqual(self.engine.replace_calls, 2)       # enable + switch
+        self.assertEqual(self.engine.buffer_ops, 2)          # enable + switch
         self.ap.set_variety(DETERMINISTIC)
         self.drain()
         self.assertIsNone(self.open_calls[2][1]["rng"])

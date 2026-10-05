@@ -59,6 +59,7 @@ assets_dir = "assets"
 "android.permission.READ_MEDIA_AUDIO" = true
 "android.permission.FOREGROUND_SERVICE" = true
 "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" = true
+"android.permission.FOREGROUND_SERVICE_DATA_SYNC" = true
 "android.permission.POST_NOTIFICATIONS" = true
 "android.permission.WAKE_LOCK" = true
 "android.permission.RECORD_AUDIO" = true

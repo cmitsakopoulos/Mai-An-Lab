@@ -1834,11 +1834,12 @@ class LibraryView:
 
         Shuffle is still forced off: a walk is an intentional ordering, and Dart
         would otherwise scramble the very sequence shown on the canvas.
-        `replace=False` means "play after this one": the block goes in directly
-        after the current track WITHOUT jumping to it. It used to queue_extend
-        onto the far END of the queue, which was useless in practice — a library
-        queue is thousands of tracks long, so nothing appended there is ever
-        reached."""
+        `replace=False` is Add to Queue: the block goes in as the listener's
+        picks, after any earlier ones and ahead of the rest of the queue (and of
+        auto-play's recommendations), WITHOUT jumping to it. It used to
+        queue_extend onto the far END of the queue, which was useless in
+        practice — a library queue is thousands of tracks long, so nothing
+        appended there is ever reached."""
         tracks = [t for t in tracks if t.get("path")]
         if not tracks:
             return 0
@@ -1865,7 +1866,9 @@ class LibraryView:
         elif not audio_engine.queue:
             audio_engine.set_queue(tracks, start_index=0)
         else:
-            audio_engine.queue_after_current(tracks)
+            # Add: the listener's picks, after any earlier ones (FIFO) and
+            # ahead of auto-play and the held queue (utils.queue_layout).
+            audio_engine.queue_last_many(tracks)
         return len(tracks)
 
     def _build_net_track_list(self) -> ft.Control:

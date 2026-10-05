@@ -1,11 +1,8 @@
 package com.flet.flet_audio_service
 
-import android.app.Notification
-import android.app.NotificationChannel
 import android.app.NotificationManager
-import android.app.PendingIntent
+import android.app.Service
 import android.content.Context
-import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.media.MediaMetadataRetriever
@@ -13,11 +10,11 @@ import android.media.AudioFormat
 import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
-import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
 import android.util.Log
-import androidx.core.app.NotificationCompat
+import androidx.core.app.ServiceCompat
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
@@ -105,6 +102,8 @@ class FletAudioServicePlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
 
             showProgressNotification(job, title, content, progress, total, done)
             result.success(null)
+        } else if (call.method == "releasePlaybackService") {
+            result.success(releasePlaybackService())
         } else if (call.method == "resolveArtwork") {
             val audioPath = call.argument<String>("path") ?: ""
             val sidecar = call.argument<String>("sidecar")
@@ -385,6 +384,34 @@ class FletAudioServicePlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         return null
     }
 
+    // ── Playback service release ───────────────────────────────────────────
+    // We run audio_service with androidStopForegroundOnPause=false, so it only
+    // leaves the foreground in onDestroy. Its stop() is deactivate + stopSelf(),
+    // but the activity's MediaBrowser binding keeps the service alive past
+    // stopSelf() and the system refuses to cancel a foreground notification:
+    // a stopped player kept a stale notification, the foreground slot and the
+    // wakelock until the activity died. The handler calls this after stop().
+    // AudioService.instance / wakeLock aren't public, hence reflection; the
+    // app's `-keepnames class * { *; }` rule keeps both names. Main thread.
+
+    private fun releasePlaybackService(): Boolean {
+        return try {
+            val cls = Class.forName("com.ryanheise.audioservice.AudioService")
+            val service = cls.getDeclaredField("instance")
+                .apply { isAccessible = true }
+                .get(null) as? Service ?: return false
+            ServiceCompat.stopForeground(service, ServiceCompat.STOP_FOREGROUND_REMOVE)
+            val wakeLock = cls.getDeclaredField("wakeLock")
+                .apply { isAccessible = true }
+                .get(service) as? PowerManager.WakeLock
+            if (wakeLock?.isHeld == true) wakeLock.release()
+            true
+        } catch (t: Throwable) {
+            Log.w(TAG, "releasePlaybackService failed", t)
+            false
+        }
+    }
+
     // ── Now-playing artwork ────────────────────────────────────────────────
     // audio_service decodes MediaItem.artUri itself, but on our side that URI
     // was only ever a sidecar cover.jpg in shared storage: tracks with embedded
@@ -464,13 +491,16 @@ class FletAudioServicePlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             .joinToString("") { "%02x".format(it) }
 
     // ── Library-task progress notifications ────────────────────────────────
-    // One notification per job ("dsp", "metadata", ...) so concurrent tasks
-    // don't overwrite each other. On Android 16+ (API 36) this uses the
-    // platform ProgressStyle; older releases get the classic progress bar.
-    // Deliberately NOT promoted to a Live Update: a library scan isn't the kind
-    // of time-sensitive activity the status-bar chip is meant for.
+    // One notification per job ("dsp", "metadata", "download", ...) so
+    // concurrent tasks don't overwrite each other. While any job runs,
+    // LibraryTaskService holds the foreground (keeping the job alive with the
+    // screen off) and shows the progress in its own notification instead; the
+    // per-job ones remain for done summaries, and as the fallback when the
+    // service can't start (a job begun with the app in the background).
 
-    private val progressChannelId = "library_tasks"
+    // Jobs whose progress went to a per-job fallback notification, which must
+    // be cancelled once the service takes over.
+    private val fallbackShown = mutableSetOf<String>()
 
     private fun notificationIdFor(job: String): Int = when (job) {
         "dsp" -> 9999          // kept: the id the old single-job version used
@@ -484,80 +514,30 @@ class FletAudioServicePlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         val context = appContext ?: return
         val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         val notificationId = notificationIdFor(job)
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            nm.createNotificationChannel(
-                NotificationChannel(
-                    progressChannelId, "Library tasks", NotificationManager.IMPORTANCE_LOW
-                ).apply {
-                    description = "Progress of track analysis and metadata sync"
-                    setShowBadge(false)
-                }
-            )
-            // Superseded by library_tasks; drop it so Settings doesn't list a dead channel.
-            nm.deleteNotificationChannel("dsp_scan_channel")
-        }
         if (!nm.areNotificationsEnabled()) {
             Log.w(TAG, "notifications disabled for app; progress for '$job' not shown")
         }
 
-        if (done && content.isEmpty()) {
-            nm.cancel(notificationId)
-            return
-        }
-
-        val launch = context.packageManager.getLaunchIntentForPackage(context.packageName)
-            ?.apply { flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP }
-        val tapIntent = launch?.let {
-            PendingIntent.getActivity(
-                context, notificationId, it,
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-            )
-        }
-
-        val notification: Notification =
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.BAKLAVA) {
-                val b = Notification.Builder(context, progressChannelId)
-                    .setSmallIcon(R.drawable.ic_stat_library)
-                    .setContentTitle(title)
-                    .setContentText(content)
-                    .setOnlyAlertOnce(true)
-                    .setCategory(Notification.CATEGORY_PROGRESS)
-                if (tapIntent != null) b.setContentIntent(tapIntent)
-                if (done) {
-                    // Final state: leave a short-lived, dismissible summary.
-                    b.setOngoing(false).setAutoCancel(true).setTimeoutAfter(15_000)
-                } else {
-                    val style = Notification.ProgressStyle()
-                    if (total > 0) {
-                        style.setProgressSegments(listOf(Notification.ProgressStyle.Segment(total)))
-                        style.setProgress(progress.coerceIn(0, total))
-                    } else {
-                        style.setProgressIndeterminate(true)
-                    }
-                    b.setStyle(style).setOngoing(true)
-                }
-                b.build()
-            } else {
-                val b = NotificationCompat.Builder(context, progressChannelId)
-                    .setSmallIcon(R.drawable.ic_stat_library)
-                    .setContentTitle(title)
-                    .setContentText(content)
-                    .setOnlyAlertOnce(true)
-                    .setCategory(NotificationCompat.CATEGORY_PROGRESS)
-                if (tapIntent != null) b.setContentIntent(tapIntent)
-                if (done) {
-                    b.setOngoing(false).setAutoCancel(true).setTimeoutAfter(15_000)
-                } else {
-                    b.setOngoing(true)
-                    if (total > 0) b.setProgress(total, progress.coerceIn(0, total), false)
-                    else b.setProgress(0, 0, true)
-                }
-                b.build()
+        if (!done) {
+            val inService = LibraryTaskService.update(
+                context, job, LibraryTaskService.Job(title, content, progress, total))
+            if (inService) {
+                if (fallbackShown.remove(job)) nm.cancel(notificationId)
+                return
             }
+            fallbackShown.add(job)
+        } else {
+            LibraryTaskService.finish(job)
+            fallbackShown.remove(job)
+            if (content.isEmpty()) {
+                nm.cancel(notificationId)
+                return
+            }
+        }
 
         try {
-            nm.notify(notificationId, notification)
+            nm.notify(notificationId, ProgressNotifications.build(
+                context, notificationId, title, content, progress, total, done))
         } catch (e: SecurityException) {
             // POST_NOTIFICATIONS revoked (Android 13+).
             Log.w(TAG, "notify denied for '$job': ${e.message}")

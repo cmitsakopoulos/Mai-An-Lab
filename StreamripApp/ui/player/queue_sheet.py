@@ -7,6 +7,7 @@ from ui.tokens import (
     BORDER_SUBTLE, RADIUS_CARD, RADIUS_PILL, LIB_TRACK_COLOR, apply_opacity
 )
 from ui.widgets import AnimatedEntry
+from utils import queue_layout
 
 if sys.platform == "darwin":
     from utils.audio_engine_macos import audio_engine
@@ -14,6 +15,12 @@ else:
     from utils.audio_engine import audio_engine
 
 logger = logging.getLogger(__name__)
+
+# The sheet draws at most this many rows; the held queue gets a short preview
+# (enough to recognise what auto-play paused) and its full size in the header.
+VISIBLE_ROWS = 15
+HELD_PREVIEW = 5
+HELD_OPACITY = 0.38
 
 
 class QueueSheet:
@@ -158,13 +165,23 @@ class QueueSheet:
         is_shuffle = bool(audio_engine.is_shuffle)
 
         is_similar = bool(getattr(self.app, "play_similar_mode", False))
+        # While auto-play is on, rows from `held_at` on are the queue it paused
+        # (utils.queue_layout): drawn dimmed and inert, never reordered or
+        # removed here. Turning auto-play off is the way back to them.
+        held_at = (queue_layout.held_start(audio_engine.queue, cur_idx)
+                   if is_similar and audio_engine.queue else None)
+        held_total = len(audio_engine.queue) - held_at if held_at is not None else 0
 
-        self._count_text.value = (
-            f"{remaining} track{'s' if remaining != 1 else ''} remaining"
-            if audio_engine.queue else "Nothing queued"
-        )
+        if not audio_engine.queue:
+            self._count_text.value = "Nothing queued"
+        elif held_at is not None:
+            live = max(0, held_at - cur_idx - 1)
+            self._count_text.value = f"{live} up next" + (
+                f" · {held_total:,} on hold" if held_total else "")
+        else:
+            self._count_text.value = f"{remaining} track{'s' if remaining != 1 else ''} remaining"
 
-        def track_row(i: int, t: dict, position_offset: int) -> ft.Control:
+        def track_row(i: int, t: dict, position_offset: int, held: bool = False) -> ft.Control:
             is_active = (i == cur_idx)
             same_art  = (not is_active and bool(cur_artist)
                          and t.get("artist_name", "") == cur_artist)
@@ -176,6 +193,10 @@ class QueueSheet:
 
             if is_active:
                 pos_indicator = ft.Icon(ft.Icons.PLAY_ARROW_ROUNDED, color=CYAN, size=16)
+            elif held:
+                # No number: held rows don't play in this order (or at all)
+                # until auto-play is off.
+                pos_indicator = ft.Container()
             else:
                 pos_indicator = ft.Text(
                     f"{position}",
@@ -219,12 +240,13 @@ class QueueSheet:
                             [
                                 ft.ReorderableDragHandle(
                                     content=ft.Icon(ft.Icons.REORDER_ROUNDED, color=DIM, size=18),
-                                    visible=not is_active and not is_shuffle,
+                                    visible=not is_active and not is_shuffle and not held,
                                 ),
                                 ft.IconButton(
                                     icon=ft.Icons.REMOVE_CIRCLE_OUTLINE_ROUNDED,
                                     icon_color="#FF453A",
                                     icon_size=16,
+                                    visible=not held,
                                     on_click=lambda e, row=t: self._remove(row),
                                 ),
                             ],
@@ -240,7 +262,8 @@ class QueueSheet:
                 border_radius=RADIUS_CARD,
                 height=56,
                 padding=ft.Padding.only(left=8, right=6, top=4, bottom=4),
-                opacity=0.4 if is_repeat_one else 1.0,
+                opacity=HELD_OPACITY if held else (0.4 if is_repeat_one else 1.0),
+                disabled=held,
             )
 
             return AnimatedEntry(
@@ -266,22 +289,40 @@ class QueueSheet:
             for idx in range(cur_idx, len(audio_engine.queue)):
                 upcoming.append((idx, audio_engine.queue[idx]))
 
-        visible = upcoming[:15]
+        if held_at is not None:
+            # Auto-play forces shuffle off, so `upcoming` is in queue order.
+            live_rows = [(i, t) for i, t in upcoming if i < held_at]
+            held_rows = [(i, t) for i, t in upcoming if i >= held_at]
+            live_rows = live_rows[:max(1, VISIBLE_ROWS - min(len(held_rows), HELD_PREVIEW))]
+            visible = live_rows + held_rows[:VISIBLE_ROWS - len(live_rows)][:HELD_PREVIEW]
+        else:
+            visible = upcoming[:VISIBLE_ROWS]
+        n_live = sum(1 for i, _t in visible if held_at is None or i < held_at)
         # The track dicts as drawn. Row actions resolve against these by
         # identity at event time: a refill or native index change can land
         # between the render and the tap, so a captured index can go stale.
         self._rendered = [t for _i, t in visible]
         rows = [
-            track_row(idx, t, position_offset=pos)
+            track_row(idx, t, position_offset=pos,
+                      held=held_at is not None and idx >= held_at)
             for pos, (idx, t) in enumerate(visible)
         ]
-        # Auto-play section header, Apple Music style: above the first
-        # recommendation, or at the end while the next block is on its way.
-        self._header_at = None
-        if is_similar and rows:
-            first = next((p for p, (_i, t) in enumerate(visible) if p > 0 and t.get("_autoplay")), None)
-            self._header_at = first if first is not None else len(rows)
-            rows.insert(self._header_at, self._autoplay_header(pending=first is None))
+        # Section headers (control positions, for the reorder handler).
+        # Auto-play, Apple Music style: above the first recommendation, or at
+        # the end of the live rows while the next block is on its way. Then the
+        # held queue, below everything that will play.
+        self._header_positions = []
+        self._held_header_at = None
+        if held_at is not None and rows:
+            first = next((p for p, (_i, t) in enumerate(visible[:n_live])
+                          if p > 0 and t.get("_autoplay")), None)
+            at = first if first is not None else n_live
+            rows.insert(at, self._autoplay_header(pending=first is None))
+            self._header_positions.append(at)
+            if held_total:
+                self._held_header_at = n_live + 1
+                rows.insert(self._held_header_at, self._held_header(held_total))
+                self._header_positions.append(self._held_header_at)
 
         is_empty = len(rows) == 0
         self._empty_label.visible = is_empty
@@ -340,19 +381,44 @@ class QueueSheet:
             on_click=lambda e: self._open_autoplay_sheet(),
         )
 
+    def _held_header(self, count: int) -> ft.Control:
+        """Label over the queue auto-play paused. Deliberately not a button:
+        the toggle in Now Playing is the one way back."""
+        return ft.Container(
+            key="q_held_header",
+            content=ft.Row(
+                [
+                    ft.Icon(ft.Icons.PAUSE_CIRCLE_OUTLINE_ROUNDED, color=DIM, size=14),
+                    ft.Text("YOUR QUEUE", color=DIM, size=11, weight=ft.FontWeight.W_700),
+                    ft.Text(f"{count:,} on hold · resumes when auto-play is off",
+                            color=DIM, size=12, max_lines=1,
+                            overflow=ft.TextOverflow.ELLIPSIS, expand=True),
+                ],
+                spacing=6,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            padding=ft.Padding.only(left=10, right=6, top=16, bottom=4),
+        )
+
     def _open_autoplay_sheet(self):
         from ui.player.autoplay_sheet import AutoPlaySheet
         AutoPlaySheet(self.app).open()
 
     def _handle_queue_reorder(self, e: ft.OnReorderEvent):
-        # Control indices -> positions in the visible track list: the
-        # Auto-play header row is a control but not a track.
-        hdr = getattr(self, "_header_at", None)
-        if hdr is not None and e.old_index == hdr:
+        # Control indices -> positions in the visible track list: section
+        # headers are controls but not tracks.
+        hdrs = getattr(self, "_header_positions", [])
+        if e.old_index in hdrs:
+            self.refresh()
+            return
+        # Nothing moves into or out of the held queue: dropping at the held
+        # header itself (just above it) is the lowest allowed slot.
+        held_hdr = getattr(self, "_held_header_at", None)
+        if held_hdr is not None and (e.old_index > held_hdr or e.new_index > held_hdr):
             self.refresh()
             return
         def _to_track_pos(ctrl_i):
-            return ctrl_i - 1 if hdr is not None and ctrl_i > hdr else ctrl_i
+            return ctrl_i - sum(1 for h in hdrs if h < ctrl_i)
         old_idx = _to_track_pos(e.old_index)
         new_idx = _to_track_pos(e.new_index)
         if new_idx > old_idx:

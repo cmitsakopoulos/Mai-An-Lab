@@ -168,6 +168,13 @@ debug_log("importing queue_controller and error_boundary")
 from utils.queue_controller import QueueController
 from utils import play_ledger
 from utils.autoplay import AutoPlay, VARIETY_MODES, DETERMINISTIC
+
+# One auto-play controller per PROCESS, like the audio engine: Android can tear
+# the Flet session down (a new StreamripFletApp) while playback carries on, and
+# the station, history and rejections must survive that.
+_AUTOPLAY: AutoPlay | None = None
+# The native handler's resume record (see FletAudioService setResumePath).
+NATIVE_RESUME_NAME = "native_resume.json"
 from utils.error_boundary import ErrorBoundary
 debug_log("all main.py imports completed successfully")
 
@@ -427,20 +434,24 @@ class StreamripFletApp:
 
         # wire ft.Audio into the page
         audio_engine.play_log_path = play_ledger.ledger_path(DATA_DIR)
+        audio_engine.resume_path = os.path.join(DATA_DIR, NATIVE_RESUME_NAME)
         audio_engine.setup(self.page, self.db_manager)
 
         # Restore saved shuffle, repeat and similar playback preferences
         audio_engine.is_shuffle = bool(self._prefs.get("is_shuffle", False))
         audio_engine.repeat_mode = self._prefs.get("repeat_mode", "none")
         self.play_similar_mode = bool(self._prefs.get("play_similar_mode", False))
-        # One controller per process: a UI restart re-runs _heavy_init, and the
-        # session's history/rejections must survive it.
-        if getattr(self, "autoplay", None) is None:
-            self.autoplay = AutoPlay(
-                audio_engine, self.db_manager,
-                run_task=lambda fn, *a: self.page.run_task(fn, *a),
-                notify=lambda msg: self.safe_update(lambda: self.show_snackbar(msg)),
-            )
+        # One controller per process (see _AUTOPLAY): a UI restart or a new
+        # session re-runs _heavy_init, and the station/history must survive.
+        global _AUTOPLAY
+        run_task = lambda fn, *a: self.page.run_task(fn, *a)  # noqa: E731
+        notify = lambda msg: self.safe_update(lambda: self.show_snackbar(msg))  # noqa: E731
+        if _AUTOPLAY is None:
+            _AUTOPLAY = AutoPlay(audio_engine, self.db_manager,
+                                 run_task=run_task, notify=notify)
+        else:
+            _AUTOPLAY.bind_ui(run_task, notify)
+        self.autoplay = _AUTOPLAY
         self.autoplay.db = self.db_manager
         variety = self._prefs.get("autoplay_variety", DETERMINISTIC)
         self.autoplay.variety = variety if variety in VARIETY_MODES else DETERMINISTIC
@@ -484,7 +495,18 @@ class StreamripFletApp:
         # `page.run_task` / `asyncio.create_task`. Those need a running
         # loop in the calling thread, otherwise the dispatches no-op and
         # the mini-player never gets revived.
-        await self._restore_queue_state_async()
+        if audio_engine.queue:
+            # Same process, new session (Android tore the UI down while the
+            # music played on, or a theme restart): the engine's queue is the
+            # live one. Restoring the saved snapshot re-pushed it to the native
+            # player, which paused playback and jumped back to whatever track
+            # this side last heard. Ask the player where it is instead.
+            audio_engine.probe_native()
+            self.safe_update(self._refresh_now_playing_ui)
+            if self.queue_sheet and self.queue_sheet._initialized:
+                self.safe_update(self.queue_sheet.refresh)
+        else:
+            await self._restore_queue_state_async()
         await self.check_onboarding()
         self._is_restarting = False
         # Prime availability checks so the UI reflects DSP readiness immediately,
@@ -608,6 +630,8 @@ class StreamripFletApp:
         except Exception:
             pass
         self._enriching_metadata = True
+        notifier = None
+        summary: dict = {}
         try:
             await asyncio.sleep(3)  # let startup / the scan settle before network
             from utils.metadata_enrich import enrich_library
@@ -623,12 +647,16 @@ class StreamripFletApp:
                 self.db_manager, provider=provider, with_genres=True,
                 progress=metadata_progress_cb(notifier),
             )
-            notifier.finish(metadata_summary_text(summary))
             if summary.get("enriched"):
                 logger.info("Metadata enrichment complete (%s): %s", provider, summary)
         except Exception as exc:
             logger.warning("Metadata enrichment failed: %s", exc)
+            summary = {"status": f"error: {exc}"}
         finally:
+            # Always close the notification: an unfinished one stayed "ongoing"
+            # forever and now also keeps the native task service running.
+            if notifier is not None:
+                notifier.finish(metadata_summary_text(summary))
             self._enriching_metadata = False
 
     async def _auto_export_state_snapshot(self):
@@ -1762,19 +1790,11 @@ class StreamripFletApp:
             dur   = state.get("duration", 0.0)
             if not queue:
                 return
-            # The position file is written far more often than the queue file
-            # (every track change / 10 s of play) and is never older than it.
-            # Trust it when its track is still in this queue.
             pstate = await asyncio.to_thread(self._read_queue_state, self._position_state_path())
-            if pstate and pstate.get("path"):
-                pi = pstate.get("current_index")
-                if not (isinstance(pi, int) and 0 <= pi < len(queue)
-                        and queue[pi].get("path") == pstate["path"]):
-                    pi = next((i for i, t in enumerate(queue) if t.get("path") == pstate["path"]), None)
-                if pi is not None:
-                    index = pi
-                    pos = pstate.get("position", 0.0)
-                    dur = pstate.get("duration", 0.0)
+            native = await asyncio.to_thread(self._read_native_resume)
+            pos_mtime = await asyncio.to_thread(self._mtime, self._position_state_path())
+            index, pos, dur = self._choose_resume(queue, index, pos, dur,
+                                                  pstate, native, pos_mtime)
 
             # Bound `index` defensively; a stale snapshot may reference a
             # row that no longer exists in the persisted queue.
@@ -1826,6 +1846,66 @@ class StreamripFletApp:
             asyncio.create_task(_delayed_refresh())
         except Exception as exc:
             logger.warning("Could not restore queue state: %s", exc)
+
+    @classmethod
+    def _choose_resume(cls, queue, index, pos, dur, pstate, native, pos_mtime):
+        """Where to resume: (index, position, duration).
+
+        The queue file's own index is the floor. The position file is written
+        far more often (every track change / 10 s of play), so it wins when its
+        track is still queued, but only Python writes it, and only while it
+        can hear the player. The native record (`native` = (path, index hint,
+        position, written_at)) is written by the player itself on every track
+        change and play/pause, so after background auto-advance with the
+        session gone it is the newer truth: it wins when written after the
+        position file (`pos_mtime`) and its track is still queued."""
+        if pstate and pstate.get("path"):
+            pi = cls._row_of(queue, pstate["path"], pstate.get("current_index"))
+            if pi is not None:
+                index = pi
+                pos = pstate.get("position", 0.0)
+                dur = pstate.get("duration", 0.0)
+        if native is not None:
+            path, hint, n_pos, n_at = native
+            ni = cls._row_of(queue, path, hint)
+            if ni is not None and n_at > pos_mtime:
+                if ni != index:
+                    logger.info("Restore: native record is newer (%s, row %d, was %d)",
+                                os.path.basename(path), ni, index)
+                    dur = queue[ni].get("duration") or 0.0
+                index, pos = ni, n_pos
+        return index, pos, dur
+
+    @staticmethod
+    def _row_of(queue: list[dict], path: str, hint) -> int | None:
+        """Row holding `path`: `hint` when it does (the same song can be queued
+        twice), else the first match, else None."""
+        if isinstance(hint, int) and 0 <= hint < len(queue) and queue[hint].get("path") == path:
+            return hint
+        return next((i for i, t in enumerate(queue) if t.get("path") == path), None)
+
+    @staticmethod
+    def _mtime(path: str) -> float:
+        try:
+            return os.path.getmtime(path)
+        except OSError:
+            return 0.0
+
+    def _read_native_resume(self):
+        """(path, index, position_s, written_at) from the native resume
+        record, or None if absent, unreadable or not a library track."""
+        rec = self._read_queue_state(os.path.join(DATA_DIR, NATIVE_RESUME_NAME))
+        if not isinstance(rec, dict):
+            return None
+        path = play_ledger.src_to_path(rec.get("src") or "")
+        if not path:
+            return None
+        try:
+            return (path, rec.get("index"),
+                    max(0.0, float(rec.get("position_ms") or 0) / 1000.0),
+                    float(rec.get("at") or 0))
+        except (TypeError, ValueError):
+            return None
 
     def _read_queue_state(self, state_path: str):
         try:

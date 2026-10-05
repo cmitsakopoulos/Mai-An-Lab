@@ -254,5 +254,93 @@ class TestJobsOrdering(unittest.TestCase):
         self.assertEqual(titles, ["Track 2", "Track 3", "Track 1", "Track 0"])
 
 
+class TestDownloadNotification(unittest.TestCase):
+    """The worker drives a batch-level system notification (which also keeps
+    the native task service alive) and must always close it."""
+
+    def _run_batch(self, outcomes):
+        """Run the real worker over len(outcomes) jobs; each _workflow sets the
+        given terminal state. Returns the recorded notifier calls."""
+        calls = []
+
+        class FakeNotifier:
+            def __init__(self, job, title):
+                calls.append(("init", job, title))
+
+            def update(self, done, total, content):
+                calls.append(("update", done, total, content))
+
+            def finish(self, content=""):
+                calls.append(("finish", content))
+
+        async def run():
+            import utils.queue_controller as qc
+            orig = qc.ProgressNotifier
+            qc.ProgressNotifier = FakeNotifier
+            try:
+                q = _controller()
+                q._schedule_library_scan = lambda: None
+                states = iter(outcomes)
+
+                async def fake_workflow(job):
+                    q._set(job, percent=50)
+                    q._set(job, state=next(states), percent=100)
+                q._workflow = fake_workflow
+                q.enqueue_many([_item(i) for i in range(len(outcomes))])
+                await q._worker_task
+            finally:
+                qc.ProgressNotifier = orig
+
+        asyncio.run(run())
+        return calls
+
+    def test_batch_progress_counts_finished_jobs(self):
+        calls = self._run_batch([DONE, DONE])
+        updates = [c for c in calls if c[0] == "update"]
+        # Second job at 50%: one finished job (100) + 50, out of 2 × 100.
+        self.assertIn(150, [u[1] for u in updates if u[2] == 200])
+        self.assertTrue(any("2 of 2" in u[3] for u in updates))
+
+    def test_summary_reports_done_and_failed(self):
+        calls = self._run_batch([DONE, FAILED, DONE])
+        self.assertEqual(calls[-1], ("finish", "2 downloads finished · 1 failed."))
+
+    def test_all_cancelled_removes_the_notification(self):
+        calls = self._run_batch([CANCELLED])
+        self.assertEqual(calls[-1], ("finish", ""))
+
+    def test_worker_crash_still_finishes(self):
+        calls = []
+
+        class FakeNotifier:
+            def __init__(self, *_):
+                pass
+
+            def update(self, *_):
+                pass
+
+            def finish(self, content=""):
+                calls.append(content)
+
+        async def run():
+            import utils.queue_controller as qc
+            orig = qc.ProgressNotifier
+            qc.ProgressNotifier = FakeNotifier
+            try:
+                q = _controller()
+
+                async def boom(job):
+                    raise RuntimeError("boom")
+                q._workflow = boom
+                q.enqueue(_item(1))
+                with self.assertRaises(RuntimeError):
+                    await q._worker_task
+            finally:
+                qc.ProgressNotifier = orig
+
+        asyncio.run(run())
+        self.assertEqual(len(calls), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

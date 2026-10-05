@@ -87,6 +87,10 @@ class AutoPlaySheetTests(_Base):
 
 
 class QueueHeaderTests(_Base):
+    """Queue (setUp): Alpha playing, Beta, Rec 1, Rec 2, then Gamma, which is
+    held: auto-play paused it. Controls: Alpha 0, Beta 1, AUTO-PLAY 2,
+    Rec 1 3, Rec 2 4, YOUR QUEUE 5, Gamma 6."""
+
     def _sheet(self):
         qs = QueueSheet(self.app)
         qs._ensure_initialized()
@@ -96,53 +100,81 @@ class QueueHeaderTests(_Base):
     def test_header_sits_above_first_recommendation(self):
         qs = self._sheet()
         ctrls = qs._queue_list.controls
-        self.assertEqual(qs._header_at, 2)
+        self.assertEqual(qs._header_positions, [2, 5])
         self.assertEqual(ctrls[2].key, "q_autoplay_header")
         self.assertIn("from Alpha — X", _texts(ctrls[2]))
 
-    def test_no_header_when_autoplay_off(self):
+    def test_held_queue_is_labelled_dimmed_and_inert(self):
+        qs = self._sheet()
+        ctrls = qs._queue_list.controls
+        self.assertEqual(ctrls[5].key, "q_held_header")
+        self.assertIn("1 on hold · resumes when auto-play is off", _texts(ctrls[5]))
+        self.assertIsNone(getattr(ctrls[5], "on_click", None))   # not a way back
+        gamma = ctrls[6].content                     # AnimatedEntry -> card
+        while not isinstance(gamma, ft.Container) or gamma.bgcolor is None:
+            gamma = gamma.content
+        self.assertTrue(gamma.disabled)
+        self.assertLess(gamma.opacity, 1.0)
+        actions = gamma.content.controls[-1].controls      # drag handle, remove
+        self.assertFalse(any(c.visible for c in actions))
+        self.assertEqual(qs._count_text.value, "3 up next · 1 on hold")
+
+    def test_no_sections_when_autoplay_off(self):
         self.app.play_similar_mode = False
         qs = self._sheet()
-        self.assertIsNone(qs._header_at)
-        self.assertFalse(any(getattr(c, "key", None) == "q_autoplay_header"
-                             for c in qs._queue_list.controls))
+        self.assertEqual(qs._header_positions, [])
+        keys = {getattr(c, "key", None) for c in qs._queue_list.controls}
+        self.assertFalse({"q_autoplay_header", "q_held_header"} & keys)
+        self.assertEqual(qs._count_text.value, "4 tracks remaining")
 
-    def test_reorder_skips_the_header_row(self):
+    def test_pending_station_header_sits_between_live_and_held(self):
+        audio_engine.queue = [t for t in audio_engine.queue if not t.get("_autoplay")]
+        qs = self._sheet()
+        keys = [getattr(c, "key", None) for c in qs._queue_list.controls]
+        # Alpha, AUTO-PLAY (finding…), YOUR QUEUE, Beta, Gamma: with nothing
+        # pending, everything after the playing row is held.
+        self.assertEqual(keys[1:3], ["q_autoplay_header", "q_held_header"])
+
+    def test_reorder_skips_headers_and_never_crosses_into_the_held_queue(self):
         qs = self._sheet()
         moved = MagicMock()
         orig = audio_engine.move_queue_item
         audio_engine.move_queue_item = moved
         try:
-            # Drag "Gamma" (control 5 = queue row 4) to just below "Alpha"
-            # (insertion slot 1): header at control 2 must not shift the math.
-            qs._handle_queue_reorder(MagicMock(old_index=5, new_index=1,
+            # Drag "Rec 2" (control 4 = queue row 3) to just below "Alpha"
+            # (insertion slot 1): the header at control 2 must not shift it.
+            qs._handle_queue_reorder(MagicMock(old_index=4, new_index=1,
                                                control=MagicMock(controls=list(qs._queue_list.controls))))
-            moved.assert_called_once_with(4, 1)
+            moved.assert_called_once_with(3, 1)
             moved.reset_mock()
-            # Dragging the header itself is ignored.
+            # Dragging a header is ignored.
             qs._handle_queue_reorder(MagicMock(old_index=2, new_index=4, control=MagicMock(controls=[])))
+            # A held row can't move, and nothing can be dropped below the
+            # held header.
+            qs._handle_queue_reorder(MagicMock(old_index=6, new_index=1, control=MagicMock(controls=[])))
+            qs._handle_queue_reorder(MagicMock(old_index=1, new_index=7, control=MagicMock(controls=[])))
             moved.assert_not_called()
         finally:
             audio_engine.move_queue_item = orig
 
     def test_row_actions_resolve_the_drawn_row_after_the_queue_shifts(self):
         qs = self._sheet()
-        gamma = audio_engine.queue[4]
+        rec2 = audio_engine.queue[3]
         # A refill lands between the render and the tap: every row shifts by 2.
         audio_engine.queue[1:1] = [{"path": "/r/9"}, {"path": "/r/8"}]
         removed, moved = MagicMock(), MagicMock()
         saved = (audio_engine.remove_from_queue, audio_engine.move_queue_item)
         audio_engine.remove_from_queue, audio_engine.move_queue_item = removed, moved
         try:
-            # Drawn "Gamma" (control 5) dragged to below "Alpha" (slot 1):
-            # resolves to Gamma and Beta's CURRENT rows, not the drawn ones.
-            qs._handle_queue_reorder(MagicMock(old_index=5, new_index=1,
+            # Drawn "Rec 2" (control 4) dragged to below "Alpha" (slot 1):
+            # resolves to Rec 2 and Beta's CURRENT rows, not the drawn ones.
+            qs._handle_queue_reorder(MagicMock(old_index=4, new_index=1,
                                                control=MagicMock(controls=list(qs._queue_list.controls))))
-            moved.assert_called_once_with(6, 3)
-            qs._remove(gamma)
-            removed.assert_called_once_with(6)
+            moved.assert_called_once_with(5, 3)
+            qs._remove(rec2)
+            removed.assert_called_once_with(5)
             removed.reset_mock()
-            qs._remove({"path": "/m/c"})               # equal, but not a queued row
+            qs._remove({"path": "/r/2"})               # equal, but not a queued row
             removed.assert_not_called()
         finally:
             audio_engine.remove_from_queue, audio_engine.move_queue_item = saved

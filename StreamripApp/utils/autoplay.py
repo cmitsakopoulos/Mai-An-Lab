@@ -48,7 +48,7 @@ import random
 import time
 from collections import Counter, deque
 
-from utils import genre_graph, play_ledger, track_graph
+from utils import genre_graph, play_ledger, queue_layout, track_graph
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +120,13 @@ class AutoPlay:
         # inserting a stale block.
         self._gen = 0
         self._filling = False
+
+    def bind_ui(self, run_task, notify=None) -> None:
+        """Re-point the UI hooks at a new Flet session. The controller is kept
+        per process (its station, history and rejections outlive a session),
+        but the session it schedules work on and notifies through does not."""
+        self._run_task = run_task
+        self._notify = notify or (lambda _msg: None)
 
     # ── mode ────────────────────────────────────────────────────────────────
     @property
@@ -213,6 +220,11 @@ class AutoPlay:
         """Ledger batch (play order): {path, listened_s, duration_s, ended_at}."""
         now = time.time()
         for e in entries:
+            # Heard while the UI was away (no track-change event reached us):
+            # still history, so a station doesn't serve it again.
+            path = e.get("path") or ""
+            if path and path not in self.history:
+                self.history.append(path)
             ended = e.get("ended_at") or now
             self.on_listen(e.get("path") or "", float(e.get("listened_s") or 0.0),
                            float(e.get("duration_s") or 0.0),
@@ -260,12 +272,29 @@ class AutoPlay:
 
     # ── listener feedback (Settings → Auto-play) ────────────────────────────
     async def load_feedback(self) -> None:
-        """Hidden tracks and learned genre-hop penalties, from the DB."""
+        """Hidden tracks, learned genre-hop penalties and (on a cold start)
+        recent plays, from the DB."""
         try:
             self.hidden = {r["path"] for r in await self.db.get_autoplay_hidden()}
         except Exception:
             logger.warning("Auto-play: could not load hidden tracks", exc_info=True)
         await self._load_hop_rejects()
+        if not self.history:
+            await self._seed_history()
+
+    async def _seed_history(self) -> None:
+        """History is in-memory, so a process the OS killed came back with
+        none and a resumed station re-served what was just heard. Recent plays
+        stand in for it, oldest first like live history."""
+        try:
+            rows = await self.db.get_recent_tracks(HISTORY_LEN)
+        except Exception:
+            logger.warning("Auto-play: could not load recent plays", exc_info=True)
+            return
+        for row in reversed(rows or []):
+            path = row.get("path") if isinstance(row, dict) else None
+            if path and path not in self.history:
+                self.history.append(path)
 
     async def _load_hop_rejects(self) -> None:
         try:
@@ -398,9 +427,12 @@ class AutoPlay:
 
     def _insert_after(self) -> int:
         """Below the last pending recommendation (keeps the buffer's order and
-        stays ahead of the tail), or right after the playing row."""
+        stays ahead of the held queue), or below the listener's up-next picks,
+        which always play first (utils.queue_layout)."""
         rows = self._pending_rows()
-        return rows[-1] if rows else self.engine.current_index
+        if rows:
+            return rows[-1]
+        return queue_layout.up_next_end(self.engine.queue, self.engine.current_index) - 1
 
     def _schedule_fill(self, n: int, *, replace: bool = False,
                        append_and_play: bool = False) -> None:
@@ -457,8 +489,14 @@ class AutoPlay:
                 self.engine.play_track_at(first_new)
             elif replace:
                 # Even an empty batch drops the old buffer: it belonged to the
-                # previous station or to the leg just rejected.
-                self.engine.replace_rows(self._pending_rows(), batch)
+                # previous station or to the leg just rejected. With nothing
+                # pending, replace_rows would land the block right after the
+                # playing row, i.e. ahead of the listener's up-next picks.
+                victims = self._pending_rows()
+                if victims:
+                    self.engine.replace_rows(victims, batch)
+                elif batch:
+                    self.engine.queue_after_current(batch, after_index=self._insert_after())
             elif batch:
                 self.engine.queue_after_current(batch, after_index=self._insert_after())
             if batch:

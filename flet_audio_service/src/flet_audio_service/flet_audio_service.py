@@ -433,13 +433,20 @@ class AudioServiceControl(Service):
         await self._wait_ready()
         await self._invoke_method("set_repeat_mode", {"mode": mode})
 
-    async def set_play_log_path(self, path: str):
+    async def set_play_log_path(self, path: str, resume_path: str | None = None):
         """Tell the native handler where to append its play ledger (one JSON
         line per finished listen: {id, ms, dur, start, end}). The handler
         outlives the Flet session, so listens are captured even while Python
-        can't hear events; the caller drains the file into its DB."""
+        can't hear events; the caller drains the file into its DB.
+
+        `resume_path`: where the handler keeps its resume record (one JSON
+        object: {src, index, position_ms, playing, at}), rewritten on every
+        track change and play/pause, for restoring after the process dies."""
         await self._wait_ready()
-        await self._invoke_method("set_play_log_path", {"path": path})
+        args = {"path": path}
+        if resume_path:
+            args["resume_path"] = resume_path
+        await self._invoke_method("set_play_log_path", args)
 
     async def decode_pcm(self, path: str) -> dict[str, Any]:
         """Decode an audio file to mono 16-bit little-endian PCM via the

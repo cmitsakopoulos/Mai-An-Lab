@@ -45,7 +45,7 @@ def ledger_path(data_dir: str) -> str:
     return os.path.join(data_dir, LEDGER_NAME)
 
 
-def _src_to_path(src: str) -> str:
+def src_to_path(src: str) -> str:
     """Invert AudioEngine._to_uri: file URIs and bare paths map back to the
     library path; network streams have no library identity and are dropped."""
     if not src:
@@ -67,7 +67,7 @@ def parse_lines(lines) -> list[dict]:
             raw = json.loads(line)
         except ValueError:
             continue  # a torn final line from a killed process
-        path = _src_to_path(str(raw.get("id") or ""))
+        path = src_to_path(str(raw.get("id") or ""))
         if not path:
             continue
         try:

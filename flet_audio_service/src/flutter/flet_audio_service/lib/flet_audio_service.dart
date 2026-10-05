@@ -70,7 +70,11 @@ class FletAudioService extends FletService with WidgetsBindingObserver {
   // sent — i.e. Dart has caught up to Python's most recent intent. This
   // replaces the old wall-clock suppression gate with a deterministic,
   // timing-independent reconciliation.
-  int _epoch = 0;
+  // Static, like the handler: Android can tear the Flet session down and build
+  // a new service object while the player (and Python's engine, whose counter
+  // this mirrors) carries on. A per-instance counter restarted at 0, so Python
+  // rejected every event of the new session as stale.
+  static int _epoch = 0;
   // Serializes all playlist mutations + skips so a rapid add-then-skip (Play
   // Similar replenishment) can never interleave against the live
   // ConcatenatingAudioSource. Each link emits an `op_complete` ack.
@@ -214,7 +218,8 @@ class FletAudioService extends FletService with WidgetsBindingObserver {
             await _handler!._player.setShuffleModeEnabled(shuffle);
           }
           // setPlaylist re-shuffles internally when shuffle mode is enabled.
-          await _handler!.setPlaylist(items, startIndex, keepListen: keepListen);
+          await _handler!.setPlaylist(items, startIndex,
+              keepListen: keepListen, autoplay: autoplay);
           // CRITICAL: do NOT await play(). just_audio's play() Future does not
           // complete until playback is paused or the track ends, so awaiting it
           // here would block this op (and the whole serialized _opChain) for the
@@ -279,6 +284,10 @@ class FletAudioService extends FletService with WidgetsBindingObserver {
       case 'set_play_log_path':
         final path = a['path'] as String?;
         if (path != null && path.isNotEmpty) _handler?.setPlayLogPath(path);
+        final resumePath = a['resume_path'] as String?;
+        if (resumePath != null && resumePath.isNotEmpty) {
+          _handler?.setResumePath(resumePath);
+        }
 
       case 'set_repeat_mode':
         final mode = a['mode'] as String? ?? 'none';
@@ -753,18 +762,7 @@ class FletAudioService extends FletService with WidgetsBindingObserver {
   /// Every child is a leaf source, so a logical index is a children index.
   /// O(1): reads our own ConcatenatingAudioSource, not player.sequence (which
   /// rebuilds a list of the whole queue on each read).
-  String? _srcAt(int? idx) {
-    final handler = _handler;
-    if (handler == null || idx == null) return null;
-    final children = handler._playlist.children;
-    if (idx < 0 || idx >= children.length) return null;
-    final child = children[idx];
-    if (child is IndexedAudioSource) {
-      final tag = child.tag;
-      if (tag is MediaItem) return tag.id;
-    }
-    return null;
-  }
+  String? _srcAt(int? idx) => _handler?._idAt(idx);
 
   void _emitPosition() {
     final handler = _handler;
@@ -935,12 +933,14 @@ class FletAudioService extends FletService with WidgetsBindingObserver {
           androidNotificationChannelId:
               'com.example.flet_audio_service.channel.audio',
           androidNotificationChannelName: 'Audio Playback',
-          // true: while PAUSED the service leaves the foreground, so Android
-          // may freeze or reclaim the idle process instead of keeping it
-          // pinned (and its timers firing) for as long as the user stays
-          // paused. The notification becomes swipe-dismissible while paused;
-          // a reclaimed process cold-starts into the saved queue.
-          androidStopForegroundOnPause: true,
+          // false: EVERY playing→paused edge would otherwise drop the
+          // foreground and the wakelock, including the ones nobody chose (a
+          // transient focus loss, a playlist reload). The backgrounded app
+          // was then frozen, and getting the foreground back from the
+          // background is refused on Android 12+, so playback died and the
+          // notification went stale. The handler's idle timer releases the
+          // service after a long deliberate pause instead.
+          androidStopForegroundOnPause: false,
           // Android 14+ MediaStyle notifications require an explicit icon;
           // omitting this can cause SystemUI to kill the foreground service
           // on screen-lock. mipmap/ic_launcher always exists in a Flet app.
@@ -1096,6 +1096,12 @@ class AudioPlayerHandler extends BaseAudioHandler with QueueHandler, SeekHandler
       if (current is MediaItem) {
         mediaItem.add(_withArt(current));
         _ledgerOnItem(current);
+        // Keyed by item, not index: a reload can keep the index and change
+        // the item, and a splice above the playing row the reverse.
+        if (current.id != _resumeSrc) {
+          _resumeSrc = current.id;
+          _saveResume();
+        }
         _ensureArt(current);
         final next = _player.nextIndex;
         final seq = _player.sequence;
@@ -1117,12 +1123,20 @@ class AudioPlayerHandler extends BaseAudioHandler with QueueHandler, SeekHandler
       } else {
         _ledgerClock.stop();
       }
+      // Before the ledger's early return: a repair reload's pause still moves
+      // the resume point.
+      if (s.playing != _resumePlaying) {
+        _resumePlaying = s.playing;
+        _saveResume();
+      }
+      _syncIdleStop(s);
       if (s.processingState == ProcessingState.idle && _ledgerHold) return;
       if (s.processingState == ProcessingState.completed ||
           s.processingState == ProcessingState.idle) {
         _ledgerFinalize();
       }
     });
+
     // A loop (repeat-one, or repeat-all over one item) replays the SAME item,
     // so the sequence listener sees no change; autoAdvance onto the ledger's
     // own item is the only signal that a fresh listen began.
@@ -1136,6 +1150,66 @@ class AudioPlayerHandler extends BaseAudioHandler with QueueHandler, SeekHandler
     });
 
     _initAudioSession();
+  }
+
+  /// Id (= the src Python sent) of live playlist row [idx], or null. Every
+  /// child is a leaf source, so a logical index is a children index. O(1):
+  /// reads our own ConcatenatingAudioSource, not player.sequence (which
+  /// rebuilds a list of the whole queue on each read).
+  String? _idAt(int? idx) {
+    if (idx == null) return null;
+    final children = _playlist.children;
+    if (idx < 0 || idx >= children.length) return null;
+    final child = children[idx];
+    if (child is IndexedAudioSource) {
+      final tag = child.tag;
+      if (tag is MediaItem) return tag.id;
+    }
+    return null;
+  }
+
+  // ── Resume record ─────────────────────────────────────────────────────────
+  // Where playback is, written by the handler because it outlives the Flet
+  // session. Python's own snapshot (queue_pos.json) is only written while
+  // Python can hear the player, so after background auto-advance through the
+  // auto-play prefill it pointed at the track playing when the session died,
+  // and a cold start resumed there, replaying everything heard since.
+  // One ~120-byte atomic write per track change and per play/pause; nothing
+  // periodic, so a kill mid-track resumes at the start of that track.
+  String? _resumePath;
+  Future<void> _resumeWrites = Future<void>.value();
+  String? _resumeSrc;
+  bool _resumePlaying = false;
+
+  void setResumePath(String path) {
+    _resumePath = path;
+    _saveResume();
+  }
+
+  void _saveResume() {
+    final path = _resumePath;
+    if (path == null) return;
+    final idx = _player.currentIndex;
+    final src = _idAt(idx);
+    if (src == null) return;
+    final record = jsonEncode({
+      'src': src,
+      'index': idx,
+      'position_ms': _player.position.inMilliseconds,
+      'playing': _player.playing,
+      'at': _nowSecs(),
+    });
+    // Chained so writes never interleave; tmp + rename so a kill mid-write
+    // leaves the previous record, never a torn one.
+    _resumeWrites = _resumeWrites.then((_) async {
+      try {
+        final tmp = File('$path.tmp');
+        await tmp.writeAsString(record, flush: true);
+        await tmp.rename(path);
+      } catch (e) {
+        debugPrint("FletAudioService: resume record write failed → $e");
+      }
+    });
   }
 
   // ── Now-playing artwork ───────────────────────────────────────────────────
@@ -1208,8 +1282,9 @@ class AudioPlayerHandler extends BaseAudioHandler with QueueHandler, SeekHandler
   static const int _ledgerMinMs = 1000;
   static const int _ledgerPendingCap = 500;
   MediaItem? _ledgerItem;
-  // Set while a repair re-push reloads the item already playing: its stop()
-  // passes through `idle`, which must not close the listen.
+  // Set while a repair re-push reloads the item already playing: an `idle`
+  // seen during that reload must not close the listen. (setPlaylist no longer
+  // stop()s first, so this is now defensive.)
   bool _ledgerHold = false;
   final Stopwatch _ledgerClock = Stopwatch();
   bool _ledgerCounting = false;
@@ -1278,6 +1353,42 @@ class AudioPlayerHandler extends BaseAudioHandler with QueueHandler, SeekHandler
     lines.forEach(_ledgerAppend);
   }
 
+  // ── Idle release ──────────────────────────────────────────────────────────
+  // The service stays in the foreground while paused (see AudioServiceConfig),
+  // which pins the process and holds audio_service's wakelock. After this long
+  // without audible playback the handler stops and releases the service, so
+  // the notification goes and Android may reclaim the process; a reclaimed
+  // process cold-starts into the saved queue. A transient interruption (call,
+  // navigation prompt) never counts: its end has to be able to resume.
+  static const Duration _idleStopAfter = Duration(minutes: 10);
+  Timer? _idleStopTimer;
+  // True once playback has started since the last release: a cold-start
+  // restore that was never played holds no foreground and needs no release.
+  bool _holdsService = false;
+  bool _transientPause = false;
+
+  void _syncIdleStop(PlayerState s) {
+    final audible = s.playing &&
+        s.processingState != ProcessingState.completed &&
+        s.processingState != ProcessingState.idle;
+    if (audible) {
+      _holdsService = true;
+      _idleStopTimer?.cancel();
+      _idleStopTimer = null;
+      return;
+    }
+    if (!_holdsService || _transientPause) {
+      _idleStopTimer?.cancel();
+      _idleStopTimer = null;
+      return;
+    }
+    _idleStopTimer ??= Timer(_idleStopAfter, () {
+      _idleStopTimer = null;
+      debugPrint("FletAudioService: idle for $_idleStopAfter, releasing service");
+      stop();
+    });
+  }
+
   bool _wasPlayingBeforeInterruption = false;
 
   Future<void> _initAudioSession() async {
@@ -1288,19 +1399,36 @@ class AudioPlayerHandler extends BaseAudioHandler with QueueHandler, SeekHandler
       if (event.type == AudioInterruptionType.duck) {
         _player.setVolume(event.begin ? 0.5 : 1.0);
       } else if (event.type == AudioInterruptionType.pause) {
+        // Transient focus loss: Android will hand focus back.
         if (event.begin) {
           _wasPlayingBeforeInterruption = _player.playing;
+          // Set before pausing so the paused state doesn't arm the idle timer.
+          _transientPause = _wasPlayingBeforeInterruption;
           _player.pause();
         } else {
+          _transientPause = false;
           if (_wasPlayingBeforeInterruption) {
+            _wasPlayingBeforeInterruption = false;
             _player.play();
+          } else {
+            _syncIdleStop(_player.playerState);
           }
         }
       } else if (event.type == AudioInterruptionType.unknown && event.begin) {
-        _wasPlayingBeforeInterruption = _player.playing;
+        // Permanent focus loss (another player took over): no resume is
+        // coming, so this pause is idle like a user pause.
+        _wasPlayingBeforeInterruption = false;
+        _transientPause = false;
         _player.pause();
       }
     });
+  }
+
+  /// A user play/pause supersedes any pending interruption: the user's choice
+  /// stands, and the interruption's end must not undo it.
+  void _clearInterruption() {
+    _transientPause = false;
+    _wasPlayingBeforeInterruption = false;
   }
 
   /// androidCompactActionIndices [0, 1, 3] = previous, play/pause, next
@@ -1344,18 +1472,38 @@ class AudioPlayerHandler extends BaseAudioHandler with QueueHandler, SeekHandler
 
   @override
   Future<void> play() async {
+    _clearInterruption();
     final session = await AudioSession.instance;
     await session.setActive(true);
     await _player.play();
   }
 
   @override
-  Future<void> pause() => _player.pause();
+  Future<void> pause() {
+    _clearInterruption();
+    return _player.pause();
+  }
 
+  /// Every stop path (Python, the notification's stop button, swiping the
+  /// notification away, the idle timer) ends here.
   @override
   Future<void> stop() async {
+    _idleStopTimer?.cancel();
+    _idleStopTimer = null;
+    _clearInterruption();
     await _player.stop();
     await super.stop();
+    // audio_service's own stop can't leave the foreground (see
+    // releasePlaybackService in the plugin); without this the notification,
+    // the foreground slot and the wakelock all outlived the stop.
+    if (_holdsService && Platform.isAndroid) {
+      try {
+        await _decodeChannel.invokeMethod('releasePlaybackService');
+      } catch (e) {
+        debugPrint("FletAudioService: releasePlaybackService failed → $e");
+      }
+    }
+    _holdsService = false;
   }
 
   @override
@@ -1410,7 +1558,7 @@ class AudioPlayerHandler extends BaseAudioHandler with QueueHandler, SeekHandler
   }
 
   Future<void> setPlaylist(List<MediaItem> items, int startIndex,
-      {bool keepListen = false}) async {
+      {bool keepListen = false, bool autoplay = false}) async {
     final sources = items
         .map((item) => _buildAudioSource(item.id, item))
         .toList();
@@ -1427,7 +1575,13 @@ class AudioPlayerHandler extends BaseAudioHandler with QueueHandler, SeekHandler
         items.isNotEmpty &&
         _ledgerItem?.id == items[clampedStart].id;
     try {
-      await _player.stop();
+      // No _player.stop() first: setAudioSource replaces the source and keeps
+      // playing if the player was playing. stop() dropped `playing` (the
+      // service's foreground edge) and went through `idle`, which audio_service
+      // treats as a full stop: it cancelled the notification and stopSelf()'d
+      // the service on every re-push, including background repairs. A push
+      // that must not play still pauses first.
+      if (!autoplay && _player.playing) await _player.pause();
       // Setting initialIndex inside setAudioSource avoids the race where a
       // separate seek call would be clobbered by the source-load defaulting
       // back to index 0.

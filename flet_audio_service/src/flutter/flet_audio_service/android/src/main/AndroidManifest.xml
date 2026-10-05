@@ -4,8 +4,16 @@
     <uses-permission android:name="android.permission.WAKE_LOCK"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"/>
+    <!-- LibraryTaskService: keeps downloads / metadata sync / analysis alive
+         with the screen off. Required for the dataSync type on Android 14+. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
 
     <application>
+        <service
+            android:name="com.flet.flet_audio_service.LibraryTaskService"
+            android:foregroundServiceType="dataSync"
+            android:exported="false" />
+
         <service
             android:name="com.ryanheise.audioservice.AudioService"
             android:foregroundServiceType="mediaPlayback"

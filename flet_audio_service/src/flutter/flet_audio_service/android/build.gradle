@@ -46,6 +46,12 @@ android {
     }
 }
 
+dependencies {
+    // ServiceCompat.startForeground(…, type) for LibraryTaskService needs
+    // core 1.12+. Same version audio_service pins, so nothing new resolves.
+    implementation "androidx.core:core:1.13.1"
+}
+
 // audio_service requires the host activity to use audio_service's CACHED
 // FlutterEngine; not just any FlutterFragmentActivity. The audio_service
 // plugin ships an `AudioServiceFragmentActivity` helper that overrides

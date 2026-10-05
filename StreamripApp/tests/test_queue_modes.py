@@ -160,6 +160,11 @@ class TestQueueModes(unittest.TestCase):
         self.app._save_queue_state = main.StreamripFletApp._save_queue_state.__get__(self.app, main.StreamripFletApp)
         self.app._position_state_path = main.StreamripFletApp._position_state_path.__get__(self.app, main.StreamripFletApp)
         self.app._save_position_state = main.StreamripFletApp._save_position_state.__get__(self.app, main.StreamripFletApp)
+        # Restore helpers (resume-point choice, native resume record).
+        self.app._choose_resume = main.StreamripFletApp._choose_resume
+        self.app._row_of = main.StreamripFletApp._row_of
+        self.app._mtime = main.StreamripFletApp._mtime
+        self.app._read_native_resume = main.StreamripFletApp._read_native_resume.__get__(self.app, main.StreamripFletApp)
         
         # Mock the scheduled partition save to write synchronously in tests
         def _mock_schedule_partition_save(filename, queue_list, current_index, position, duration):

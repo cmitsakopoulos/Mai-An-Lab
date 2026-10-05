@@ -24,6 +24,8 @@ import pathlib
 import flet as ft
 from flet_audio_service import AudioServiceControl
 
+from utils import queue_layout
+
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.ERROR)
 
@@ -59,6 +61,9 @@ class AudioEngine:
         # Where the native handler appends finished listens; set by the app
         # before setup() and re-sent to Dart on every `ready`.
         self.play_log_path = ""
+        # Where the native handler keeps its resume record (see
+        # FletAudioService setResumePath); read by the app's session restore.
+        self.resume_path = ""
         self.current_track  = ""
         self.current_artist = ""
         self.current_album  = ""
@@ -130,6 +135,17 @@ class AudioEngine:
         Python-initiated mutation/skip immediately before dispatching to Dart."""
         self._queue_epoch += 1
         return self._queue_epoch
+
+    def probe_native(self) -> None:
+        """A new UI session in the same process: this queue is still the live
+        one, but the playing row may lag what the native player did while this
+        side couldn't hear it. An empty splice changes nothing; its ack carries
+        the player's index, playing item and playlist length, so _apply_ack
+        catches the mirror up, or (a player that came back empty, or ops lost
+        with the old session) repairs through the divergence guard. Nothing is
+        re-pushed when the two agree, so playback is never interrupted."""
+        if self.queue:
+            self._schedule_splice([])
 
     @property
     def shuffle_indices(self) -> list[int]:
@@ -244,7 +260,8 @@ class AudioEngine:
             # object, but the (static) handler already has the path, so this
             # is idempotent. Buffered listens flush as soon as it lands.
             if self.play_log_path and self._page:
-                self._page.run_task(self._audio.set_play_log_path, self.play_log_path)
+                self._page.run_task(self._audio.set_play_log_path,
+                                    self.play_log_path, self.resume_path or None)
         # Session (re)connected: whatever the ledger captured while Python was
         # deaf can be drained now.
         self.dispatch("on_native_ready")
@@ -966,8 +983,10 @@ class AudioEngine:
         await self._run_native_mutation(send, epoch)
 
     def queue_next(self, track: dict):
+        """Play Next: first in the up-next block (see utils.queue_layout)."""
         if not track.get("path"):
             return
+        track = queue_layout.as_queued(track)
         if not self.queue:
             self.set_queue([track])
             return
@@ -979,14 +998,38 @@ class AudioEngine:
         self._schedule_splice([(insert_at, 0, [track])])
 
     def queue_last(self, track: dict):
+        """Add to Queue: last in the up-next block, so it plays after the
+        listener's earlier picks but before the rest of the queue and before
+        auto-play's recommendations. Appending used to put it behind the whole
+        library tail (and behind every auto-play refill), i.e. never. Under
+        shuffle the order is random anyway, so it still appends."""
         if not track.get("path"):
             return
+        track = queue_layout.as_queued(track)
         if not self.queue:
             self.set_queue([track])
             return
-        self.queue.append(track)
+        at = (len(self.queue) if self._is_shuffle
+              else queue_layout.up_next_end(self.queue, self.current_index))
+        self.queue.insert(at, track)
         self.dispatch("on_queue_mutated")
-        self._schedule_splice([(len(self.queue) - 1, 0, [track])])
+        self._schedule_splice([(at, 0, [track])])
+
+    def queue_last_many(self, tracks: list[dict]):
+        """Add to Queue for a block (one mutation, one native op): last in the
+        up-next block, in order. See queue_last."""
+        tracks, _ = self._playable(tracks)
+        tracks = [queue_layout.as_queued(t) for t in tracks]
+        if not tracks:
+            return
+        if not self.queue:
+            self.set_queue(tracks)
+            return
+        at = (len(self.queue) if self._is_shuffle
+              else queue_layout.up_next_end(self.queue, self.current_index))
+        self.queue[at:at] = tracks
+        self.dispatch("on_queue_mutated")
+        self._schedule_splice([(at, 0, list(tracks))])
 
     def queue_extend(self, tracks: list[dict]):
         """Append several tracks as one mutation: one on_queue_mutated dispatch

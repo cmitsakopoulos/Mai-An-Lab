@@ -1903,8 +1903,9 @@ class AssistantRunner:
         seed_name = f"'{seed_row.get('title')}' by {seed_row.get('artist')}" if seed_row else "the active track"
 
         if is_queue and self.engine.queue:
-            # One mutation, one native op (not one per track).
-            self.engine.queue_extend(engine_tracks)
+            # Add to Queue semantics (ahead of auto-play's recommendations and
+            # the held queue); one mutation, one native op.
+            self.engine.queue_last_many(engine_tracks)
             for t in engine_tracks:
                 self._remember(t["path"], seed_path=seed_path)
             added = len(engine_tracks)

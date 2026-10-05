@@ -8,6 +8,8 @@ import math
 import flet as ft
 from tinytag import TinyTag
 
+from utils import queue_layout
+
 if sys.platform == "darwin":
     try:
         from Foundation import NSURL, NSOperationQueue, NSThread
@@ -859,6 +861,8 @@ class AudioEngine:
                     self._page.run_task(self.play_current)
 
     def queue_next(self, track: dict):
+        """Play Next: first in the up-next block (see utils.queue_layout)."""
+        track = queue_layout.as_queued(track)
         with self._lock:
             if not self.queue:
                 self.set_queue([track])
@@ -870,14 +874,31 @@ class AudioEngine:
             self.dispatch("on_queue_mutated")
 
     def queue_last(self, track: dict):
+        """Add to Queue: last in the up-next block (parity with Android)."""
+        track = queue_layout.as_queued(track)
         with self._lock:
             if not self.queue:
                 self.set_queue([track])
                 return
-            self.queue.append(track)
             if self._is_shuffle:
+                self.queue.append(track)
                 self._on_track_added_to_shuffle(len(self.queue) - 1, play_next=False)
+            else:
+                at = queue_layout.up_next_end(self.queue, self.current_index)
+                self.queue.insert(at, track)
             self.dispatch("on_queue_mutated")
+
+    def queue_last_many(self, tracks: list[dict]):
+        """Add to Queue for a block: last in the up-next block, in order
+        (parity with Android)."""
+        tracks = [queue_layout.as_queued(t) for t in tracks if t.get("path")]
+        if not tracks:
+            return
+        if not self.queue or self._is_shuffle:
+            self.queue_extend(tracks)
+            return
+        at = queue_layout.up_next_end(self.queue, self.current_index)
+        self.queue_after_current(tracks, after_index=at - 1)
 
     def queue_extend(self, tracks: list[dict]):
         """Append several tracks with a single on_queue_mutated dispatch (one

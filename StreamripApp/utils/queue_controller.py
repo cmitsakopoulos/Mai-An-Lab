@@ -5,6 +5,7 @@ import logging
 import itertools
 
 from utils.error_boundary import JobCancelledException
+from utils.progress_notify import ProgressNotifier
 from utils.streamrip_api import download, get_default_download_path
 
 logger = logging.getLogger(__name__)
@@ -45,6 +46,11 @@ class QueueController:
         self._ids = itertools.count(1)
         self._listeners: list = []
         self._scan_needed = False
+        # System progress notification for the running batch. Posting it also
+        # starts the native task service, which keeps a long download alive
+        # with the screen off. None while the worker is idle.
+        self._notifier: ProgressNotifier | None = None
+        self._batch_counts = {DONE: 0, FAILED: 0, CANCELLED: 0}
 
     # ── observation ─────────────────────────────────────────────────────────
     def add_listener(self, fn) -> None:
@@ -218,6 +224,8 @@ class QueueController:
 
     async def _worker_loop(self):
         self.is_processing = True
+        self._notifier = ProgressNotifier("download", "Downloads")
+        self._batch_counts = {DONE: 0, FAILED: 0, CANCELLED: 0}
         self._notify()
         try:
             while self._pending:
@@ -227,9 +235,13 @@ class QueueController:
                 job["status"] = "Starting…"
                 self._cancel_event.clear()
                 self._notify()
+                self._post_progress(job)
 
                 await self._workflow(job)
 
+                state = job.get("state")
+                if state in self._batch_counts:
+                    self._batch_counts[state] += 1
                 self._push_history(job)
                 self.current_job = None
                 self._notify()
@@ -242,6 +254,11 @@ class QueueController:
             self.is_processing = False
             self._worker_task = None
             self._cancel_event.clear()
+            if self._notifier is not None:
+                # Also on cancellation/crash: an unfinished notifier would keep
+                # the native task service (and its wakelock) running.
+                self._notifier.finish(self._batch_summary())
+                self._notifier = None
             self._notify()
             # Re-index ONCE, after the whole queue drains. This used to run per
             # completed job, so a 20-track batch kicked off 20 full library
@@ -276,6 +293,41 @@ class QueueController:
         if detail  is not None: job["detail"]  = detail
         if state   is not None: job["state"]   = state
         self._notify()
+        self._post_progress(job)
+
+    def _post_progress(self, job: dict) -> None:
+        """Batch-level bar: finished jobs count 100 each, the running one its
+        percent. The total grows if more is queued mid-batch. ProgressNotifier
+        throttles to ~1 update/s."""
+        notifier = self._notifier
+        if notifier is None or job is not self.current_job:
+            return
+        finished = sum(self._batch_counts.values())
+        total = finished + self.active_count
+        try:
+            pct = max(0.0, min(100.0, float(job.get("percent") or 0)))
+        except (TypeError, ValueError):
+            pct = 0.0
+        head = job.get("title") or "Unknown"
+        if job.get("artist"):
+            head += f" — {job['artist']}"
+        count = f"{finished + 1} of {total}" if total > 1 else ""
+        text = " · ".join(p for p in (head, count, job.get("status") or "") if p)
+        notifier.update(finished * 100 + int(pct), total * 100, text)
+
+    def _batch_summary(self) -> str:
+        """Done-notification text; empty (= just remove the notification)
+        when everything was cancelled."""
+        done = self._batch_counts[DONE]
+        failed = self._batch_counts[FAILED]
+        if not done and not failed:
+            return ""
+        parts = []
+        if done:
+            parts.append(f"{done} download{'s' if done != 1 else ''} finished")
+        if failed:
+            parts.append(f"{failed} failed")
+        return " · ".join(parts) + "."
 
     async def _workflow(self, job: dict):
         url      = job.get("url")
