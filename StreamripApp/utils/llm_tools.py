@@ -708,7 +708,8 @@ async def _download_item(item: Dict[str, Any]) -> "Any":
             success=False,
         )
     try:
-        download_dir = streamrip_api.get_default_download_path()
+        from utils.storage_paths import pick_download_dir, resolve_saved_paths
+        download_dir = await asyncio.to_thread(pick_download_dir, *resolve_saved_paths())
         await streamrip_api.download(url, download_dir)
         return AssistantResponse(
             spoken=f"Downloading '{item.get('title')}' by {item.get('artist')} now, sir.",

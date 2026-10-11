@@ -7,6 +7,7 @@ import itertools
 from utils.error_boundary import JobCancelledException
 from utils.progress_notify import ProgressNotifier
 from utils.streamrip_api import download, get_default_download_path
+from utils.storage_paths import pick_download_dir
 
 logger = logging.getLogger(__name__)
 
@@ -348,7 +349,10 @@ class QueueController:
                 )
 
         try:
-            await asyncio.to_thread(os.makedirs, target, exist_ok=True)
+            # Falls back to the library folder (then the public Music folder)
+            # if the download folder can't be written; never to app storage.
+            target = await asyncio.to_thread(
+                pick_download_dir, target, getattr(self.app, "library_folder", ""))
             for attempt in range(3):
                 try:
                     async with self._job_lock:

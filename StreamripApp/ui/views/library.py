@@ -19,7 +19,6 @@ if sys.platform == "darwin":
 else:
     from utils.audio_engine import audio_engine
 
-from utils.filepath_utils import get_app_dir
 
 logger = logging.getLogger(__name__)
 
@@ -4375,7 +4374,8 @@ class LibraryView:
         self._is_scanning = True
         self._scan_is_quiet = quiet
 
-        target = self.app.library_folder or self.app.target_folder or get_app_dir()
+        from utils.storage_paths import resolve_library_dir
+        target = resolve_library_dir(self.app.library_folder, self.app.target_folder)
         if not quiet:
             self._scan_progress_container.visible = True
             self._scan_progress.value = None
@@ -4432,6 +4432,13 @@ class LibraryView:
             self._needs_reload = True
         else:
             self.page.run_task(self.load_library)
+
+        # The automatic artist-metadata trigger: a scan that indexed anything
+        # may have brought new artists (a download lands here via a quiet scan).
+        if count:
+            schedule = getattr(self.app, "schedule_metadata_enrichment", None)
+            if schedule is not None:
+                schedule()
 
         if not quiet:
             def _hide_scanner():

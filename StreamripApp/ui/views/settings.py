@@ -2588,9 +2588,11 @@ class SettingsView:
         if not dl or not lib:
             self.app.show_snackbar("Paths cannot be empty.")
             return
+        bad = self._private_path_error(dl) or self._private_path_error(lib)
+        if bad:
+            self.app.show_snackbar(bad)
+            return
         
-        self.app.target_folder = dl
-        self.app.library_folder = lib
         from utils.streamrip_api import update_config_params
         update_config_params({"downloads": {"folder": dl}})
         # "" means ask every time; the quality sheet treats any unknown value
@@ -2598,6 +2600,7 @@ class SettingsView:
         update_config_params({"general": {"default_quality": self._default_quality_dropdown.value or ""}})
         self.app._save_pref("folder_path", dl)
         self.app._save_pref("library_path", lib)
+        self.app.sync_config_to_ui()
         self.app.show_snackbar("Storage paths updated.")
         self.app.library_view.start_scan()
 
@@ -2721,9 +2724,13 @@ class SettingsView:
             self.app.show_snackbar("Nothing to save \u2014 enter credentials for a source first.")
 
     # ── native browsing ──────────────────────────────────────────────────────
-    def _browse_android_paths(self, target: str):
-        """Interactive directory navigator for Android."""
-        app_data = os.getenv("FLET_APP_STORAGE_DATA") or ""
+    def _browse_android_paths(self, target: str, on_pick=None):
+        """Interactive directory navigator for Android.
+
+        Only shared storage is offered: the app's own sandbox can't be opened
+        by any files app, so music saved there is unreachable. `on_pick`
+        overrides the default (save to Settings) handling of the chosen path."""
+        from utils.storage_paths import is_app_private
         label    = "Download Folder" if target == "download" else "Library Folder"
 
         BOOKMARKS = [
@@ -2732,8 +2739,6 @@ class SettingsView:
             (os.path.abspath("/storage/emulated/0/Music"),    "Music"),
             (os.path.abspath("/storage/emulated/0/Download"), "Downloads"),
         ]
-        if app_data:
-            BOOKMARKS.append((app_data, "App Storage"))
 
         bs_holder  = [None]
         path_state = [None]
@@ -2757,7 +2762,7 @@ class SettingsView:
             if picked_path[0]:
                 p = picked_path[0]
                 picked_path[0] = None
-                self._handle_folder_picked(p, target)
+                (on_pick or (lambda path: self._handle_folder_picked(path, target)))(p)
 
         def _render(directory):
             path_state[0] = directory
@@ -2782,11 +2787,16 @@ class SettingsView:
                 title_text.value = os.path.basename(directory) or directory
                 path_text.value  = directory
 
+                private = is_app_private(directory)
                 dir_list.controls.append(
                     ft.Container(
                         content=ft.Button(
-                            content=ft.Text(f"Use \"{os.path.basename(directory) or directory}\"", overflow=ft.TextOverflow.ELLIPSIS, max_lines=1),
-                            icon=ft.Icons.CHECK_ROUNDED,
+                            content=ft.Text(
+                                "App-private folder: not usable" if private
+                                else f"Use \"{os.path.basename(directory) or directory}\"",
+                                overflow=ft.TextOverflow.ELLIPSIS, max_lines=1),
+                            icon=ft.Icons.BLOCK_ROUNDED if private else ft.Icons.CHECK_ROUNDED,
+                            disabled=private,
                             on_click=lambda _: _confirm(directory),
                             bgcolor=CYAN,
                             color=BG,
@@ -2920,17 +2930,21 @@ class SettingsView:
         so refresh()'s page.update() never races the sheet's dismissal."""
         self._handle_folder_picked(path, target)
 
+    @staticmethod
+    def _private_path_error(path: str) -> str | None:
+        from utils.storage_paths import is_app_private
+        if is_app_private(path):
+            return ("That folder is inside the app's private storage, which no "
+                    "files app can open. Pick a folder in shared storage.")
+        return None
+
     def _handle_folder_picked(self, path: str, target: str):
         if not path:
             return
-
-        if target == "download":
-            self.app.target_folder = path
-        elif target == "library":
-            self.app.library_folder = path
-
-        self._dl_path_field.value  = self.app.target_folder
-        self._lib_path_field.value = self.app.library_folder
+        bad = self._private_path_error(path)
+        if bad:
+            self.app.show_snackbar(bad)
+            return
 
         from utils.streamrip_api import update_config_params
         if target == "download":
@@ -2938,6 +2952,11 @@ class SettingsView:
             self.app._save_pref("folder_path", path)
         else:
             self.app._save_pref("library_path", path)
+        # Re-resolve rather than assign: a download folder left unset follows
+        # the library, so picking a library can move both.
+        self.app.sync_config_to_ui()
+        self._dl_path_field.value  = self.app.target_folder
+        self._lib_path_field.value = self.app.library_folder
 
         self.refresh()
         if getattr(self, "_current_subpage_name", None) == "Storage":

@@ -2271,7 +2271,7 @@ class DatabaseManager:
                 genres      TEXT,     -- JSON: [{"name": str, "count": int}, ...]
                 source      TEXT,     -- e.g. 'musicbrainz'
                 score       INTEGER,  -- match confidence (0-100) from the search
-                status      TEXT,     -- 'ok' | 'lowconfidence' | 'notfound' | 'error'
+                status      TEXT,     -- 'ok' | 'lowconfidence' | 'notfound' | 'retry' | 'error'
                 fetched_at  REAL
             )
         ''')
@@ -2290,8 +2290,18 @@ class DatabaseManager:
                     "ALTER TABLE artist_enrichment ADD COLUMN provenance TEXT"
                 )
                 logger.info("DatabaseManager: added artist_enrichment.provenance")
+            # Failed lookups in a row. A failure writes status='retry' so the
+            # background pass picks the artist up again, rolling to the other
+            # provider; at ENRICH_MAX_ATTEMPTS it parks as status='error' and
+            # waits for a manual Sync. Any real answer resets it to 0, since
+            # upsert's INSERT OR REPLACE leaves the column at its default.
+            if "attempts" not in cols:
+                await conn.execute(
+                    "ALTER TABLE artist_enrichment ADD COLUMN attempts INTEGER DEFAULT 0"
+                )
+                logger.info("DatabaseManager: added artist_enrichment.attempts")
         except Exception as exc:
-            logger.warning("provenance column migration skipped: %s", exc)
+            logger.warning("artist_enrichment column migration skipped: %s", exc)
         # NPMI genre-similarity model, precomputed at graph generation and read
         # by the walk's metadata gate. Single-row JSON blob (small + atomic),
         # Additive: harmless on a DB that predates it.
@@ -2471,6 +2481,37 @@ class DatabaseManager:
             ''', (artist_name, mbid, country, area, genres_text, source, score, status,
                   prov_text))
             await conn.commit()
+
+    async def record_enrichment_failure(
+        self, artist_name: str, *, source: str, max_attempts: int = 3,
+    ) -> str | None:
+        """Mutation: count one failed lookup. Returns the row's status after
+        the write — 'retry' below `max_attempts`, 'error' at it (parked until a
+        manual Sync) — or None when the row was left alone.
+
+        Failures used to write nothing, so the artist stayed "new" and was
+        fetched again on every boot, forever. A failure only ever lands on a
+        missing/'retry'/'error' row: a manual row, or one holding a real answer
+        (a re-sync of an 'ok' row that lost its connection), keeps its data."""
+        async with self._write_lock:
+            conn = await self.get_connection()
+            async with conn.execute(
+                "SELECT status, source, COALESCE(attempts, 0) "
+                "FROM artist_enrichment WHERE artist_name = ?",
+                (artist_name,),
+            ) as cursor:
+                row = await cursor.fetchone()
+            if row and (row[1] == "manual" or row[0] not in ("retry", "error")):
+                return None
+            attempts = (row[2] if row else 0) + 1
+            status = "error" if attempts >= max_attempts else "retry"
+            await conn.execute('''
+                INSERT OR REPLACE INTO artist_enrichment
+                    (artist_name, source, status, attempts, fetched_at)
+                VALUES (?, ?, ?, ?, strftime('%s','now'))
+            ''', (artist_name, source, status, attempts))
+            await conn.commit()
+            return status
 
     async def set_manual_artist_enrichment(
         self, artist_name: str, *, country: str | None = None,
@@ -2861,18 +2902,21 @@ class DatabaseManager:
 
     async def get_artists_needing_enrichment(
         self, limit: int | None = None, include_failed: bool = False,
-        retry_incomplete: bool = False,
-    ) -> list[str]:
+        retry_incomplete: bool = False, with_attempts: bool = False,
+    ) -> list:
         """Lock-free read: artist names the next enrichment pass should fetch.
         Rows the user filled by hand (source='manual') are never re-fetched.
+        `with_attempts` returns (name, failed_attempts) pairs instead, which is
+        what the background pass needs to pick each artist's provider.
 
         Three widening scopes, because the callers want different things:
 
-          default            artists with NO enrichment row at all. What the
+          default            artists with NO enrichment row, plus 'retry' rows
+                             (failed fewer than the max times). What the
                              background pass after a library index uses — cheap,
-                             and it only touches genuinely new artists.
-          include_failed     also rows whose last attempt ERRORED, i.e. a
-                             transient offline/rate-cap failure worth retrying.
+                             and it only touches new or still-retrying artists.
+          include_failed     also rows PARKED at status='error' after the max
+                             failed attempts. Only a manual Sync asks for these.
           retry_incomplete   also rows that succeeded but came back with EMPTY
                              GENRES. This is what lets a re-sync heal an artist
                              MusicBrainz has no tags for by trying the other
@@ -2883,7 +2927,7 @@ class DatabaseManager:
         to nothing were never revisited and the documented healing never
         happened. It is now an explicit, separate scope."""
         conn = await self.get_connection()
-        clauses = ["e.artist_name IS NULL"]
+        clauses = ["e.artist_name IS NULL", "e.status = 'retry'"]
         if include_failed:
             clauses.append("e.status = 'error'")
         if retry_incomplete:
@@ -2891,7 +2935,7 @@ class DatabaseManager:
                 "(e.genres IS NULL OR e.genres = '' OR e.genres = '[]')"
             )
         sql = (
-            "SELECT a.name FROM artists a "
+            "SELECT a.name, COALESCE(e.attempts, 0) FROM artists a "
             "LEFT JOIN artist_enrichment e ON e.artist_name = a.name "
             f"WHERE ({' OR '.join(clauses)}) "
             "  AND (e.source IS NULL OR e.source <> 'manual') "
@@ -2901,6 +2945,8 @@ class DatabaseManager:
             sql += f" LIMIT {int(limit)}"
         async with conn.execute(sql) as cursor:
             rows = await cursor.fetchall()
+        if with_attempts:
+            return [(r[0], int(r[1] or 0)) for r in rows if r[0]]
         return [r[0] for r in rows if r[0]]
 
     async def get_artist_meta_for_paths(self, paths: list[str]) -> dict:

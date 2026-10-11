@@ -211,3 +211,23 @@ async def test_onboarding_browse_folder():
         await wizard._browse_folder(None)
         assert wizard.detected_music_dir == "/Users/test/Music"
         assert wizard._folder_field.value == "/Users/test/Music"
+
+
+def test_onboarding_never_saves_an_app_private_folder(tmp_path, monkeypatch):
+    """A typed sandbox path (what the old '~/Music' default resolved to on
+    Android) is replaced by the public Music folder before it is saved."""
+    import ui.player.onboarding_modal as ob_mod
+    from utils import storage_paths
+    monkeypatch.setattr(storage_paths, "is_android", lambda: True)
+    monkeypatch.setenv("APP_FILES_PATH", "/data/user/0/com.example/files")
+    app = MockApp()
+    wizard = ob_mod.OnboardingWizardModal(app)
+    wizard.detected_music_dir = "/data/user/0/com.example/files/Music"
+
+    with patch.object(ob_mod, "get_app_dir", return_value=str(tmp_path)), \
+         patch.object(ob_mod, "update_config_params") as mock_update_config:
+        wizard._finish_onboarding(None)
+
+    folder = mock_update_config.call_args[0][0]["downloads"]["folder"]
+    assert folder == storage_paths.default_music_dir()
+    assert not storage_paths.is_app_private(folder)

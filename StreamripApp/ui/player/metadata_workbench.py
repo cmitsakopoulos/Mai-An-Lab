@@ -17,8 +17,7 @@ wrong with that:
     whole list under your finger.
 
 So the unit of work here is not "an artist with a problem", it is "a pile of
-artists that belong to one scene". You select several and drop them on a genre,
-because that is what the user actually knows: not this artist's tag list, but
+artists that belong to one scene". You select several and tap a genre, because that is what the user actually knows: not this artist's tag list, but
 that these twenty are all Greek rap. The bins are the library's own vocabulary,
 which matters for correctness and not just typing — the NPMI model in
 `genre_similarity` is learned from co-occurrence across THIS library's tags, so
@@ -29,12 +28,10 @@ a freshly invented spelling has no learned relation to anything.
     expand Container, and the pane is mounted with `_show_sub_page_full` so it
     is not nested inside the settings hub's scrolling Column. Both were
     violated before, which is what made scrolling fight back.
-  • `Draggable`/`DragTarget` carry the payload on `e.src.data`, so nothing has
-    to go through `page.get_control`.
-  • Drag is an accelerator, never the only path: a horizontal drag inside a
-    settings sub-page already means "back" (docs/FLET_FACTS.md §4), and touch
-    gesture arbitration is unkind to drag-inside-scroll. Select-then-tap does
-    the same job and is the primary route.
+  • Select-then-tap is the ONLY tagging route. Drag-and-drop was removed: a
+    horizontal drag inside a settings sub-page already means "back"
+    (docs/FLET_FACTS.md §4), and touch gesture arbitration is unkind to
+    drag-inside-scroll.
   • Row edits mutate one row and call `row.update()`; only structural changes
     re-render the list. The old code rebuilt every row on every chip tap.
 """
@@ -90,8 +87,6 @@ _SOURCE_STYLE = {
     "qobuz":       ("QOBUZ", "#FF9F0A"),
     "manual":      ("YOURS", ACCENT_AMBER),
 }
-
-_DRAG_GROUP = "mw_artist"
 
 # Fixed column widths, kept here so the header and the rows can never drift
 # apart. Everything else is proportional, so the two text columns get the whole
@@ -615,7 +610,7 @@ class MetadataWorkbenchPane(ft.Column):
         )
 
     def _row(self, g: dict, *, last: bool = False) -> ft.Control:
-        """One table row. Draggable on desktop, checkbox-selectable everywhere."""
+        """One table row: tap opens the editor, the checkbox selects."""
         name = g["artist_name"]
         sev = g.get("gap_severity", 2)
         genres = _genre_names(g.get("genres"))
@@ -702,39 +697,11 @@ class MetadataWorkbenchPane(ft.Column):
             on_click=lambda _e, gg=g: self._open_editor(gg),
             ink=True, data=name,
         )
-        # Drag is the desktop accelerator. `content_feedback` shows what is
-        # actually travelling, which for a multi-selection is the whole pile.
-        drag = ft.Draggable(
-            group=_DRAG_GROUP, content=row, data=name,
-            content_feedback=self._drag_feedback(name),
-            on_drag_start=lambda _e, n=name: self._on_drag_start(n),
-        )
-        # Keep the checkbox reachable: selection can be changed in code (a drag
-        # start replaces the selection, "Clear" empties it), and the tick has to
-        # follow — a native click updates the widget itself, nothing else does.
-        drag._checkbox = check
-        return drag
-
-    def _drag_feedback(self, name: str) -> ft.Control:
-        n = len(self.selected) if name in self.selected and self.selected else 1
-        label = f"{n} artists" if n > 1 else name
-        return ft.Container(
-            content=ft.Row([
-                ft.Icon(ft.Icons.DRAG_INDICATOR_ROUNDED, size=15, color=BG),
-                ft.Text(label, size=12.5, weight=ft.FontWeight.W_700, color=BG),
-            ], spacing=6, tight=True),
-            bgcolor=CYAN, border_radius=RADIUS_PILL,
-            padding=ft.Padding.symmetric(horizontal=14, vertical=9),
-            opacity=0.95,
-        )
-
-    def _on_drag_start(self, name: str):
-        # Dragging an unselected row acts on that row alone — it must not
-        # silently carry a selection the user made somewhere else.
-        if name not in self.selected:
-            for other in list(self.selected):
-                self._toggle_select(other, False)
-            self._toggle_select(name, True)
+        # Keep the checkbox reachable: selection can be changed in code ("Clear"
+        # empties it), and the tick has to follow — a native click updates the
+        # widget itself, nothing else does.
+        row._checkbox = check
+        return row
 
     def _toggle_select(self, name: str, on: bool):
         """Selection changes ONE row's appearance. The old code re-rendered the
@@ -743,12 +710,10 @@ class MetadataWorkbenchPane(ft.Column):
             self.selected.add(name)
         else:
             self.selected.discard(name)
-        drag = self._row_refs.get(name)
-        if drag is not None:
-            row = drag.content
+        row = self._row_refs.get(name)
+        if row is not None:
             row.bgcolor = apply_opacity(0.10, CYAN) if on else "transparent"
-            drag.content_feedback = self._drag_feedback(name)
-            cb = getattr(drag, "_checkbox", None)
+            cb = getattr(row, "_checkbox", None)
             if cb is not None and cb.value != on:
                 cb.value = on
             try:
@@ -788,10 +753,10 @@ class MetadataWorkbenchPane(ft.Column):
 
     # ── BINS ─────────────────────────────────────────────────────────────────
     def _render_bins(self):
-        """The pinned tray: drop targets for the library's own vocabulary.
+        """The pinned tray: tap targets for the library's own vocabulary.
 
-        Visible only when something is selected or draggable — an empty tray on
-        an empty list is just chrome."""
+        Hidden on the Uncertain filter and on an empty list — a tray with
+        nothing to apply it to is just chrome."""
         if self.filter == "uncertain" or not self.all_gaps:
             self._h_bins.content = None
             self._h_bins.visible = False
@@ -807,7 +772,7 @@ class MetadataWorkbenchPane(ft.Column):
         bins.append(self._bin("New…", kind="new", count=0))
 
         hint = (f"{n} selected — tap a tag to apply"
-                if n else "Select artists, or drag one onto a tag")
+                if n else "Select artists, then tap a tag")
         # ONE fixed-height row that scrolls sideways, NOT a wrapping row.
         # Wrapping put twelve pills on five lines (~600pt) in a tray that does
         # not expand, so the ListView — which does — was left roughly 110pt and
@@ -856,37 +821,7 @@ class MetadataWorkbenchPane(ft.Column):
             alignment=ft.Alignment(0, 0),
             animate=ft.Animation(120, ft.AnimationCurve.EASE_OUT),
         )
-
-        def _will_accept(e):
-            inner.bgcolor = apply_opacity(0.30, accent)
-            inner.border = ft.Border.all(2, accent)
-            try:
-                inner.update()
-            except Exception:
-                pass
-
-        def _leave(_e):
-            inner.bgcolor = apply_opacity(0.12, accent) if self.selected else SURFACE2
-            inner.border = ft.Border.all(
-                1, apply_opacity(0.45 if self.selected else 0.25, accent))
-            try:
-                inner.update()
-            except Exception:
-                pass
-
-        def _accept(e):
-            _leave(e)
-            # e.src is the Draggable itself, so the payload arrives without a
-            # page.get_control round trip.
-            dragged = getattr(getattr(e, "src", None), "data", None)
-            if dragged and dragged not in self.selected:
-                self.selected = {dragged}
-            self._apply_bin(label, kind)
-
-        return ft.DragTarget(
-            group=_DRAG_GROUP, content=inner,
-            on_will_accept=_will_accept, on_leave=_leave, on_accept=_accept,
-        )
+        return inner
 
     def _apply_bin(self, label: str, kind: str):
         names = sorted(self.selected)
@@ -903,7 +838,7 @@ class MetadataWorkbenchPane(ft.Column):
     def _commit_tag(self, names: list[str], *, genre=None, country=None):
         async def _do():
             try:
-                # Merge, never overwrite: dropping artists on a genre must not
+                # Merge, never overwrite: tagging artists with a genre must not
                 # erase a country MusicBrainz already found for some of them.
                 n = await self.db.bulk_tag_artists(
                     names, genre=genre, country=country, refresh_model=False,

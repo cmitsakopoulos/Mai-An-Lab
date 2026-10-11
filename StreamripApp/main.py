@@ -173,6 +173,14 @@ from utils.autoplay import AutoPlay, VARIETY_MODES, DETERMINISTIC
 # the Flet session down (a new StreamripFletApp) while playback carries on, and
 # the station, history and rejections must survive that.
 _AUTOPLAY: AutoPlay | None = None
+# Automatic artist-metadata pass, also per PROCESS: `_heavy_init` runs again for
+# every Flet session and every theme / error-boundary restart, and each of those
+# used to start its own network pass. `boot_done` limits the boot catch-up to
+# once per launch; `running` / `rerun` make the pass single-flight.
+_ENRICH_STATE: dict = {"boot_done": False, "running": False, "rerun": False, "timer": None}
+# Serialises flet_prefs.json writes across sessions (see _save_pref).
+_PREFS_WRITE_LOCK = threading.Lock()
+_BOOT_ENRICH_DELAY_S = 30.0
 # The native handler's resume record (see FletAudioService setResumePath).
 NATIVE_RESUME_NAME = "native_resume.json"
 from utils.error_boundary import ErrorBoundary
@@ -526,13 +534,14 @@ class StreamripFletApp:
         # block startup.
         asyncio.create_task(self._auto_export_state_snapshot())
 
-        # Incremental artist-metadata enrichment (MusicBrainz country + genres),
-        # off the hot path. This is the ONLY automatic enrichment trigger now
-        # that build_acoustic_edges no longer blocks on it: the task self-guards
-        # (config opt-out, re-entrancy flag, 3 s settle delay) and refreshes the
-        # NPMI genre model as provenance lands, so the walk's metadata gate stays
-        # current without stalling the graph rebuild on a 1 req/s network cap.
-        asyncio.create_task(self._enrich_metadata_async())
+        # Artist-metadata catch-up, once per launch and well behind the UI. The
+        # real trigger is a library scan that indexed something (see
+        # LibraryView._on_scan_complete); this only covers what that missed — a
+        # pass the OS killed mid-way, and failed lookups still due a retry. With
+        # nothing pending it is one SELECT and posts nothing.
+        if not _ENRICH_STATE["boot_done"]:
+            _ENRICH_STATE["boot_done"] = True
+            self.schedule_metadata_enrichment(delay=_BOOT_ENRICH_DELAY_S)
 
         # Similarity-graph readiness check, off the hot path. Without this the
         # ONLY automatic build was the state-ZIP auto-import branch above, so a
@@ -616,12 +625,31 @@ class StreamripFletApp:
                 return
             await asyncio.sleep(min(quiet - idle, 0.5))
 
+    def schedule_metadata_enrichment(self, delay: float = 5.0):
+        """Run the automatic artist-metadata pass in `delay` seconds.
+
+        Coalesced: a pass already waiting will see whatever was just indexed,
+        and a pass already running is asked to go round once more when done."""
+        if _ENRICH_STATE["running"]:
+            _ENRICH_STATE["rerun"] = True
+            return
+        timer = _ENRICH_STATE["timer"]
+        if timer is not None and not timer.done():
+            return
+
+        async def _later():
+            await asyncio.sleep(delay)
+            await self._enrich_metadata_async()
+
+        _ENRICH_STATE["timer"] = asyncio.create_task(_later())
+
     async def _enrich_metadata_async(self):
-        """Background, incremental artist-metadata enrichment (MusicBrainz
-        country + genres). Only fetches artists with no cached enrichment, so
-        each library top-up enriches just the new artists, then refreshes the
-        NPMI genre model. Rate-limited, offline-safe, never blocks the UI."""
-        if getattr(self, "_enriching_metadata", False):
+        """The automatic artist-metadata pass (`enrich_pending`): new artists,
+        plus failed lookups still due a retry, each rolling between
+        MusicBrainz and Qobuz until the third failure parks it for a manual
+        Sync. Rate-limited, offline-safe, never blocks the UI."""
+        if _ENRICH_STATE["running"]:
+            _ENRICH_STATE["rerun"] = True
             return
         try:
             from utils.streamrip_api import load_config
@@ -629,23 +657,39 @@ class StreamripFletApp:
                 return
         except Exception:
             pass
-        self._enriching_metadata = True
+        _ENRICH_STATE["running"] = True
+        try:
+            while True:
+                _ENRICH_STATE["rerun"] = False
+                await self._await_scroll_quiet()
+                await self._run_enrich_pass()
+                if not _ENRICH_STATE["rerun"]:
+                    break
+        finally:
+            _ENRICH_STATE["running"] = False
+
+    async def _run_enrich_pass(self):
         notifier = None
         summary: dict = {}
         try:
-            await asyncio.sleep(3)  # let startup / the scan settle before network
-            from utils.metadata_enrich import enrich_library
-            # Background pass: NEW artists only (no include_failed /
-            # retry_incomplete). Re-checking blanks and retrying failures is
-            # deliberate work the user asks for with Sync in the workbench, not
+            from utils.metadata_enrich import enrich_pending
             from utils.progress_notify import (
                 ProgressNotifier, metadata_progress_cb, metadata_summary_text,
             )
             provider = self._prefs.get("sync_provider", "musicbrainz")
             notifier = ProgressNotifier("metadata", "Fetching artist metadata")
-            summary = await enrich_library(
-                self.db_manager, provider=provider, with_genres=True,
-                progress=metadata_progress_cb(notifier),
+            inner = metadata_progress_cb(notifier)
+
+            # Failures don't raise the notification: an offline launch would
+            # otherwise post "connection lost" for a pass nobody asked for.
+            # Once a lookup succeeds the bar shows, and the summary with it.
+            def _progress(i, total, name, res):
+                if (res or {}).get("status") != "error":
+                    inner(i, total, name, res)
+
+            summary = await enrich_pending(
+                self.db_manager, preferred=provider, with_genres=True,
+                progress=_progress,
             )
             if summary.get("enriched"):
                 logger.info("Metadata enrichment complete (%s): %s", provider, summary)
@@ -657,7 +701,6 @@ class StreamripFletApp:
             # forever and now also keeps the native task service running.
             if notifier is not None:
                 notifier.finish(metadata_summary_text(summary))
-            self._enriching_metadata = False
 
     async def _auto_export_state_snapshot(self):
         """Background task: write a deterministic state bundle to the standard
@@ -2799,14 +2842,19 @@ class StreamripFletApp:
 
     # ── config / prefs ───────────────────────────────────────────────────────
     def sync_config_to_ui(self):
+        """Resolve the effective folders. In memory only: a fallback (stored
+        path empty, unreadable or app-private) is never written back, so the
+        user's settings change only when they change them."""
+        from utils import storage_paths
+        dl = ""
         try:
-            from utils.streamrip_api import load_config, get_default_download_path
-            cfg = load_config()
-            self.target_folder = cfg.get("downloads", {}).get("folder", "") or get_default_download_path()
+            from utils.streamrip_api import load_config
+            dl = str((load_config().get("downloads", {}) or {}).get("folder", "") or "")
         except Exception:
-            from utils.streamrip_api import get_default_download_path
-            self.target_folder = get_default_download_path()
-        self.library_folder = self._prefs.get("library_path", "") or ""
+            logger.exception("could not read download folder from config")
+        self.library_folder = storage_paths.resolve_library_dir(
+            self._prefs.get("library_path", ""), dl)
+        self.target_folder = storage_paths.resolve_download_dir(dl, self.library_folder)
 
     def _load_prefs(self):
         try:
@@ -2816,13 +2864,29 @@ class StreamripFletApp:
             self._prefs = {}
 
     def _save_pref(self, key: str, value):
+        """Persist one key. The write merges into what is on disk instead of
+        dumping self._prefs: every Flet session (and every restart_ui) holds
+        its own copy, and a stale one dumped whole silently erased keys
+        another had saved, such as library_path."""
         self._prefs[key] = value
+        path = self._prefs_path
         def _save_task():
-            try:
-                with open(self._prefs_path, "w") as fh:
-                    safe_json_dump(self._prefs, fh)
-            except Exception:
-                pass
+            with _PREFS_WRITE_LOCK:
+                try:
+                    try:
+                        with open(path) as fh:
+                            on_disk = json.load(fh)
+                        if not isinstance(on_disk, dict):
+                            on_disk = {}
+                    except (OSError, ValueError):
+                        on_disk = {}
+                    on_disk[key] = value
+                    tmp = path + ".tmp"
+                    with open(tmp, "w") as fh:
+                        safe_json_dump(on_disk, fh)
+                    os.replace(tmp, path)
+                except Exception:
+                    logger.exception("failed to save pref %s", key)
         asyncio.create_task(asyncio.to_thread(_save_task))
 
     # ── snackbar ─────────────────────────────────────────────────────────────

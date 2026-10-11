@@ -735,7 +735,7 @@ def refresh_walk_models(db_manager, *, on_done=None) -> None:
 
     Call this after ANY write to artist_enrichment. Repeated calls inside the
     debounce window collapse into one rebuild, so a burst of single-artist saves
-    (or a drag of twenty artists onto one genre) costs a single pass.
+    (or tagging twenty artists with one genre) costs a single pass.
 
     `on_done(summary)` fires when the rebuild lands, so the UI can confirm
     "Auto-Play updated" at the moment it is actually true rather than optimistically
@@ -767,51 +767,87 @@ def refresh_walk_models(db_manager, *, on_done=None) -> None:
         logger.debug("refresh_walk_models called with no running loop; skipped")
 
 
-async def enrich_library(
-    db_manager, *,
-    provider: str = "musicbrainz",
-    with_genres: bool = True, limit=None,
-    contact: str = DEFAULT_CONTACT, include_failed: bool = False,
-    max_consecutive_errors: int = 3, progress=None,
-    cancel_event: asyncio.Event | None = None,
-    retry_incomplete: bool = False,
-    **_kwargs,
+# How many failed lookups an artist gets before it parks at status='error'.
+# Each attempt is a separate pass (the HTTP layer already retries a request 3×
+# with backoff inside one), and successive attempts ROLL between providers, so
+# an artist MusicBrainz keeps erroring on is also tried against Qobuz.
+ENRICH_MAX_ATTEMPTS = 3
+_ALT_PROVIDER = {"musicbrainz": "qobuz", "qobuz": "musicbrainz"}
+
+
+async def _provider_pass(
+    db_manager, provider: str, artists: list[str], *,
+    with_genres: bool, contact: str, max_consecutive_errors: int,
+    progress=None, cancel_event: asyncio.Event | None = None,
+    index_base: int = 0, grand_total: int | None = None,
+    blank_is_failure: bool = False,
 ) -> dict:
-    """Incrementally enrich artists from an explicit provider: 'musicbrainz' or 'qobuz'.
+    """Look `artists` up against ONE provider and write what comes back.
 
-    Strictly no silent fallbacks:
-      - When provider='musicbrainz', queries MusicBrainz exclusively. If no genres
-        or country are found, records the exact reason without falling back to Qobuz.
-      - When provider='qobuz', queries Qobuz exclusively. If Qobuz credentials or
-        network fail, fails loudly at runtime with an explicit error status.
-      - File tags are baseline (already indexed into the library database) and
-        never conflated with an external sync pass.
+    `blank_is_failure` is for a provider being tried as the FALLBACK: an answer
+    with no genres and no country is counted as a failed attempt instead of
+    being stored. Stored, it would end the retries for good — the artist never
+    gets back to the preferred provider (MusicBrainz is the only country
+    source) — and a blank Qobuz row also lands in the workbench's Uncertain list.
 
-    Returns a summary dict — including `aborted`, `cancelled`, `status` and `reasons`,
-    all of which the caller is expected to display loudly rather than discard.
-    """
-    try:
-        try:
-            artists = await db_manager.get_artists_needing_enrichment(
-                limit=limit, include_failed=include_failed,
-                retry_incomplete=retry_incomplete,
-            )
-        except TypeError:
-            # Backend predates the retry_incomplete scope (test fakes).
-            artists = await db_manager.get_artists_needing_enrichment(
-                limit=limit, include_failed=include_failed,
-            )
-    except Exception as exc:
-        logger.error("enrich_library: cannot list artists needing enrichment: %s", exc)
-        return {"enriched": 0, "status": f"error: {exc}"}
-    if not artists:
-        return {"enriched": 0, "status": "uptodate"}
+    Returns {done, status, counts, reasons, parked, unavailable}. `unavailable`
+    is set — and nothing is written — when the provider can't be used at all
+    (no aiohttp, Qobuz won't log in); the caller decides what that means.
 
+    Failures are written in a batch, not as they happen: errors arrive in runs,
+    and a run long enough to abort is the CONNECTION failing, not those
+    artists. That run is discarded so an offline boot costs nobody an attempt;
+    a run that a success breaks (or the pass ends on) is recorded."""
+    total = grand_total or len(artists)
     counts: Counter = Counter()
     reasons: Counter = Counter()
-    done = 0
-    consecutive_errors = 0
+    done = parked = 0
     status = "completed"
+    streak: list[str] = []
+
+    async def _record_failure(name: str):
+        nonlocal parked
+        record = getattr(db_manager, "record_enrichment_failure", None)
+        if record is None:
+            return  # backend predates attempt tracking (test fakes)
+        try:
+            st = await record(name, source=provider, max_attempts=ENRICH_MAX_ATTEMPTS)
+        except Exception as exc:
+            logger.warning("could not record enrichment failure for %r: %s", name, exc)
+            return
+        if st == "error":
+            parked += 1
+
+    async def _flush_failures():
+        for n in streak:
+            await _record_failure(n)
+        streak.clear()
+
+    def _result(unavailable=None) -> dict:
+        return {"done": done, "status": status, "counts": counts,
+                "reasons": reasons, "parked": parked, "unavailable": unavailable}
+
+    def _report(i, name, res):
+        if progress:
+            progress(index_base + i, total, name, res)
+
+    async def _on_error(i, name, reason, res) -> bool:
+        """Count one failure; True means abort the pass."""
+        nonlocal status
+        counts["error"] += 1
+        reasons[reason or "unknown"] += 1
+        streak.append(name)
+        _report(i, name, res)
+        if len(streak) >= max_consecutive_errors:
+            counts["aborted"] = 1
+            status = "aborted"
+            logger.error(
+                "enrich_library: aborting after %d consecutive %s failures (last: %s)",
+                len(streak), provider, reason,
+            )
+            streak.clear()
+            return True
+        return False
 
     if provider == "qobuz":
         from utils.metadata_qobuz import open_client, close_client, lookup_artist_genres
@@ -819,7 +855,7 @@ async def enrich_library(
             qobuz_client = await open_client(raise_on_error=True)
         except Exception as exc:
             logger.error("enrich_library: failed to open Qobuz client: %s", exc)
-            return {"enriched": 0, "status": f"error: Qobuz connection failed: {exc}", "total": len(artists)}
+            return _result(f"error: Qobuz connection failed: {exc}")
 
         try:
             for i, name in enumerate(artists, 1):
@@ -836,22 +872,19 @@ async def enrich_library(
                 genres = qres.get("genres") or []
                 reason = qres.get("reason")
                 if reason and reason.startswith("error:"):
-                    consecutive_errors += 1
-                    counts["error"] += 1
-                    reasons[reason] += 1
-                    if progress:
-                        progress(i, len(artists), name, {"status": "error", "reason": reason, "genres": []})
-                    if consecutive_errors >= max_consecutive_errors:
-                        counts["aborted"] = 1
-                        status = "aborted"
-                        logger.error(
-                            "enrich_library: aborting after %d consecutive Qobuz failures (last: %s)",
-                            consecutive_errors, reason
-                        )
+                    if await _on_error(i, name, reason,
+                                       {"status": "error", "reason": reason, "genres": []}):
                         break
                     continue
-                consecutive_errors = 0
+                await _flush_failures()
 
+                if not genres and blank_is_failure:
+                    counts["blank"] += 1
+                    reasons[reason or "no_tags"] += 1
+                    await _record_failure(name)
+                    _report(i, name, {"status": "notfound", "reason": reason,
+                                      "genres": [], "source": "qobuz"})
+                    continue
                 if genres:
                     st = "ok"
                     provenance = {"country": None, "genres": "qobuz"}
@@ -873,11 +906,10 @@ async def enrich_library(
                         genres=[], source="qobuz", score=0,
                         status="lowconfidence", provenance={"country": None, "genres": None},
                     )
-                if progress:
-                    progress(i, len(artists), name, {
-                        "status": st, "reason": reason, "genres": genres,
-                        "source": "qobuz"
-                    })
+                _report(i, name, {
+                    "status": st, "reason": reason, "genres": genres,
+                    "source": "qobuz"
+                })
         finally:
             await close_client(qobuz_client)
 
@@ -885,7 +917,7 @@ async def enrich_library(
         # MusicBrainz provider
         if aiohttp is None:
             logger.error("enrich_library: aiohttp unavailable, cannot enrich")
-            return {"enriched": 0, "status": "no_aiohttp"}
+            return _result("no_aiohttp")
         async with aiohttp.ClientSession() as session:
             client = MusicBrainzClient(session, contact=contact)
             for i, name in enumerate(artists, 1):
@@ -903,23 +935,18 @@ async def enrich_library(
                            "reason": f"error: {type(exc).__name__}: {exc}"}
                 st = res["status"]
                 if st == "error":
-                    consecutive_errors += 1
-                    counts["error"] += 1
-                    reasons[res.get("reason") or "unknown"] += 1
-                    if progress:
-                        progress(i, len(artists), name, res)
-                    if consecutive_errors >= max_consecutive_errors:
-                        counts["aborted"] = 1
-                        status = "aborted"
-                        logger.error(
-                            "enrich_library: aborting after %d consecutive MusicBrainz failures (last: %s)",
-                            consecutive_errors, res.get("reason"),
-                        )
+                    if await _on_error(i, name, res.get("reason"), res):
                         break
                     continue
-                consecutive_errors = 0
+                await _flush_failures()
 
                 genres = res.get("genres") or []
+                if blank_is_failure and not genres and not res.get("country"):
+                    counts["blank"] += 1
+                    reasons[res.get("reason") or st] += 1
+                    await _record_failure(name)
+                    _report(i, name, res)
+                    continue
                 provenance = {
                     "country": "musicbrainz" if res.get("country") else None,
                     "genres": "musicbrainz" if genres else None,
@@ -936,21 +963,173 @@ async def enrich_library(
                     score=res.get("score"), status=st, provenance=provenance,
                 )
                 done += 1
-                if progress:
-                    progress(i, len(artists), name, res)
+                _report(i, name, res)
 
+    if status != "aborted":
+        await _flush_failures()
+    return _result()
+
+
+async def enrich_library(
+    db_manager, *,
+    provider: str = "musicbrainz",
+    with_genres: bool = True, limit=None,
+    contact: str = DEFAULT_CONTACT, include_failed: bool = False,
+    max_consecutive_errors: int = 3, progress=None,
+    cancel_event: asyncio.Event | None = None,
+    retry_incomplete: bool = False,
+    **_kwargs,
+) -> dict:
+    """Enrich artists from ONE explicit provider: 'musicbrainz' or 'qobuz'.
+    This is the manual Sync; the automatic pass is `enrich_pending`.
+
+    Strictly no silent fallbacks:
+      - When provider='musicbrainz', queries MusicBrainz exclusively. If no genres
+        or country are found, records the exact reason without falling back to Qobuz.
+      - When provider='qobuz', queries Qobuz exclusively. If Qobuz credentials or
+        network fail, fails loudly at runtime with an explicit error status.
+      - File tags are baseline (already indexed into the library database) and
+        never conflated with an external sync pass.
+    A lookup that ERRORS is counted (see `_provider_pass`), so the background
+    pass can retry it against the other provider.
+
+    Returns a summary dict — including `aborted`, `cancelled`, `status` and `reasons`,
+    all of which the caller is expected to display loudly rather than discard.
+    """
+    try:
+        try:
+            artists = await db_manager.get_artists_needing_enrichment(
+                limit=limit, include_failed=include_failed,
+                retry_incomplete=retry_incomplete,
+            )
+        except TypeError:
+            # Backend predates the retry_incomplete scope (test fakes).
+            artists = await db_manager.get_artists_needing_enrichment(
+                limit=limit, include_failed=include_failed,
+            )
+    except Exception as exc:
+        logger.error("enrich_library: cannot list artists needing enrichment: %s", exc)
+        return {"enriched": 0, "status": f"error: {exc}"}
+    if not artists:
+        return {"enriched": 0, "status": "uptodate"}
+
+    res = await _provider_pass(
+        db_manager, provider, artists,
+        with_genres=with_genres, contact=contact,
+        max_consecutive_errors=max_consecutive_errors,
+        progress=progress, cancel_event=cancel_event,
+    )
+    if res["unavailable"]:
+        return {"enriched": 0, "status": res["unavailable"], "total": len(artists)}
+
+    done = res["done"]
     refresh = await _do_refresh_walk_models(db_manager) if done else {}
 
     summary = {
         "enriched": done,
-        "status": status,
+        "status": res["status"],
         "provider": provider,
         "total": len(artists),
+        "reasons": dict(res["reasons"]),
+        "parked": res["parked"],
+        **refresh,
+        **res["counts"],
+    }
+    log = logger.error if res["status"] in ("aborted",) else logger.info
+    log("enrich_library: %s", summary)
+    return summary
+
+
+async def enrich_pending(
+    db_manager, *,
+    preferred: str = "musicbrainz",
+    with_genres: bool = True,
+    contact: str = DEFAULT_CONTACT,
+    max_consecutive_errors: int = 3, progress=None,
+    cancel_event: asyncio.Event | None = None,
+) -> dict:
+    """The automatic pass: new artists, plus ones whose last lookup failed.
+
+    Each artist's provider ROLLS with its failed-attempt count — attempt 0 on
+    `preferred`, attempt 1 on the other one, attempt 2 back on `preferred` —
+    and the third failure parks it at status='error' until a manual Sync. A
+    provider that can't be used at all this pass hands its artists to the
+    other one rather than burning their attempts.
+
+    A pass that aborts (the connection went) stops the whole run: the other
+    provider would only fail the same way."""
+    try:
+        rows = await db_manager.get_artists_needing_enrichment(with_attempts=True)
+    except Exception as exc:
+        logger.error("enrich_pending: cannot list artists needing enrichment: %s", exc)
+        return {"enriched": 0, "status": f"error: {exc}"}
+    if not rows:
+        return {"enriched": 0, "status": "uptodate"}
+
+    if preferred not in _ALT_PROVIDER:
+        preferred = "musicbrainz"
+    order = [preferred, _ALT_PROVIDER[preferred]]
+    groups: dict[str, list[str]] = {p: [] for p in order}
+    for name, attempts in rows:
+        groups[order[attempts % len(order)]].append(name)
+
+    total = len(rows)
+    queue = [p for p in order if groups[p]]
+    unavailable: dict[str, str] = {}
+    counts: Counter = Counter()
+    reasons: Counter = Counter()
+    per_provider: dict[str, int] = {}
+    done = parked = base = 0
+    status = "completed"
+
+    while queue:
+        provider = queue.pop(0)
+        names = groups.pop(provider)
+        res = await _provider_pass(
+            db_manager, provider, names,
+            with_genres=with_genres, contact=contact,
+            max_consecutive_errors=max_consecutive_errors,
+            progress=progress, cancel_event=cancel_event,
+            index_base=base, grand_total=total,
+            blank_is_failure=(provider != preferred),
+        )
+        if res["unavailable"]:
+            unavailable[provider] = res["unavailable"]
+            alt = _ALT_PROVIDER[provider]
+            if alt not in unavailable:
+                logger.warning("enrich_pending: %s unavailable (%s); rolling %d artist(s) to %s",
+                               provider, res["unavailable"], len(names), alt)
+                groups.setdefault(alt, []).extend(names)
+                if alt not in queue:
+                    queue.append(alt)
+            continue
+        base += len(names)
+        done += res["done"]
+        parked += res["parked"]
+        per_provider[provider] = per_provider.get(provider, 0) + res["done"]
+        counts.update(res["counts"])
+        reasons.update(res["reasons"])
+        if res["status"] in ("aborted", "cancelled"):
+            status = res["status"]
+            break
+
+    if status == "completed" and unavailable and not per_provider:
+        status = "error: no metadata provider available (" + "; ".join(
+            f"{p}: {r}" for p, r in unavailable.items()) + ")"
+
+    refresh = await _do_refresh_walk_models(db_manager) if done else {}
+    summary = {
+        "enriched": done,
+        "status": status,
+        "provider": preferred,
+        "providers": per_provider,
+        "total": total,
         "reasons": dict(reasons),
+        "parked": parked,
         **refresh,
         **counts,
     }
-    log = logger.error if status in ("aborted",) else logger.info
-    log("enrich_library: %s", summary)
+    log = logger.error if status == "aborted" or status.startswith("error") else logger.info
+    log("enrich_pending: %s", summary)
     return summary
 

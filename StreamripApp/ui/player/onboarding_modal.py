@@ -4,6 +4,7 @@ Provides a modern, frictionless introduction to the app's core innovations,
 guides initial music source configuration, and personalizes theme accents.
 """
 import os
+import sys
 import flet as ft
 from ui.tokens import (
     BG, SURFACE, SURFACE2, SURFACE_ELEVATED, TEXT, DIM, TEXT_TERTIARY,
@@ -38,11 +39,12 @@ class OnboardingWizardModal:
         self.selected_startup = "Library"
         self._dialog = None
 
-        # Resolve local music directory
-        home = os.path.expanduser("~")
-        candidate_dir = os.path.join(home, "Music", "Streamrip")
-        if not os.path.exists(candidate_dir):
-            candidate_dir = os.path.join(home, "Music")
+        # Suggest the public Music folder. Not expanduser("~"): main.py points
+        # HOME at the app's sandbox, which no files app can open on Android.
+        from utils.storage_paths import default_music_dir
+        candidate_dir = os.path.join(default_music_dir(), "Streamrip")
+        if not os.path.isdir(candidate_dir):
+            candidate_dir = default_music_dir()
         self.detected_music_dir = candidate_dir
 
         # Interactive sources state
@@ -730,9 +732,19 @@ class OnboardingWizardModal:
             self.detected_music_dir = self._folder_field.value.strip()
 
     async def _browse_folder(self, e):
+        if hasattr(sys, "getandroidapilevel"):
+            # pick_folder shells out to desktop pickers; Android gets the
+            # Settings navigator, which only offers shared storage.
+            settings = getattr(self.app, "settings_view", None)
+            if settings is not None:
+                settings._browse_android_paths("library", on_pick=self._apply_picked_folder)
+            return
         from ui.widgets import pick_folder
         import asyncio
         picked = await asyncio.to_thread(pick_folder, "Select Music Library Folder")
+        self._apply_picked_folder(picked)
+
+    def _apply_picked_folder(self, picked):
         if picked:
             self.detected_music_dir = picked
             if hasattr(self, "_folder_field") and self._folder_field:
@@ -807,6 +819,11 @@ class OnboardingWizardModal:
                     f.write("1")
         except Exception:
             pass
+
+        # A typed path inside the app's sandbox would strand every download.
+        from utils.storage_paths import usable, default_music_dir
+        if not usable(self.detected_music_dir):
+            self.detected_music_dir = default_music_dir()
 
         # 3. Save chosen preferences
         update_dict = {

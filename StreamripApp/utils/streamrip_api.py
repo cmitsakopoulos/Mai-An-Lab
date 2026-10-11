@@ -54,11 +54,10 @@ def get_config_path():
     return DEFAULT_CONFIG_PATH
 
 def get_default_download_path():
-    plat = get_platform_name()
-    if plat == 'android':
-        base_dir = os.getenv("FLET_APP_STORAGE_DATA") or os.getenv("APP_FILES_PATH") or "/data/user/0"
-        return os.path.join(base_dir, "StreamripDownloads")
-    return os.path.join(os.path.expanduser("~"), "Music", "Streamrip")
+    """The download folder resolved from saved settings; never app-private.
+    See utils.storage_paths for the rules (it follows the library folder)."""
+    from .storage_paths import resolve_saved_paths
+    return resolve_saved_paths()[0]
 
 def ensure_config_exists():
     path = get_config_path()
@@ -212,6 +211,11 @@ def _default_quality(source: str, config) -> int:
 
 async def download(url, download_dir, progress_callback=None, quality=None, stop_event=None):
     """Download entry point (Qobuz and Deezer) with granular progress tracking."""
+    from .storage_paths import is_app_private
+    if is_app_private(download_dir):
+        # Last line of defence: a file saved in the sandbox can't be reached
+        # by any files app on modern Android.
+        raise PermissionError(f"Refusing to download into app-private storage: {download_dir}")
     os.makedirs(download_dir, exist_ok=True)
     
     mtype, mid, source = _detect_type_and_id(url)
