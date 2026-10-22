@@ -12,6 +12,17 @@ This document provides technical details for the specialized Android-native brid
 | [audio_engine_macos.py](../StreamripApp/utils/audio_engine_macos.py) | macOS player state and queue management; native AVFoundation integration. |
 | [flet_audio_service](../flet_audio_service) | Python ↔ Dart ↔ Kotlin bridge for system-level media controls on Android. |
 | [pca_engine.py](../StreamripApp/utils/pca_engine.py) | Unsupervised double-pass SVD PCA: Pearson correlation cleaving, zero-padded 8×3 projection matrix, and on-device visualization report. |
+| [harmonic.py](../StreamripApp/utils/harmonic.py) | Camelot wheel harmonic key geometry: Krumhansl-Schmuckler mapping and late-fusion unit circle coordinates. |
+| [autoplay.py](../StreamripApp/utils/autoplay.py) | Resumable Station auto-play controller: dynamic buffers, variety sampling, and negative feedback. |
+| [autoplay_hidden.py](../StreamripApp/ui/views/autoplay_hidden.py) | Settings subview for managing hidden auto-play tracks and unblocking learned genre hop penalties. |
+| [genre_graph.py](../StreamripApp/utils/genre_graph.py) | PAGA-style genre adjacency: bridge-artist lift scoring, cultural scene partitioning, and untagged label propagation. |
+| [deezer.py](../StreamripApp/utils/deezer.py) | Deezer client: search, URL resolution, and Blowfish stream decryption via pycryptodomex. |
+| [metadata_workbench.py](../StreamripApp/ui/player/metadata_workbench.py) | Artist provenance board: bulk tagging bins, fused multi-source sync, and confidence review. |
+| [metadata_enrich.py](../StreamripApp/utils/metadata_enrich.py) | Multi-source enrichment cascade (MusicBrainz → file tags → Qobuz → manual). |
+| [onboarding_modal.py](../StreamripApp/ui/player/onboarding_modal.py) | First-run onboarding wizard: storage path validation, credentials, and theme setup. |
+| [state_export.py](../StreamripApp/utils/state_export.py) | Portable state bundle export/import (v3 ZIP): online SQLite backup, TOML config, and search history. |
+| [error_boundary.py](../StreamripApp/utils/error_boundary.py) | Global error capture boundary, session lifecycle protection, and restart handler. |
+| [llm_engine.py](../StreamripApp/utils/llm_engine.py) | Conversational LLM agent and tool dispatcher for natural-language library interaction. |
 
 ---
 
@@ -32,11 +43,19 @@ To prevent the Android OS from killing the Python process during background play
 - A custom refresh action button in the notification shade dispatches a `replenish_queue` command to trigger background queue replenishment on-demand.
 - The Python interpreter remains active in the background.
 
-### Android-Specific Performance Optimizations
+### Android-Specific Performance & Reliability Mechanics
 - **Targeted UI Refreshes**: The app bypasses Flet's global `page.update()` for the high-frequency playback position heartbeat. By refreshing only the specific player controls, background CPU spikes are reduced by ~60%.
-- **Throttled Position Heartbeat**: Playback position mirroring is strictly throttled to **1.5s** intervals to minimize Python/Dart bridge chatter and preserve battery life.
+- **Throttled Position Heartbeat**: Playback position mirroring is strictly throttled to 1 Hz while the application is in the foreground, pausing entirely when backgrounded to conserve battery.
+- **Bounded Native Operation Timeout**: Every native call across the Python-Dart boundary is registered with a unique UUID (`register_op`) and wrapped in a 30-second timeout (`_SEND_TIMEOUT_S = 30.0`). If the underlying session was torn down by the OS or the Dart method channel stalls, the call times out cleanly instead of deadlocking the operation lock indefinitely.
+- **Atomic Batch Queue Insertion**: Multi-track appends cross the boundary in a single batch call (`add_queue_items`) rather than individual dispatches, preventing sequence corruption and audio interruption.
+- **Queue State Snapshot Guard (`_QUEUE_STATE["held"]`)**: Process-level tracking preserves the user's manual queue or album tracks when auto-play takes over (`_QUEUE_STATE["held"]`). When auto-play is disabled or the station ends, the held queue is restored. It also prevents empty engine states during session initialization or teardown from erasing the persisted queue snapshot on disk.
+- **Station Traversal Lifecycle**: While track playback and queue states are persisted to disk and restored across app relaunches, the active **Station** instance (`track_graph.Station`) resides strictly in memory. If Android destroys the background process, the active playback queue and position are restored on relaunch, but the in-memory station traversal position (current leg, seed, step count, and session exclusion history) resets.
+- **Native Play Ledger & Qualification**: Track listens are logged by the native player in an append-only ledger (`play_ledger.py`) and qualify as played only after 30 seconds or 50% duration, capturing accurate metrics during background playback.
+- **Coalesced UI Updates (`app.safe_update`)**: Background tasks (such as download progress firing 4 times per second) dispatch mutations through `app.safe_update(fn, target)`. By passing an explicit `target` control, Flet flushes only that control's specific subtree rather than triggering a global `page.update()` that churns every cached tab. If any mutation in a batch is untargeted, the dispatcher safely falls back to a full page flush.
+- **Destroyed Session Safeguards**: When Android tears down or recreates an activity, background threads holding stale page handles would trigger `RuntimeError("...destroyed session")`. `safe_update` checks `page.session` before calling `page.run_task`, bailing out before creating un-schedulable coroutines and eliminating `coroutine was never awaited` warnings.
+- **Global Error Boundary (`utils/error_boundary.py`)**: Wraps asynchronous view entry points and event handlers. If unhandled exceptions occur, it catches the fault, displays an inline error container with selectable trace details, and provides a clean `restart()` mechanism without crashing the process.
 - **Zero-Cost Indicators**: Heavy Python-driven animation loops are replaced with static or GPU-accelerated native indicators to keep background CPU usage to a minimum.
-- **Active UI Containment**: To prevent memory bloat or WebSocket choking under long sessions, high-volume control arrays (like the Jarvis chat history bubble tree) are strictly capped at **50** active items, dynamically popping older nodes.
+- **Active UI Containment**: High-volume control arrays (such as the Jarvis chat history bubble tree) are strictly capped at 50 active items, dynamically popping older nodes to prevent memory bloat.
 
 ---
 
@@ -91,9 +110,10 @@ To resolve this, Mai-An Lab implements a hybrid workflow that offloads library-w
 4. **PCM File**: Samples are written to `appContext.cacheDir/dsp_pcm/<hash>.pcm` (the app's private internal storage, always accessible to Python in the same process). The bridge returns the absolute path, not the bytes themselves, avoiding serializing ~4 MB of audio across Dart ↔ Python channels.
 5. **Feature Extraction**: Python (via pure-NumPy `StreamripApp/utils/dsp.py`) memory-maps the PCM file and extracts the **60D feature vector** (consisting of a 52D packed timbre/chroma profile BLOB and 8 scalar descriptors, detailed in `docs/Auto_Playlist_Engine.md`).
 
-### 2.2 Performance Considerations
-- **Hardware-Accelerated**: Using `MediaCodec` keeps on-device decoding battery-efficient and fast compared to native mobile software-based decoding.
-- **Batched Processing**: To avoid UI stutter, on-device analysis is handled via Kotlin worker threads and separate `asyncio` tasks in Python.
+### 2.2 Performance Considerations & Mobile Extraction Limits
+- **Hardware-Accelerated Decoding**: Using `MediaCodec` keeps on-device PCM decoding battery-efficient compared to software decoders.
+- **On-Device Extraction Bottleneck**: Feature extraction (`StreamripApp/utils/dsp.py`) runs pure NumPy without native BLAS or C acceleration. On typical mobile ARM CPUs, computing HPSS, 20-band MFCCs, chroma pitch vectors, and rhythm profiles takes **~10–12 seconds per track**.
+- **Practical Offloading Boundary**: While on-device analysis runs on background worker threads without freezing the UI, processing more than ~50 tracks on-device leads to thermal throttling, excessive battery draw, and prolonged completion times. The laptop-offload pipeline is practically mandatory for medium to large music libraries.
 
 ### 2.3 The Laptop-Offload Pipeline (`tools/dsp_offload.py` / `tools/auto_offload.sh`)
 To make bulk ingestion feasible, the companion script `tools/dsp_offload.py` offloads feature extraction to the user's computer, running at **~200 ms per track** (a 50x speedup). 
@@ -105,7 +125,7 @@ To make bulk ingestion feasible, the companion script `tools/dsp_offload.py` off
 > **One-Touch Offload Script (`tools/auto_offload.sh`)**: During development, you can automate this entire round-trip (pulling live databases directly from Android private app storage `/data/user/0/com.mitsakopoulos.maianlab.mai_an_lab/app_flutter`, running the offloader, stopping the app, and writing back the database) using `./tools/auto_offload.sh`.
 
 The offloader is designed with several production engineering optimizations:
-- **Zero Math Duplication**: It directly imports and shares the app's native NumPy feature pipeline (`StreamripApp/utils/dsp.py` via `sys.path` injection), ensuring that feature extraction models written on the host are exactly identical to what the app expects (`FEATURES_VERSION = 3`).
+- **Zero Math Duplication**: It directly imports and shares the app's native NumPy feature pipeline (`StreamripApp/utils/dsp.py` via `sys.path` injection), ensuring that feature extraction models written on the host are exactly identical to what the app expects (`FEATURES_VERSION = 5`).
 - **ADB Tar Streaming**: Instead of executing `adb pull` for every track; which pays a 50–200 ms handshake penalty per file; the script bundles track lists into batches of 100 and streams them in a single command (`adb exec-out tar -cf - -T <list>`). This amortizes connection overhead and saves minutes on large libraries.
 - **Parallel CPU Ingestion**: Decodes audio using multi-process `ffmpeg` pipelines and extracts features using a Python `ThreadPoolExecutor`. Because both `ffmpeg` spawns and heavy NumPy/FFT operations release the Python GIL, workers scale linearly across all CPU cores.
 - **Transactional SQLite WAL Batching**: Features are upserted into the SQLite database in single-transaction chunks inside a `BEGIN/COMMIT` boundary. This is orders of magnitude faster than single-row commits and guarantees database integrity; if interrupted, the script resumes from the last completed chunk.
@@ -114,11 +134,21 @@ The offloader is designed with several production engineering optimizations:
   - `<audio_file>.pcm`: Decoded mono PCM frames, ensuring that if you tweak the feature-extraction pipeline parameters, you can re-run the extraction step instantly without re-decoding.
 - **Defensive Migrations**: The script inspects the bundle DB and automatically runs `ALTER TABLE play_counts ADD COLUMN` migrations if a pre-v3 bundle is provided, making the tool backward-compatible with any exported app state.
 
+### 2.4 State Bundle Architecture (`utils/state_export.py`)
+For headless testing, diagnostics, and moving catalog state between desktop development and mobile devices, the app provides a portable state bundle mechanism:
+- **Bundle Format (Version 3)**: A compressed ZIP (`mai_an_lab_state_<timestamp>.zip`) containing:
+  - `mai_an_lab.db`: Consistent SQLite database snapshot captured using SQLite's online backup API (`_snapshot_sqlite`), ensuring zero lock corruption even under active WAL transactions.
+  - `config.toml`: Current Streamrip service configuration and credentials.
+  - `search_history.json`: Local search token history.
+  - `manifest.json`: Bundle metadata, schema version, creation timestamp, and host architecture.
+- **Storage Locations**: Bundles are written to and read from `/sdcard/Download` on Android (accessible without root via `MANAGE_EXTERNAL_STORAGE`) and `~/Downloads` on desktop.
+- **Safe Hot Import Lifecycle**: When importing a bundle in Settings → Advanced, the app proactively closes open `DatabaseManager` handles, unzips the payload, verifies schema compatibility (`BUNDLE_VERSION == 3`), and instructs the user to force-close and relaunch to rebind all memory-resident models.
 
-### 2.4 Playback DSP Routing & Precedence (Equalizer & Dynamism)
+
+### 2.5 Playback DSP Routing & Precedence (Equalizer & Dynamism)
 To provide high-fidelity audio enhancement without signal muddling or processing conflicts, the audio engine implements a track-by-track Dynamism calculation and a strict exclusivity routing matrix between the 5-band manual Equalizer and Dynamism.
 
-#### 2.4.1 Decoupled Track-by-Track Dynamism Calculations
+#### 2.5.1 Decoupled Track-by-Track Dynamism Calculations
 Rather than comparing track features against global library averages (which distorts calculations based on library composition), Dynamism is calculated purely track-by-track using the active track's absolute acoustic features:
 1. **Spectral Contrast Normalization**: Maps typical spectral contrast values ($[0.2, 0.4]$) to a normalized $[0.0, 1.0]$ range:
    $$\text{norm\_contrast} = \max\left(0.0, \min\left(1.0, \frac{\text{spectral\_contrast} - 0.2}{0.2}\right)\right)$$
@@ -128,7 +158,7 @@ Rather than comparing track features against global library averages (which dist
    $$\text{gain\_db} = 1.0 + 3.0 \times \text{score}$$
    This guarantees a baseline enhancement of $+1.0\text{ dB}$ for all tracks, scaling up to $+4.0\text{ dB}$ for highly dynamic/rhythmic music.
 
-#### 2.4.2 Non-Conflicting Precedence Routing
+#### 2.5.2 Non-Conflicting Precedence Routing
 To prevent the manual Equalizer and Dynamism from fighting over the same frequency bands, the engine enforces exclusive precedence routing:
 *   **Manual EQ Inactive (Equalizer Disabled)**:
     *   The 5 EQ bands are dynamically configured with a psychoacoustic loudness contour (boosting low-bass and high-presence frequencies) scaled by the track's dynamism score:
@@ -262,25 +292,43 @@ To guarantee an ultra-responsive user experience, prevent socket leaks, and prot
   - All class-level references (`_loop`, `_thread`, `_client`, `_client_lock`) are reset to `None` for garbage collection.
 * **On-Demand Resurrection**: The very next search or dropdown expansion automatically and seamlessly spins up a fresh event loop, thread, and lock context; restarting the inactivity timer from zero.
 
-### 3.2 Download & Auto-Rescanning Architecture
+### 3.2 Deezer Backend & Stream Decryption Architecture (`DeezerClient`)
+
+The application integrates Deezer as a co-equal secondary streaming and acquisition source alongside Qobuz:
+
+1. **Authentication via ARL Cookie**: Authenticates using an active browser ARL cookie (`deezer.arl` in `config.toml`). Standard username and password login is unsupported due to Deezer web API restrictions.
+2. **On-the-Fly Stream Decryption**: Deezer CDN tracks are Blowfish-CBC encrypted with dynamic per-track keys. Using `pycryptodomex`, audio chunks are decrypted on-the-fly during download and stream operations rather than buffered fully in memory, avoiding Android out-of-memory terminations on large lossless tracks.
+3. **Decrypted Preview Fallback**: Because Deezer CDN audio is Blowfish-encrypted and cannot be streamed over raw HTTP without decryption, track previews cannot be played directly via URL. Tapping preview initiates an on-the-fly decrypted download to a local temporary cache file before dispatching to the audio engine.
+4. **Subscription Quality Fallback & Ceiling**: Quality selection automatically falls back to the maximum available tier for the account plan (FLAC → 320 kbps MP3 → 128 kbps MP3) when `lower_quality_if_not_available` is enabled. The maximum fidelity available from Deezer is 16-bit / 44.1 kHz FLAC (CD quality); 24-bit Hi-Res master tiers are exclusive to Qobuz.
+5. **Tag Layout Normalisation**: Metadata harvested from Deezer (`source_metadata.py`) is normalised to match Qobuz schema standards (artist, album artist, release year, disc and track indices, embedded artwork), ensuring library homogeneity.
+6. **Jarvis Catalog Scope Limitation**: Jarvis voice commands and conversational LLM tool invocations (`llm_tools.py`) operate exclusively against the **Qobuz** catalog for remote searches and downloads. Deezer searches must be performed manually through the Search tab UI.
+
+### 3.3 Download Dock & Multi-Track Acquisition (`DownloadDock`)
+
+Downloads are coordinated through an asynchronous download controller (`queue_controller.py`) with UI feedback managed by a persistent floating dock:
+- **Speed & Progress Metrics**: Emits aggregated download velocity, progress percentages, and quality badges.
+- **Granular Controls**: Supports individual item cancellation, batch pausing, and failure retry dispatching.
+- **Auto-Collapsing Floating Pill**: Minimizes automatically when idle to maximize screen space.
+
+### 3.4 Download & Auto-Rescanning Architecture
 To bridge remote search and the local playback library seamlessly, remote downloads run on dedicated worker threads. When a download completes and passes checksum validation, it is renamed atomically from a `.tmp` file to its target format.
 
 The downloader thread immediately fires an asynchronous callback that calls `LibraryScanner.scan_track` on the specific downloaded file path:
 
 ```text
-Qobuz Download ──► Background Worker ──► Atomic Rename (.tmp → .flac)
-                                                   │
-                                                   ▼
-                                         LibraryScanner Callback
-                                                   │
-                                                   ▼
-                                       Targeted Indexing Scan
-                                                   │
-                                                   ▼
-                                        SQLite DB WAL Ingestion
-                                                   │
-                                                   ▼
-                                         Live UI Accent Refreshes
+Qobuz / Deezer Download ──► Background Worker ──► Atomic Rename (.tmp → .flac)
+                                                               │
+                                                               ▼
+                                                     LibraryScanner Callback
+                                                               │
+                                                               ▼
+                                                   Targeted Indexing Scan
+                                                               │
+                                                               ▼
+                                                    SQLite DB WAL Ingestion
+                                                               │
+                                                               ▼
+                                                     Live UI Accent Refreshes
 ```
 
 - **Instant Local Integration**: Instead of rebuilding the entire music database, the scanner performs a highly optimized, single-file SQLite WAL ingestion. It extracts metadata tags, writes the track details to `tracks` (triggering aggregate counters), and refreshes the Library tree dynamically.
@@ -338,31 +386,29 @@ Jarvis is a zero-latency vocal command center that operates entirely on-device, 
    - To guarantee complete stability and prevent channel-locking glitches between Android's native SpeechRecognizer and TextToSpeech engines, the system allows active voice feedback to run naturally without forced interruption when the microphone is pressed.
    - A click or hold gesture on the microphone button launches the voice-capturing STT pipeline directly without calling `service.tts_stop()`, avoiding platform-specific codec/channel cancellation conflicts and ensuring robust execution on all mobile builds.
 
-4. **Conversational NLP & Normalisation (`assistant_intent.py` & `semantic_intent.py`)**:
-   - **Spelling Auto-Correction (Levenshtein Distance)**: Speech recognition is prone to minor errors and dictation drift. The upgraded classifier calculates Levenshtein Edit Distance on all OOV (out-of-vocabulary) terms against key command tokens (`"skip"`, `"pause"`, `"resume"`, `"mute"`, `"unmute"`, `"queue"`, `"playlist"`, `"download"`):
-     $$D(i, j) = \min \begin{cases} D(i-1, j) + 1 \\ D(i, j-1) + 1 \\ D(i-1, j-1) + \text{cost} \end{cases}$$
-     If edit distance $D \le 1$, the token is automatically corrected (e.g. *"skup"* $\rightarrow$ *"skip"*, *"downloaded"* $\rightarrow$ *"download"*), preserving command integrity.
-   - **Synonym & Slang Translation Map**: Normalizes colloquial voice inputs to their semantic command equivalents using a deterministic vocabulary dictionary (e.g. *"banger"* / *"beats"* $\rightarrow$ *"song"*, *"blast"* / *"spin"* $\rightarrow$ *"play"*, *"shove"* $\rightarrow$ *"add"*, *"quiet"* $\rightarrow$ *"mute"*, *"resume"* $\rightarrow$ *"play"*).
-   - **Inverse Document Frequency (IDF) Weighting**: Standard bag-of-words vector space models fail when generic particles (like `"play"`, `"the"`, `"me"`) overwhelm high-value verbs. The classifier applies dynamic IDF scaling weights:
-     * Noise particles/connectors carry low weight ($\approx 0.1$ - $0.5$).
-     * Primary intent verbs (`"skip"`, `"pause"`, `"unmute"`, `"download"`, `"shuffle"`, `"similarity"`) carry massive weight ($\approx 1.8$ - $2.8$).
-     This ensures critical actions always dominate the Cosine Similarity metric during query-anchor classification.
-   - **Recursive Fixed-Point Peeling**: Employs a recursive peeling loop (`_normalise` and `_clean_query`) to dynamically strip out voice hesitation layers, politeness noise, and auxiliary verbs (e.g. *"Yo, um, Jarvis, could you please... please"*), isolating the core query perfectly.
+4. **Deterministic NLP & Normalisation (`assistant_intent.py` & `text_match.py`)**:
+   - **Spelling Auto-Correction (Levenshtein Distance)**: Calculates Levenshtein Edit Distance on out-of-vocabulary terms against key command tokens (`"skip"`, `"pause"`, `"resume"`, `"mute"`, `"unmute"`, `"queue"`, `"playlist"`, `"download"`). If edit distance $D \le 1$, the token is automatically corrected.
+   - **Synonym & Slang Translation Map**: Normalizes colloquial voice inputs to their semantic command equivalents using a deterministic vocabulary dictionary (e.g. *"banger"* / *"beats"* $\rightarrow$ *"song"*, *"blast"* / *"spin"* $\rightarrow$ *"play"*, *"shove"* $\rightarrow$ *"add"*, *"quiet"* $\rightarrow$ *"mute"*).
+   - **Recursive Fixed-Point Peeling**: Employs recursive peeling loops (`_normalise` and `_clean_query`) to dynamically strip out voice hesitation layers, politeness noise, and auxiliary verbs, isolating the target query.
    - **Homophone Protections**: Integrates custom vocabulary mappings to capture homophone slips (e.g. treating *"cue"* and *"queue"* identically).
+   - *Note on Legacy Semantic Classifier*: The experimental 30k-token BERT WordPiece vector-space model (`semantic_intent.py`) was retired to `deprecated_feature/`. Sub-word splitting fractured domain terms (such as `equalizer`, `qobuz`, and `haptic`), whereas whole-token matching combined with Levenshtein distance proved more reliable, faster, and zero-overhead on mobile.
 
-5. **Proactive Sandboxed Chat Persistence & Lazy 15-Minute Expiration (`utils/chat_memory.py`)**:
-   - **Lite JSON Architecture**: To bypass heavy, slow local database wrappers on Android, the chat memory is modeled as a sandboxed JSON storage backend. Read and write access completes in **under 0.2 milliseconds** with a footprint **less than 50 KB**.
-   - **Proactive Memory Cap (50 items)**: To protect Android's UI buffer and WebSocket sync channel from sluggish serialization lag during deep chat histories, the memory strictly caps the chat list at **50 messages**, shifting out older entries dynamically.
-   - **Lazy Inactivity Expiration**: When the user opens the Jarvis panel or resumes the app, `load_session()` checks the time delta since the last active interaction against a **15-minute inactivity threshold** (900 seconds).
-     * If the time delta is under 15 minutes, the existing chat history and greeting states are re-hydrated seamlessly.
-     * If the threshold is breached, the storage file is lazily cleared, resetting variables and scheduling a fresh, time-of-day aware greeting bubble.
+5. **Conversational LLM Agent (`llm_engine.py` & `llm_tools.py`)**:
+   - For unstructured, complex, or conversational prompts, Jarvis routes requests to an LLM tool-calling agent.
+   - **Tool Schema**: Exposes structured tools for catalog searches, playback management, queue inspection, similarity walk triggers, and library statistics.
+   - **Fallback Architecture**: Operates as a seamless complement to deterministic voice commands: precise physical playback controls execute instantaneously via local regex matching, while open-ended musical queries leverage the conversational agent.
 
-6. **OS Process Lifecycle Integration**:
+6. **Proactive Sandboxed Chat Persistence & Lazy 15-Minute Expiration (`utils/chat_memory.py`)**:
+   - **Lite JSON Architecture**: To bypass heavy, slow local database wrappers on Android, the chat memory is modeled as a sandboxed JSON storage backend. Read and write access completes in under 0.2 milliseconds with a footprint under 50 KB.
+   - **Proactive Memory Cap (50 items)**: To protect Android's UI buffer and WebSocket sync channel from sluggish serialization lag during deep chat histories, the memory strictly caps the chat list at 50 messages, shifting out older entries dynamically.
+   - **Lazy Inactivity Expiration**: When the user opens the Jarvis panel or resumes the app, `load_session()` checks the time delta since the last active interaction against a 15-minute inactivity threshold (900 seconds). If breached, storage resets and issues a fresh greeting.
+
+7. **OS Process Lifecycle Integration**:
    - The application hooks into Flet's system event loop via `on_app_lifecycle_state_change`:
      * **Background / Suspend** (`hidden`, `inactive`, `detached`): Proactively calls `handle_app_background()` to write the final active timestamp to disk, guaranteeing that if the Android OS kills the suspended process to free up system memory, the inactivity duration is preserved accurately.
      * **Resume / Foreground** (`resumed`): Calls `handle_app_resume()`. If the 15-minute inactivity limit was breached during background suspension, it immediately resets UI controls and triggers the initial hello greeting bubble.
 
-7. **Real-Time Dynamic Help System**:
+8. **Real-Time Dynamic Help System**:
     - Queries the database and filesystem on-the-fly when the user requests `help` or asks `"what can you do?"`.
 
 ### 5.2 Comprehensive Skillset & Commands
@@ -409,7 +455,10 @@ The catalog database (SQLite) manages records across the following tables:
 | `track_neighbors` | Sparse adjacency table representing the $k$-NN acoustic/metadata graph. | `track_path`, `neighbor_path`, `weight`, `edge_kind` |
 | `pca_space` | Persists the active PCA projection produced by the double-pass SVD engine. | `id` (always 1), `means` (8×float32 BLOB), `stds` (8×float32 BLOB), `projection` (8×3 float32 BLOB), `eigenvalues` (8×float32 BLOB) |
 | `artist_enrichment` | Caches external MusicBrainz provenance (country/area) and community genre tags. | `artist_name` (PK), `mbid`, `country`, `area`, `genres` (JSON list), `source`, `score`, `status`, `fetched_at` |
-| `genre_affinity` | Pre-computed NPMI genre$\times$genre similarity model for random walk metadata gates. | `id` (always 1), `model` (JSON dict `"a|b": npmi`), `updated_at` |
+| `genre_affinity` | Pre-computed NPMI genre×genre similarity model for random walk metadata gates. | `id` (always 1), `model` (JSON dict `"a|b": npmi`), `updated_at` |
+| `genre_graph` | Pre-computed PAGA-style genre adjacency graph driving auto-play journey walks. | `id` (always 1), `model` (JSON dict `{"version", "nodes", "adj"}`), `updated_at` |
+| `autoplay_hidden` | Tracks hidden from auto-play via user removal or negative feedback. | `path` (PK), `hidden_at` |
+| `autoplay_hop_rejects` | Negative feedback ledger per genre hop used to penalize or veto poor transitions. | `src`, `dst`, `path`, `artist`, `rejected_at` (PK: `src, dst, path`) |
 
 > [!NOTE]
 > **Sound Profile BLOB Layout (v5)**: The high-dimensional feature profile is packed as a single 68-float, little-endian binary BLOB inside the `play_counts.timbre` column (272 bytes total) to keep database size minimal and query speeds fast. The BLOB contains the 20D MFCC Mean, 20D MFCC std (timbral dispersion), 12D Chroma Pitch Profile, and 16D Rhythm Profile. The `features_version` column acts as a schema version, letting the engine dynamically invalidate and re-analyze features if extraction logic evolves.
@@ -427,12 +476,22 @@ The catalog database (SQLite) manages records across the following tables:
 
 ## 7. Metadata Curation & Deletion Internals
 
-Mai-An Lab supports direct in-app library modification, writing changes directly to physical files and executing database cascade routines under atomic async contexts:
+Mai-An Lab provides in-app metadata curation and physical file lifecycle operations executed under atomic asynchronous transactions:
 
-### 7.1 Metadata Curation Pipeline
-- **Physical Tag Mutations**: When editing a track’s metadata tags, the Python backend locks the physical file and executes header writes using low-level container bindings (e.g. Vorbis comments for `.flac`, ID3 tags for `.mp3`, and MP4 tags for `.m4a`).
-- **Database Synchronization**: Following disk write completion, the app launches an asynchronous SQLite transaction to update the target `tracks`, `albums`, or `artists` tables while keeping WAL journaling active.
-- **Aggregate Recalculation Triggers**: SQL triggers automatically run on the updated track rows, recalculating aggregate stats (like artist track counts and album releases) in real-time.
+### 7.1 Metadata Curation & Workbench Pipeline
+
+Metadata curation is centered on the **Metadata Workbench** (`ui/player/metadata_workbench.py`), which establishes artist-level provenance (country, origin area, and genre taxonomy) to guide Auto-Play journey graphs:
+
+- **Multi-Source Enrichment Cascade (`utils/metadata_enrich.py`)**:
+  1. *MusicBrainz API*: Polled with rate limiting (≤ 1 req/s, descriptive User-Agent) to extract objective artist country/area and community genre tags.
+  2. *Local Audio File Tags*: Fallback to extract embedded genres from existing library files when MusicBrainz tags are sparse.
+  3. *Qobuz Catalog API (`utils/metadata_qobuz.py`)*: Fallback to remote streaming metadata for missing artist classifications.
+  4. *Manual Curation*: User overrides applied via the Workbench.
+- **Per-Field Provenance**: The database records provenance labels (`MB`, `FILES`, `QOBUZ`, `YOURS`), enabling transparent verification of sources.
+- **Bulk Scene Tagging**: Users can select multiple artists and assign common genres (e.g. tagging a set of artists as regional rap) in a single operation.
+- **Auto-Play Model Synchronization**: Saving curated metadata immediately triggers `refresh_walk_models`, recalculating NPMI genre affinities and regenerating the journey graph.
+- **Background Single-Flight Catch-Up (`_ENRICH_STATE`)**: The app executes an initial boot enrichment pass 30 seconds after launch with single-flight locking, preventing redundant network requests.
+- **Database-Only Curation Scope (No Disk Mutation)**: Workbench modifications are committed directly to the SQLite `artist_enrichment` and `artists` tables via `set_manual_artist_enrichment`. The Workbench **does not mutate physical audio file tags on disk** (physical tag rewriting was retired to `deprecated_feature/` to eliminate risk of corrupting disparate container formats such as FLAC, ID3, and MP4).
 
 ### 7.2 Physical Song Deletion Pipeline
 Song deletion executes in a strict two-phase atomic pipeline to ensure filesystem and database consistency:
@@ -441,3 +500,38 @@ Song deletion executes in a strict two-phase atomic pipeline to ensure filesyste
   - **Junction Cleanup**: Removes occurrences of the deleted track path from the `playlist_tracks` junction table.
   - **FTS5 De-indexing**: Wipes search tokens associated with the deleted track from the `fts_search` virtual table.
   - **Aggregate Updates**: Mutates artist track/album counts. If an artist or album now contains **zero** tracks, their parent rows are automatically deleted from `artists` and `albums` respectively, keeping the library tree clean.
+
+---
+
+## 8. Developer, Diagnostic & Migration Tooling
+
+The repository provides several command-line diagnostics and offline scripts under `tools/` and `StreamripApp/tools/` for verifying catalog state, testing auto-play walks, and managing schema migrations:
+
+### 8.1 State Bundle Appraisal CLI (`tools/appraise_state_bundle.py`)
+A dependency-free CLI tool (using only Python's standard library `sqlite3` and `zipfile`) that inspects state bundle archives or raw SQLite database files:
+- **Computed State Audit**: Scans `tracks` and `play_counts` to report total track counts, the number of tracks with current DSP features (`features_version >= 5`), and the percentage of tracks with persisted $Z_r$ PCA coordinates (`pca_coords`).
+- **Build Automation Guard**: Emits distinct process exit codes:
+  - `0`: Valid bundle containing tracks (safe for build scripts to preserve).
+  - `1`: Valid database structure but empty (0 tracks).
+  - `2`: Missing, corrupted, or unreadable archive.
+- **Usage in Android Builds**: Called by `_adb_common.sh` and `fresh_build_android.sh` before running `adb uninstall`, refusing to wipe the target device if the only available state backup is empty or missing.
+
+### 8.2 Desktop State Restoration (`tools/restore_macos_state.py`)
+Facilitates seamless reproduction of Android mobile catalog state on macOS developer workstations:
+- Unpacks an exported state bundle (`mai_an_lab_state_<timestamp>.zip`) to desktop application support paths (`~/Library/Application Support/streamrip/`).
+- Maps Android database files, TOML configs, and search histories into local macOS test locations without requiring manual re-scanning or multi-hour feature recomputation.
+
+### 8.3 Feature BLOB Schema Migration (`tools/migrate_v4_to_v5_drop_delta.py`)
+An in-place SQLite database migration script that upgrades feature profiles from schema v4 to v5:
+- **Delta Dropping**: Reads 88-float v4 feature BLOBs from `play_counts.timbre` and `feature_cache.timbre` (20 MFCC mean, 20 MFCC std, 20 MFCC delta, 12 chroma, 16 rhythm).
+- Drops the deprecated 20-float MFCC delta block (`np.delete(v, np.s_[40:60])`), converts the surviving 68 floats to little-endian bytes, and updates `features_version = 5`.
+- Avoids re-analyzing audio files from scratch when upgrading older test databases.
+
+### 8.4 Headless Station Probing & A/B Diagnostics (`tools/walk_probe.py` & `tools/walk_ab_probe.py`)
+Command-line test harnesses that run auto-play station walks against a target SQLite database without launching the GUI:
+- **Cohesion & Guardrails**: Computes mean NPMI soft-set genre similarity scores against seed tracks and tallies foreign cross-culture tracks (similarity $< 0.06$) to verify that cultural barriers are strictly enforced.
+- **A/B Metadata Contribution**: Runs dual walks from the same seed—one with metadata pool gating enabled and one pure-acoustic walk—printing diffable queue outputs to evaluate transitions objectively.
+
+### 8.5 Metadata Enrichment Probe & Fusion Evaluation (`StreamripApp/tools/`)
+- `enrich_artists.py`: Standalone CLI wrapper around `utils.metadata_enrich.enrich_library`, allowing developers to test MusicBrainz rate limits (1 req/s) and backfill test databases offline.
+- `eval_metadata_fusion.py`: Benchmarks the 4-tier metadata fusion cascade against difficult artist catalogs, tracking resolution confidence across MusicBrainz, local tags, and Qobuz APIs.

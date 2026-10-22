@@ -61,6 +61,11 @@ BUFFER_LOW = 3           # top up when fewer than this remain
 BACKGROUND_TARGET = 24   # ~1.5 h, topped up once before the UI goes away
 HISTORY_LEN = 150        # tracks started this session, never re-recommended
 SKIP_SIGNAL_MAX_AGE_S = 180  # older ledger entries are history, not feedback
+# A fill is one take plus one batched DB read: seconds at most. One still marked
+# running after this long never ran: it was scheduled on a UI session the OS
+# tore down, so its `finally` never cleared the flag, and every later refill
+# (track change, queue end, a removal) bailed on it for the life of the process.
+FILL_STALE_S = 60.0
 
 # Station shape. Measured on the device image (2026-09-28): 5 per act / 1 per
 # album keeps a same-artist run to ~4 across different albums (never inside one
@@ -120,13 +125,18 @@ class AutoPlay:
         # inserting a stale block.
         self._gen = 0
         self._filling = False
+        self._fill_started = 0.0
 
     def bind_ui(self, run_task, notify=None) -> None:
         """Re-point the UI hooks at a new Flet session. The controller is kept
         per process (its station, history and rejections outlive a session),
-        but the session it schedules work on and notifies through does not."""
+        but the session it schedules work on and notifies through does not.
+        A fill scheduled on the old session may never run, so it is superseded
+        rather than waited for."""
         self._run_task = run_task
         self._notify = notify or (lambda _msg: None)
+        self._gen += 1
+        self._filling = False
 
     # ── mode ────────────────────────────────────────────────────────────────
     @property
@@ -167,11 +177,17 @@ class AutoPlay:
         self._schedule_fill(BUFFER_TARGET, replace=True)
 
     def resume(self, path: str) -> None:
-        """After a session restore: give an enabled station its anchor back
-        without touching the restored queue. The station itself opens on the
-        next refill (its state isn't persisted)."""
-        if self.enabled and not self.anchor and path:
+        """A session (re)started on `path`: give an enabled station its anchor
+        back and top the buffer up, without touching what is queued. The saved
+        queue carries the buffer it had, but the native player can play past it
+        while the app is away (its resume record moves the index on), and then
+        nothing was pending and nothing refilled until the next track change.
+        The station itself reopens on that fill (its state isn't persisted)."""
+        if not self.enabled or not path:
+            return
+        if not self.anchor:
             self.anchor = path
+        self.ensure_buffer()
 
     def _reset(self, anchor: str) -> None:
         self._gen += 1
@@ -255,12 +271,12 @@ class AutoPlay:
             self.station.exclude([path])
         if self.enabled and not self._negative(path):
             have = len(self._pending_rows())
-            if not self._filling and have < BUFFER_TARGET:
+            if not self._fill_busy() and have < BUFFER_TARGET:
                 self._schedule_fill(BUFFER_TARGET - have)
 
     def on_queue_dry(self) -> None:
         """The queue played out while enabled: append a block and play it."""
-        if not self.enabled or self._filling:
+        if not self.enabled or self._fill_busy():
             return
         self._schedule_fill(BUFFER_TARGET, append_and_play=True)
 
@@ -370,7 +386,7 @@ class AutoPlay:
         return len(victims)
 
     def ensure_buffer(self, target: int = BUFFER_TARGET) -> None:
-        if not self.enabled or self._filling:
+        if not self.enabled or self._fill_busy():
             return
         have = len(self._pending_rows())
         low = BUFFER_LOW if target == BUFFER_TARGET else target
@@ -434,12 +450,24 @@ class AutoPlay:
             return rows[-1]
         return queue_layout.up_next_end(self.engine.queue, self.engine.current_index) - 1
 
+    def _fill_busy(self) -> bool:
+        if self._filling and time.monotonic() - self._fill_started > FILL_STALE_S:
+            logger.error("Auto-play: a fill never finished; clearing it")
+            self._filling = False
+        return self._filling
+
     def _schedule_fill(self, n: int, *, replace: bool = False,
                        append_and_play: bool = False) -> None:
-        if n <= 0 or (self._filling and not replace):
+        if n <= 0 or (self._fill_busy() and not replace):
             return
         self._filling = True
-        self._run_task(self._fill, n, self._gen, replace, append_and_play)
+        self._fill_started = time.monotonic()
+        try:
+            self._run_task(self._fill, n, self._gen, replace, append_and_play)
+        except Exception:
+            # No live session to run it on (torn down mid-call).
+            self._filling = False
+            logger.error("Auto-play: could not schedule a fill", exc_info=True)
 
     async def _open(self, gen: int) -> tuple[track_graph.Station | None, bool]:
         """The current station, opening it on first use. (station, just_opened)."""

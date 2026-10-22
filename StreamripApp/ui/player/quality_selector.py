@@ -16,6 +16,17 @@ TIERS = [
 TIER_KEYS = {t[0] for t in TIERS}
 
 
+def hires_subtitle(records: list[dict]) -> str:
+    """Hi-Res subtitle for these records. Deezer has no 24-bit tier, so its
+    Hi-Res downloads are 16-bit FLAC; the sheet must not promise otherwise."""
+    sources = {(r.get("source") or "qobuz").lower() for r in records}
+    if sources == {"deezer"}:
+        return "16-bit FLAC (Deezer's best)"
+    if "deezer" in sources:
+        return "24-bit FLAC (Deezer items: 16-bit)"
+    return "24-bit FLAC"
+
+
 class QualitySelectorSheet:
     """Quality picker for one item or for a whole selection.
 
@@ -51,6 +62,8 @@ class QualitySelectorSheet:
 
         self._heading = ft.Text("Select Quality", color=TEXT, size=15, weight=ft.FontWeight.W_700)
         self._subheading = ft.Text("", color=DIM, size=12, visible=False)
+        # Per-tier subtitles, kept so _present can relabel Hi-Res per source.
+        self._tier_subs = {tier: ft.Text(sub, color=DIM) for tier, _, sub, _ in TIERS}
 
         # Close-then-follow-up handoff. Closing a BottomSheet and raising a
         # snackbar in the same Flutter frame makes the outgoing sheet's bare
@@ -68,7 +81,7 @@ class QualitySelectorSheet:
                         *[
                             ft.ListTile(
                                 title=ft.Text(title, color=TEXT),
-                                subtitle=ft.Text(sub, color=DIM),
+                                subtitle=self._tier_subs[tier],
                                 leading=ft.Icon(icon, color=CYAN),
                                 on_click=lambda e, t=tier: self._confirm(t),
                             )
@@ -117,6 +130,7 @@ class QualitySelectorSheet:
             f"{count} items" if count > 1 else records[0].get("ui_title", "")
         )
         self._subheading.visible = True
+        self._tier_subs["hires"].value = hires_subtitle(records)
         # Presented through the Flet 0.86 dialog stack rather than the legacy
         # page.overlay + `.open = True` path, which never installs the dismiss
         # lifecycle: a scrim tap closed the sheet in Flutter while leaving

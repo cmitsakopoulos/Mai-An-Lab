@@ -57,9 +57,9 @@ audio file ──► MediaCodec (Android) ──► mono int16 PCM @ 22050 Hz (1
                                                                          HYBRID COORD GRAPH
                                                                                    │
                                                                                    ▼
-                                                                     Personalised-PageRank Walker 
-                                                                       (restart · softmax τ · MMR ·
-                                                                        multi-tier · persistent avoid)
+                                                                       Resumable Station Engine
+                                                                 (PAGA genre journey · bridge lift ·
+                                                                  cultural bounds · negative feedback)
                                                                                    │
                                                                                    ▼
                                                                      Seamless Dynamic Playback Queue
@@ -146,12 +146,28 @@ Instead of writing and reading precomputed similarity edges from SQLite, similar
 
 * **Scalar Boosting**: after scaling, the non-harmonic scalar columns are multiplied by `scalar_weight = 1.5` so tempo and dynamics carry weight comparable to the 68 individual graph embedding axes. The harmonic columns (`cos_h`, `sin_h`, `key_mode`) are **not** boosted here — they are handled separately by the late-fusion step below.
 
-* **Late Fusion PCA reduction (Kaiser).** The harmonic unit-circle coordinates (`cos_h`, `sin_h`, `key_mode`) encode the rigid Camelot wheel geometry. Because PCA is a global linear rotation, running SVD on these columns would destroy the geometric integrity of the 12-hour circle. The engine therefore uses a **Late Fusion** strategy:
-  1. The z-scored feature matrix is **split** into a continuous block (68-D graph embedding + surviving non-harmonic scalars, ~75-D) and a harmonic block (3-D: `cos_h`, `sin_h`, `key_mode`), each z-scored with its own $\mu$/$\sigma$.
-  2. A thin SVD reduces **only the continuous block** to the components with eigenvalue $> 1$ (Kaiser; floored at 3), giving $Z_{r,\text{cont}}$ (typically ~20-D to 30-D). $Z_{r,\text{cont}}$ is kept **un-normalised**: Euclidean distance here preserves magnitude — how far a track sits from the library's "average" — which is real perceptual signal.
-  3. The raw z-scored harmonic coordinates are multiplied by `harmonic_weight = 1.5` and **concatenated** back onto $Z_{r,\text{cont}}$, producing the final unified coordinate space $Z_r$ (typically ~23-D to 33-D).
-
-  This guarantees that Euclidean distance in $Z_r$ matches perfect-fifth compatibility on the Camelot clock with 100% fidelity, while PCA still denoises the high-dimensional timbre and dynamics axes. The projection ($\mu_{\text{cont}}$, $\sigma_{\text{cont}}$, $\mu_{\text{harm}}$, $\sigma_{\text{harm}}$, surviving-feature list, $V_{\text{keep}}$, `harmonic_weight`) and every track's $Z_r$ coordinates are persisted in `pca_space` / `play_counts.pca_coords`; this single geometry drives the live similarity walker.
+* **Late Fusion PCA Reduction & Camelot Harmonic Geometry (`utils/harmonic.py`)**:
+  The DSP layer estimates a track's key as a discrete index $k \in [0, 23]$ (indices $0..11$ correspond to C through B major; $12..23$ correspond to C through B minor) via Krumhansl–Schmuckler pitch-class profile correlation.
+  
+  The engine maps key indices to the DJ-standard 12-hour Camelot wheel:
+  - **Major Ring (B-Ring)**: Hours $1\text{B}..12\text{B}$ (e.g. C major $\to 8\text{B}$, G major $\to 9\text{B}$, F major $\to 7\text{B}$).
+  - **Minor Ring (A-Ring)**: Hours $1\text{A}..12\text{A}$ (e.g. A minor $\to 8\text{A}$, E minor $\to 9\text{A}$, D minor $\to 7\text{A}$).
+  
+  Harmonic distance between two keys is defined symmetrically:
+  $$\Delta_{\text{hour}} = \min(|h_a - h_b|, 12 - |h_a - h_b|)$$
+  - Same ring: Distance equals $\Delta_{\text{hour}}$.
+  - Opposite ring: Relative major/minor (same hour, opposite ring) has distance $0$; other cross-ring transitions have distance $\min(\Delta_{\text{hour}} + 1, 6)$.
+  
+  To preserve this circular topology within Euclidean distance metrics without distortion, keys are embedded as 3-dimensional unit-circle coordinates:
+  $$\mathbf{x}_{\text{harm}} = \left[\cos\left(\frac{2\pi \cdot h}{12}\right), \;\sin\left(\frac{2\pi \cdot h}{12}\right), \;\text{mode}\right]$$
+  where $\text{mode} = 1.0$ for major (B-ring) and $0.0$ for minor (A-ring).
+  
+  Because global SVD/PCA is a linear rotation, passing circular trigonometric coordinates through PCA would distort the 12-hour circle geometry. The engine therefore enforces a **Late Fusion** pipeline:
+  1. The z-scored feature matrix is **split** into a continuous block (68-D graph embedding + surviving non-harmonic scalars, ~75-D) and the 3-D harmonic block ($\cos_h$, $\sin_h$, $\text{mode}$), each z-scored with its own $\mu$/$\sigma$.
+  2. A thin SVD reduces **only the continuous block** to the components with eigenvalue $> 1$ (Kaiser; floored at 3), producing $Z_{r,\text{cont}}$ (~20-D to 30-D). $Z_{r,\text{cont}}$ remains un-normalized to preserve absolute acoustic distance from the library centroid.
+  3. The raw z-scored harmonic coordinates are multiplied by `harmonic_weight = 1.5` and **concatenated** back onto $Z_{r,\text{cont}}$, yielding the unified coordinate space $Z_r$ (~23-D to 33-D).
+  
+  This ensures that Euclidean distance in $Z_r$ matches perfect-fifth compatibility on the Camelot clock with 100% mathematical fidelity while PCA denoises timbre and dynamics. The projection parameters and track coordinates are persisted in `pca_space` and `play_counts.pca_coords`.
 
 * **Live Self-tuning affinity (Zelnik-Manor)**: at walk time, distances are computed live. For any track, Euclidean distances to other tracks are converted to affinities $a_{ij} = \exp\!\big(-d(i,j)^2 / (\sigma_i \sigma_j)\big) \in (0,1]$, where $\sigma_i$ is $i$'s distance to its 7th-nearest neighbour.
 
@@ -165,175 +181,80 @@ When acoustic data is missing or needs to be augmented, the engine falls back to
 
 ---
 
-## 3. Stateful Graph Traversal (Personalised-PageRank Walker)
+## 3. Resumable Station Engine (`autoplay.py` & `track_graph.Station`)
 
-The voice assistant runs a **personalised-PageRank-flavoured random walk** with four behavioural levers: anchoring (restart), exploration (softmax temperature), diversity (MMR), and negative-centroid avoidance. When a user says *"play more like this"*, the walker traverses the graph from the current track's seed.
+Auto-play operates on a **Resumable Station** model rather than re-running disconnected similarity walks on every refill. A station is initiated from an anchor track and continues a coherent journey across sessions without re-recommending tracks that have already been played or dropped.
 
-Each step does three things: **gather candidates → score them → sample one**. The subsections below cover each of these in turn.
+### 3.1 Seed-Anchored Acoustic Ranking
+- **Metadata Defines Membership, Acoustics Rank the Pool**: Candidate tracks are gated by genre taxonomy and regional cultural boundaries (`_pool_foreign`). Tracks inside the pool are ranked strictly by cosine proximity to the seed track in the continuous $Z_r$ coordinate space.
+- **No Chaining Drift**: By anchoring ranks to the seed rather than greedy step-to-step nearest-neighbor chaining, the station prevents cumulative drift away from the core musical style.
+- **Repeat Caps**: Per-artist (`ARTIST_CAP = 5`) and per-album (`ALBUM_CAP = 1`) limits over a sliding 24-track window (`CAP_WINDOW = 24`) prevent over-representation of prolific artists or single releases.
 
-### 3.1 Gather; multi-tier candidate pooling
+### 3.2 Variety Modes
+1. **Deterministic Mode**:
+   - Strictly reproducible order for identical seed and library states.
+   - Picks nearest neighbors first within the active genre leg, followed by the strongest available genre hop.
+2. **Random Mode**:
+   - Draws a session random seed (persisted in logs for debugging/replay).
+   - Uses rank-sampled candidate selection inside legs (`genre_graph.rank_pick`), lift-weighted hops between genres, and a shuffled entry track.
 
-Each step pools acoustic + artist neighbours into one candidate set, then attaches a per-tier multiplier before any scoring math happens:
-
-$$\text{effective\_weight}(c) = \text{raw\_weight}(c) \times \mu_{\text{tier}(c)}$$
-
-with $\mu_{\text{acoustic}} = 1.0$ and $\mu_{\text{artist}} = 0.4$. An acoustic neighbour at affinity 0.9 has effective weight 0.9; an artist neighbour at raw weight 1.0 has effective weight 0.4. The walker therefore prefers acoustic edges by default but artist edges catch it when acoustic edges are absent; including mid-walk, not just at the seed.
-
-When the same track appears in both tiers (e.g. an acoustic neighbour that's also same-artist), the merge keeps the **maximum effective weight** so the stronger signal wins and the candidate appears exactly once in the pool.
-
-### 3.2 Score; composite logit
-
-The per-candidate logit is a composite of edge affinity, metadata fusion, diversity, and negative feedback penalties computed before the softmax:
-
-$$\text{logit}_c = \Big( w_c \cdot \mu_{\text{tier}(c)} \cdot (1 + \lambda_{\text{meta}} \cdot S_{\text{meta}}) \Big) - \lambda_{\text{MMR\_eff}} \cdot \max_{v \in \text{visited}} \cos(e_c, e_v) - \lambda_{\text{neg}} \cdot \max_{r \in \text{rejected}} \cos(e_c, e_r)$$
-
-Here, $\lambda_{\text{MMR\_eff}}$ decays over steps:
-
-| Term | Default | Purpose |
-|---|---|---|
-| $\lambda_{\text{MMR}}$ | 0.15 | Penalises candidates close in timbre to already-visited nodes; decays as $\lambda_{\text{MMR}}/(1+\text{step})$ so later steps stay anchored to the seed |
-| $\lambda_{\text{neg}}$ | 0.6 | Penalises candidates close in timbre to session-rejected tracks (skips/dislikes) |
-
-### 3.3 Score; softmax temperature
-
-The softmax converts logits to probabilities:
-
-$$p_i = \frac{e^{\text{logit}_i / \tau}}{\sum_j e^{\text{logit}_j / \tau}}$$
-
-A single flat temperature $\tau$ governs the whole walk (default 0.04; small → near-greedy, large → near-uniform). Before exponentiating, each node's logits are **z-standardised** (subtract mean, divide by std) so $\tau$ has the same meaning everywhere regardless of how that node's candidate affinities are spread; the code also subtracts $\max_j$ for numerical stability (softmax is shift-invariant).
-
-The **MMR diversity penalty** (Maximal Marginal Relevance) is the subtractive term in the composite logit. For each candidate $c$ we compute its maximum cosine to anything already in the walk:
-
-$$\text{logit}_c \mathrel{-}= \lambda_{\text{MMR\_eff}} \cdot \max_{v \in \text{visited}} \cos(\text{timbre}_c, \text{timbre}_v)$$
-
-with $\lambda_{\text{MMR\_eff}} = 0.15 / (1 + \text{step})$ by default. If candidate $c$ sounds very similar to a track we already added, subtract $\lambda \times$ that similarity from its logit. The walker still prefers candidates similar to the *seed* (high affinity via the edge) but inside that pool prefers candidates that are *different from each other* — a small sliver of seed-similarity traded for more variety across repeated *play similar* calls from the same seed.
-
-### 3.4 Sample; Personalised-PageRank restart
-
-Before sampling from the softmax, with probability $\alpha = 0.15$, the walker **teleports back to the teleport target** instead of stepping forward from `current`. The teleport target defaults to the seed but can be overridden (e.g. to anchor back to the original seed when Play Similar mode dynamically appends tracks from the current playing position). This is the *personalised PageRank* trick; the random surfer occasionally jumps to a preferred page rather than following an outlink. The stationary distribution is:
-
-$$P_{\text{stationary}}(v) = \alpha \cdot \mathbb{1}[v = \text{teleport}] + (1-\alpha) \sum_u P(u) \cdot \text{transition}(u, v)$$
-
-That $\alpha$ fraction is the **anchor**. Without it, the walker's distance from the seed grows roughly linearly with step count and you end up far afield; a "play similar" sequence ten steps in would have basically forgotten the seed. With it, the walker effectively averages over "where do I get to in $1/\alpha \approx 6.6$ steps before being yanked back?"; and the resulting playlist concentrates around the seed's true neighbourhood regardless of length.
-
-### 3.5 Persistent avoidance and live neighbors
-
-* **Persistent avoidance set**: the `avoid` set passed into `walk()` unions the assistant's in-memory recent list with the on-disk `playback_history` table (7-day window). Tracks the user heard yesterday don't reappear today, even across app restarts. See §4.4 for the table schema.
-
-* **Live Neighbors Lookup**: neighbors and affinities are computed live. At the start of the walk, the walker initializes the active catalog coordinates from `play_counts`. At each step, candidates are found by computing Zelnik-Manor local scaling affinities on-the-fly, avoiding database lookups during traversal.
-
-### 3.6 The walker in pseudocode
-
-```text
-fn walk(seed, length, kinds, weights, α, λ_mmr, λ_neg, τ, avoid, teleport):
-    visited       = avoid ∪ {seed}
-    visited_embs  = [embedding(seed)] if available else []
-    neg_embs      = [embedding(r) for r in session_rejected]
-    current       = seed
-    output        = []
-
-    repeat length times:
-        step = len(output)
-
-        # 3.4: anchor (Personalised-PageRank teleport)
-        if uniform() < α:
-            current = teleport
-
-        # 3.1: gather
-        candidates = get_live_neighbors(current, kinds)
-        candidates = merge_tiers(candidates, weights, exclude=visited)
-        if candidates is empty:
-            if current ≠ teleport: current = teleport; continue
-            else: break
-
-        # 3.2: composite logit calculation
-        # Base weights/affinity + metadata fusion boost
-        logits = [c.effective_weight for c in candidates]
-        if meta_active:
-            for i, c in enumerate(candidates):
-                logits[i] *= (1.0 + λ_meta * meta_score(current, c.path))
-
-        # Additive diversity (MMR) & negative centroid penalties
-        λ_mmr_eff = λ_mmr / (1.0 + step)
-        if λ_mmr_eff > 0 and visited_embs:
-            for i, c in enumerate(candidates):
-                logits[i] -= λ_mmr_eff * max(cos(emb(c), v) for v in visited_embs)
-        if λ_neg > 0 and neg_embs:
-            for i, c in enumerate(candidates):
-                logits[i] -= λ_neg * max(cos(emb(c), r) for r in neg_embs)
-
-        # 3.3: flat-temperature softmax over per-node z-standardised logits
-        probs  = softmax(zstandardise(logits) / τ)
-        chosen = sample(candidates, probs)
-
-        output.append(chosen)
-        visited.add(chosen)
-        if embedding(chosen) exists:
-            visited_embs.append(embedding(chosen))
-        current = chosen
-
-    return output
-```
-
-The reference implementation is in [track_graph.walk()](file:///Users/chrismitsacopoulos/Desktop/Mai-An-Lab/StreamripApp/utils/track_graph.py); the function signature exposes every knob (`restart_prob`, `diversity_lambda`, `negative_lambda`, `temperature`, `edge_kind_weights`, `teleport_path`, …) so different intents can re-tune the walker without touching the algorithm. A hypothetical *play discovery* intent would use $\tau = 0.2$, $\alpha = 0.05$, $\lambda = 0.5$; same code path, different point in the trade-off space.
-
+### 3.3 Dynamic Buffer Management & Lifecycle
+The playback buffer is proactively maintained ahead of the currently playing track:
+- **Foreground Buffer**: Maintains a target of 4 tracks ahead (`BUFFER_TARGET = 4`). A refill is triggered whenever fewer than 3 tracks remain (`BUFFER_LOW = 3`).
+- **Background Pre-Buffering**: When the application enters the background, the station tops up the queue to 24 tracks (`BACKGROUND_TARGET = 24`, approximately 1.5 hours of playback).
+- **Session History Exclusion**: Tracks played during the active session are recorded in an in-memory history (`HISTORY_LEN = 150`) and excluded from subsequent recommendations.
+- **In-Memory Traversal Lifecycle**: The `Station` instance and its traversal state (active leg, seed coordinates, hop chain, and artist bans) reside purely in process memory. If Android destroys the app process in the background, the current track position and physical playback queue are restored from the database snapshot on relaunch, but the in-memory station traversal resets and must be re-anchored.
 
 ---
 
-### 5.1 The Camelot wheel
+## 4. PAGA-Style Genre Adjacency & Traversal (`genre_graph.py`)
 
-The **Camelot wheel** is the DJ industry's de-facto re-numbering of the 24 keys (12 major + 12 minor) so that musically compatible keys sit at adjacent positions on a clock. Two concentric rings:
+To sequence transitions between different musical styles without abrupt acoustic clashes, the engine constructs a topological genre graph inspired by PAGA (Partition-based Graph Abstraction):
 
-* **Outer ring ("B" = Bright = major)**: `1B = B major`, `2B = F♯ major`, `3B = D♭ major`, …, `12B = E major`.
-* **Inner ring ("A" = minor)**: `1A = G♯ minor`, `2A = D♯ minor`, …, `12A = D♭ minor`.
+### 4.1 Coarse Families & Cultural Partitioning
+- **Genre Nodes**: Coarse musical families (defined in `genre_taxonomy.py`) serve as graph nodes.
+- **Cultural Scenes**: Coarse families are partitioned by regional culture when necessary (e.g. `Hip-Hop` vs `Hip-Hop·GR`, where Greek laiko and rap share Western bucket terms but diverge acoustically and culturally).
+- **Hard Boundaries**: Hops between different cultural scenes are strictly forbidden during automated journeys.
 
-Two tracks are **harmonically compatible** if any of these holds:
+### 4.2 Bridge-Artist Adjacency & Lift
+- **Bridge Artists**: Two genre nodes are considered adjacent only when library artists carry tags in both genres (e.g., Alice In Chains spanning Rock and Metal; Depeche Mode spanning Alternative, Electronic, and Pop).
+- **Lift Scoring**: Edge weights are calculated as a statistical lift over chance, rather than raw acoustic similarity. This prevents high-volume artists from dominating graph connectivity.
+- **Acoustic Edge Selection**: While bridge artists define which genres can connect, acoustic proximity determines which specific bridge track carries the transition.
+- **Sparse Library & Disconnected Graph Trap**: Because transitions strictly require shared bridge artists, small libraries (< 100 tracks) or catalogs containing siloed genres (e.g. classical chamber music alongside ambient techno with zero crossover artists) form disconnected graph components. In this case, the station has no mathematical exit from the initial genre; it will either play all eligible candidates in the seed's genre or run dry once local candidates are exhausted.
 
-| Relationship | Camelot move | Example | Distance |
-|---|---|---|---|
-| Same key | 8B → 8B | C major → C major | 0 |
-| Relative major/minor (same hour, opposite ring) | 8B → 8A | C major → A minor | 0 |
-| ±1 hour, same ring (perfect 4th / 5th) | 8B → 9B | C major → G major | 1 |
-| ±1 hour, opposite ring | 8B → 9A | C major → E minor | 2 |
-| Further apart | … | … | 3–6 |
-
-The full pitch-class → Camelot table lives in `utils/harmonic.py` (`_MAJOR_HOUR`, `_MINOR_HOUR`); derived from the standard Mixed In Key reference. `key_index_to_camelot(k)` returns the `(hour, ring)` tuple for any `key_index` in [0, 23] (your `dsp.py`'s Krumhansl-Schmuckler estimate).
-
-### 5.2 The harmonic distance + penalty
-
-`camelot_distance(a, b)` returns a symmetric integer in `[0, 6]`:
-
-```text
-if either key unknown:        return 6   (max; penalises tracks lacking a key estimate)
-if same ring:                  return min(|hour_a - hour_b|, 12 - |hour_a - hour_b|)
-if opposite ring and same hour: return 0  (relative major/minor)
-if opposite ring otherwise:    return min(hour_dist + 1, 6)
-```
-
-The normalised penalty divides through by the max:
-
-$$\text{camelot\_penalty}(a, b) = \frac{\text{camelot\_distance}(a, b)}{6} \in [0, 1]$$
+### 4.3 Untagged Track Label Propagation
+Tracks lacking genre tags (common in regional imports) are assigned to genre nodes via $k$-NN label-propagation over acoustic $Z_r$ coordinates. This eliminates untagged orphan tracks and ensures all library items can anchor a station.
 
 ---
 
-## 6. End-to-End Trace
+## 5. Negative Feedback & Learned Genre Hop Penalties
 
-Walking through a concrete request makes the moving parts visible. Suppose the user is listening to **"Weightless" by Marconi Union** (ambient, ~60 BPM, low energy, D minor = `7A`) and says *"play similar"*.
+Auto-play adapts dynamically to user preferences through active negative feedback:
 
-### 6.1 The walker fires
+### 5.1 Track Removals & Early Skips
+- **Track Removals**: Removing a recommended track immediately hides it from auto-play. The exclusion is written to the `autoplay_hidden` database table and can be viewed or restored in Settings.
+- **Early Skips (`play_ledger.py`)**: Skipping a recommendation before reaching 30 seconds or 50% duration logs a negative feedback signal.
+- **Leg Termination**: Accumulating 2 negative signals (`NEGATIVES_TO_END_LEG = 2`) within a single genre leg terminates the leg immediately, replacing the unheard buffer with a hop into a new genre or steering away from the rejected style.
+- **Station Artist Bans**: An artist receiving 2 negative signals (`ARTIST_NEGATIVES_TO_BAN = 2`) is banned from further recommendations for the life of that station.
 
-1. **Live Graph**: `track_graph.walk()` initializes the coordinate graph in memory on startup.
-2. **Step 1; gather**. Three candidates among the seed's neighbors (after multi-tier merge):
-   - **Another Marconi Union track**; acoustic edge, affinity 0.93 → effective weight 0.93.
-   - **"Avril 14th" by Aphex Twin**; acoustic edge, affinity 0.91 → effective weight 0.91 (timbre-twin: solo piano, similar MFCC).
-   - **Random electronica track**; only an artist edge, raw 1.0 → effective $1.0 \times 0.4 = 0.40$.
-3. **Step 1; score**. The effective weights $[0.93, 0.91, 0.40]$ are z-standardised per node and divided by the flat temperature $\tau = 0.04$, then softmaxed. The two acoustic twins sit far above the lone artist edge, so they split almost all the probability between them while the artist candidate is effectively excluded.
-4. **Step 1; sample**: pick the Marconi Union track. Append to walk; add its embedding to `visited_embs`.
-5. **Step 2; restart roll**: $\alpha = 0.15$ doesn't fire (we rolled 0.42). Step from the Marconi Union track.
-6. **Step 2; MMR kicks in**. Another Marconi Union track (Track 3 from the same album) is the next acoustic-twin, ~0.95 affinity to the seed — but it's also ~0.95 cosine to *the just-added* Marconi Union track in the timbre sub-space. The MMR penalty subtracts $\lambda \cdot 0.95 = 0.15 \cdot 0.95 \approx 0.14$ from its logit, nudging it below Aphex Twin's "Avril 14th" (similarly slow piano), so softmax now favours Avril.
-7. **Step 3; restart fires**. Roll 0.08 < $\alpha$ → teleport back to the seed. Score from the seed's neighbours again, but Marconi Union Track 1 and "Avril 14th" are in `visited` (filtered out) AND their embeddings still apply MMR pressure on whatever else surfaces.
+### 5.2 Learned Hop Penalties & Vetoes
+- **Hop Window Blame**: Rejections occurring within the first few tracks following a genre transition (`HOP_WINDOW = 3`) are attributed to that specific directed hop.
+- **Hop Penalties**: Each rejection halves the hop's transition probability (`HOP_REJECT_WEIGHT = 0.5`) across all future stations.
+- **Permanent Vetoes**: A directed hop accumulating 3 rejections across at least 2 distinct artists (`HOP_VETO_REJECTS = 3`, `HOP_VETO_ARTISTS = 2`) is permanently vetoed and recorded in `autoplay_hop_rejects`. Vetoes can be reviewed and reset in Settings → Auto-play.
 
-Repeat for 12 steps. The walk explores the seed's neighbourhood without drifting into unrelated genres (restart), without producing 12 Marconi Union tracks in a row (MMR), and without re-recommending anything the user heard yesterday (persistent avoid set).
+---
+
+## 6. Dynamic Queue Layout & Lifecycle Management
+
+Queue management is partitioned into explicit functional tiers (`utils/queue_layout.py`):
+
+```text
+[ Playing Track ] → [ Up-Next Picks ] → [ Auto-Play Buffer ] → [ Held Queue ]
+```
+
+- **Up-Next Precedence**: Tracks queued manually via *Play Next* or *Add to Queue* are placed ahead of the auto-play buffer.
+- **Non-Destructive Auto-Play Toggle**: Disabling auto-play drops only the auto-play buffer, restoring manual queues seamlessly without stopping playback.
+- **Session Rebinding & Stale Recovery**: When Android recycles UI sessions, `bind_ui` re-points UI notification hooks without resetting the underlying station or clearing history. Stale fill attempts are timed out after 60 seconds (`FILL_STALE_S = 60.0`) to prevent deadlocks.
 
 ---
 
@@ -506,3 +427,24 @@ To guarantee absolute race-safety, the state manager utilizes a monotonic intege
    - **Post-Await**: Immediately after the async `tg.walk()` call returns, catching any state transitions that occurred while waiting for the walk to complete.
    - **Pre-Mutation**: Directly before writing the new candidates into the active `audio_engine.queue`.
 3. **Graceful Abort**: If the check fails at any of these points (meaning the generation has changed), the coroutine aborts silently without mutating the queue or player state.
+
+---
+
+## 10. Headless Station Probing & Evaluation Harnesses
+
+To evaluate the perceptual quality of similarity walks and station journeys across refactorings without requiring manual UI playback sessions, the repository includes two command-line probing harnesses:
+
+### 10.1 Multi-Seed Station Walker Probe (`tools/walk_probe.py`)
+- **Direct Database Execution**: Connects directly to a specified SQLite database (`--db <path>`) and executes similarity walks across arbitrary seeds (`--seed <name>` or randomly sampled library tracks).
+- **Dual-Walk A/B Comparison**: Executes two simultaneous walks from the same seed track:
+  1. `smooth+meta`: The production walk with metadata pool gating, cultural boundaries, and bridge-artist adjacency enabled.
+  2. `smooth-acoustic`: Pure acoustic similarity flow over $Z_r$ Euclidean coordinates without metadata pool constraints.
+- **Diagnostic Coherence Metrics**: Calculates mean cohesion scores, logs hop transition reasons, and reports whether the database carries valid $Z_r$ coordinates and NPMI genre affinity matrices before initiating tests.
+- **Graph Rebuild Mode (`--build`)**: Rebuilds $Z_r$ geometry, metadata edges, and NPMI genre models on throwaway test databases without triggering network enrichment.
+
+### 10.2 Deterministic Regression Harness (`tools/walk_ab_probe.py`)
+- **Fixed Seed Evaluation**: Evaluates walk stability across 5 fixed benchmark seeds spanning diverse genres and cultural scenes (US Hip-Hop, UK Grime, US Metal, UK EDM, and Greek Laiko).
+- **Zero-Temperature Execution**: Runs with `temperature=0.0` and `mmr_lambda=0.0` for perfectly deterministic, reproducible trajectory outputs.
+- **Guardrail Quantitative Metrics**:
+  - `cohesion`: Mean NPMI soft-set similarity of each queued track's genre tags compared to the seed.
+  - `foreign`: Tally of queued tracks falling below the cultural veto floor ($\text{sim} < 0.06$). Any foreign count $> 0$ on siloed seeds flags a regression in cultural scene enforcement.

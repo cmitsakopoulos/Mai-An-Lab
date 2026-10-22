@@ -318,7 +318,7 @@ class SettingsView:
                 ft.DropdownOption(key="",      text="Ask every time"),
                 ft.DropdownOption(key="mp3",   text="High \u2014 MP3 / AAC 320kbps"),
                 ft.DropdownOption(key="cd",    text="CD Quality \u2014 16-bit FLAC"),
-                ft.DropdownOption(key="hires", text="Hi-Res \u2014 24-bit FLAC"),
+                ft.DropdownOption(key="hires", text="Hi-Res \u2014 24-bit FLAC (Deezer: 16-bit)"),
             ],
             bgcolor=SURFACE2,
             border_color=BORDER,
@@ -1476,7 +1476,7 @@ class SettingsView:
                     ft.Container(height=4),
                     ft.Row([
                         ft.Icon(ft.Icons.INFO_OUTLINE_ROUNDED, color=DIM, size=14),
-                        ft.Text("FLAC requires a Deezer HiFi subscription; other plans fall back to 320 kbps MP3.",
+                        ft.Text("FLAC needs a Deezer plan with lossless and 320 kbps MP3 a paid plan. If your plan can't serve the quality you pick, downloads drop to the best it can.",
                                 color=DIM, size=11, expand=True),
                     ], spacing=6, vertical_alignment=ft.CrossAxisAlignment.START),
                 ], spacing=10),
@@ -1910,7 +1910,7 @@ class SettingsView:
             ft.Container(
                 content=ft.Column([
                     ft.Text("Mai An Lab", size=28, weight=ft.FontWeight.W_900, color=CYAN),
-                    ft.Text("Version 1.3.0", color=DIM, size=14),
+                    ft.Text("Version 2.0.0", color=DIM, size=14),
                 ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=4),
                 alignment=ft.Alignment(0, 0),
                 padding=ft.Padding.only(bottom=10),

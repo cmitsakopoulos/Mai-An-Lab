@@ -175,6 +175,28 @@ class DivergenceTests(unittest.TestCase):
         asyncio.run(self.e._do_skip(2, True, 8))
         self.e._resync_native.assert_called_once()
 
+    def test_an_op_to_a_dead_session_cannot_hold_the_pipeline(self):
+        # Flet's invoke_method waits forever; one addressed to a session the OS
+        # tore down is never answered.
+        async def scenario():
+            self.e._audio = MagicMock()
+            async def hang(_rid):
+                await asyncio.Event().wait()
+            async def ok(_rid):
+                pass
+            self.e._audio.wait_for_op = AsyncMock(return_value={"ok": True, "epoch": 9})
+            first = await self.e._dispatch_op(hang, 8)
+            second = await asyncio.wait_for(self.e._dispatch_op(ok, 9), 1.0)
+            return first, second
+        orig = engine_mod._SEND_TIMEOUT_S
+        engine_mod._SEND_TIMEOUT_S = 0.05
+        try:
+            first, second = asyncio.run(scenario())
+        finally:
+            engine_mod._SEND_TIMEOUT_S = orig
+        self.assertEqual(first, {"ok": False, "timeout": True})
+        self.assertEqual(second, {"ok": True, "epoch": 9})
+
     # ── entry filtering / index bookkeeping ─────────────────────────────────
     def test_pathless_tracks_never_enter_the_queue(self):
         self.e._schedule_push = MagicMock()

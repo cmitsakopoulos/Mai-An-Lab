@@ -194,35 +194,52 @@ class DeezerClient(Client):
         # Config is documented as 0/1/2, but it is user-editable TOML and a
         # stray 3 would be an IndexError deep in the download path.
         quality = max(0, min(int(quality), self.max_quality))
-        dl_info: dict = {"quality": quality, "id": item_id}
+        dl_info: dict = {"id": item_id}
 
         track_info = await asyncio.to_thread(self.client.gw.get_track, item_id)
 
         fallback_id = track_info.get("FALLBACK", {}).get("SNG_ID")
 
-        _, format_str = self.QUALITY_MAP[quality]
-
-        dl_info["quality_to_size"] = [
+        sizes = [
             int(track_info.get(f"FILESIZE_{format}", 0))
             for _, format in self.QUALITY_MAP
         ]
+        dl_info["quality_to_size"] = sizes
+
+        # Try the requested format, then (when allowed) each lower one. A plan
+        # without lossless raises WrongLicense for FLAC, a free plan for
+        # MP3_320 too; formats the track simply doesn't have are skipped.
+        lower = self.config.lower_quality_if_not_available
+        candidates = [quality]
+        if lower:
+            candidates = [q for q in range(quality, -1, -1) if sizes[q] > 0] or [quality]
 
         token = track_info["TRACK_TOKEN"]
-        try:
-            logger.debug("Fetching deezer url with token %s", token)
-            url = await asyncio.to_thread(self.client.get_track_url, token, format_str)
-        except deezer.WrongLicense:
-            raise NonStreamableError(
-                "The requested quality is not available with your subscription. "
-                "Deezer HiFi is required for quality 2. Otherwise, the maximum "
-                "quality allowed is 1.",
-            )
-        except deezer.WrongGeolocation:
-            if not is_retry and fallback_id:
-                return await self.get_downloadable(fallback_id, quality, is_retry=True)
-            raise NonStreamableError(
-                "The requested track is not available. This may be due to your country/location.",
-            )
+        url = None
+        for i, q in enumerate(candidates):
+            _, format_str = self.QUALITY_MAP[q]
+            try:
+                logger.debug("Fetching deezer url with token %s (%s)", token, format_str)
+                url = await asyncio.to_thread(self.client.get_track_url, token, format_str)
+            except deezer.WrongLicense:
+                if i + 1 < len(candidates):
+                    logger.info("Deezer: %s not on this plan, trying lower quality", format_str)
+                    continue
+                raise NonStreamableError(
+                    "The requested quality is not available with your Deezer plan. "
+                    "FLAC needs a plan with lossless; 320 kbps MP3 needs a paid plan."
+                    + ("" if lower else " Turn on lower_quality_if_not_available to fall back."),
+                )
+            except deezer.WrongGeolocation:
+                if not is_retry and fallback_id:
+                    return await self.get_downloadable(fallback_id, quality, is_retry=True)
+                raise NonStreamableError(
+                    "The requested track is not available. This may be due to your country/location.",
+                )
+            # The quality actually obtained, so the file gets the right
+            # extension: an MP3 fallback must not be saved as .flac.
+            dl_info["quality"] = q
+            break
 
         if url is None:
             url = self._get_encrypted_file_url(

@@ -3,13 +3,13 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Platform: Android](https://img.shields.io/badge/Platform-Android%2011%2B-green.svg)](https://developer.android.com/about/versions/11)
 [![Platform: macOS](https://img.shields.io/badge/Platform-macOS%20Desktop-lightgrey.svg)](https://www.apple.com/macos/)
-[![Python: 3.11](https://img.shields.io/badge/Python-3.11-blue.svg)](https://www.python.org/)
+[![Python: 3.12](https://img.shields.io/badge/Python-3.12-blue.svg)](https://www.python.org/)
 [![Built with Flet](https://img.shields.io/badge/Built%20with-Flet-blue.svg)](https://flet.dev)
 [![Engine: Streamrip](https://img.shields.io/badge/Engine-Streamrip-orange.svg)](https://github.com/nathom/streamrip)
 
-[**Latest Release**](https://github.com/cmitsakopoulos/Mai-An-Lab/releases/latest)
+[**Latest Release**](https://github.com/cmitsakopoulos/Mai-An-Lab/releases/latest) • [**v2.0.0 Release Notes**](docs/release_notes_v2.0.0.md) • [**Development Reference**](docs/Development_Reference.md) • [**Auto-Playlist Engine**](docs/Auto_Playlist_Engine.md) • [**UI Instructions**](docs/UI_Instructions.md)
 
-Mai-An Lab is a dual-platform music player and streamrip download client for Android and macOS. It embeds the streamrip download toolset in an interactive interface built with Flet.
+Mai-An Lab is a dual-platform music player and streamrip download client for Qobuz and Deezer, on Android and macOS. It embeds the streamrip download toolset in an interactive interface built with Flet.
 
 The player implements native engine fallbacks; background services and hardware speech engines on mobile, and an Apple `AVAudioPlayer` loop on desktop. It features an LLM-powered Jarvis assistant, SQLite library search, and an auto-playlist engine based on seed-anchored acoustic similarity.
 
@@ -22,16 +22,17 @@ The player implements native engine fallbacks; background services and hardware 
 
 ### Search, Direct Streaming & Downloader
 
-Search the entire Qobuz streaming catalog across Artists, Albums, and Tracks with responsive skeleton loading and paginated results. Designed for seamless on-the-fly streaming and studio-grade music acquisition:
+Search the Qobuz or Deezer catalogue across Artists, Albums, and Tracks with responsive skeleton loading and paginated results. Designed for seamless on-the-fly streaming and studio-grade music acquisition:
 
-- **Direct Network Audio Streaming**: Resolves authenticated stream URLs on the fly to play full-length track previews directly over the network with zero disk overhead. Includes interactive connection cards displaying real-time stream resolution and granular cancellation.
-- **High-Fidelity Streamrip Acquisition**: Download albums or individual tracks directly to your system directory in user-selected formats ranging from **High (320kbps MP3/AAC)** and **CD Quality (16-bit FLAC)** to uncompressed **Hi-Res (24-bit FLAC)** with embedded tags and artwork.
+- **Two Sources, One Search** *(v2.0.0)*: A Qobuz/Deezer switch sits above the results; each source keeps its own results when you flip between them, and rows carry a source colour (Deezer is purple). You only need credentials for one source; search opens on whichever is set up, and picking the other says which credential is missing.
+- **Direct Network Audio Streaming**: Resolves authenticated stream URLs on the fly to play full-length track previews directly over the network with zero disk overhead. Includes interactive connection cards displaying real-time stream resolution and granular cancellation. Deezer serves encrypted streams, so a Deezer preview falls back to a temporary download (decrypted on the way in) instead of playing over the network.
+- **High-Fidelity Streamrip Acquisition**: Download albums or individual tracks directly to your system directory in user-selected formats ranging from **High (320kbps MP3/AAC)** and **CD Quality (16-bit FLAC)** to uncompressed **Hi-Res (24-bit FLAC)** with embedded tags and artwork. Deezer tops out at 16-bit FLAC, so its Hi-Res option downloads CD-quality FLAC.
 - **Integrated Download Dock & Queue**: Monitor multi-track acquisition in real-time with speed metrics, quality badges, retry controls, and auto-collapsing floating action pills.
 
 <p align="center">
   <img src="assets/search_query.png" width="31%" alt="Real-time Query & Skeleton Loading" style="border-radius: 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); border: 1px solid rgba(255, 255, 255, 0.1);">
   &nbsp;
-  <img src="assets/search_stream.png" width="31%" alt="Direct Network Streaming & Progress" style="border-radius: 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); border: 1px solid rgba(255, 255, 255, 0.1);">
+  <img src="assets/search_stream.png" width="31%" alt="Qobuz/Deezer Source Switch, Results & Streaming" style="border-radius: 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); border: 1px solid rgba(255, 255, 255, 0.1);">
   &nbsp;
   <img src="assets/search_quality.png" width="31%" alt="Download Quality Selection" style="border-radius: 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); border: 1px solid rgba(255, 255, 255, 0.1);">
 </p>
@@ -88,7 +89,7 @@ Fine-tune your listening experience via a manual 5-band Equalizer and real-time 
 
 ### Settings & System Customization
 
-Configure runtime storage paths, audio render engines, theme accents, and customize view visibility. The Appearance hub allows granular control over active Library tabs (e.g. limiting to 3 active views for ergonomic Cupertino segmented navigation) and visual palettes.
+Store your Qobuz and Deezer credentials (Account), configure runtime storage paths, audio render engines, theme accents, and customize view visibility. The Appearance hub allows granular control over active Library tabs (e.g. limiting to 3 active views for ergonomic Cupertino segmented navigation) and visual palettes.
 
 <p align="center">
   <img src="assets/settings_general.png" width="45%" alt="General Settings & Audio Engine" style="border-radius: 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); border: 1px solid rgba(255, 255, 255, 0.1);">
@@ -120,9 +121,10 @@ Desktop playback uses Apple `AVAudioPlayer` (`AVFoundation` via dynamic `pyobjc-
 ## Headline Features
 
 > [!IMPORTANT]
-> **Portability & Build Parity**; this project contains a modified port of `streamrip 2.1.0`. All native C-extension compilation dependencies are removed, allowing the same Python codebase to target Android (ARM64) and macOS (Intel & Apple Silicon) with zero-configuration build compatibility. ONLY Qobuz is supported.
+> **Portability & Build Parity**; this project contains a modified port of `streamrip 2.1.0`. All native C-extension compilation dependencies are removed, allowing the same Python codebase to target Android (ARM64) and macOS (Intel & Apple Silicon) with zero-configuration build compatibility. The one native package, `pycryptodomex` (Deezer decryption only), ships as a prebuilt mobile wheel, and the app still starts and runs Qobuz if it is missing. Qobuz and Deezer are supported; upstream's Tidal and SoundCloud clients are not wired in.
 
 - **Acoustic Auto-Playlists**; continuous $Z_r$ coordinate geometry derived from Kaiser-truncated SVD of 68-D timbre embeddings and scalar audio features. Candidate generation combines metadata taxonomy gating with live cosine proximity ranking to the seed track, bounded by per-artist and per-album repetition caps for cohesive, drift-free queue generation.
+- **Deezer Backend** *(v2.0.0)*; search, previews and downloads from Deezer alongside Qobuz, signed in with your own account's ARL cookie. Encrypted CDN streams are Blowfish-decrypted as they download rather than buffered whole, so large FLACs don't risk an out-of-memory kill on Android. Deezer metadata is normalised to the same tag layout as Qobuz, so downloads from either source look the same in the library.
 - **Interactive Acoustic Network Canvas** *(v1.3.0)*; force-directed similarity graph embedded directly in the Library view with Louvain genre community clustering, density tuning, real-time speculative walk overlay trajectories, and instant queue enqueuing.
 - **Jarvis Voice & LLM Assistant**; combines offline keyword intent parsing and conversational LLM intelligence with tool-calling capabilities to search tracks, query Qobuz archives, manage queues, and trigger similarity walks.
 - **Advanced Equalizer & Real-time DSP** *(v1.2.0)*; features a manual 5-band manual equalizer with filtered System/Custom preset types, keyboard-editable gain values with validation and range clamping, and a live decibel boost monitor badge/card for real-time track Dynamism levels.
@@ -136,6 +138,7 @@ Desktop playback uses Apple `AVAudioPlayer` (`AVFoundation` via dynamic `pyobjc-
 
 For information on the internals of Mai-An Lab, refer to the following documentation:
 
+- [Release Notes (v2.0.0)](./docs/release_notes_v2.0.0.md)
 - [Release Notes (v1.3.0)](./docs/release_notes_v1.3.0.md)
 - [Release Notes (v1.2.0)](./docs/release_notes_v1.2.0.md)
 - [System Architecture & Database Design](./docs/Development_Reference.md#6-database-design--schema)
@@ -163,10 +166,11 @@ This application is verified on the following hardware/software stack:
 
 | Component | Technology |
 |---|---|
-| **Logic** | [Serious Python](https://github.com/flet-dev/serious-python) (CPython 3.11) |
+| **Logic** | [Serious Python](https://github.com/flet-dev/serious-python) (CPython 3.12) |
 | **UI Framework** | [Flet](https://flet.dev/) (Flutter backend) |
 | **Android Audio Engine** | [Just Audio](https://pub.dev/packages/just_audio) + ExoPlayer |
 | **macOS Audio Engine** | Native `AVAudioPlayer` (`AVFoundation` via [pyobjc-framework-AVFoundation](https://pypi.org/project/pyobjc-framework-AVFoundation/)) |
+| **Deezer Backend** | [deezer-py](https://pypi.org/project/deezer-py/) + [pycryptodomex](https://pypi.org/project/pycryptodomex/) (Blowfish stream decryption) |
 | **Persistence** | [AioSQLite](https://github.com/omnilib/aiosqlite) (SQLite + FTS5) |
 | **Analytics** | [NumPy](https://numpy.org/) (Pure-Python DSP) |
 
@@ -203,7 +207,7 @@ To build the application for Android, ensure the following toolchain is installe
 
 | Tool | Requirement |
 |---|---|
-| **Python** | 3.11+ (must match Serious Python's embedded interpreter) |
+| **Python** | 3.12 (must match Serious Python's embedded interpreter) |
 | **Flutter SDK** | Latest stable; `flutter` must be in your `PATH` |
 | **Android SDK & NDK** | Latest Command Line Tools; `ANDROID_HOME` must be set |
 | **Flet** | Install via `pip install flet` |
@@ -261,6 +265,8 @@ This is a modified version of the original Streamrip project. I take no credit f
 
 As the creator of Streamrip notes:
 > **I will not be responsible for how you use streamrip. By using streamrip, you agree to the terms and conditions of the Qobuz API.**
+
+The same applies to Deezer: you sign in with your own account, and you are bound by Deezer's terms of use.
 
 ---
 

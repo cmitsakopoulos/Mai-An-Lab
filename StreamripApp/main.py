@@ -178,6 +178,11 @@ _AUTOPLAY: AutoPlay | None = None
 # used to start its own network pass. `boot_done` limits the boot catch-up to
 # once per launch; `running` / `rerun` make the pass single-flight.
 _ENRICH_STATE: dict = {"boot_done": False, "running": False, "rerun": False, "timer": None}
+# Whether this PROCESS has held a queue (restored, rebuilt on re-entry, or
+# saved non-empty). Until it has, an empty engine queue means "not loaded yet"
+# (a session torn down before the restore ran, or a restore that failed), not
+# "the user cleared it", so it must never delete the saved snapshot.
+_QUEUE_STATE: dict = {"held": False}
 # Serialises flet_prefs.json writes across sessions (see _save_pref).
 _PREFS_WRITE_LOCK = threading.Lock()
 _BOOT_ENRICH_DELAY_S = 30.0
@@ -509,7 +514,9 @@ class StreamripFletApp:
             # live one. Restoring the saved snapshot re-pushed it to the native
             # player, which paused playback and jumped back to whatever track
             # this side last heard. Ask the player where it is instead.
+            _QUEUE_STATE["held"] = True
             audio_engine.probe_native()
+            self.autoplay.resume(audio_engine.current_path)
             self.safe_update(self._refresh_now_playing_ui)
             if self.queue_sheet and self.queue_sheet._initialized:
                 self.safe_update(self.queue_sheet.refresh)
@@ -1853,6 +1860,8 @@ class StreamripFletApp:
                 audio_engine.restore_queue(queue, index, pos, dur)
             finally:
                 self.is_restoring_session = False
+            if audio_engine.queue:
+                _QUEUE_STATE["held"] = True
 
             # Pre-extract artwork for the restored track so the mini-
             # player and now-playing screen don't render a blank tile
@@ -2014,6 +2023,9 @@ class StreamripFletApp:
         """
         path = os.path.join(DATA_DIR, "queue_state.json")
         if not audio_engine.queue:
+            if not _QUEUE_STATE["held"]:
+                # Nothing was loaded yet; the snapshot is the only copy.
+                return
             try:
                 if os.path.exists(path):
                     os.remove(path)
@@ -2021,6 +2033,7 @@ class StreamripFletApp:
                 pass
             self._save_position_state()  # removes it too
             return
+        _QUEUE_STATE["held"] = True
 
         state = {
             "queue":         audio_engine.queue,
@@ -2916,12 +2929,15 @@ class StreamripFletApp:
             self._save_queue_state()
             # Flush DB to disk on disconnect
             if hasattr(self, "db_manager"):
-                self.db_manager.checkpoint()
-            # Shut down the audio engine (stops playback and background pollers)
-            try:
-                audio_engine.shutdown()
-            except Exception as ae_exc:
-                logger.error("Failed to shutdown audio engine: %s", ae_exc)
+                asyncio.create_task(self.db_manager.checkpoint())
+            # Shut down the audio engine (stops playback and background pollers),
+            # unless a newer session has already rebound it: the engine is per
+            # process, and this would stop that session's player.
+            if audio_engine._page is self.page:
+                try:
+                    audio_engine.shutdown()
+                except Exception as ae_exc:
+                    logger.error("Failed to shutdown audio engine: %s", ae_exc)
         except Exception as exc:
             logger.error("Failed to save queue state or checkpoint: %s", exc)
         # cleanup preview cache

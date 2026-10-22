@@ -206,6 +206,59 @@ class AutoPlayTests(unittest.TestCase):
         self.assertEqual(len(self.open_calls), 1)            # resumed, not reopened
         self.assertEqual(self.paths()[4:7], ["/r/4", "/r/5", "/r/6"])
 
+    # ── session teardown / restore ──────────────────────────────────────────
+    def test_a_fill_that_never_ran_stops_blocking_refills(self):
+        # Scheduled on a session the OS tore down: the coroutine never ran,
+        # so nothing cleared the flag.
+        self.ap.set_enabled(True)
+        self.tasks.clear()
+        self.engine.current_index = 2
+        self.ap.ensure_buffer()
+        self.assertEqual(self.tasks, [])                     # still "filling"
+        with patch.object(ap_mod.time, "monotonic",
+                          return_value=time.monotonic() + ap_mod.FILL_STALE_S + 1):
+            self.ap.ensure_buffer()
+        self.drain()
+        self.assertEqual(self.ap.buffer_paths(), ["/r/1", "/r/2", "/r/3", "/r/4"])
+
+    def test_a_dead_session_run_task_does_not_wedge_the_controller(self):
+        def dead(*_a):
+            raise RuntimeError("Page has been destroyed session.")
+        self.ap.bind_ui(dead)
+        self.ap.set_enabled(True)
+        self.assertFalse(self.ap._filling)
+        self.ap.bind_ui(lambda fn, *a: self.tasks.append((fn, a)))
+        self.ap.ensure_buffer()
+        self.drain()
+        self.assertEqual(len(self.ap.buffer_paths()), ap_mod.BUFFER_TARGET)
+
+    def test_a_new_session_supersedes_a_fill_from_the_old_one(self):
+        self.ap.set_enabled(True)                            # queued on the old session
+        stale = self.tasks.pop()
+        self.ap.bind_ui(lambda fn, *a: self.tasks.append((fn, a)))
+        self.ap.resume(self.engine.current_path)
+        self.tasks.insert(0, stale)                          # the old one runs late
+        self.drain()
+        self.assertEqual(self.ap.buffer_paths(), ["/r/1", "/r/2", "/r/3", "/r/4"])
+
+    def test_resume_tops_up_a_restored_queue_with_nothing_pending(self):
+        # The native player played past the saved buffer while the app was away.
+        self.ap.enabled = True
+        self.ap.resume("/lib/a")
+        self.drain()
+        self.assertEqual(self.ap.anchor, "/lib/a")
+        self.assertEqual(self.ap.buffer_paths(), ["/r/1", "/r/2", "/r/3", "/r/4"])
+
+    def test_resume_leaves_a_full_restored_buffer_alone(self):
+        self.engine.queue[1:1] = [{"path": f"/s/{i}", "_autoplay": True} for i in range(4)]
+        self.ap.enabled = True
+        self.ap.resume("/lib/a")
+        self.assertEqual(self.tasks, [])
+
+    def test_resume_does_nothing_while_disabled(self):
+        self.ap.resume("/lib/a")
+        self.assertEqual((self.ap.anchor, self.tasks), ("", []))
+
     def test_background_prefill_tops_up_to_background_target(self):
         self.enable()
         self.ap.prefill_for_background()

@@ -168,9 +168,9 @@ def repair_config():
 def _detect_type_and_id(url: str):
     """Parse a Qobuz or Deezer URL into (media_type, id, source).
 
-    Deezer localises its web URLs (deezer.com/en/album/..., /fr/track/...) and
-    also serves bare deezer.page.link share URLs, so the id is matched after an
-    optional locale segment rather than anchored to the host.
+    Deezer localises its web URLs (deezer.com/en/album/..., /fr/track/...), so
+    the id is matched after an optional locale segment. deezer.page.link short
+    links carry no id and are not resolved.
     """
     patterns = [
         # The id is the LAST path segment: Qobuz web URLs carry a slug first
@@ -255,7 +255,10 @@ async def download(url, download_dir, progress_callback=None, quality=None, stop
 
     # Resolve all downloadables and their sizes first
     resolve_sem = asyncio.Semaphore(10)
-    
+    # The first resolve failure, so "nothing resolved" can say why (e.g. a
+    # Deezer plan without the requested quality) instead of hiding it in a log.
+    first_error: list[Exception] = []
+
     async def _resolve(t_meta):
         async with resolve_sem:
             try:
@@ -265,6 +268,8 @@ async def download(url, download_dir, progress_callback=None, quality=None, stop
                 return d
             except Exception as e:
                 logger.warning(f"Could not resolve track {t_meta.get('id')}: {e}")
+                if not first_error:
+                    first_error.append(e)
                 return None
 
     dl_results = await asyncio.gather(*[_resolve(t) for t in tracks])
@@ -277,7 +282,8 @@ async def download(url, download_dir, progress_callback=None, quality=None, stop
             total_bytes += d._size or 0
 
     if not active_jobs:
-        raise Exception("No tracks could be resolved for download.")
+        reason = f": {first_error[0]}" if first_error else "."
+        raise Exception(f"No tracks could be resolved for download{reason}")
 
     downloaded_bytes = 0
     completed_tracks = 0

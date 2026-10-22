@@ -35,6 +35,11 @@ logger.setLevel(logging.ERROR)
 # unreadable file, say) can never turn into a reload loop.
 _VERIFY_DELAY_S = 1.5
 _RESYNC_COOLDOWN_S = 30.0
+# Upper bound on delivering one native op (the extension's ready wait is 25 s).
+# Flet's invoke_method waits forever by default, and an invoke addressed to a
+# session the OS tore down is never answered: unbounded, it held the op lock
+# for good and every later push, splice and skip queued behind it.
+_SEND_TIMEOUT_S = 30.0
 
 
 def _dur_secs(d: ft.Duration) -> float:
@@ -516,7 +521,13 @@ class AudioEngine:
             rid = uuid.uuid4().hex
             try:
                 self._audio.register_op(rid)
-                await send(rid)
+                await asyncio.wait_for(send(rid), timeout=_SEND_TIMEOUT_S)
+            except asyncio.TimeoutError:
+                # Possibly delivered: Dart may still apply it in order. The next
+                # ack's length/identity check repairs it if it was lost.
+                logger.error("ADB_AUDIO: native op send timed out after %.0fs",
+                             _SEND_TIMEOUT_S)
+                return {"ok": False, "timeout": True}
             except Exception as exc:
                 logger.warning("ADB_AUDIO: native op not delivered: %s", exc)
                 return {"ok": False, "undelivered": True}

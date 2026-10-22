@@ -7,6 +7,7 @@ import asyncio
 import os
 import sys
 import unittest
+import unittest.mock
 from unittest.mock import AsyncMock, MagicMock
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -50,6 +51,38 @@ class ChooseResumeTests(unittest.TestCase):
     def test_native_src_maps_to_a_library_path(self):
         self.assertEqual(play_ledger.src_to_path("file:///music/a%20b.flac"), "/music/a b.flac")
         self.assertEqual(play_ledger.src_to_path("https://stream/x"), "")
+
+
+class QueueSnapshotTests(unittest.TestCase):
+    """The saved queue is the only copy until this process has loaded it."""
+
+    def setUp(self):
+        import tempfile
+        self.dir = tempfile.mkdtemp()
+        self.path = os.path.join(self.dir, "queue_state.json")
+        with open(self.path, "w") as fh:
+            fh.write('{"queue": [{"path": "/m/1"}], "current_index": 0}')
+        self._patches = [
+            unittest.mock.patch.object(main, "DATA_DIR", self.dir),
+            unittest.mock.patch.object(main.audio_engine, "queue", []),
+            unittest.mock.patch.dict(main._QUEUE_STATE, {"held": False}),
+        ]
+        for p in self._patches:
+            p.start()
+        self.app = main.StreamripFletApp.__new__(main.StreamripFletApp)
+
+    def tearDown(self):
+        for p in self._patches:
+            p.stop()
+
+    def test_an_empty_queue_before_any_restore_keeps_the_snapshot(self):
+        self.app._save_queue_state()
+        self.assertTrue(os.path.exists(self.path))
+
+    def test_clearing_a_queue_this_process_held_removes_it(self):
+        main._QUEUE_STATE["held"] = True
+        self.app._save_queue_state()
+        self.assertFalse(os.path.exists(self.path))
 
 
 class AutoPlayMemoryTests(unittest.TestCase):

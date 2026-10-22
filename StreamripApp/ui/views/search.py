@@ -1908,15 +1908,23 @@ class SearchView:
                 title = re.sub(r"\[.*?\]", "", data.get("ui_title", data.get("name", ""))).strip()
                 artist = data.get("ui_subtitle", data.get("artist", ""))
                 
-                self.show_preview_progress("Connecting...", f"Resolving stream URL for '{title}'...")
-                
+                source = data.get("source") or self.selected_source
+                # Deezer's CDN serves Blowfish-encrypted audio, which no player
+                # can stream; trying it only cost ~7 s before the download
+                # fallback below. Go straight to the (decrypting) download.
+                streamable = source != "deezer"
+                self.show_preview_progress(
+                    "Connecting...",
+                    f"Resolving stream URL for '{title}'..." if streamable
+                    else f"Fetching preview for '{title}'...",
+                )
+
                 stream_url = None
-                if track_id:
+                if track_id and streamable:
                     try:
                         # Attempt to resolve direct stream URL
                         stream_url = await self.searcher.get_track_stream_url(
-                            str(track_id), quality=1,
-                            source=data.get("source") or self.selected_source,
+                            str(track_id), quality=1, source=source,
                         )
                         logger.info("Direct preview stream URL resolved: %s", stream_url)
                     except Exception as stream_exc:
