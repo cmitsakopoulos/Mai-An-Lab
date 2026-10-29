@@ -219,6 +219,9 @@ class QueueController:
 
     # ── worker ──────────────────────────────────────────────────────────────
     def _push_history(self, job: dict) -> None:
+        # Every terminal job passes through here exactly once (finished,
+        # removed while pending, or cleared).
+        self._report_companion_result(job)
         self._history.append(job)
         if len(self._history) > HISTORY_LIMIT:
             del self._history[: len(self._history) - HISTORY_LIMIT]
@@ -226,6 +229,8 @@ class QueueController:
     async def _worker_loop(self):
         self.is_processing = True
         self._notifier = ProgressNotifier("download", "Downloads")
+        if hasattr(self._notifier, "set_cancel_handler"):
+            self._notifier.set_cancel_handler(self.clear)
         self._batch_counts = {DONE: 0, FAILED: 0, CANCELLED: 0}
         self._notify()
         try:
@@ -366,12 +371,38 @@ class QueueController:
                         else f"Contacting API… (attempt {attempt + 1} of 3)",
                     )
 
-                    await download(
+                    dest_paths = await download(
                         url, target,
                         progress_callback=progress_hook,
                         quality=metadata.get("quality"),
                         stop_event=self._cancel_event,
                     )
+                    dsp = metadata.get("dsp_features")
+                    if dsp and dest_paths and getattr(self.app, "db_manager", None):
+                        try:
+                            import base64
+                            from utils.dsp import FEATURES_VERSION
+                            from utils.filepath_utils import normalize_nfc
+                            dest_file = normalize_nfc(dest_paths[0])
+                            timbre_blob = None
+                            if "timbre_b64" in dsp and dsp["timbre_b64"]:
+                                timbre_blob = base64.b64decode(dsp["timbre_b64"])
+                            await self.app.db_manager.update_track_features(
+                                path=dest_file,
+                                bpm=dsp.get("bpm"),
+                                energy=dsp.get("energy"),
+                                brightness=dsp.get("brightness"),
+                                rolloff=dsp.get("rolloff"),
+                                beat_strength=dsp.get("beat_strength"),
+                                spectral_flatness=dsp.get("spectral_flatness"),
+                                spectral_contrast=dsp.get("spectral_contrast"),
+                                key_index=dsp.get("key_index"),
+                                timbre_blob=timbre_blob,
+                                features_version=dsp.get("features_version", FEATURES_VERSION),
+                            )
+                            logger.info(f"Persisted pre-computed DSP features for {dest_file}")
+                        except Exception as dsp_err:
+                            logger.warning(f"Failed to persist pre-computed DSP features: {dsp_err}")
                     break
                 except JobCancelledException:
                     raise
@@ -405,3 +436,15 @@ class QueueController:
                       detail="Aborted by user")
         except Exception as exc:
             self._set(job, state=FAILED, status="Failed", percent=0, detail=str(exc))
+
+    def _report_companion_result(self, job: dict) -> None:
+        """Tell the sync manager how a Mac transfer ended: it acks the Mac
+        only for files that actually arrived, so a failure stays queued."""
+        tid = (job.get("metadata") or {}).get("companion_transfer_id")
+        manager = getattr(self.app, "companion_manager", None)
+        if not tid or manager is None:
+            return
+        try:
+            manager.on_transfer_finished(str(tid), job.get("state") == DONE)
+        except Exception:
+            logger.exception("companion transfer report failed")

@@ -38,7 +38,15 @@ class PlaylistEditorDialog:
         self.app.dismiss_dialog(self._dlg)
         self._dlg = None
 
-        t_name = ft.TextField(value=name, label="Playlist Name", border_color=BORDER, focused_border_color=LIB_PLAYLIST_COLOR, bgcolor=SURFACE)
+        t_name = ft.TextField(
+            value=name,
+            label="Playlist Name",
+            border={
+                ft.ControlState.FOCUSED: ft.OutlineInputBorder(side=ft.BorderSide(1, LIB_PLAYLIST_COLOR)),
+                ft.ControlState.DEFAULT: ft.OutlineInputBorder(side=ft.BorderSide(1, BORDER)),
+            },
+            bgcolor=SURFACE,
+        )
         
         colors = ["#FF5555", "#55FF55", "#5555FF", "#FFFF55", "#FF55FF", "#55FFFF", "#FFFFFF", "#FF8C00", "#8A2BE2"]
         

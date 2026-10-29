@@ -59,6 +59,8 @@ class AudioServiceControl(Service):
     # Internal-use event for STT transcription results.
     on_stt_result: Optional[EventHandler] = None
     on_equalizer_bands_result: Optional[EventHandler] = None
+    # Internal-use event for notification actions (Cancel, Dismissed, Timeout).
+    on_notification_action: Optional[EventHandler] = None
     # Internal-use event: acknowledgement that a serialized queue mutation
     # (set_playlist / splice / move / skip / set_shuffle) has landed on
     # the Dart side. Payload: {request_id, ok, epoch, current_index, queue_len,
@@ -107,6 +109,12 @@ class AudioServiceControl(Service):
         # Pending queue-op acks, keyed by request_id → asyncio.Future resolved
         # by the on_op_complete event.
         object.__setattr__(self, "_pending_ops", {})
+        # Handlers for notification action callbacks, keyed by job ("download", "sync", "dsp", etc.).
+        object.__setattr__(self, "_notification_action_handlers", {})
+        # Last action per job that arrived before any handler was registered
+        # (a notification tap that cold-started the app lands before the UI
+        # wires its handlers). Replayed on registration.
+        object.__setattr__(self, "_unhandled_notification_actions", {})
 
         def internal_on_decode_complete(e):
             try:
@@ -183,6 +191,29 @@ class AudioServiceControl(Service):
             fut.set_result(payload)
 
         self.on_op_complete = internal_on_op_complete
+
+        def internal_on_notification_action(e):
+            try:
+                payload = json.loads(getattr(e, "data", "") or "{}")
+            except Exception as ex:
+                _log(f"notification_action: bad payload: {ex}")
+                return
+            job = payload.get("job") or ""
+            action = payload.get("action") or ""
+            _log(f"notification_action received: job={job}, action={action}")
+            handlers = object.__getattribute__(self, "_notification_action_handlers")
+            cb = handlers.get(job) or handlers.get("all")
+            if not cb:
+                object.__getattribute__(self, "_unhandled_notification_actions")[job] = action
+            if cb:
+                try:
+                    res = cb(job, action)
+                    if asyncio.iscoroutine(res):
+                        asyncio.create_task(res)
+                except Exception as ex:
+                    _log(f"notification_action callback error for {job}: {ex}")
+
+        self.on_notification_action = internal_on_notification_action
 
         def internal_on_ready(e):
             _log("internal_on_ready FIRED; Dart said ready")
@@ -297,6 +328,32 @@ class AudioServiceControl(Service):
                 "done": done,
             },
         )
+
+    def register_notification_action_handler(
+        self, job: str, callback: Any
+    ) -> None:
+        """Register a callback for notification actions (e.g. 'cancel') for a job."""
+        try:
+            handlers = object.__getattribute__(self, "_notification_action_handlers")
+            handlers[job] = callback
+            pending = object.__getattribute__(self, "_unhandled_notification_actions").pop(job, None)
+        except AttributeError:
+            return
+        if pending is not None:
+            try:
+                res = callback(job, pending)
+                if asyncio.iscoroutine(res):
+                    asyncio.create_task(res)
+            except Exception as ex:
+                _log(f"replayed notification_action for {job} failed: {ex}")
+
+    def unregister_notification_action_handler(self, job: str) -> None:
+        """Unregister a notification action callback."""
+        try:
+            handlers = object.__getattribute__(self, "_notification_action_handlers")
+            handlers.pop(job, None)
+        except AttributeError:
+            pass
 
     # ── Queue-op handshake helpers ────────────────────────────────────────────
 

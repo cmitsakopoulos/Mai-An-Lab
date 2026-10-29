@@ -205,10 +205,10 @@ packages:
     dependency: transitive
     description:
       name: file_picker
-      sha256: "57d9a1dd5063f85fa3107fb42d1faffda52fdc948cefd5fe5ea85267a5fc7343"
+      sha256: "29cc1fdb20613876cc7afc529738c1c0f11a9ca159b010edad0c566ac330847e"
       url: "https://pub.dev"
     source: hosted
-    version: "10.3.10"
+    version: "11.0.3"
   fixnum:
     dependency: transitive
     description:
@@ -221,10 +221,10 @@ packages:
     dependency: "direct main"
     description:
       name: flet
-      sha256: "3893723f1f1eb72dbeabd4c704a37c709dbcc36b0bbc060647a1fef75e82fc8f"
+      sha256: b2aa2c8b91291cff43cbff42f68dec94d2ae6d839363f0278ffd2a4674e0ff11
       url: "https://pub.dev"
     source: hosted
-    version: "0.84.0"
+    version: "1.0.5"
   flutter:
     dependency: "direct main"
     description: flutter
@@ -545,10 +545,10 @@ packages:
     dependency: transitive
     description:
       name: pasteboard
-      sha256: "9ff73ada33f79a59ff91f6c01881fd4ed0a0031cfc4ae2d86c0384471525fca1"
+      sha256: fedbe8da188d2f713aa8b01260737342e6e1087534a3ab26e1a719f8d3e8f32f
       url: "https://pub.dev"
     source: hosted
-    version: "0.4.0"
+    version: "0.5.0"
   path:
     dependency: transitive
     description:
@@ -717,14 +717,6 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "0.28.0"
-  screen_brightness:
-    dependency: transitive
-    description:
-      name: screen_brightness
-      sha256: e0edf92c08889e8f493cde291e7c687db2b4a1471f2371c074070b75d7c7d79b
-      url: "https://pub.dev"
-    source: hosted
-    version: "2.1.11"
   screen_brightness_android:
     dependency: transitive
     description:
@@ -741,35 +733,11 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "2.1.4"
-  screen_brightness_macos:
-    dependency: transitive
-    description:
-      name: screen_brightness_macos
-      sha256: b0957237b842d846a84363b69f229b339a8f91faced55041e245b2ebff7b0142
-      url: "https://pub.dev"
-    source: hosted
-    version: "2.1.4"
-  screen_brightness_ohos:
-    dependency: transitive
-    description:
-      name: screen_brightness_ohos
-      sha256: "569a2c97909a50894b81487619eb7654f5358443a5af05f840c19261f49c0940"
-      url: "https://pub.dev"
-    source: hosted
-    version: "2.1.4"
   screen_brightness_platform_interface:
     dependency: transitive
     description:
       name: screen_brightness_platform_interface
       sha256: "2de60c0ba569b898950029cc1f7e9dd72bda44a22beb5054aac331cb6fce2ff2"
-      url: "https://pub.dev"
-    source: hosted
-    version: "2.1.2"
-  screen_brightness_windows:
-    dependency: transitive
-    description:
-      name: screen_brightness_windows
-      sha256: "368b9c822e1671de81616e48150006e39eff2a434957e47ee638b09a32b2297c"
       url: "https://pub.dev"
     source: hosted
     version: "2.1.2"
@@ -1242,14 +1210,6 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "0.5.2"
-  window_to_front:
-    dependency: transitive
-    description:
-      name: window_to_front
-      sha256: "14fad8984db4415e2eeb30b04bb77140b180e260d6cb66b26de126a8657a9241"
-      url: "https://pub.dev"
-    source: hosted
-    version: "0.0.4"
   xdg_directories:
     dependency: transitive
     description:

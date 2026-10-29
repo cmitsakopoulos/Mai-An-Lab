@@ -14,6 +14,15 @@
             android:foregroundServiceType="dataSync"
             android:exported="false" />
 
+        <receiver
+            android:name="com.flet.flet_audio_service.NotificationActionReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.flet.flet_audio_service.ACTION_CANCEL_TASK" />
+                <action android:name="com.flet.flet_audio_service.ACTION_NOTIFICATION_DISMISSED" />
+            </intent-filter>
+        </receiver>
+
         <service
             android:name="com.ryanheise.audioservice.AudioService"
             android:foregroundServiceType="mediaPlayback"

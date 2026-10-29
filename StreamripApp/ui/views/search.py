@@ -127,7 +127,7 @@ class SearchView:
             hint_text="Artist, album or track…",
             hint_style=ft.TextStyle(color=DIM, size=15),
             bgcolor="transparent",
-            border=ft.InputBorder.NONE,
+            border=ft.NoInputBorder(),
             text_style=ft.TextStyle(color=TEXT, size=16),
             content_padding=ft.Padding.only(left=4, right=4, top=18, bottom=18),
             on_submit=lambda e: asyncio.create_task(self.start_search()),

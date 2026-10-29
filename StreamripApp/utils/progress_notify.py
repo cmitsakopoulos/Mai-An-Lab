@@ -34,14 +34,36 @@ def _service():
 
 
 class ProgressNotifier:
-    def __init__(self, job: str, title: str):
+    def __init__(self, job: str, title: str, on_cancel=None):
         self.job = job
         self.title = title
+        self.on_cancel = on_cancel
         self._last_at = 0.0
         self._last_pct = -1
+        self._last_content = ""
         # Only a notifier that actually showed something posts a summary, so a
         # no-op run (nothing to analyse / every artist up to date) stays silent.
         self.posted = False
+        if on_cancel is not None:
+            self._register_cancel()
+
+    def set_cancel_handler(self, fn) -> None:
+        self.on_cancel = fn
+        if fn is not None:
+            self._register_cancel()
+
+    def _register_cancel(self) -> None:
+        svc = _service()
+        if svc and hasattr(svc, "register_notification_action_handler"):
+            def _action_handler(job, action):
+                if job == self.job and action == "cancel" and self.on_cancel:
+                    try:
+                        res = self.on_cancel()
+                        if asyncio.iscoroutine(res):
+                            asyncio.create_task(res)
+                    except Exception as ex:
+                        logger.warning("on_cancel callback for %s failed: %s", self.job, ex)
+            svc.register_notification_action_handler(self.job, _action_handler)
 
     async def _send(self, content: str, progress: int, total: int, done: bool) -> None:
         svc = _service()
@@ -68,24 +90,28 @@ class ProgressNotifier:
             pass  # no running loop (tests / shutdown)
 
     def update(self, done: int, total: int, content: str) -> None:
-        """Post progress. Skipped unless ≥1 s has passed AND the visible
-        percentage moved, except for the first and final updates. total <= 0
-        shows an indeterminate bar (e.g. a post-processing stage)."""
+        """Post progress. Throttled to ~1 update/s, but never drops updates when
+        content or percentage changes past the interval. total <= 0 shows an
+        indeterminate bar."""
         now = time.monotonic()
         pct = int(done * 100 / total) if total > 0 else -1
         first = self._last_at == 0.0
         last = total > 0 and done >= total
         if not (first or last):
-            if now - self._last_at < _MIN_INTERVAL_S or pct == self._last_pct:
+            if now - self._last_at < _MIN_INTERVAL_S:
+                return
+            if pct == self._last_pct and content == self._last_content:
                 return
         self._last_at = now
         self._last_pct = pct
+        self._last_content = content
         self._post(content, done, total, False)
 
     def stage(self, content: str) -> None:
         """Switch to an indeterminate bar with a new message, unthrottled."""
         self._last_at = time.monotonic()
         self._last_pct = -1
+        self._last_content = content
         self._post(content, 0, 0, False)
 
     def finish(self, content: str = "") -> None:
@@ -93,6 +119,9 @@ class ProgressNotifier:
         when `content` is empty). No-op if nothing was ever shown."""
         if self.posted:
             self._post(content, 0, 0, True)
+        svc = _service()
+        if svc and hasattr(svc, "unregister_notification_action_handler"):
+            svc.unregister_notification_action_handler(self.job)
 
 
 def format_eta(seconds: float) -> str:

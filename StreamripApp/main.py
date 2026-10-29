@@ -222,6 +222,10 @@ class StreamripFletApp:
         # Mirrors self.autoplay.enabled (persisted as the "play_similar_mode"
         # pref); the AutoPlay controller is created in _heavy_init.
         self.play_similar_mode: bool = False
+        self._companion_server = None
+        self._companion_client = None
+        self._companion_manager = None
+        self.companion_manager = None
 
     def _show_error(self, e=None):
         """Surfaces critical errors to the full-screen ErrorBoundary."""
@@ -258,6 +262,8 @@ class StreamripFletApp:
             logger.info("App lifecycle: %s - Suspending UI updates", state)
             if hasattr(self, "assistant_view") and self.assistant_view:
                 self.assistant_view.handle_app_background()
+            if getattr(self, "companion_manager", None):
+                self.companion_manager.handle_app_background()
             return
         logger.info("App lifecycle: %s - Resuming UI updates", state)
         if hasattr(self, "assistant_view") and self.assistant_view:
@@ -269,6 +275,10 @@ class StreamripFletApp:
         self.page.run_task(self._prune_caches_async)
         # Pick up listens that finished while we were in the background.
         self._schedule_ledger_drain(0.0)
+        if getattr(self, "companion_manager", None):
+            # Re-checks a link that may have died while hidden, or re-probes
+            # and restarts discovery, and offers transfers queued meanwhile.
+            self.companion_manager.handle_app_resume()
 
     async def initialize(self):
         # PHASE 1: Immediate Splash Render (< 50ms)
@@ -449,6 +459,9 @@ class StreamripFletApp:
         audio_engine.play_log_path = play_ledger.ledger_path(DATA_DIR)
         audio_engine.resume_path = os.path.join(DATA_DIR, NATIVE_RESUME_NAME)
         audio_engine.setup(self.page, self.db_manager)
+        svc = audio_engine.audio_service
+        if svc is not None and hasattr(svc, "register_notification_action_handler"):
+            svc.register_notification_action_handler("navigate", self._on_notification_navigate)
 
         # Restore saved shuffle, repeat and similar playback preferences
         audio_engine.is_shuffle = bool(self._prefs.get("is_shuffle", False))
@@ -475,6 +488,16 @@ class StreamripFletApp:
         self.now_playing.update_shuffle(audio_engine.is_shuffle)
         self.now_playing.update_repeat(audio_engine.repeat_mode)
         self.now_playing.update_play_similar(self.play_similar_mode)
+
+        # Companion Sync auto-discovery on mobile / client
+        if hasattr(sys, "getandroidapilevel") or sys.platform != "darwin":
+            try:
+                from utils.sync.manager import get_sync_manager
+                get_sync_manager(self)
+                if self.companion_manager.enabled:
+                    asyncio.create_task(self.companion_manager.start())
+            except Exception as ex:
+                logger.debug("CompanionSyncManager startup skipped: %s", ex)
 
         # bind audio engine events
         audio_engine.bind(
@@ -2531,6 +2554,24 @@ class StreamripFletApp:
         """Route a genre to the Settings metadata workbench with search filtered."""
         self.switch_tab(3)
         self.settings_view._on_open_metadata_workbench_click(genre_filter=genre_name)
+
+    def _on_notification_navigate(self, _job: str, target: str):
+        """A progress notification was tapped: open the screen it is about.
+        Targets come from ProgressNotifications.kt's navigate_to extra."""
+        logger.info("notification tap → %s", target)
+        try:
+            if target == "sync":
+                self.switch_tab(3)
+                self.settings_view._on_open_sync_hub_click()
+            elif target == "workbench":
+                self.switch_tab(3)
+                self.settings_view._on_open_metadata_workbench_click()
+            elif target == "downloads":
+                self.download_dock.expand()
+            elif target == "library":
+                self.switch_tab(2)
+        except Exception:
+            logger.exception("notification navigation to %s failed", target)
 
     def dismiss_dialog(self, dialog) -> bool:
         """Close ONE specific dialog. Returns False if it was already closed.

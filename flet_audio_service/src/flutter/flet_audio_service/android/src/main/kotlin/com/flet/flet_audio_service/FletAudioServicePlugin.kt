@@ -3,6 +3,7 @@ package com.flet.flet_audio_service
 import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
+import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.media.MediaMetadataRetriever
@@ -16,6 +17,9 @@ import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.ServiceCompat
 import io.flutter.embedding.engine.plugins.FlutterPlugin
+import io.flutter.embedding.engine.plugins.activity.ActivityAware
+import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding
+import io.flutter.plugin.common.PluginRegistry
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import java.io.File
@@ -28,7 +32,8 @@ import java.util.concurrent.Executors
 import kotlin.math.max
 import kotlin.math.min
 
-class FletAudioServicePlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
+class FletAudioServicePlugin : FlutterPlugin, MethodChannel.MethodCallHandler,
+    ActivityAware, PluginRegistry.NewIntentListener {
 
     companion object {
         private const val TAG = "FletAudioServiceDsp"
@@ -45,7 +50,34 @@ class FletAudioServicePlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         // comparable to offload output.
         private const val MAX_SECONDS = 120
         private const val DECODE_TIMEOUT_US = 10_000L
+
+        private var pluginInstance: FletAudioServicePlugin? = null
+        val dismissedJobs: MutableSet<String> = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+
+        fun handleNotificationAction(job: String, action: String) {
+            pluginInstance?.let { plugin ->
+                plugin.mainHandler.post {
+                    plugin.channel?.invokeMethod("notificationAction", mapOf(
+                        "job" to job,
+                        "action" to action
+                    ))
+                }
+            }
+        }
+
+        fun handleNotificationDismissed(job: String) {
+            dismissedJobs.add(job)
+        }
+
+        // Extra set by ProgressNotifications on the tap intent.
+        const val EXTRA_NAVIGATE_TO = "navigate_to"
+        // A notification tap whose target hasn't reached Dart yet (cold start:
+        // the activity intent arrives before Dart sets its channel handler).
+        // Dart drains it with takePendingNavigate once its handler is up.
+        @Volatile var pendingNavigate: String? = null
     }
+
+    private var activityBinding: ActivityPluginBinding? = null
 
     private var channel: MethodChannel? = null
     private var appContext: Context? = null
@@ -63,18 +95,70 @@ class FletAudioServicePlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
     private val mainHandler = Handler(Looper.getMainLooper())
 
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
+        pluginInstance = this
         appContext = binding.applicationContext
         channel = MethodChannel(binding.binaryMessenger, CHANNEL)
         channel?.setMethodCallHandler(this)
     }
 
     override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
+        if (pluginInstance === this) pluginInstance = null
         channel?.setMethodCallHandler(null)
         channel = null
         appContext = null
     }
 
+    // ── Notification tap → in-app navigation ─────────────────────────────
+
+    override fun onAttachedToActivity(binding: ActivityPluginBinding) {
+        activityBinding = binding
+        binding.addOnNewIntentListener(this)
+        consumeNavigateExtra(binding.activity.intent)
+    }
+
+    override fun onDetachedFromActivityForConfigChanges() = onDetachedFromActivity()
+
+    override fun onReattachedToActivityForConfigChanges(binding: ActivityPluginBinding) =
+        onAttachedToActivity(binding)
+
+    override fun onDetachedFromActivity() {
+        activityBinding?.removeOnNewIntentListener(this)
+        activityBinding = null
+    }
+
+    // singleTop activity: a tap while running arrives here, not as a relaunch.
+    override fun onNewIntent(intent: Intent): Boolean {
+        consumeNavigateExtra(intent)
+        return false
+    }
+
+    private fun consumeNavigateExtra(intent: Intent?) {
+        if (intent == null) return
+        val target = intent.getStringExtra(EXTRA_NAVIGATE_TO) ?: return
+        // Strip it so a re-attach (rotation) doesn't navigate again.
+        intent.removeExtra(EXTRA_NAVIGATE_TO)
+        pendingNavigate = target
+        mainHandler.post {
+            channel?.invokeMethod(
+                "notificationAction",
+                mapOf("job" to "navigate", "action" to target),
+                object : MethodChannel.Result {
+                    // Dart got it: nothing left to replay.
+                    override fun success(r: Any?) { if (pendingNavigate == target) pendingNavigate = null }
+                    override fun error(code: String, msg: String?, details: Any?) {}
+                    override fun notImplemented() {}
+                },
+            )
+        }
+    }
+
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
+        if (call.method == "takePendingNavigate") {
+            val target = pendingNavigate
+            pendingNavigate = null
+            result.success(target)
+            return
+        }
         if (call.method == "decodePcm") {
             val path = call.argument<String>("path")
             if (path.isNullOrEmpty()) {
@@ -502,11 +586,7 @@ class FletAudioServicePlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
     // be cancelled once the service takes over.
     private val fallbackShown = mutableSetOf<String>()
 
-    private fun notificationIdFor(job: String): Int = when (job) {
-        "dsp" -> 9999          // kept: the id the old single-job version used
-        "metadata" -> 9998
-        else -> 9000 + (job.hashCode() and 0x3FF)
-    }
+    private fun notificationIdFor(job: String): Int = LibraryTaskService.notificationIdFor(job)
 
     private fun showProgressNotification(
         job: String, title: String, content: String, progress: Int, total: Int, done: Boolean,
@@ -520,13 +600,14 @@ class FletAudioServicePlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
 
         if (!done) {
             val inService = LibraryTaskService.update(
-                context, job, LibraryTaskService.Job(title, content, progress, total))
+                context, job, LibraryTaskService.Job(job, title, content, progress, total))
             if (inService) {
                 if (fallbackShown.remove(job)) nm.cancel(notificationId)
                 return
             }
             fallbackShown.add(job)
         } else {
+            dismissedJobs.remove(job)
             LibraryTaskService.finish(job)
             fallbackShown.remove(job)
             if (content.isEmpty()) {
@@ -537,7 +618,7 @@ class FletAudioServicePlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
 
         try {
             nm.notify(notificationId, ProgressNotifications.build(
-                context, notificationId, title, content, progress, total, done))
+                context, notificationId, job, title, content, progress, total, done))
         } catch (e: SecurityException) {
             // POST_NOTIFICATIONS revoked (Android 13+).
             Log.w(TAG, "notify denied for '$job': ${e.message}")

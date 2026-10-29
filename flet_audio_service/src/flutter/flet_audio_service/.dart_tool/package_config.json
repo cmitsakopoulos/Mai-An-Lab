@@ -153,7 +153,7 @@
     },
     {
       "name": "file_picker",
-      "rootUri": "file:///Users/chrismitsacopoulos/.pub-cache/hosted/pub.dev/file_picker-10.3.10",
+      "rootUri": "file:///Users/chrismitsacopoulos/.pub-cache/hosted/pub.dev/file_picker-11.0.3",
       "packageUri": "lib/",
       "languageVersion": "3.4"
     },
@@ -165,7 +165,7 @@
     },
     {
       "name": "flet",
-      "rootUri": "file:///Users/chrismitsacopoulos/.pub-cache/hosted/pub.dev/flet-0.84.0",
+      "rootUri": "file:///Users/chrismitsacopoulos/.pub-cache/hosted/pub.dev/flet-1.0.5",
       "packageUri": "lib/",
       "languageVersion": "3.0"
     },
@@ -417,7 +417,7 @@
     },
     {
       "name": "pasteboard",
-      "rootUri": "file:///Users/chrismitsacopoulos/.pub-cache/hosted/pub.dev/pasteboard-0.4.0",
+      "rootUri": "file:///Users/chrismitsacopoulos/.pub-cache/hosted/pub.dev/pasteboard-0.5.0",
       "packageUri": "lib/",
       "languageVersion": "3.4"
     },
@@ -548,12 +548,6 @@
       "languageVersion": "2.12"
     },
     {
-      "name": "screen_brightness",
-      "rootUri": "file:///Users/chrismitsacopoulos/.pub-cache/hosted/pub.dev/screen_brightness-2.1.11",
-      "packageUri": "lib/",
-      "languageVersion": "3.0"
-    },
-    {
       "name": "screen_brightness_android",
       "rootUri": "file:///Users/chrismitsacopoulos/.pub-cache/hosted/pub.dev/screen_brightness_android-2.1.6",
       "packageUri": "lib/",
@@ -566,26 +560,8 @@
       "languageVersion": "3.0"
     },
     {
-      "name": "screen_brightness_macos",
-      "rootUri": "file:///Users/chrismitsacopoulos/.pub-cache/hosted/pub.dev/screen_brightness_macos-2.1.4",
-      "packageUri": "lib/",
-      "languageVersion": "3.0"
-    },
-    {
-      "name": "screen_brightness_ohos",
-      "rootUri": "file:///Users/chrismitsacopoulos/.pub-cache/hosted/pub.dev/screen_brightness_ohos-2.1.4",
-      "packageUri": "lib/",
-      "languageVersion": "3.0"
-    },
-    {
       "name": "screen_brightness_platform_interface",
       "rootUri": "file:///Users/chrismitsacopoulos/.pub-cache/hosted/pub.dev/screen_brightness_platform_interface-2.1.2",
-      "packageUri": "lib/",
-      "languageVersion": "3.0"
-    },
-    {
-      "name": "screen_brightness_windows",
-      "rootUri": "file:///Users/chrismitsacopoulos/.pub-cache/hosted/pub.dev/screen_brightness_windows-2.1.2",
       "packageUri": "lib/",
       "languageVersion": "3.0"
     },
@@ -940,12 +916,6 @@
     {
       "name": "window_manager",
       "rootUri": "file:///Users/chrismitsacopoulos/.pub-cache/hosted/pub.dev/window_manager-0.5.2",
-      "packageUri": "lib/",
-      "languageVersion": "3.0"
-    },
-    {
-      "name": "window_to_front",
-      "rootUri": "file:///Users/chrismitsacopoulos/.pub-cache/hosted/pub.dev/window_to_front-0.0.4",
       "packageUri": "lib/",
       "languageVersion": "3.0"
     },

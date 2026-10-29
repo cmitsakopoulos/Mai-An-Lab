@@ -57,6 +57,13 @@ from utils.metadata_enrich import (
 
 logger = logging.getLogger(__name__)
 
+
+def _input_border(color=BORDER, focused_color=CYAN, radius=10):
+    return {
+        ft.ControlState.FOCUSED: ft.OutlineInputBorder(border_radius=radius, side=ft.BorderSide(1, focused_color)),
+        ft.ControlState.DEFAULT: ft.OutlineInputBorder(border_radius=radius, side=ft.BorderSide(1, color)),
+    }
+
 _COUNTRY_NAMES = {
     "GR": "Greece", "US": "United States", "GB": "United Kingdom",
     "FR": "France", "DE": "Germany", "IT": "Italy", "ES": "Spain",
@@ -164,8 +171,8 @@ class MetadataWorkbenchPane(ft.Column):
         )
         self._search_field = ft.TextField(
             hint_text="Find an artist…", prefix_icon=ft.Icons.SEARCH_ROUNDED,
-            bgcolor=SURFACE2, border_color=BORDER, focused_border_color=CYAN,
-            border_radius=10, text_style=ft.TextStyle(color=TEXT, size=13),
+            bgcolor=SURFACE2, border=_input_border(BORDER, CYAN, 10),
+            text_style=ft.TextStyle(color=TEXT, size=13),
             dense=True, content_padding=ft.Padding.symmetric(horizontal=12, vertical=8),
             on_change=self._on_search,
         )
@@ -431,7 +438,7 @@ class MetadataWorkbenchPane(ft.Column):
         from utils.progress_notify import (
             ProgressNotifier, metadata_progress_cb, metadata_summary_text,
         )
-        notifier = ProgressNotifier("metadata", "Syncing artist metadata")
+        notifier = ProgressNotifier("metadata", "Syncing artist metadata", on_cancel=self.cancel_event.set)
         summary: dict = {}
         try:
             summary = await enrich_library(
@@ -882,8 +889,8 @@ class MetadataWorkbenchPane(ft.Column):
         _on_dismiss, _close = dialog_handoff(self.app, lambda: dlg)
 
         field = ft.TextField(
-            label="Genre", autofocus=True, bgcolor=SURFACE2, border_color=BORDER,
-            focused_border_color=CYAN, border_radius=10,
+            label="Genre", autofocus=True, bgcolor=SURFACE2,
+            border=_input_border(BORDER, CYAN, 10),
             text_style=ft.TextStyle(color=TEXT, size=14),
         )
 
@@ -930,7 +937,7 @@ class MetadataWorkbenchPane(ft.Column):
         country_row = ft.Row(wrap=True, spacing=6, run_spacing=6)
         custom = ft.TextField(
             hint_text="Add a genre…", dense=True, width=160, bgcolor=SURFACE2,
-            border_color=BORDER, focused_border_color=CYAN, border_radius=8,
+            border=_input_border(BORDER, CYAN, 8),
             text_style=ft.TextStyle(color=TEXT, size=12),
             content_padding=ft.Padding.symmetric(horizontal=10, vertical=6),
         )
@@ -1155,7 +1162,7 @@ class MetadataWorkbenchPane(ft.Column):
 
         query_field = ft.TextField(
             value=artist, label="Artist name", dense=True, bgcolor=SURFACE2,
-            border_color=BORDER, focused_border_color=CYAN, border_radius=10,
+            border=_input_border(BORDER, CYAN, 10),
             text_style=ft.TextStyle(color=TEXT, size=13),
         )
         results = ft.Column([], scroll=ft.ScrollMode.AUTO, height=res_h, spacing=8)

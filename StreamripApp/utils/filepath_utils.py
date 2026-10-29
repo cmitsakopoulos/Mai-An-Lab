@@ -32,10 +32,18 @@ def get_temp_artwork_dir() -> str:
     return dir_path
 
 # We don't depend on pathvalidate here to keep it simple for now, 
+import unicodedata
+
 # but we implement a robust manual version of sanitize_filename
 def sanitize_filename(name: str) -> str:
     # Remove illegal characters for both Windows and Unix
-    return re.sub(r'[\\/*?:"<>|]', "", name)
+    clean = re.sub(r'[\\/*?:"<>|]', "", name)
+    return unicodedata.normalize("NFC", clean)
+
+def normalize_nfc(text: str) -> str:
+    """Canonicalize Unicode to Normalization Form C (composed).
+    Prevents SQLite byte-equality mismatches between macOS NFD and Linux/Android NFC."""
+    return unicodedata.normalize("NFC", text or "")
 
 ALLOWED_CHARS = set(printable)
 
@@ -48,11 +56,11 @@ def clean_filename(fn: str, restrict: bool = False) -> str:
     path = truncate_str(str(sanitize_filename(fn)))
     if restrict:
         path = "".join(c for c in path if c in ALLOWED_CHARS)
-    return path.strip()
+    return unicodedata.normalize("NFC", path.strip())
 
 def clean_filepath(fn: str, restrict: bool = False) -> str:
     # Basic cleanup for paths
     path = str(fn).replace("..", "").replace(":", "")
     if restrict:
         path = "".join(c for c in path if c in ALLOWED_CHARS)
-    return path.strip()
+    return unicodedata.normalize("NFC", path.strip())

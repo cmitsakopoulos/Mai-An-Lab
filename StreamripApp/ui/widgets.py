@@ -340,7 +340,7 @@ class AppSearchBar(ft.Container):
             hint_text=hint,
             hint_style=ft.TextStyle(color=DIM),
             text_style=ft.TextStyle(color=TEXT),
-            border=ft.InputBorder.NONE,
+            border=ft.NoInputBorder(),
             on_submit=on_submit,
             on_change=on_change,
             expand=True,

@@ -26,6 +26,13 @@ else:
 logger = logging.getLogger(__name__)
 
 
+def _input_border(color=BORDER, focused_color=CYAN, radius=10):
+    return {
+        ft.ControlState.FOCUSED: ft.OutlineInputBorder(border_radius=radius, side=ft.BorderSide(1, focused_color)),
+        ft.ControlState.DEFAULT: ft.OutlineInputBorder(border_radius=radius, side=ft.BorderSide(1, color)),
+    }
+
+
 @dataclass(slots=True)
 class SettingSearchEntry:
     title: str
@@ -289,22 +296,18 @@ class SettingsView:
             label="Download Path",
             hint_text="e.g. C:\\Music\\Downloads",
             bgcolor=SURFACE2,
-            border_color=BORDER,
-            focused_border_color=CYAN,
+            border=_input_border(BORDER, CYAN, 10),
             text_style=ft.TextStyle(color=TEXT, size=13),
             label_style=ft.TextStyle(color=CYAN, size=11),
-            border_radius=10,
             expand=True,
         )
         self._lib_path_field = ft.TextField(
             label="Library Path",
             hint_text="e.g. C:\\Music\\Library",
             bgcolor=SURFACE2,
-            border_color=BORDER,
-            focused_border_color=CYAN,
+            border=_input_border(BORDER, CYAN, 10),
             text_style=ft.TextStyle(color=TEXT, size=13),
             label_style=ft.TextStyle(color=CYAN, size=11),
-            border_radius=10,
             expand=True,
         )
 
@@ -321,11 +324,9 @@ class SettingsView:
                 ft.DropdownOption(key="hires", text="Hi-Res \u2014 24-bit FLAC (Deezer: 16-bit)"),
             ],
             bgcolor=SURFACE2,
-            border_color=BORDER,
-            focused_border_color=CYAN,
+            border=_input_border(BORDER, CYAN, 10),
             text_style=ft.TextStyle(color=TEXT, size=13),
             label_style=ft.TextStyle(color=CYAN, size=11),
-            border_radius=10,
             expand=True,
         )
 
@@ -336,41 +337,33 @@ class SettingsView:
             label="Qobuz User ID",
             hint_text="e.g. 1234567",
             bgcolor=SURFACE2,
-            border_color=BORDER,
-            focused_border_color=CYAN,
+            border=_input_border(BORDER, CYAN, 10),
             text_style=ft.TextStyle(color=TEXT, size=13),
             label_style=ft.TextStyle(color=CYAN, size=11),
-            border_radius=10,
         )
         self._qobuz_token_field = ft.TextField(
             label="Auth Token / Password Hash",
             hint_text="Enter token or MD5 of password",
             bgcolor=SURFACE2,
-            border_color=BORDER,
-            focused_border_color=CYAN,
+            border=_input_border(BORDER, CYAN, 10),
             text_style=ft.TextStyle(color=TEXT, size=13),
             label_style=ft.TextStyle(color=CYAN, size=11),
-            border_radius=10,
         )
         self._qobuz_app_id_field = ft.TextField(
             label="Qobuz App ID",
             hint_text="Default: 312369995",
             bgcolor=SURFACE2,
-            border_color=BORDER,
-            focused_border_color=CYAN,
+            border=_input_border(BORDER, CYAN, 10),
             text_style=ft.TextStyle(color=TEXT, size=13),
             label_style=ft.TextStyle(color=CYAN, size=11),
-            border_radius=10,
         )
         self._qobuz_app_secret_field = ft.TextField(
             label="Qobuz App Secret",
             hint_text="Default: e79f8b9be485692b0e5f9dd895826368",
             bgcolor=SURFACE2,
-            border_color=BORDER,
-            focused_border_color=CYAN,
+            border=_input_border(BORDER, CYAN, 10),
             text_style=ft.TextStyle(color=TEXT, size=13),
             label_style=ft.TextStyle(color=CYAN, size=11),
-            border_radius=10,
         )
         self._qobuz_use_token_switch = ft.Switch(
             value=True,
@@ -385,11 +378,9 @@ class SettingsView:
             label="Deezer ARL Cookie",
             hint_text="Long alphanumeric string from your browser cookies",
             bgcolor=SURFACE2,
-            border_color=BORDER,
-            focused_border_color=DEEZER_COLOR,
+            border=_input_border(BORDER, DEEZER_COLOR, 10),
             text_style=ft.TextStyle(color=TEXT, size=13),
             label_style=ft.TextStyle(color=DEEZER_COLOR, size=11),
-            border_radius=10,
         )
 
         # AI Assistant (Jarvis) Controls
@@ -402,22 +393,18 @@ class SettingsView:
             ],
             value="gemini",
             bgcolor=SURFACE2,
-            border_color=BORDER,
-            focused_border_color=CYAN,
+            border=_input_border(BORDER, CYAN, 10),
             text_style=ft.TextStyle(color=TEXT, size=13),
             label_style=ft.TextStyle(color=CYAN, size=11),
-            border_radius=10,
             on_select=lambda _e: self._update_assistant_provider_visibility(),
         )
         self._assistant_api_key_field = ft.TextField(
             label="Google Gemini API Key",
             hint_text="Paste your key from aistudio.google.com",
             bgcolor=SURFACE2,
-            border_color=BORDER,
-            focused_border_color=CYAN,
+            border=_input_border(BORDER, CYAN, 10),
             text_style=ft.TextStyle(color=TEXT, size=13),
             label_style=ft.TextStyle(color=CYAN, size=11),
-            border_radius=10,
         )
         self._assistant_model_dropdown = ft.Dropdown(
             label="Gemini Model",
@@ -430,33 +417,27 @@ class SettingsView:
             ],
             value="gemini-3.5-flash-lite",
             bgcolor=SURFACE2,
-            border_color=BORDER,
-            focused_border_color=CYAN,
+            border=_input_border(BORDER, CYAN, 10),
             text_style=ft.TextStyle(color=TEXT, size=13),
             label_style=ft.TextStyle(color=CYAN, size=11),
-            border_radius=10,
         )
         self._assistant_ollama_url_field = ft.TextField(
             label="Local Endpoint URL",
             hint_text="http://localhost:11434/v1",
             value="http://localhost:11434/v1",
             bgcolor=SURFACE2,
-            border_color=BORDER,
-            focused_border_color=CYAN,
+            border=_input_border(BORDER, CYAN, 10),
             text_style=ft.TextStyle(color=TEXT, size=13),
             label_style=ft.TextStyle(color=CYAN, size=11),
-            border_radius=10,
         )
         self._assistant_ollama_model_field = ft.TextField(
             label="Local Model Name",
             hint_text="llama3.2",
             value="llama3.2",
             bgcolor=SURFACE2,
-            border_color=BORDER,
-            focused_border_color=CYAN,
+            border=_input_border(BORDER, CYAN, 10),
             text_style=ft.TextStyle(color=TEXT, size=13),
             label_style=ft.TextStyle(color=CYAN, size=11),
-            border_radius=10,
         )
         self._assistant_personality_field = ft.TextField(
             label="Personality / System Directive Prompt",
@@ -465,11 +446,9 @@ class SettingsView:
             min_lines=3,
             max_lines=6,
             bgcolor=SURFACE2,
-            border_color=BORDER,
-            focused_border_color=CYAN,
+            border=_input_border(BORDER, CYAN, 10),
             text_style=ft.TextStyle(color=TEXT, size=12),
             label_style=ft.TextStyle(color=CYAN, size=11),
-            border_radius=10,
         )
 
         # Config Editor
@@ -487,11 +466,9 @@ class SettingsView:
         # Dropdowns for General Preferences
         common_style = dict(
             bgcolor=SURFACE2,
-            border_color=BORDER,
-            focused_border_color=CYAN,
+            border=_input_border(BORDER, CYAN, 10),
             text_style=ft.TextStyle(color=TEXT, size=13),
             label_style=ft.TextStyle(color=CYAN, size=11),
-            border_radius=10,
         )
         self._startup_page_dropdown = ft.Dropdown(
             label="Startup Page",
@@ -566,11 +543,9 @@ class SettingsView:
         self._haptic_eq_drag_dropdown = ft.Dropdown(
             label="EQ node drag & sliders",
             bgcolor=SURFACE2,
-            border_color=BORDER,
-            focused_border_color=CYAN,
+            border=_input_border(BORDER, CYAN, 10),
             text_style=ft.TextStyle(color=TEXT, size=13),
             label_style=ft.TextStyle(color=CYAN, size=11),
-            border_radius=10,
             on_select=self._on_haptic_intensity_change,
             options=[
                 ft.dropdown.Option("none", "None"),
@@ -583,11 +558,9 @@ class SettingsView:
         self._haptic_swipe_queue_dropdown = ft.Dropdown(
             label="Swipe track to Queue",
             bgcolor=SURFACE2,
-            border_color=BORDER,
-            focused_border_color=CYAN,
+            border=_input_border(BORDER, CYAN, 10),
             text_style=ft.TextStyle(color=TEXT, size=13),
             label_style=ft.TextStyle(color=CYAN, size=11),
-            border_radius=10,
             on_select=self._on_haptic_intensity_change,
             options=[
                 ft.dropdown.Option("none", "None"),
@@ -600,11 +573,9 @@ class SettingsView:
         self._haptic_long_press_dropdown = ft.Dropdown(
             label="Long press track",
             bgcolor=SURFACE2,
-            border_color=BORDER,
-            focused_border_color=CYAN,
+            border=_input_border(BORDER, CYAN, 10),
             text_style=ft.TextStyle(color=TEXT, size=13),
             label_style=ft.TextStyle(color=CYAN, size=11),
-            border_radius=10,
             on_select=self._on_haptic_intensity_change,
             options=[
                 ft.dropdown.Option("none", "None"),
@@ -617,11 +588,9 @@ class SettingsView:
         self._haptic_network_tap_dropdown = ft.Dropdown(
             label="Network node tap & inspect",
             bgcolor=SURFACE2,
-            border_color=BORDER,
-            focused_border_color=CYAN,
+            border=_input_border(BORDER, CYAN, 10),
             text_style=ft.TextStyle(color=TEXT, size=13),
             label_style=ft.TextStyle(color=CYAN, size=11),
-            border_radius=10,
             on_select=self._on_haptic_intensity_change,
             options=[
                 ft.dropdown.Option("none", "None"),
@@ -634,11 +603,9 @@ class SettingsView:
         self._haptic_network_reseed_dropdown = ft.Dropdown(
             label="Network reseed graph",
             bgcolor=SURFACE2,
-            border_color=BORDER,
-            focused_border_color=CYAN,
+            border=_input_border(BORDER, CYAN, 10),
             text_style=ft.TextStyle(color=TEXT, size=13),
             label_style=ft.TextStyle(color=CYAN, size=11),
-            border_radius=10,
             on_select=self._on_haptic_intensity_change,
             options=[
                 ft.dropdown.Option("none", "None"),
@@ -651,11 +618,9 @@ class SettingsView:
         self._haptic_network_walk_dropdown = ft.Dropdown(
             label="Network walk step traversal",
             bgcolor=SURFACE2,
-            border_color=BORDER,
-            focused_border_color=CYAN,
+            border=_input_border(BORDER, CYAN, 10),
             text_style=ft.TextStyle(color=TEXT, size=13),
             label_style=ft.TextStyle(color=CYAN, size=11),
-            border_radius=10,
             on_select=self._on_haptic_intensity_change,
             options=[
                 ft.dropdown.Option("none", "None"),
@@ -677,22 +642,18 @@ class SettingsView:
             label="Equalizer Preset",
             on_select=self._on_eq_preset_select,
             bgcolor=SURFACE2,
-            border_color=BORDER,
-            focused_border_color=CYAN,
+            border=_input_border(BORDER, CYAN, 10),
             text_style=ft.TextStyle(color=TEXT, size=13),
             label_style=ft.TextStyle(color=CYAN, size=11),
-            border_radius=10,
         )
         self._eq_sliders_container = ft.Column(spacing=15)
         self._custom_preset_name_field = ft.TextField(
             label="Save Custom Preset",
             hint_text="Enter preset name",
             bgcolor=SURFACE2,
-            border_color=BORDER,
-            focused_border_color=CYAN,
+            border=_input_border(BORDER, CYAN, 10),
             text_style=ft.TextStyle(color=TEXT, size=13),
             label_style=ft.TextStyle(color=CYAN, size=11),
-            border_radius=10,
             expand=True,
         )
         self._eq_bands = [
@@ -734,7 +695,7 @@ class SettingsView:
             hint_text="Search settings...",
             hint_style=ft.TextStyle(color=DIM, size=13),
             bgcolor="transparent",
-            border=ft.InputBorder.NONE,
+            border=ft.NoInputBorder(),
             text_style=ft.TextStyle(color=TEXT, size=13),
             content_padding=ft.Padding.only(left=4, right=4, top=12, bottom=12),
             expand=True,
@@ -903,6 +864,9 @@ class SettingsView:
 
     def open_subpage(self, subpage_name: str):
         """Directly transitions to any settings subpage by name."""
+        if subpage_name in ("Companion & Sync", "Sync", "Companion"):
+            self._on_open_sync_hub_click()
+            return
         builders = {
             "AI Assistant": self._build_assistant_group,
             "Account": self._build_auth_group,
@@ -938,23 +902,33 @@ class SettingsView:
     def _build_search_registry(self) -> list[SettingSearchEntry]:
         return [
             SettingSearchEntry(
-                title="AI Assistant (Jarvis)",
-                subtitle="Google Gemini API key, providers & LLM settings",
-                category="SET-UP",
-                subpage_name="AI Assistant",
-                icon=ft.Icons.SMART_TOY_ROUNDED,
-                on_select=lambda: self._show_sub_page("AI Assistant", self._build_assistant_group()),
+                title="Companion & Sync",
+                subtitle="Wireless feature offload and device transfers",
+                category="GENERAL",
+                subpage_name="Companion & Sync",
+                icon=ft.Icons.SYNC_ROUNDED,
+                on_select=self._on_open_sync_hub_click,
                 keywords=[
-                    "gemini", "ollama", "api key", "llm", "jarvis", "ai", "assistant",
-                    "personality", "prompt", "zax", "model", "voice", "speech", "stt",
-                    "tts", "agent", "intelligence", "endpoint", "lm studio", "local server",
-                    "chat", "bot", "system directive", "voice command", "apikey", "disable", "enable"
+                    "companion", "sync", "offload", "dsp", "mac", "android",
+                    "wireless", "bluetooth", "p2p", "remote", "pairing", "pin", "server"
+                ]
+            ),
+            SettingSearchEntry(
+                title="Storage & Paths",
+                subtitle="Library and download locations",
+                category="GENERAL",
+                subpage_name="Storage",
+                icon=ft.Icons.STORAGE_ROUNDED,
+                on_select=lambda: self._show_sub_page("Storage", self._build_storage_group()),
+                keywords=[
+                    "download", "path", "folder", "directory", "streamrip", "location",
+                    "storage", "music folder", "save", "destination", "library path", "db path", "disk", "target"
                 ]
             ),
             SettingSearchEntry(
                 title="Authentication",
                 subtitle="Qobuz & Deezer credentials",
-                category="SET-UP",
+                category="GENERAL",
                 subpage_name="Account",
                 icon=ft.Icons.LOCK_PERSON_ROUNDED,
                 on_select=lambda: self._show_sub_page("Account", self._build_auth_group()),
@@ -965,15 +939,17 @@ class SettingsView:
                 ]
             ),
             SettingSearchEntry(
-                title="Storage & Paths",
-                subtitle="Library and download locations",
-                category="SET-UP",
-                subpage_name="Storage",
-                icon=ft.Icons.STORAGE_ROUNDED,
-                on_select=lambda: self._show_sub_page("Storage", self._build_storage_group()),
+                title="AI Assistant (Jarvis)",
+                subtitle="Google Gemini API key, providers & LLM settings",
+                category="GENERAL",
+                subpage_name="AI Assistant",
+                icon=ft.Icons.SMART_TOY_ROUNDED,
+                on_select=lambda: self._show_sub_page("AI Assistant", self._build_assistant_group()),
                 keywords=[
-                    "download", "path", "folder", "directory", "streamrip", "location",
-                    "storage", "music folder", "save", "destination", "library path", "db path", "disk", "target"
+                    "gemini", "ollama", "api key", "llm", "jarvis", "ai", "assistant",
+                    "personality", "prompt", "zax", "model", "voice", "speech", "stt",
+                    "tts", "agent", "intelligence", "endpoint", "lm studio", "local server",
+                    "chat", "bot", "system directive", "voice command", "apikey", "disable", "enable"
                 ]
             ),
             SettingSearchEntry(
@@ -1178,14 +1154,16 @@ class SettingsView:
                 self._search_bar_container,
                 ft.Container(height=16),
                 
-                # Set-up Section
-                ft.Text("SET-UP", size=11, color=CYAN, weight=ft.FontWeight.W_800),
-                HubSettingItem(ft.Icons.SMART_TOY_ROUNDED, "AI Assistant (Jarvis)", "Google Gemini API key, providers & LLM settings",
-                               on_tap=lambda _: self._show_sub_page("AI Assistant", self._build_assistant_group())),
-                HubSettingItem(ft.Icons.LOCK_PERSON_ROUNDED, "Authentication", "Qobuz & Deezer credentials", 
-                               on_tap=lambda _: self._show_sub_page("Account", self._build_auth_group())),
+                # General Section
+                ft.Text("GENERAL", size=11, color=CYAN, weight=ft.FontWeight.W_800),
+                HubSettingItem(ft.Icons.SYNC_ROUNDED, "Companion & Sync", "Wireless feature offload and device transfers",
+                               on_tap=self._on_open_sync_hub_click),
                 HubSettingItem(ft.Icons.STORAGE_ROUNDED, "Storage & Paths", "Library and download locations", 
                                on_tap=lambda _: self._show_sub_page("Storage", self._build_storage_group())),
+                HubSettingItem(ft.Icons.LOCK_PERSON_ROUNDED, "Authentication", "Qobuz & Deezer credentials", 
+                               on_tap=lambda _: self._show_sub_page("Account", self._build_auth_group())),
+                HubSettingItem(ft.Icons.SMART_TOY_ROUNDED, "AI Assistant (Jarvis)", "Google Gemini API key, providers & LLM settings",
+                               on_tap=lambda _: self._show_sub_page("AI Assistant", self._build_assistant_group())),
                 
                 ft.Divider(color=BORDER, height=30),
                 
@@ -1979,7 +1957,11 @@ class SettingsView:
             self.app.show_snackbar(f"DSP query failed: {exc}", color="#FF4444")
             return
         from utils.progress_notify import ProgressNotifier, dsp_progress_cb
-        notifier = ProgressNotifier("dsp", "Analysing library")
+        dsp_cancelled = False
+        def _cancel():
+            nonlocal dsp_cancelled
+            dsp_cancelled = True
+        notifier = ProgressNotifier("dsp", "Analysing library", on_cancel=_cancel)
 
         if missing:
             self.app.show_snackbar(
@@ -1991,7 +1973,11 @@ class SettingsView:
                     self.app.db_manager,
                     audio_engine.audio_service,
                     progress_cb=dsp_progress_cb(notifier),
+                    cancel_check=lambda: dsp_cancelled,
                 )
+                if dsp_cancelled:
+                    notifier.finish("Analysis cancelled.")
+                    return
             except Exception as exc:
                 logger.exception("Advanced: bulk_analyze_library failed: %s", exc)
                 self.app.show_snackbar(f"DSP analysis failed: {exc}", color="#FF4444")
@@ -2055,7 +2041,11 @@ class SettingsView:
             self.app.show_snackbar(f"DSP query failed: {exc}", color="#FF4444")
             return
         from utils.progress_notify import ProgressNotifier, dsp_progress_cb
-        notifier = ProgressNotifier("dsp", "Analysing library")
+        dsp_cancelled2 = False
+        def _cancel2():
+            nonlocal dsp_cancelled2
+            dsp_cancelled2 = True
+        notifier = ProgressNotifier("dsp", "Analysing library", on_cancel=_cancel2)
 
         if missing:
             self.app.show_snackbar(
@@ -2067,7 +2057,11 @@ class SettingsView:
                     self.app.db_manager,
                     audio_engine.audio_service,
                     progress_cb=dsp_progress_cb(notifier),
+                    cancel_check=lambda: dsp_cancelled2,
                 )
+                if dsp_cancelled2:
+                    notifier.finish("Analysis cancelled.")
+                    return
             except Exception as exc:
                 logger.exception("Advanced: bulk_analyze_library failed: %s", exc)
                 self.app.show_snackbar(f"DSP analysis failed: {exc}", color="#FF4444")
@@ -2138,6 +2132,14 @@ class SettingsView:
         # Full-height mount: the pane owns a ListView, which must not be nested
         # inside the hub's scrolling Column (see _show_sub_page_full).
         self._show_sub_page_full("Metadata", self._metadata_workbench_pane)
+
+    def _on_open_sync_hub_click(self, _e=None):
+        """Companion & Sync surface — Mac server toggle, Android Wi-Fi pairing,
+        live wireless DSP offload, and state bundle backup."""
+        from ui.views.sync_hub import SyncHubPane
+        if not getattr(self, "_sync_hub_pane", None):
+            self._sync_hub_pane = SyncHubPane(self.app)
+        self._show_sub_page_full("Companion & Sync", self._sync_hub_pane)
 
     # ── State bundle (export/import) ────────────────────────────────────────
     def _on_export_state_click(self, _e):
@@ -3148,7 +3150,7 @@ class SettingsView:
                 width=75,
                 height=30,
                 content_padding=ft.Padding.symmetric(vertical=4, horizontal=6),
-                border=ft.InputBorder.NONE,
+                border=ft.NoInputBorder(),
                 bgcolor=SURFACE2,
                 border_radius=5,
                 disabled=not is_eq_enabled,

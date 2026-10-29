@@ -3,11 +3,12 @@ import sys
 import math
 import logging
 import asyncio
+from typing import Optional, Union, Any
 from collections import Counter
 import flet as ft
 import flet.canvas as cv
 from ui.tokens import (
-    BG, SURFACE, SURFACE2, SURFACE_ELEVATED, CYAN, AMBER, TEXT, DIM, TEXT_TERTIARY,
+    BG, SURFACE, SURFACE2, SURFACE_ELEVATED, CYAN, AMBER, ACCENT_GREEN, ACCENT_RED, TEXT, DIM, TEXT_TERTIARY,
     BORDER, BORDER_SUBTLE, RADIUS_CARD, RADIUS_PILL, RADIUS_THUMB,
     SOURCE_COLORS, LIB_ARTIST_COLOR, LIB_ALBUM_COLOR, LIB_TRACK_COLOR,
     LIB_PLAYLIST_COLOR, LIB_GENRE_COLOR, apply_opacity, lerp_hex
@@ -312,7 +313,7 @@ class LibraryView:
             hint_text="Search artists, albums, tracks…",
             hint_style=ft.TextStyle(color=DIM, size=14),
             bgcolor="transparent",
-            border=ft.InputBorder.NONE,
+            border=ft.NoInputBorder(),
             text_style=ft.TextStyle(color=TEXT, size=14),
             content_padding=ft.Padding.only(left=4, right=4, top=14, bottom=14),
             expand=True,
@@ -526,6 +527,32 @@ class LibraryView:
             visible=False,
         )
 
+        # ── Multi-select state ──────────────────────────────────────────────
+        self._selection_mode = False
+        self._selected_track_paths = set()
+        self._selected_tracks_meta = {}
+        self._selection_count_text = ft.Text("0 selected", color=TEXT, weight=ft.FontWeight.W_600, size=13)
+        self._selection_send_btn = ft.Button(
+            "Send (0)",
+            icon=ft.Icons.PHONELINK_RING_ROUNDED,
+            on_click=lambda _: self._open_send_to_phone_dialog(list(self._selected_tracks_meta.values())),
+            disabled=True,
+        )
+        self._selection_bar = ft.Container(
+            content=ft.Row([
+                ft.IconButton(ft.Icons.CLOSE_ROUNDED, icon_color=DIM, on_click=self._exit_selection_mode, tooltip="Cancel Selection"),
+                self._selection_count_text,
+                ft.Container(expand=True),
+                self._selection_send_btn,
+            ], vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            bgcolor=SURFACE2,
+            border=ft.Border.all(1, BORDER_SUBTLE),
+            border_radius=RADIUS_CARD,
+            padding=ft.Padding.symmetric(horizontal=12, vertical=6),
+            margin=ft.Margin.only(left=14, right=14, bottom=8),
+            visible=False,
+        )
+
         self._root = ft.Column(
             [
                 # toolbar
@@ -563,6 +590,7 @@ class LibraryView:
                 # list or empty state
                 self._animated_list_wrapper,
                 self._empty_label,
+                self._selection_bar,
             ],
             expand=True,
             spacing=0,
@@ -3515,6 +3543,7 @@ class LibraryView:
             subtitle=ft.Text(f"{artist}  ·  {tc} tracks", color=DIM, size=12, max_lines=2),
             trailing=Che,
             bgcolor=apply_opacity(0.06, accent) if expanded else "transparent",
+            on_long_press=lambda e: self._open_album_context_menu(a),
         )
         tile._chevron = Che
         tile.on_click = lambda e: self.page.run_task(self._toggle_node, node_id, tile)
@@ -3535,8 +3564,10 @@ class LibraryView:
             label="Playlist Name",
             hint_text="ex. Mai An",
             bgcolor=SURFACE2,
-            border_color=BORDER,
-            focused_border_color=LIB_PLAYLIST_COLOR,
+            border={
+                ft.ControlState.FOCUSED: ft.OutlineInputBorder(side=ft.BorderSide(1, LIB_PLAYLIST_COLOR)),
+                ft.ControlState.DEFAULT: ft.OutlineInputBorder(side=ft.BorderSide(1, BORDER)),
+            },
             text_style=ft.TextStyle(color=TEXT),
             autofocus=True,
         )
@@ -3931,6 +3962,23 @@ class LibraryView:
             overflow=ft.TextOverflow.ELLIPSIS,
         )
 
+        is_sel_mode = getattr(self, "_selection_mode", False)
+        if is_sel_mode:
+            is_selected = path in self._selected_track_paths
+            leading_ctrl = ft.Checkbox(
+                value=is_selected,
+                on_change=lambda e, m=meta: self._toggle_track_selection(m),
+            )
+            click_handler = lambda e, m=meta: self._toggle_track_selection(m)
+        else:
+            click_handler = lambda e: self.page.run_task(
+                self.app.play_track,
+                path,
+                ("playlist", playlist_id) if playlist_id is not None else
+                ("album", album_context[0], album_context[1]) if album_context else
+                ("library", None),
+            )
+
         tile = ft.ListTile(
             height=self.ROW_H,
             data={
@@ -3944,13 +3992,7 @@ class LibraryView:
             subtitle=subtitle_ctrl,
             trailing=trailing_ctrl,
             bgcolor=apply_opacity(0.1, CYAN) if is_current else "transparent",
-            on_click=lambda e: self.page.run_task(
-                self.app.play_track,
-                path,
-                ("playlist", playlist_id) if playlist_id is not None else
-                ("album", album_context[0], album_context[1]) if album_context else
-                ("library", None),
-            ),
+            on_click=click_handler,
             # ListTile handles long-press natively, so the row no longer needs a
             # GestureDetector wrapper. "Play Next" lives in the menu this opens.
             on_long_press=lambda e: self._on_track_long_press(meta),
@@ -4073,7 +4115,7 @@ class LibraryView:
             color=TEXT,
             weight=ft.FontWeight.W_700,
             size=15,
-            max_lines=1,
+            max_lines=2,
             overflow=ft.TextOverflow.ELLIPSIS,
         )
 
@@ -4087,7 +4129,7 @@ class LibraryView:
             sub_text,
             color=DIM,
             size=12,
-            max_lines=1,
+            max_lines=2,
             overflow=ft.TextOverflow.ELLIPSIS,
         ) if sub_text else None
 
@@ -4113,7 +4155,7 @@ class LibraryView:
                 ft.Text(f"{bitrate // 1000} kbps", size=10, color=DIM)
             )
 
-        badges_row = ft.Row(badge_controls, spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER) if badge_controls else None
+        badges_row = ft.Row(badge_controls, spacing=8, wrap=True, vertical_alignment=ft.CrossAxisAlignment.CENTER) if badge_controls else None
 
         card_col_children = [title_ctrl]
         if subtitle_ctrl:
@@ -4209,6 +4251,13 @@ class LibraryView:
 
             _close(_perform_redownload)
 
+        def _send_to_phone(_e):
+            _close(lambda: self._open_send_to_phone_dialog([meta]))
+
+        def _select_multiple(_e):
+            p = meta.get("path")
+            _close(lambda: self._enable_selection_mode(initial_path=p, initial_meta=meta))
+
         grab_handle = ft.Container(
             content=ft.Row(
                 [ft.Container(width=36, height=5, bgcolor=BORDER, border_radius=3)],
@@ -4239,7 +4288,7 @@ class LibraryView:
                         ft.ListTile(
                             leading=ft.Icon(ft.Icons.ALL_INCLUSIVE_ROUNDED, color=CYAN),
                             title=ft.Text("Start Radio", color=TEXT),
-                            subtitle=ft.Text("Play this, then similar songs", color=DIM, size=12),
+                            subtitle=ft.Text("Play similar tracks automatically", color=DIM, size=12),
                             on_click=_start_radio,
                         ),
                         ft.ListTile(
@@ -4250,7 +4299,20 @@ class LibraryView:
                         ft.ListTile(
                             leading=ft.Icon(ft.Icons.DOWNLOAD_ROUNDED, color=DIM),
                             title=ft.Text("Redownload (Different Quality)", color=TEXT),
+                            subtitle=ft.Text("Select alternate quality tier", color=DIM, size=12),
                             on_click=_redownload,
+                        ),
+                        ft.ListTile(
+                            leading=ft.Icon(ft.Icons.PHONELINK_RING_ROUNDED, color=ACCENT_GREEN),
+                            title=ft.Text("Send to Phone…", color=TEXT),
+                            subtitle=ft.Text("Transcode AAC & pre-compute features", color=DIM, size=12),
+                            on_click=_send_to_phone,
+                        ),
+                        ft.ListTile(
+                            leading=ft.Icon(ft.Icons.CHECKLIST_ROUNDED, color=CYAN),
+                            title=ft.Text("Select Multiple…", color=TEXT),
+                            subtitle=ft.Text("Batch transfer or library actions", color=DIM, size=12),
+                            on_click=_select_multiple,
                         ),
                         ft.ListTile(
                             leading=ft.Icon(ft.Icons.DELETE_OUTLINE_ROUNDED, color="#FF4444"),
@@ -4260,6 +4322,7 @@ class LibraryView:
                     ],
                     tight=True,
                     spacing=0,
+                    scroll=ft.ScrollMode.ADAPTIVE,
                 ),
                 bgcolor=SURFACE,
                 padding=ft.Padding.only(left=16, right=16, top=0, bottom=24),
@@ -4508,10 +4571,17 @@ class LibraryView:
 
         total = len(missing)
         failures = 0
+        dsp_cancelled = False
         import time
         from utils.progress_notify import ProgressNotifier, dsp_progress_cb
         start_time = time.time()
-        notifier = ProgressNotifier("dsp", "Analysing library")
+
+        def _cancel_dsp():
+            nonlocal dsp_cancelled
+            dsp_cancelled = True
+            logger.info("Local DSP analysis cancelled via system notification")
+
+        notifier = ProgressNotifier("dsp", "Analysing library", on_cancel=_cancel_dsp)
         notify_cb = dsp_progress_cb(notifier)
 
         async def _on_progress(done, total_, current, failures_):
@@ -4544,7 +4614,13 @@ class LibraryView:
                 self.app.db_manager,
                 audio_engine.audio_service,
                 progress_cb=_on_progress,
+                cancel_check=lambda: dsp_cancelled,
             )
+            if dsp_cancelled:
+                notifier.finish("Analysis cancelled.")
+                self._analyzing_dsp = False
+                self.page.run_task(self.load_library)
+                return
         except Exception as exc:
             logger.exception("Library network compute: bulk_analyze_library failed: %s", exc)
             self.app.show_snackbar(f"DSP analysis failed: {exc}", color="#FF4444")
@@ -4582,3 +4658,290 @@ class LibraryView:
             fn()
         except Exception as exc:
             logger.warning("LibraryView UI error: %s", exc)
+
+    # ── Multi-select & Companion Sync actions ──────────────────────────────────
+
+    def _enable_selection_mode(self, initial_path: Optional[str] = None, initial_meta: Optional[dict] = None):
+        self._selection_mode = True
+        self._selected_track_paths.clear()
+        self._selected_tracks_meta.clear()
+        if initial_path:
+            self._selected_track_paths.add(initial_path)
+            if initial_meta:
+                self._selected_tracks_meta[initial_path] = initial_meta
+        self._selection_bar.visible = True
+        self._update_selection_bar()
+        self.page.run_task(self.load_library)
+
+    def _exit_selection_mode(self, _e=None):
+        self._selection_mode = False
+        self._selected_track_paths.clear()
+        self._selected_tracks_meta.clear()
+        self._selection_bar.visible = False
+        self._update_selection_bar()
+        self.page.run_task(self.load_library)
+
+    def _toggle_track_selection(self, meta: dict):
+        path = meta.get("path")
+        if not path:
+            return
+        if path in self._selected_track_paths:
+            self._selected_track_paths.remove(path)
+            self._selected_tracks_meta.pop(path, None)
+            is_sel = False
+        else:
+            self._selected_track_paths.add(path)
+            self._selected_tracks_meta[path] = meta
+            is_sel = True
+
+        for ctrl in self._path_to_controls.get(path, []):
+            tile = self._get_tile(ctrl) or ctrl
+            if hasattr(tile, "leading") and isinstance(tile.leading, ft.Checkbox):
+                tile.leading.value = is_sel
+                try:
+                    tile.leading.update()
+                except Exception:
+                    pass
+
+        self._update_selection_bar()
+
+    def _update_selection_bar(self):
+        count = len(self._selected_track_paths)
+        self._selection_count_text.value = f"{count} selected"
+        self._selection_send_btn.text = f"Send ({count})"
+        self._selection_send_btn.disabled = (count == 0)
+        try:
+            self._selection_bar.update()
+        except Exception:
+            if self.page:
+                self.page.update()
+
+    def _open_album_context_menu(self, a: dict):
+        self.app.trigger_haptic("long_press")
+        _on_sheet_dismissed, _close = dialog_handoff(self.app, lambda: bs)
+
+        album = a.get("album") or "Unknown Album"
+        artist = a.get("artist") or "Unknown Artist"
+        tc = a.get("track_count", "?")
+
+        def _play_album(_e):
+            async def _do():
+                tracks = await self.app.db_manager.get_tracks_by_album(album, artist)
+                if tracks:
+                    await self.app.play_track(tracks[0]["path"], ("album", album, artist))
+            _close(lambda: self.page.run_task(_do))
+
+        def _queue_album(_e):
+            async def _do():
+                tracks = await self.app.db_manager.get_tracks_by_album(album, artist)
+                for t in tracks:
+                    audio_engine.queue_last(t)
+                self.app.trigger_haptic("swipe_queue")
+                self.app.show_snackbar(f"Added {len(tracks)} tracks to queue.")
+            _close(lambda: self.page.run_task(_do))
+
+        def _send_album(_e):
+            async def _do():
+                tracks = await self.app.db_manager.get_tracks_by_album(album, artist)
+                if tracks:
+                    self._open_send_to_phone_dialog(tracks)
+                else:
+                    self.app.show_snackbar("No tracks found for this album.")
+            _close(lambda: self.page.run_task(_do))
+
+        def _select_album(_e):
+            async def _do():
+                tracks = await self.app.db_manager.get_tracks_by_album(album, artist)
+                self._enable_selection_mode()
+                for t in tracks:
+                    p = t.get("path")
+                    if p:
+                        self._selected_track_paths.add(p)
+                        self._selected_tracks_meta[p] = t
+                self._update_selection_bar()
+                await self.load_library()
+            _close(lambda: self.page.run_task(_do))
+
+        grab_handle = ft.Container(
+            content=ft.Row(
+                [ft.Container(width=36, height=5, bgcolor=BORDER, border_radius=3)],
+                alignment=ft.MainAxisAlignment.CENTER,
+            ),
+            padding=ft.Padding.only(top=8, bottom=10),
+        )
+
+        album_card = ft.Container(
+            content=ft.Row(
+                [
+                    ft.Container(
+                        content=ft.Icon(ft.Icons.ALBUM_ROUNDED, color=LIB_ALBUM_COLOR, size=28),
+                        width=54, height=54, bgcolor=SURFACE, border_radius=10,
+                        border=ft.Border.all(1, BORDER_SUBTLE),
+                        alignment=ft.Alignment(0, 0),
+                    ),
+                    ft.Column([
+                        ft.Text(album, color=TEXT, weight=ft.FontWeight.W_700, size=15, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS),
+                        ft.Text(f"{artist}  ·  {tc} tracks", color=DIM, size=12, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS),
+                    ], spacing=3, expand=True),
+                ],
+                spacing=12,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            bgcolor=SURFACE2,
+            border=ft.Border.all(1, BORDER_SUBTLE),
+            border_radius=RADIUS_CARD,
+            padding=ft.Padding.symmetric(horizontal=12, vertical=10),
+        )
+
+        bs = ft.BottomSheet(
+            content=ft.Container(
+                content=ft.Column(
+                    [
+                        grab_handle,
+                        album_card,
+                        ft.Container(height=6),
+                        ft.ListTile(
+                            leading=ft.Icon(ft.Icons.PHONELINK_RING_ROUNDED, color=ACCENT_GREEN),
+                            title=ft.Text("Send Album to Phone…", color=TEXT),
+                            subtitle=ft.Text(f"Transfer {tc} tracks with acoustic features", color=DIM, size=12),
+                            on_click=_send_album,
+                        ),
+                        ft.ListTile(
+                            leading=ft.Icon(ft.Icons.CHECKLIST_ROUNDED, color=CYAN),
+                            title=ft.Text("Select Tracks from Album…", color=TEXT),
+                            subtitle=ft.Text("Choose specific tracks from this album", color=DIM, size=12),
+                            on_click=_select_album,
+                        ),
+                        ft.ListTile(
+                            leading=ft.Icon(ft.Icons.PLAY_ARROW_ROUNDED, color=CYAN),
+                            title=ft.Text("Play Album", color=TEXT),
+                            on_click=_play_album,
+                        ),
+                        ft.ListTile(
+                            leading=ft.Icon(ft.Icons.PLAYLIST_ADD_CHECK_ROUNDED, color=CYAN),
+                            title=ft.Text("Add Album to Queue", color=TEXT),
+                            on_click=_queue_album,
+                        ),
+                    ],
+                    tight=True,
+                    spacing=0,
+                    scroll=ft.ScrollMode.ADAPTIVE,
+                ),
+                bgcolor=SURFACE,
+                padding=ft.Padding.only(left=16, right=16, top=0, bottom=24),
+            ),
+            bgcolor=SURFACE,
+            draggable=True,
+            on_dismiss=_on_sheet_dismissed,
+        )
+        self.page.show_dialog(bs)
+
+    def _open_send_to_phone_dialog(self, tracks: list[dict]):
+        if not tracks:
+            self.app.show_snackbar("No tracks selected.")
+            return
+
+        from utils.sync.server import DEFAULT_PORT, get_companion_server
+        from utils.sync.discovery import resolve_local_ip
+
+        server = get_companion_server(self.app)
+
+        is_running = server.is_running
+        ip = resolve_local_ip()
+        port = server.bound_port or DEFAULT_PORT
+
+        quality_dropdown = ft.Dropdown(
+            label="Audio Quality",
+            value="aac_vbr_max",
+            options=[
+                ft.dropdown.Option("aac_vbr_max", "AAC (VBR Max)"),
+                ft.dropdown.Option("original", "Original (No Transcode)"),
+                ft.dropdown.Option("aac_320k", "AAC (320 kbps)"),
+                ft.dropdown.Option("aac_256k", "AAC (256 kbps)"),
+                ft.dropdown.Option("aac_192k", "AAC (192 kbps)"),
+            ],
+            bgcolor=SURFACE2,
+            border=ft.OutlineInputBorder(side=ft.BorderSide(1, BORDER)),
+        )
+
+        dsp_checkbox = ft.Checkbox(value=True)
+        dsp_row = ft.Row([
+            dsp_checkbox,
+            ft.Column([
+                ft.Text("Pre-compute acoustic features", weight=ft.FontWeight.W_600, size=13, color=TEXT),
+                ft.Text("Enables instant similarity walks and auto-play on mobile", size=11, color=DIM),
+            ], spacing=1, expand=True),
+        ], vertical_alignment=ft.CrossAxisAlignment.CENTER)
+
+        status_text = ft.Text(
+            f"Online · {ip}:{port} · PIN: {server.pin}" if is_running
+            else "Server offline · Starts automatically on transfer",
+            size=12,
+            color=ACCENT_GREEN if is_running else DIM,
+        )
+
+        async def _start_transfer(_e=None):
+            self.app.dismiss_dialog(dlg)
+            self.app.show_snackbar("Preparing transfer on Mac...", icon=ft.Icons.SYNC_ROUNDED)
+
+            if not server.is_running:
+                try:
+                    await server.start()
+                except Exception as ex:
+                    self.app.show_snackbar(f"Failed to start Companion Server: {ex}", color=ACCENT_RED)
+                    return
+
+            quality = quality_dropdown.value or "aac_vbr_max"
+            precompute = bool(dsp_checkbox.value)
+
+            try:
+                queued = await server.queue_tracks_for_transfer(
+                    tracks=tracks,
+                    quality=quality,
+                    precompute_dsp=precompute,
+                )
+                if not queued:
+                    self.app.show_snackbar("None of the selected files exist on disk.", color=ACCENT_RED)
+                    return
+                self.app.show_snackbar(
+                    f"Queued {len(queued)} track{'s' if len(queued) != 1 else ''} for Phone (PIN: {server.pin}) · "
+                    "the phone offers them as soon as it connects",
+                    icon=ft.Icons.CHECK_CIRCLE,
+                )
+                if self._selection_mode:
+                    self._exit_selection_mode()
+            except Exception as ex:
+                self.app.show_snackbar(f"Failed to queue transfer: {ex}", color=ACCENT_RED)
+
+        page_w = self.page.width if (self.page and self.page.width) else 440
+        dialog_w = min(400, max(280, page_w - 48))
+
+        dlg = ft.AlertDialog(
+            title=ft.Row([
+                ft.Icon(ft.Icons.PHONELINK_RING_ROUNDED, color=ACCENT_GREEN, size=24),
+                ft.Text(
+                    f"Send {len(tracks)} Track{'s' if len(tracks) != 1 else ''} to Phone",
+                    weight=ft.FontWeight.W_700,
+                    size=16,
+                    expand=True,
+                ),
+            ], spacing=8),
+            content=ft.Container(
+                content=ft.Column([
+                    ft.Text(
+                        "Transfer selected audio and pre-computed acoustic features to your device.",
+                        color=DIM, size=13,
+                    ),
+                    quality_dropdown,
+                    dsp_row,
+                    status_text,
+                ], spacing=14, tight=True, scroll=ft.ScrollMode.ADAPTIVE),
+                width=dialog_w,
+            ),
+            actions=[
+                ft.TextButton("Cancel", on_click=lambda _: self.app.dismiss_dialog(dlg)),
+                ft.Button("Send to Phone", bgcolor=ACCENT_GREEN, color=BG, on_click=lambda e: self.page.run_task(_start_transfer)),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        self.page.show_dialog(dlg)

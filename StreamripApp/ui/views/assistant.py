@@ -65,11 +65,12 @@ class AssistantView:
 
         self._input = ft.TextField(
             hint_text="Ask me anything, sir…",
-            border_color=BORDER,
-            focused_border_color=CYAN,
+            border={
+                ft.ControlState.FOCUSED: ft.OutlineInputBorder(border_radius=22, side=ft.BorderSide(1, CYAN)),
+                ft.ControlState.DEFAULT: ft.OutlineInputBorder(border_radius=22, side=ft.BorderSide(1, BORDER)),
+            },
             text_style=ft.TextStyle(color=TEXT, size=14),
             content_padding=ft.Padding.symmetric(horizontal=14, vertical=12),
-            border_radius=22,
             multiline=False,
             min_lines=1,
             max_lines=1,

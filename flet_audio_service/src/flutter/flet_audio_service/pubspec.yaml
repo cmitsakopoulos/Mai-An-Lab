@@ -10,11 +10,11 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  flet: ^0.84.0
+  flet: ">=1.0.0 <2.0.0"
   audio_service: ^0.18.18
   just_audio: ^0.10.5
-  audio_session: ^0.1.21
-  permission_handler: ^11.3.0
+  audio_session: ">=0.1.21 <0.3.0"
+  permission_handler: ">=11.3.0 <14.0.0"
   flutter_tts: ^4.2.0
   speech_to_text: ^7.0.0
 

@@ -28,6 +28,13 @@ STARTUP_OPTIONS = [
 ]
 
 
+def _input_border(color=apply_opacity(0.15, TEXT), focused_color=CYAN, radius=8):
+    return {
+        ft.ControlState.FOCUSED: ft.OutlineInputBorder(border_radius=radius, side=ft.BorderSide(1, focused_color)),
+        ft.ControlState.DEFAULT: ft.OutlineInputBorder(border_radius=radius, side=ft.BorderSide(1, color)),
+    }
+
+
 class OnboardingWizardModal:
     """Glassmorphic 3-slide modal for first-run orientation and configuration."""
 
@@ -307,16 +314,14 @@ class OnboardingWizardModal:
                 text_style=ft.TextStyle(font_family="Courier New", color=CYAN),
                 dense=True,
                 content_padding=ft.Padding.symmetric(vertical=8, horizontal=10),
-                border_radius=8,
                 bgcolor=apply_opacity(0.06, TEXT),
-                border_color=apply_opacity(0.15, TEXT),
-                focused_border_color=self.selected_accent,
+                border=_input_border(focused_color=self.selected_accent),
                 expand=True,
                 on_change=self._on_folder_change,
             )
         else:
             self._folder_field.value = self.detected_music_dir
-            self._folder_field.focused_border_color = self.selected_accent
+            self._folder_field.border = _input_border(focused_color=self.selected_accent)
 
         folder_card = ft.Container(
             content=ft.Column(
@@ -402,10 +407,8 @@ class OnboardingWizardModal:
                         can_reveal_password=True,
                         label_style=ft.TextStyle(size=10, color=DIM),
                         content_padding=ft.Padding.symmetric(vertical=10, horizontal=10),
-                        border_radius=8,
                         bgcolor=apply_opacity(0.06, TEXT),
-                        border_color=apply_opacity(0.15, TEXT),
-                        focused_border_color=self.selected_accent,
+                        border=_input_border(focused_color=self.selected_accent),
                         on_change=lambda e: self._set_deezer_arl(e.control.value),
                     ),
                     ft.Row(
@@ -431,10 +434,8 @@ class OnboardingWizardModal:
                         text_size=11,
                         label_style=ft.TextStyle(size=10, color=DIM),
                         content_padding=ft.Padding.symmetric(vertical=10, horizontal=10),
-                        border_radius=8,
                         bgcolor=apply_opacity(0.06, TEXT),
-                        border_color=apply_opacity(0.15, TEXT),
-                        focused_border_color=self.selected_accent,
+                        border=_input_border(focused_color=self.selected_accent),
                         on_change=lambda e: self._set_qobuz_user(e.control.value),
                     ),
                     ft.TextField(
@@ -447,10 +448,8 @@ class OnboardingWizardModal:
                         can_reveal_password=True,
                         label_style=ft.TextStyle(size=10, color=DIM),
                         content_padding=ft.Padding.symmetric(vertical=10, horizontal=10),
-                        border_radius=8,
                         bgcolor=apply_opacity(0.06, TEXT),
-                        border_color=apply_opacity(0.15, TEXT),
-                        focused_border_color=self.selected_accent,
+                        border=_input_border(focused_color=self.selected_accent),
                         on_change=lambda e: self._set_qobuz_token(e.control.value),
                     ),
                     ft.Row(

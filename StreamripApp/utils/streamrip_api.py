@@ -6,6 +6,7 @@ import asyncio
 import time
 import shutil
 import re
+import aiohttp
 import mutagen
 from mutagen.flac import FLAC
 from mutagen.id3 import ID3, TIT2, TPE1, TALB, TYER
@@ -186,6 +187,9 @@ def _detect_type_and_id(url: str):
         (r'deezer\.[a-z.]+/(?:[a-z]{2}/)?artist/(?P<id>\d+)', 'artist', 'deezer'),
         (r'deezer\.[a-z.]+/(?:[a-z]{2}/)?playlist/(?P<id>\d+)', 'playlist', 'deezer'),
     ]
+    if "/api/v1/tracks/stream" in url or url.startswith("companion://"):
+        return 'track', 'companion_track', 'companion'
+
     for pattern, mtype, source in patterns:
         match = re.search(pattern, url)
         if match: return mtype, match.group('id'), source
@@ -220,7 +224,101 @@ async def download(url, download_dir, progress_callback=None, quality=None, stop
     
     mtype, mid, source = _detect_type_and_id(url)
     if not mtype:
-        raise Exception(f"Could not parse Qobuz or Deezer URL: {url}")
+        raise Exception(f"Could not parse Qobuz, Deezer, or Companion URL: {url}")
+
+    if source == "companion":
+        import urllib.parse
+        from .filepath_utils import normalize_nfc
+        parsed = urllib.parse.urlparse(url)
+        q_params = urllib.parse.parse_qs(parsed.query)
+        remote_path = q_params.get("path", ["track.audio"])[0]
+        ext = "m4a" if ("quality=aac" in url.lower() or remote_path.endswith(".m4a")) else (Path(remote_path).suffix.lstrip(".") or "flac")
+
+        filename = clean_filename(Path(remote_path).stem + f".{ext}")
+        dest_path = normalize_nfc(os.path.join(download_dir, filename))
+
+        if progress_callback:
+            progress_callback({"status": "Transferring", "percent": 0, "message": f"Receiving {filename} from Mac..."})
+
+        # No total cap: a lossless album track over slow Wi-Fi, after a
+        # server-side transcode, legitimately takes minutes. A stalled read
+        # is what should fail.
+        timeout = aiohttp.ClientTimeout(total=None, sock_connect=10, sock_read=120)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            # Streamed to a .part file and renamed only once complete and
+            # size-checked: a dropped Wi-Fi link used to leave a truncated
+            # file under the real name, which the scanner then imported.
+            part_path = dest_path + ".part"
+            downloaded = 0
+            try:
+                async with session.get(url) as resp:
+                    if resp.status == 401:
+                        raise PermissionError("Mac rejected the transfer (not paired)")
+                    if resp.status == 404:
+                        raise FileNotFoundError("Track is no longer queued on the Mac")
+                    resp.raise_for_status()
+                    total_bytes = int(resp.headers.get("Content-Length") or 0)
+                    if (total_bytes and os.path.exists(dest_path)
+                            and os.path.getsize(dest_path) == total_bytes):
+                        # Same file already received (re-sent from the Mac).
+                        if progress_callback:
+                            progress_callback({"status": "Finished", "percent": 100, "message": "Already on this device."})
+                        return [dest_path]
+                    if os.path.exists(dest_path):
+                        # A different track with the same file name (two
+                        # albums' "01. Intro"): never overwrite it.
+                        stem, dot_ext = os.path.splitext(dest_path)
+                        n = 2
+                        while os.path.exists(f"{stem} ({n}){dot_ext}"):
+                            n += 1
+                        dest_path = f"{stem} ({n}){dot_ext}"
+                        part_path = dest_path + ".part"
+                    with open(part_path, "wb") as fh:
+                        while True:
+                            if stop_event and stop_event.is_set():
+                                from .error_boundary import JobCancelledException
+                                raise JobCancelledException()
+                            chunk = await resp.content.read(1024 * 1024)
+                            if not chunk:
+                                break
+                            fh.write(chunk)
+                            downloaded += len(chunk)
+                            if progress_callback:
+                                pct = int(downloaded / total_bytes * 100) if total_bytes > 0 else 50
+                                progress_callback({
+                                    "status": "Transferring",
+                                    "percent": min(pct, 99),
+                                    "message": f"{downloaded/1e6:.1f}/{total_bytes/1e6:.1f} MB",
+                                })
+                if total_bytes and downloaded != total_bytes:
+                    raise IOError(f"Transfer incomplete ({downloaded} of {total_bytes} bytes)")
+                if downloaded == 0:
+                    raise IOError("Mac sent an empty file")
+                os.replace(part_path, dest_path)
+            finally:
+                if os.path.exists(part_path):
+                    try:
+                        os.remove(part_path)
+                    except OSError:
+                        pass
+
+            if get_platform_name() == 'android':
+                def _fix_perms():
+                    try:
+                        os.chmod(dest_path, 0o666)
+                        parent = os.path.dirname(dest_path)
+                        if parent and parent != "/":
+                            os.chmod(parent, 0o777)
+                        import subprocess
+                        subprocess.run(["am", "broadcast", "-a", "android.intent.action.MEDIA_SCANNER_SCAN_FILE", "-d", f"file://{dest_path}"], capture_output=True)
+                        subprocess.run(["content", "insert", "--uri", "content://media/external/file", "--bind", f"_data:s:{dest_path}"], capture_output=True)
+                    except Exception:
+                        pass
+                await asyncio.to_thread(_fix_perms)
+
+            if progress_callback:
+                progress_callback({"status": "Finished", "percent": 100, "message": "Transfer complete."})
+            return [dest_path]
 
     config = Config(get_config_path())
     client = _build_client(source, config)

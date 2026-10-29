@@ -129,6 +129,30 @@ class FletAudioService extends FletService with WidgetsBindingObserver {
     super.init();
     debugPrint("FletAudioService(${control.id}).init");
     WidgetsBinding.instance.addObserver(this);
+    // Listen for native events (e.g. Cancel button clicks on notifications).
+    _decodeChannel.setMethodCallHandler((call) async {
+      if (call.method == 'notificationAction') {
+        final args = call.arguments as Map<dynamic, dynamic>?;
+        final job = args?['job']?.toString() ?? '';
+        final action = args?['action']?.toString() ?? '';
+        debugPrint("FletAudioService: notificationAction received: job=$job, action=$action");
+        control.triggerEvent(
+          'notification_action',
+          jsonEncode({'job': job, 'action': action}),
+        );
+      }
+      return null;
+    });
+    // A notification tap that launched the app cold reached Kotlin before
+    // the handler above existed; replay it now.
+    _decodeChannel.invokeMethod<String>('takePendingNavigate').then((target) {
+      if (target != null && target.isNotEmpty) {
+        control.triggerEvent(
+          'notification_action',
+          jsonEncode({'job': 'navigate', 'action': target}),
+        );
+      }
+    }).catchError((_) {});
     // Register the invoke-method listener immediately so Python method calls
     // can resolve as soon as the handler is ready. flet_audio (the working
     // reference) does the same.
@@ -977,6 +1001,7 @@ class FletAudioService extends FletService with WidgetsBindingObserver {
   @override
   void dispose() {
     debugPrint("FletAudioService(${control.id}).dispose()");
+    _decodeChannel.setMethodCallHandler(null);
     control.removeInvokeMethodListener(_invokeMethod);
     _playerStateSub?.cancel();
     _positionSub?.cancel();

@@ -1,5 +1,5 @@
-flet
-flet-audio
+flet>=1.0.5
+flet-audio>=1.0.5
 mutagen
 aiohttp
 aiofiles
@@ -10,8 +10,6 @@ tinytag
 # Deezer backend: API client + Blowfish/AES for its encrypted CDN streams.
 deezer-py
 pycryptodomex
-aiofiles
-serious-python
 numpy
 pyobjc-framework-AVFoundation; sys_platform == "darwin"
 -e ../flet_audio_service

@@ -56,6 +56,7 @@ SOURCE_COLORS = {
     "deezer":     "#BF5AF2",  # Apple System Purple
     "tidal":      "#0A84FF",  # Apple System Blue - unused, kept for src_color misses
     "soundcloud": "#FF5500",  # Brand orange - unused
+    "companion":  "#30D158",  # Apple System Green (Mac/Phone P2P Sync)
 }
 
 LIB_ARTIST_COLOR   = "#BF5AF2"  # Apple System Purple
