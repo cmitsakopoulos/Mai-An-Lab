@@ -17,6 +17,7 @@ from ui.tokens import (
 QOBUZ_COLOR = SOURCE_COLORS["qobuz"]
 DEEZER_COLOR = SOURCE_COLORS["deezer"]
 from ui.widgets import OnyxButton, HubSettingItem, pick_folder
+from utils.llm_engine import DEFAULT_GEMINI_MODEL
 
 if sys.platform == "darwin":
     from utils.audio_engine_macos import audio_engine
@@ -272,6 +273,7 @@ class SettingsView:
         self.app = app
         self.page = app.page
         self._picking_target = None # "download" or "library"
+        self._gemini_models_loaded = False
 
         # File Picker: Windows only. macOS/Linux use native subprocess picker.
         # Android uses _browse_android_paths(); no FilePicker (separate Flet extension).
@@ -406,16 +408,16 @@ class SettingsView:
             text_style=ft.TextStyle(color=TEXT, size=13),
             label_style=ft.TextStyle(color=CYAN, size=11),
         )
+        # Placeholder options until _refresh_gemini_models() replaces them with
+        # what the key can actually use (Google retires models every few
+        # months, so a fixed list goes stale).
         self._assistant_model_dropdown = ft.Dropdown(
             label="Gemini Model",
             options=[
-                ft.dropdown.Option(key="gemini-3.5-flash-lite", text="Gemini 3.5 Flash-Lite (Recommended — Fast & Free)"),
-                ft.dropdown.Option(key="gemini-3.5-flash", text="Gemini 3.5 Flash (Agentic, High Performance)"),
-                ft.dropdown.Option(key="gemini-3.6-flash", text="Gemini 3.6 Flash (Latest — July 2026)"),
-                ft.dropdown.Option(key="gemini-2.5-flash", text="Gemini 2.5 Flash (Legacy — Retires Oct 2026)"),
-                ft.dropdown.Option(key="gemini-2.5-pro", text="Gemini 2.5 Pro (Legacy — Retires Oct 2026)"),
+                ft.dropdown.Option(key=DEFAULT_GEMINI_MODEL, text=f"{DEFAULT_GEMINI_MODEL} (default)"),
+                ft.dropdown.Option(key="gemini-3.5-flash", text="gemini-3.5-flash"),
             ],
-            value="gemini-3.5-flash-lite",
+            value=DEFAULT_GEMINI_MODEL,
             bgcolor=SURFACE2,
             border=_input_border(BORDER, CYAN, 10),
             text_style=ft.TextStyle(color=TEXT, size=13),
@@ -505,6 +507,8 @@ class SettingsView:
         self._show_library_stats_switch  = ft.Switch(value=True, active_color=CYAN, on_change=self._on_appearance_change)
         self._show_top_artists_switch    = ft.Switch(value=True, active_color=CYAN, on_change=self._on_appearance_change)
         self._show_top_genres_switch     = ft.Switch(value=True, active_color=CYAN, on_change=self._on_appearance_change)
+        self._show_recent_searches_switch = ft.Switch(value=True, active_color=CYAN, on_change=self._on_appearance_change)
+        self._show_new_releases_switch   = ft.Switch(value=True, active_color=CYAN, on_change=self._on_appearance_change)
 
         # Library Pane Customization & Jarvis
         self._show_jarvis_switch = ft.Switch(value=True, active_color=CYAN, on_change=self._on_appearance_change)
@@ -805,6 +809,8 @@ class SettingsView:
                 "library_stats": bool(getattr(self, "_show_library_stats_switch", None) and self._show_library_stats_switch.value),
                 "top_artists": bool(getattr(self, "_show_top_artists_switch", None) and self._show_top_artists_switch.value),
                 "top_genres": bool(getattr(self, "_show_top_genres_switch", None) and self._show_top_genres_switch.value),
+                "recent_searches": bool(getattr(self, "_show_recent_searches_switch", None) and self._show_recent_searches_switch.value),
+                "new_releases": bool(getattr(self, "_show_new_releases_switch", None) and self._show_new_releases_switch.value),
                 "jarvis": bool(getattr(self, "_show_jarvis_switch", None) and self._show_jarvis_switch.value),
                 "network": bool(getattr(self, "_show_network_switch", None) and self._show_network_switch.value),
                 "playlists": bool(getattr(self, "_show_playlists_switch", None) and self._show_playlists_switch.value),
@@ -1549,6 +1555,8 @@ class SettingsView:
         self._show_library_stats_switch.on_change = save_cb
         self._show_top_artists_switch.on_change = save_cb
         self._show_top_genres_switch.on_change = save_cb
+        self._show_recent_searches_switch.on_change = save_cb
+        self._show_new_releases_switch.on_change = save_cb
         self._show_jarvis_switch.on_change = save_cb
         self._show_network_switch.on_change = save_cb
         self._show_playlists_switch.on_change = save_cb
@@ -1564,6 +1572,8 @@ class SettingsView:
             self._pill_style_dropdown,
             ft.Divider(color=BORDER, height=20),
             ft.Text("Landing Page Sections", color=CYAN, size=12, weight=ft.FontWeight.BOLD),
+            ft.Row([self._show_recent_searches_switch, ft.Text("Show Recent Searches", color=TEXT, size=12)], spacing=10),
+            ft.Row([self._show_new_releases_switch, ft.Text("Show New From Your Artists", color=TEXT, size=12)], spacing=10),
             ft.Row([self._show_most_listened_switch, ft.Text("Show Most Listened Tracks", color=TEXT, size=12)], spacing=10),
             ft.Row([self._show_top_artists_switch, ft.Text("Show Most Listened Artists", color=TEXT, size=12)], spacing=10),
             ft.Row([self._show_top_genres_switch, ft.Text("Show Most Listened Genres", color=TEXT, size=12)], spacing=10),
@@ -1729,7 +1739,7 @@ class SettingsView:
             row["status"].value = status.upper() if status else "UNKNOWN"
             row["status"].color = CYAN if granted else "#FF8866"
             row["grant"].disabled = granted
-            row["grant"].text = "GRANTED" if granted else "GRANT"
+            row["grant"].content = "GRANTED" if granted else "GRANT"
         self.app.safe_update(lambda: None)
 
     def _on_grant_permission(self, name: str):
@@ -2433,6 +2443,8 @@ class SettingsView:
             self._show_library_stats_switch.value  = bool(landing.get("show_library_stats", True))
             self._show_top_artists_switch.value    = bool(landing.get("show_top_artists", True))
             self._show_top_genres_switch.value     = bool(landing.get("show_top_genres", True))
+            self._show_recent_searches_switch.value = bool(landing.get("show_recent_searches", True))
+            self._show_new_releases_switch.value   = bool(landing.get("show_new_releases", True))
 
             appearance = cfg.get("appearance", {})
             raw_accent = appearance.get("accent_color", "#FFD60A")
@@ -2473,7 +2485,10 @@ class SettingsView:
             self._assistant_llm_switch.value = bool(assistant_cfg.get("llm_enabled", True))
             self._assistant_provider_dropdown.value = str(assistant_cfg.get("llm_provider", "gemini"))
             self._assistant_api_key_field.value = str(assistant_cfg.get("gemini_api_key", ""))
-            self._assistant_model_dropdown.value = str(assistant_cfg.get("gemini_model", "gemini-3.5-flash-lite"))
+            self._assistant_model_dropdown.value = str(assistant_cfg.get("gemini_model") or DEFAULT_GEMINI_MODEL)
+            self._ensure_model_option(self._assistant_model_dropdown.value)
+            if (self._assistant_api_key_field.value or "").strip() and not self._gemini_models_loaded:
+                self.app.page.run_task(self._refresh_gemini_models, False)
             self._assistant_ollama_url_field.value = str(assistant_cfg.get("ollama_endpoint", "http://localhost:11434/v1"))
             self._assistant_ollama_model_field.value = str(assistant_cfg.get("ollama_model", "llama3.2"))
             self._assistant_personality_field.value = str(assistant_cfg.get("personality_prompt", ""))
@@ -2502,8 +2517,12 @@ class SettingsView:
                 "show_library_stats": show_stats,
                 "show_top_artists": bool(show_artists),
                 "show_top_genres": bool(show_genres),
+                "show_recent_searches": bool(self._show_recent_searches_switch.value),
+                "show_new_releases": bool(self._show_new_releases_switch.value),
             }
         })
+        if self._show_new_releases_switch.value and hasattr(self.app, "ensure_new_releases_refresh"):
+            self.app.ensure_new_releases_refresh()
         self.app.show_snackbar("Landing page settings updated.")
         if hasattr(self.app, "search_view"):
             self.app.search_view.refresh_setup_state()
@@ -2571,6 +2590,8 @@ class SettingsView:
                 "show_library_stats": bool(self._show_library_stats_switch.value),
                 "show_top_artists": bool(self._show_top_artists_switch.value),
                 "show_top_genres": bool(self._show_top_genres_switch.value),
+                "show_recent_searches": bool(self._show_recent_searches_switch.value),
+                "show_new_releases": bool(self._show_new_releases_switch.value),
             },
             "general": {
                 "startup_page": self._startup_page_dropdown.value,
@@ -3455,7 +3476,7 @@ class SettingsView:
                 "llm_enabled": self._assistant_llm_switch.value,
                 "llm_provider": self._assistant_provider_dropdown.value or "gemini",
                 "gemini_api_key": (self._assistant_api_key_field.value or "").strip(),
-                "gemini_model": self._assistant_model_dropdown.value or "gemini-3.5-flash-lite",
+                "gemini_model": self._assistant_model_dropdown.value or DEFAULT_GEMINI_MODEL,
                 "ollama_endpoint": (self._assistant_ollama_url_field.value or "").strip() or "http://localhost:11434/v1",
                 "ollama_model": (self._assistant_ollama_model_field.value or "").strip() or "llama3.2",
                 "personality_prompt": (self._assistant_personality_field.value or "").strip(),
@@ -3476,7 +3497,7 @@ class SettingsView:
         engine = LLMEngine(
             provider=provider,
             api_key=(self._assistant_api_key_field.value or "").strip(),
-            model=self._assistant_model_dropdown.value or "gemini-3.5-flash-lite",
+            model=self._assistant_model_dropdown.value or DEFAULT_GEMINI_MODEL,
             ollama_endpoint=(self._assistant_ollama_url_field.value or "").strip() or "http://localhost:11434/v1",
             ollama_model=(self._assistant_ollama_model_field.value or "").strip() or "llama3.2",
         )
@@ -3488,10 +3509,54 @@ class SettingsView:
             res = await engine.chat_completion([{"role": "user", "content": "Reply with the single word: OK"}])
             if res.success:
                 self.app.show_snackbar(f"✓ {provider} connection OK.")
+                if provider == "gemini":
+                    await self._refresh_gemini_models(False)
             else:
                 self.app.show_snackbar(f"✗ Connection failed: {res.error_message}")
         except Exception as exc:
             self.app.show_snackbar(f"✗ Connection failed: {exc}", color="#FF4444")
+
+    def _ensure_model_option(self, model_id: str, note: str = "") -> None:
+        """Keep the saved model selectable even when the list doesn't offer it,
+        so a load never silently swaps the user's choice for another model."""
+        dd = self._assistant_model_dropdown
+        if not model_id or any(o.key == model_id for o in dd.options):
+            return
+        dd.options.append(ft.dropdown.Option(key=model_id, text=f"{model_id}{note}"))
+
+    async def _refresh_gemini_models(self, announce: bool = True):
+        """Fill the model dropdown with the chat models this API key can use."""
+        from utils.llm_engine import list_gemini_models
+        key = (self._assistant_api_key_field.value or "").strip()
+        if not key:
+            if announce:
+                self.app.show_snackbar("Enter your Gemini API key first.")
+            return
+        try:
+            models = await list_gemini_models(key)
+        except Exception as exc:
+            logger.warning("Gemini model list failed: %s", exc)
+            if announce:
+                self.app.show_snackbar(f"Couldn't load Gemini models: {exc}", color="#FF4444")
+            return
+        if not models:
+            return
+        dd = self._assistant_model_dropdown
+        current = dd.value or DEFAULT_GEMINI_MODEL
+        dd.options = [
+            ft.dropdown.Option(
+                key=m["id"],
+                text=m["id"] + (" (default)" if m["id"] == DEFAULT_GEMINI_MODEL else ""),
+            )
+            for m in models
+        ]
+        # A retired model stays visible, flagged, rather than vanishing.
+        self._ensure_model_option(current, " (not offered for this key)")
+        dd.value = current
+        self._gemini_models_loaded = True
+        self.app.safe_update(lambda: None)
+        if announce:
+            self.app.show_snackbar(f"{len(models)} Gemini models available.")
 
     def _update_assistant_provider_visibility(self, e=None):
         if not hasattr(self, "_gemini_group_container") or not hasattr(self, "_ollama_group_container"):
@@ -3518,7 +3583,14 @@ class SettingsView:
             self._assistant_api_key_field,
             ft.Text("• Free tier API keys can be generated at aistudio.google.com with 0 cost & 0 credit card.", color=DIM, size=11),
             ft.Container(height=5),
-            self._assistant_model_dropdown,
+            ft.Row([
+                ft.Container(self._assistant_model_dropdown, expand=True),
+                ft.IconButton(
+                    icon=ft.Icons.REFRESH_ROUNDED, icon_color=CYAN,
+                    tooltip="Load the models your key can use",
+                    on_click=lambda _e: self.app.page.run_task(self._refresh_gemini_models),
+                ),
+            ], spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER),
         ], spacing=10)
 
         self._ollama_group_container = ft.Column([

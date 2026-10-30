@@ -137,6 +137,10 @@ class FletAudioServicePlugin : FlutterPlugin, MethodChannel.MethodCallHandler,
         val target = intent.getStringExtra(EXTRA_NAVIGATE_TO) ?: return
         // Strip it so a re-attach (rotation) doesn't navigate again.
         intent.removeExtra(EXTRA_NAVIGATE_TO)
+        // Reopened from Recents after the process died: Android hands back the
+        // ORIGINAL tap intent (the removeExtra above lived only in the dead
+        // process), so this is an old tap, not a new one.
+        if (intent.flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY != 0) return
         pendingNavigate = target
         mainHandler.post {
             channel?.invokeMethod(
@@ -183,8 +187,31 @@ class FletAudioServicePlugin : FlutterPlugin, MethodChannel.MethodCallHandler,
             val progress = call.argument<Int>("progress") ?: 0
             val total = call.argument<Int>("total") ?: 0
             val done = call.argument<Boolean>("done") ?: false
+            val cancellable = call.argument<Boolean>("cancellable") ?: true
+            val actionLabel = call.argument<String>("actionLabel")
+            val actionTarget = call.argument<String>("actionTarget")
 
-            showProgressNotification(job, title, content, progress, total, done)
+            showProgressNotification(job, title, content, progress, total, done, cancellable,
+                actionLabel, actionTarget)
+            result.success(null)
+        } else if (call.method == "showAlertNotification") {
+            showAlertNotification(
+                key = call.argument<String>("key") ?: "alert",
+                icon = call.argument<String>("icon") ?: "",
+                title = call.argument<String>("title") ?: "",
+                content = call.argument<String>("content") ?: "",
+                navigateTo = call.argument<String>("navigateTo") ?: "",
+                actionLabel = call.argument<String>("actionLabel"),
+                actionTarget = call.argument<String>("actionTarget"),
+                urgent = call.argument<Boolean>("urgent") ?: false,
+            )
+            result.success(null)
+        } else if (call.method == "cancelAlertNotification") {
+            val context = appContext
+            if (context != null) {
+                val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                nm.cancel(alertIdFor(call.argument<String>("key") ?: "alert"))
+            }
             result.success(null)
         } else if (call.method == "releasePlaybackService") {
             result.success(releasePlaybackService())
@@ -588,8 +615,34 @@ class FletAudioServicePlugin : FlutterPlugin, MethodChannel.MethodCallHandler,
 
     private fun notificationIdFor(job: String): Int = LibraryTaskService.notificationIdFor(job)
 
+    // Alert cards (ProgressNotifications.buildAlert) — one id per key, so a
+    // newer "Couldn't play" replaces the older one instead of stacking.
+    private fun alertIdFor(key: String): Int = when (key) {
+        "transfers" -> 9700
+        "scan" -> 9710
+        "playback_error" -> 9720
+        else -> 9800 + (key.hashCode() and 0xFF)
+    }
+
+    private fun showAlertNotification(
+        key: String, icon: String, title: String, content: String, navigateTo: String,
+        actionLabel: String?, actionTarget: String?, urgent: Boolean,
+    ) {
+        val context = appContext ?: return
+        val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val id = alertIdFor(key)
+        try {
+            nm.notify(id, ProgressNotifications.buildAlert(
+                context, id, icon, title, content, navigateTo, actionLabel, actionTarget, urgent))
+        } catch (e: SecurityException) {
+            // POST_NOTIFICATIONS revoked (Android 13+).
+            Log.w(TAG, "notify denied for alert '$key': ${e.message}")
+        }
+    }
+
     private fun showProgressNotification(
         job: String, title: String, content: String, progress: Int, total: Int, done: Boolean,
+        cancellable: Boolean, actionLabel: String? = null, actionTarget: String? = null,
     ) {
         val context = appContext ?: return
         val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -600,7 +653,7 @@ class FletAudioServicePlugin : FlutterPlugin, MethodChannel.MethodCallHandler,
 
         if (!done) {
             val inService = LibraryTaskService.update(
-                context, job, LibraryTaskService.Job(job, title, content, progress, total))
+                context, job, LibraryTaskService.Job(job, title, content, progress, total, cancellable))
             if (inService) {
                 if (fallbackShown.remove(job)) nm.cancel(notificationId)
                 return
@@ -618,7 +671,8 @@ class FletAudioServicePlugin : FlutterPlugin, MethodChannel.MethodCallHandler,
 
         try {
             nm.notify(notificationId, ProgressNotifications.build(
-                context, notificationId, job, title, content, progress, total, done))
+                context, notificationId, job, title, content, progress, total, done, cancellable,
+                actionLabel, actionTarget))
         } catch (e: SecurityException) {
             // POST_NOTIFICATIONS revoked (Android 13+).
             Log.w(TAG, "notify denied for '$job': ${e.message}")

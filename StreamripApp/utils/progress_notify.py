@@ -44,6 +44,7 @@ class ProgressNotifier:
         # Only a notifier that actually showed something posts a summary, so a
         # no-op run (nothing to analyse / every artist up to date) stays silent.
         self.posted = False
+        self._handler = None
         if on_cancel is not None:
             self._register_cancel()
 
@@ -63,31 +64,36 @@ class ProgressNotifier:
                             asyncio.create_task(res)
                     except Exception as ex:
                         logger.warning("on_cancel callback for %s failed: %s", self.job, ex)
+            self._handler = _action_handler
             svc.register_notification_action_handler(self.job, _action_handler)
 
-    async def _send(self, content: str, progress: int, total: int, done: bool) -> None:
+    async def _send(self, content: str, progress: int, total: int, done: bool,
+                    action: tuple[str, str] | None = None) -> None:
         svc = _service()
         if svc is None:
             return
+        extra = {}
+        if action:
+            extra = {"action_label": action[0], "action_target": action[1]}
         try:
             await svc.show_progress_notification(
                 title=self.title, content=content,
                 progress=progress, total=total, done=done, job=self.job,
+                # A Cancel button nothing listens to just does nothing on tap.
+                cancellable=self.on_cancel is not None,
+                **extra,
             )
         except Exception as exc:
             # A notification is never worth failing the job over.
             logger.debug("progress notification (%s) failed: %s", self.job, exc)
 
-    def _post(self, content: str, progress: int, total: int, done: bool) -> None:
+    def _post(self, content: str, progress: int, total: int, done: bool,
+              action: tuple[str, str] | None = None) -> None:
         # Fire-and-forget so it can be called from sync progress callbacks
         # (metadata_enrich) as well as async ones (bulk_analyze_library).
         if not done:
             self.posted = True
-        try:
-            asyncio.get_running_loop().create_task(
-                self._send(content, progress, total, done))
-        except RuntimeError:
-            pass  # no running loop (tests / shutdown)
+        _spawn(self._send(content, progress, total, done, action))
 
     def update(self, done: int, total: int, content: str) -> None:
         """Post progress. Throttled to ~1 update/s, but never drops updates when
@@ -114,14 +120,65 @@ class ProgressNotifier:
         self._last_content = content
         self._post(content, 0, 0, False)
 
-    def finish(self, content: str = "") -> None:
+    def finish(self, content: str = "", action: tuple[str, str] | None = None) -> None:
         """Replace the progress bar with a short-lived summary (or cancel it
-        when `content` is empty). No-op if nothing was ever shown."""
+        when `content` is empty). No-op if nothing was ever shown.
+
+        `action` = (label, navigate target), e.g. ("Retry", "downloads:retry"),
+        adds a button and keeps the summary until dismissed. The button opens
+        the app, so it works even after this run (and its handlers) are gone;
+        main._on_notification_navigate carries it out."""
         if self.posted:
-            self._post(content, 0, 0, True)
+            self._post(content, 0, 0, True, action if content else None)
         svc = _service()
-        if svc and hasattr(svc, "unregister_notification_action_handler"):
-            svc.unregister_notification_action_handler(self.job)
+        if self._handler is not None and svc and hasattr(svc, "unregister_notification_action_handler"):
+            svc.unregister_notification_action_handler(self.job, self._handler)
+        self._handler = None
+
+
+def _spawn(coro) -> None:
+    try:
+        asyncio.get_running_loop().create_task(coro)
+    except RuntimeError:
+        coro.close()  # no running loop (tests / shutdown)
+
+
+def post_alert(key: str, title: str, content: str, *, navigate_to: str = "",
+               action: tuple[str, str] | None = None, urgent: bool = False,
+               icon: str = "") -> None:
+    """Fire-and-forget one-shot card (not a progress bar). `key` names it so a
+    newer card replaces an older one. A no-op where there is no native bridge."""
+    svc = _service()
+    if svc is None or not hasattr(svc, "show_alert_notification"):
+        return
+
+    async def _go():
+        try:
+            await svc.show_alert_notification(
+                key=key, title=title, content=content, navigate_to=navigate_to,
+                action_label=action[0] if action else "",
+                action_target=action[1] if action else "",
+                urgent=urgent, icon=icon,
+            )
+        except Exception as exc:
+            logger.debug("alert notification (%s) failed: %s", key, exc)
+
+    _spawn(_go())
+
+
+def cancel_alert(key: str) -> None:
+    """Remove the card posted under `key`, if any."""
+    svc = _service()
+    if svc is None or not hasattr(svc, "cancel_alert_notification"):
+        return
+
+    async def _go():
+        try:
+            await svc.cancel_alert_notification(key)
+        except Exception as exc:
+            logger.debug("cancel alert (%s) failed: %s", key, exc)
+
+    _spawn(_go())
 
 
 def format_eta(seconds: float) -> str:
@@ -157,6 +214,16 @@ def metadata_progress_cb(notifier: ProgressNotifier, inner=None):
         if inner is not None:
             inner(i, total, name, res)
     return _cb
+
+
+def metadata_retry_action(summary: dict) -> tuple[str, str] | None:
+    """A Retry button for a sync that failed outright or lost its connection.
+    Per-artist misses get none: those already retry on their own, rolling
+    between sources, and a manual Retry would just repeat them."""
+    status = (summary or {}).get("status") or ""
+    if status.startswith("error") or status == "aborted":
+        return ("Retry", "workbench:sync")
+    return None
 
 
 def metadata_summary_text(summary: dict) -> str:

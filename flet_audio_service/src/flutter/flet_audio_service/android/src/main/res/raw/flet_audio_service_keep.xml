@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- audio_service looks the media notification icon up by NAME at runtime
+     (androidNotificationIcon in the Dart config). That string lives in the
+     Dart snapshot, not the dex, so the release resource shrinker would see the
+     drawable as unused and strip it, and the notification would lose its icon. -->
+<resources xmlns:tools="http://schemas.android.com/tools"
+    tools:keep="@drawable/ic_stat_playback" />

@@ -282,7 +282,10 @@ class TestQuietScan(unittest.TestCase):
         v.app._current_tab = 1          # user is on Search
         LibraryView._on_scan_complete(v, 3, 0)
         self.assertTrue(v._needs_reload)
-        v.page.run_task.assert_not_called()
+        scheduled = [c.args[0] for c in v.page.run_task.call_args_list]
+        self.assertNotIn(v.load_library, scheduled)
+        # The only background work is the "not analysed yet" check.
+        self.assertEqual(scheduled, [v._announce_unanalysed])
         v.app.show_snackbar.assert_not_called()
 
     def test_quiet_completion_on_tab_rebuilds_immediately(self):
@@ -292,7 +295,8 @@ class TestQuietScan(unittest.TestCase):
         v.app._current_tab = 2          # user is watching the library
         LibraryView._on_scan_complete(v, 3, 0)
         self.assertFalse(v._needs_reload)
-        v.page.run_task.assert_called_once()
+        scheduled = [c.args[0] for c in v.page.run_task.call_args_list]
+        self.assertEqual(scheduled.count(v.load_library), 1)
 
     def test_loud_completion_announces_itself(self):
         from ui.views.library import LibraryView
@@ -301,6 +305,29 @@ class TestQuietScan(unittest.TestCase):
         LibraryView._on_scan_complete(v, 3, 0)
         v.app.show_snackbar.assert_called_once()
         v.page.run_task.assert_called_once()
+
+    def test_unanalysed_card_after_quiet_scan(self):
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+        from ui.views.library import LibraryView
+        from utils import progress_notify as pn
+        v = self._view()
+        v._analyzing_dsp = False
+        posted, cancelled = [], []
+        with patch.object(pn, "post_alert", lambda *a, **k: posted.append((a, k))), \
+             patch.object(pn, "cancel_alert", lambda key: cancelled.append(key)):
+            v.app.db_manager.get_tracks_missing_features = AsyncMock(return_value=[{}, {}])
+            asyncio.run(LibraryView._announce_unanalysed(v))
+            v.app.db_manager.get_tracks_missing_features = AsyncMock(return_value=[])
+            asyncio.run(LibraryView._announce_unanalysed(v))
+            v._analyzing_dsp = True  # analysis already running: say nothing
+            asyncio.run(LibraryView._announce_unanalysed(v))
+        self.assertEqual(len(posted), 1)
+        (key, _title, content), kw = posted[0]
+        self.assertEqual(key, "scan")
+        self.assertIn("2 tracks are not analysed", content)
+        self.assertEqual(kw["action"], ("Analyse", "library:analyse"))
+        self.assertEqual(cancelled, ["scan"])
 
     def test_on_show_picks_up_a_deferred_rebuild_once(self):
         from ui.views.library import LibraryView

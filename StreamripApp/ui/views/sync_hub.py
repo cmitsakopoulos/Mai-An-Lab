@@ -6,6 +6,7 @@ Android Client controls (Auto-Discovery, Pairing, Live DSP Offload, and Wireless
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import platform
@@ -22,7 +23,7 @@ from ui.tokens import (
     apply_opacity,
 )
 from utils.dsp import FEATURES_VERSION
-from utils.sync.discovery import BeaconListener, resolve_local_ip, UDP_PORT
+from utils.sync.discovery import local_interfaces
 from utils.sync.server import CompanionServer, DEFAULT_PORT, get_companion_server
 from utils.sync.client import CompanionClient
 
@@ -59,6 +60,8 @@ class SyncHubPane(ft.Container):
 
         self._is_offloading = False
         self._cancel_offload = False
+        self._was_connected = False
+        self._finding = False
 
         self._build_ui()
 
@@ -104,7 +107,7 @@ class SyncHubPane(ft.Container):
     # ═════════════════════════════════════════════════════════════════════════
     def _build_macos_view(self) -> ft.Control:
         is_running = self._server.is_running if self._server else False
-        local_ip = resolve_local_ip()
+        local_ip = self._mac_lan_ip()
         bound_port = (self._server.bound_port if self._server and self._server.bound_port else DEFAULT_PORT)
 
         self._mac_status_dot = ft.Container(
@@ -123,6 +126,9 @@ class SyncHubPane(ft.Container):
         )
 
         self._mac_client_text = ft.Text("", color=DIM, size=12, visible=False)
+        # Network facts that explain a phone not finding this Mac: other
+        # addresses, a VPN holding the default route, a large managed network.
+        self._mac_net_text = ft.Text("", color=AMBER, size=12, visible=False, selectable=True)
         self._mac_pending_text = ft.Text("", color=DIM, size=12)
         self._mac_pending_row = ft.Row([
             ft.Container(content=self._mac_pending_text, expand=True),
@@ -205,11 +211,14 @@ class SyncHubPane(ft.Container):
                     pin_box,
                     endpoint_box,
                 ], spacing=12, alignment=ft.MainAxisAlignment.CENTER),
+                self._mac_net_text,
                 ft.Text(
-                    "USB instead of Wi-Fi: run `adb reverse tcp:8945 tcp:8945` with the phone "
-                    "plugged in. If the phone can't find this Mac, allow Local Network access for "
-                    "this app (System Settings → Privacy & Security → Local Network) and accept "
-                    "the firewall prompt for incoming connections.",
+                    "Phone can't find this Mac? Tap Find Mac on the phone, or type the endpoint "
+                    "above under Manual IP. Office, campus and guest Wi-Fi often keep devices "
+                    "apart; the phone's hotspot always works. USB: run "
+                    "`adb reverse tcp:8945 tcp:8945` with the phone plugged in. Also allow Local "
+                    "Network access for this app (System Settings → Privacy & Security → Local "
+                    "Network) and accept the firewall prompt for incoming connections.",
                     color=DIM, size=11, selectable=True,
                 ),
                 ft.Row([
@@ -254,19 +263,53 @@ class SyncHubPane(ft.Container):
             tools_card,
         ], spacing=16, expand=True)
 
+    @staticmethod
+    def _mac_lan_ip() -> str:
+        for iface in local_interfaces():
+            if not iface["vpn"]:
+                return iface["ip"]
+        return "127.0.0.1"
+
+    @staticmethod
+    def _mac_network_notes() -> str:
+        ifaces = local_interfaces()
+        lan = [i for i in ifaces if not i["vpn"]]
+        notes = []
+        if ifaces and ifaces[0]["vpn"]:
+            notes.append(f"A VPN ({ifaces[0]['name']}) carries this Mac's traffic. The phone "
+                         "must use the address above, and some VPNs block local traffic "
+                         "outright: pause it if the phone can't connect.")
+        if len(lan) > 1:
+            others = ", ".join(f"{i['ip']} ({i['name']})" for i in lan[1:])
+            notes.append(f"Also reachable at {others}.")
+        if lan and lan[0]["prefix"] < 24:
+            notes.append(f"This is a large network (/{lan[0]['prefix']}), typical of office and "
+                         "campus Wi-Fi. These usually block automatic discovery and often keep "
+                         "devices apart: type the address above under Manual IP on the phone, "
+                         "and if that fails too, use the phone's hotspot.")
+        return "\n".join(notes)
+
     def _refresh_macos_state(self):
         if self._is_android or not self._server or not hasattr(self, "_mac_switch"):
             return
         srv = self._server
         running = srv.is_running
-        ip = resolve_local_ip()
+        ip = self._mac_lan_ip()
         port = srv.bound_port or DEFAULT_PORT
         self._mac_switch.value = running
         self._mac_status_dot.bgcolor = ACCENT_GREEN if running else DIM
-        self._mac_status_text.value = f"Online · {ip}:{port}" if running else "Offline · Inactive"
+        if running:
+            self._mac_status_text.value = f"Online · {ip}:{port}"
+        elif srv.stopped_reason == "idle":
+            self._mac_status_text.value = "Offline · turned off after 15 min idle"
+        else:
+            self._mac_status_text.value = "Offline · Inactive"
         self._mac_status_text.color = TEXT if running else DIM
         self._pin_display.value = srv.pin
         self._endpoint_display.value = f"{ip}:{port}"
+        notes = self._mac_network_notes()
+        self._mac_net_text.value = notes
+        self._mac_net_text.visible = bool(notes)
         if srv.last_client:
             name, cip, seen = srv.last_client
             ago = int(time.monotonic() - seen)
@@ -275,7 +318,9 @@ class SyncHubPane(ft.Container):
             self._mac_client_text.value = f"Last seen: {name} ({via}) · {when}"
             self._mac_client_text.visible = True
         n = len(srv._pending_transfers)
-        self._mac_pending_text.value = f"{n} track{'s' if n != 1 else ''} waiting for the phone to download."
+        self._mac_pending_text.value = (
+            f"{n} track{'s' if n != 1 else ''} waiting for the phone to download."
+            + ("" if running else " Offered again when the server is back on."))
         self._mac_pending_row.visible = n > 0
 
     def _on_clear_pending_click(self, _e):
@@ -356,6 +401,15 @@ class SyncHubPane(ft.Container):
             icon=ft.Icons.ROUTER_ROUNDED,
             on_click=self._on_toggle_manual_click,
         )
+        self._find_btn = ft.Button(
+            "Find Mac",
+            icon=ft.Icons.RADAR_ROUNDED,
+            on_click=self._on_find_click,
+            style=ft.ButtonStyle(bgcolor=CYAN, color=BG),
+        )
+        # What the last Find Mac / manual connect learned, kept on screen:
+        # a snackbar is gone before anyone reads a network diagnosis.
+        self._diag_text = ft.Text("", color=DIM, size=12, visible=False, selectable=True)
 
         connection_card = ft.Container(
             content=ft.Column([
@@ -369,13 +423,17 @@ class SyncHubPane(ft.Container):
                     ft.Container(content=self._client_status_text, expand=True),
                 ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
                 ft.Text(
-                    "Automatically discovers your Mac Companion over Wi-Fi, hotspot, or USB to sync tracks and offload acoustic analysis.",
+                    "Automatically discovers your Mac Companion over Wi-Fi, hotspot, or USB to "
+                    "sync tracks and offload acoustic analysis. Pauses after 15 minutes without "
+                    "use to save battery.",
                     color=DIM, size=12,
                 ),
                 ft.Row([
+                    self._find_btn,
                     self._unpair_btn,
                     self._toggle_manual_btn,
                 ], wrap=True, spacing=8),
+                self._diag_text,
                 self._manual_ip_row,
             ], spacing=10),
             padding=16,
@@ -507,11 +565,24 @@ class SyncHubPane(ft.Container):
         is_enabled = self._manager.enabled if self._manager else False
         is_conn = self._manager.is_connected if self._manager else False
         is_search = self._manager.is_searching if self._manager else False
+        is_asleep = self._manager.is_asleep if self._manager else False
         server = self._manager.discovered_server if self._manager else None
 
         self._android_switch.value = is_enabled
+        if not self._finding:
+            self._find_btn.content = "Test Connection" if is_conn else "Find Mac"
+            self._find_btn.disabled = False
 
-        if not is_enabled:
+        if is_enabled and is_asleep:
+            self._client_status_dot.bgcolor = DIM
+            self._client_status_text.value = "Paused after 15 min idle · tap Find Mac to resume"
+            self._unpair_btn.visible = False
+            self._download_transfers_btn.disabled = True
+            self._check_transfers_btn.disabled = True
+            self._offload_button.disabled = True
+            if hasattr(self, "_upload_bundle_btn"):
+                self._upload_bundle_btn.disabled = True
+        elif not is_enabled:
             self._client_status_dot.bgcolor = DIM
             self._client_status_text.value = "Offline · Inactive"
             self._unpair_btn.visible = False
@@ -532,12 +603,16 @@ class SyncHubPane(ft.Container):
                     f" · Mac app is on analysis v{mac_fv}, this phone v{FEATURES_VERSION}: update both")
             self._unpair_btn.visible = True
             self._check_transfers_btn.disabled = False
-            self._offload_button.disabled = False
+            # Never re-enabled mid-offload: a second run would race the first.
+            self._offload_button.disabled = self._is_offloading
             if hasattr(self, "_upload_bundle_btn"):
                 self._upload_bundle_btn.disabled = False
             if self.page:
                 self.page.run_task(self._refresh_pending_transfers)
-                self.page.run_task(self._refresh_dsp_stats)
+                # A library scan, not an HTTP call: on connect only, not on
+                # every state change (each finished download notifies).
+                if not self._was_connected:
+                    self.page.run_task(self._refresh_dsp_stats)
         elif is_search:
             self._client_status_dot.bgcolor = AMBER
             err = self._manager.last_error if self._manager else ""
@@ -558,6 +633,37 @@ class SyncHubPane(ft.Container):
             self._offload_button.disabled = True
             if hasattr(self, "_upload_bundle_btn"):
                 self._upload_bundle_btn.disabled = True
+        self._was_connected = is_conn and is_enabled and not is_asleep
+
+    def _show_diagnosis(self, text: str, ok: bool = False):
+        self._diag_text.value = text
+        self._diag_text.color = ACCENT_GREEN if ok else DIM
+        self._diag_text.visible = bool(text)
+
+    def _on_find_click(self, _e):
+        if self._manager and not self._finding:
+            self.page.run_task(self._do_find)
+
+    async def _do_find(self):
+        self._finding = True
+        self._find_btn.disabled = True
+        self._find_btn.content = "Searching…"
+        self._show_diagnosis("Trying USB, the last known address, a broadcast query, "
+                             "then a scan of this network…")
+        self._flush()
+        try:
+            result = await self._manager.find_mac()
+        except Exception as ex:
+            logger.exception("Find Mac failed")
+            result = f"Search failed: {ex}"
+        finally:
+            self._finding = False
+        found = self._manager.is_connected or self._manager._pairing_dialog_open
+        self._show_diagnosis(result, ok=found)
+        if not found and not self._manual_ip_row.visible:
+            self._on_toggle_manual_click(None)
+        self._update_android_ui_state()
+        self._flush()
 
     def _on_android_switch_toggle(self, e):
         enabled = bool(e.control.value)
@@ -600,18 +706,14 @@ class SyncHubPane(ft.Container):
         except ValueError:
             self.app.show_snackbar(f"Invalid port in {ip}", color=ACCENT_RED)
             return
-        self.app.show_snackbar(f"Connecting to {host}:{port}…", icon=ft.Icons.SYNC_ROUNDED)
         if not self._manager:
             return
-        if not self._manager.enabled:
-            await self._manager.start()
-        try:
-            await self._manager.handle_discovered_server(
-                {"ip": host, "port": port}, interactive=True)
-        except Exception as ex:
-            self.app.show_snackbar(
-                f"Could not reach {host}:{port} — is the Companion Server on, and are both "
-                f"devices on the same network? ({ex})", color=ACCENT_RED)
+        self._show_diagnosis(f"Connecting to {host}:{port}…")
+        self._flush()
+        result = await self._manager.connect_manual(host, port)
+        self._show_diagnosis(result, ok=self._manager.is_connected or self._manager._pairing_dialog_open)
+        self._update_android_ui_state()
+        self._flush()
 
     async def _refresh_pending_transfers(self):
         client = self._active_client
@@ -675,7 +777,7 @@ class SyncHubPane(ft.Container):
                 self._offload_button.disabled = True
             else:
                 self._dsp_stats_text.value = f"{count} track{'s' if count != 1 else ''} require acoustic analysis."
-                self._offload_button.disabled = False
+                self._offload_button.disabled = self._is_offloading or not self._is_client_connected
             if self.page:
                 self.page.update()
         except Exception as err:
@@ -728,54 +830,56 @@ class SyncHubPane(ft.Container):
             self._dsp_detail_text.value = f"Processed {done}/{total} ({rate:.1f} tracks/s) • {current}"
             self._flush()
 
-        try:
-            notifier.stage(f"Sending {len(missing)} tracks to Mac…")
-            res = await client.offload_dsp(
-                missing_paths=missing,
-                db_manager=self.app.db_manager,
-                progress_cb=_progress,
-                cancel_check=lambda: self._cancel_offload,
-                features_version=FEATURES_VERSION,
-            )
-            if self._cancel_offload:
-                summary = f"DSP offload cancelled ({res.get('analysed', 0)} of {len(missing)} done)."
-            elif res.get("failed", 0):
-                summary = f"Offload finished: {res['analysed']} analysed, {res['failed']} failed."
-            else:
-                summary = f"Offload complete: {res['analysed']} tracks analysed."
-            self.app.show_snackbar(summary, icon=ft.Icons.CHECK_CIRCLE, color=CYAN)
+        awake = self._manager.activity() if self._manager else contextlib.nullcontext()
+        with awake:
+            try:
+                notifier.stage(f"Sending {len(missing)} tracks to Mac…")
+                res = await client.offload_dsp(
+                    missing_paths=missing,
+                    db_manager=self.app.db_manager,
+                    progress_cb=_progress,
+                    cancel_check=lambda: self._cancel_offload,
+                    features_version=FEATURES_VERSION,
+                )
+                if self._cancel_offload:
+                    summary = f"DSP offload cancelled ({res.get('analysed', 0)} of {len(missing)} done)."
+                elif res.get("failed", 0):
+                    summary = f"Offload finished: {res['analysed']} analysed, {res['failed']} failed."
+                else:
+                    summary = f"Offload complete: {res['analysed']} tracks analysed."
+                self.app.show_snackbar(summary, icon=ft.Icons.CHECK_CIRCLE, color=CYAN)
 
-            if res.get("analysed"):
-                notifier.stage("Rebuilding similarity graph…")
-                from utils import track_graph as tg
-                await tg.build_metadata_edges(self.app.db_manager)
-                await tg.build_acoustic_edges(self.app.db_manager)
-                lib = getattr(self.app, "library_view", None)
-                if lib:
-                    lib._cached_unanalysed = None
-                    self.page.run_task(lib.load_library)
-        except PermissionError:
-            summary = "DSP offload stopped: the Mac no longer accepts this phone. Pair again."
-            self.app.show_snackbar(summary, color=ACCENT_RED)
-            if self._manager:
-                await self._manager.unpair()
-        except ConnectionError:
-            summary = "DSP offload stopped: lost connection to the Mac. Progress so far was saved."
-            self.app.show_snackbar(summary, color=ACCENT_RED)
-        except Exception as ex:
-            logger.exception("DSP offload failed")
-            summary = f"DSP offload failed: {ex}"
-            self.app.show_snackbar(f"Offload error: {ex}", color=ACCENT_RED)
-        finally:
-            # Always finish: an unfinished notifier keeps the native task
-            # service (and its wakelock) alive.
-            notifier.finish(summary)
-            self._is_offloading = False
-            self._offload_button.disabled = False
-            self._cancel_offload_btn.visible = False
-            self._dsp_progress_bar.visible = False
-            self._dsp_detail_text.visible = False
-            await self._refresh_dsp_stats()
+                if res.get("analysed"):
+                    notifier.stage("Rebuilding similarity graph…")
+                    from utils import track_graph as tg
+                    await tg.build_metadata_edges(self.app.db_manager)
+                    await tg.build_acoustic_edges(self.app.db_manager)
+                    lib = getattr(self.app, "library_view", None)
+                    if lib:
+                        lib._cached_unanalysed = None
+                        self.page.run_task(lib.load_library)
+            except PermissionError:
+                summary = "DSP offload stopped: the Mac no longer accepts this phone. Pair again."
+                self.app.show_snackbar(summary, color=ACCENT_RED)
+                if self._manager:
+                    await self._manager.unpair()
+            except ConnectionError:
+                summary = "DSP offload stopped: lost connection to the Mac. Progress so far was saved."
+                self.app.show_snackbar(summary, color=ACCENT_RED)
+            except Exception as ex:
+                logger.exception("DSP offload failed")
+                summary = f"DSP offload failed: {ex}"
+                self.app.show_snackbar(f"Offload error: {ex}", color=ACCENT_RED)
+            finally:
+                # Always finish: an unfinished notifier keeps the native task
+                # service (and its wakelock) alive.
+                notifier.finish(summary)
+                self._is_offloading = False
+                self._offload_button.disabled = False
+                self._cancel_offload_btn.visible = False
+                self._dsp_progress_bar.visible = False
+                self._dsp_detail_text.visible = False
+                await self._refresh_dsp_stats()
 
     def _on_cancel_offload_click(self, _e):
         self._cancel_offload = True
@@ -804,25 +908,27 @@ class SyncHubPane(ft.Container):
         self.app.show_snackbar("Creating snapshot bundle...", icon=ft.Icons.IOS_SHARE_ROUNDED)
         summary = ""
         bundle_path = None
-        try:
-            bundle_path = await asyncio.to_thread(
-                state_export.export_state,
-                self.app.db_manager.db_path,
-                get_config_path(),
-                get_search_history_path(),
-            )
-            notifier.stage("Transmitting bundle to Mac…")
-            self.app.show_snackbar("Transmitting bundle to Mac...", icon=ft.Icons.CLOUD_UPLOAD_ROUNDED)
-            res = await client.upload_state_bundle(bundle_path)
-            saved_name = os.path.basename(res.get('saved_path', 'mai_an_lab_state.zip'))
-            summary = f"Backup saved on Mac: {saved_name}"
-            self.app.show_snackbar(summary, icon=ft.Icons.CHECK_CIRCLE)
+        awake = self._manager.activity() if self._manager else contextlib.nullcontext()
+        with awake:
             try:
-                os.remove(bundle_path)  # the Mac has it; don't pile zips up on the phone
-            except OSError:
-                pass
-        except Exception as ex:
-            summary = f"Backup upload failed: {ex}"
-            self.app.show_snackbar(f"Backup failed: {ex}", color=ACCENT_RED)
-        finally:
-            notifier.finish(summary)
+                bundle_path = await asyncio.to_thread(
+                    state_export.export_state,
+                    self.app.db_manager.db_path,
+                    get_config_path(),
+                    get_search_history_path(),
+                )
+                notifier.stage("Transmitting bundle to Mac…")
+                self.app.show_snackbar("Transmitting bundle to Mac...", icon=ft.Icons.CLOUD_UPLOAD_ROUNDED)
+                res = await client.upload_state_bundle(bundle_path)
+                saved_name = os.path.basename(res.get('saved_path', 'mai_an_lab_state.zip'))
+                summary = f"Backup saved on Mac: {saved_name}"
+                self.app.show_snackbar(summary, icon=ft.Icons.CHECK_CIRCLE)
+                try:
+                    os.remove(bundle_path)  # the Mac has it; don't pile zips up on the phone
+                except OSError:
+                    pass
+            except Exception as ex:
+                summary = f"Backup upload failed: {ex}"
+                self.app.show_snackbar(f"Backup failed: {ex}", color=ACCENT_RED)
+            finally:
+                notifier.finish(summary)

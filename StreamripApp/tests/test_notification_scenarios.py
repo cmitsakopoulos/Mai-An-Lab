@@ -30,7 +30,8 @@ class MockNativeAudioService:
         self.notification_history = []
         self.action_handlers = {}
 
-    async def show_progress_notification(self, title, content, progress, total, done=False, job="dsp"):
+    async def show_progress_notification(self, title, content, progress, total, done=False, job="dsp", cancellable=True,
+                                         action_label="", action_target=""):
         entry = {
             "job": job,
             "title": title,
@@ -38,6 +39,7 @@ class MockNativeAudioService:
             "progress": progress,
             "total": total,
             "done": done,
+            "action": (action_label, action_target) if action_label else None,
         }
         self.notifications[job] = entry
         self.notification_history.append(entry)
@@ -45,8 +47,9 @@ class MockNativeAudioService:
     def register_notification_action_handler(self, job, callback):
         self.action_handlers[job] = callback
 
-    def unregister_notification_action_handler(self, job):
-        self.action_handlers.pop(job, None)
+    def unregister_notification_action_handler(self, job, callback=None):
+        if callback is None or self.action_handlers.get(job) is callback:
+            self.action_handlers.pop(job, None)
 
     def simulate_user_click_cancel(self, job):
         """Simulates NotificationActionReceiver firing ACTION_CANCEL_TASK."""
@@ -149,6 +152,68 @@ class TestNotificationScenarios(unittest.TestCase):
             last_notif = self.svc.notification_history[-1]
             self.assertEqual(last_notif["job"], "download")
             self.assertTrue(last_notif["done"])
+
+    def _run_batch(self, outcomes):
+        """Run one download batch whose jobs end in `outcomes` (a state per
+        enqueued item; an item dict may mark itself as a Mac transfer)."""
+        from utils.queue_controller import FAILED
+        qc = QueueController(app=MagicMock())
+        states = iter(outcomes)
+
+        async def fake_workflow(job):
+            job["state"] = next(states)
+
+        qc._workflow = fake_workflow
+        qc._schedule_library_scan = lambda: None
+        return qc
+
+    def test_scenario_failed_downloads_offer_retry_for_that_batch_only(self):
+        from utils.queue_controller import FAILED
+        with patch.object(pn, "_service", return_value=self.svc):
+            qc = self._run_batch([FAILED, DONE, FAILED, FAILED])
+
+            async def run():
+                qc.enqueue({"id": "1", "source": "qobuz", "ui_title": "A"})
+                qc.enqueue({"id": "2", "source": "qobuz", "ui_title": "B"})
+                qc.enqueue({"id": "3", "source": "qobuz", "ui_title": "C"})
+                # A Mac transfer: the sync manager re-offers those itself.
+                qc.enqueue({"id": "4", "source": "companion", "ui_title": "D",
+                            "companion_transfer_id": "t4"})
+                await qc._worker_task
+
+            asyncio.run(run())
+            summary = self.svc.notification_history[-1]
+            self.assertTrue(summary["done"])
+            self.assertEqual(summary["action"], ("Retry", "downloads:retry"))
+            self.assertEqual(sorted(j["title"] for j in qc.retryable_failures()), ["A", "C"])
+
+    def test_scenario_retry_requeues_failures_and_skips_transfers(self):
+        from utils.queue_controller import FAILED
+        with patch.object(pn, "_service", return_value=self.svc):
+            qc = self._run_batch([FAILED, FAILED, DONE, DONE])
+
+            async def run():
+                qc.enqueue({"id": "1", "source": "qobuz", "ui_title": "A"})
+                qc.enqueue({"id": "2", "source": "companion", "ui_title": "T",
+                            "companion_transfer_id": "t2"})
+                await qc._worker_task
+                self.assertEqual(qc.retry_failed(), 1)
+                await qc._worker_task
+
+            asyncio.run(run())
+            titles = [j["title"] for j in qc.jobs if j.get("state") == DONE]
+            self.assertIn("A", titles)
+
+    def test_scenario_no_retry_when_nothing_failed(self):
+        with patch.object(pn, "_service", return_value=self.svc):
+            qc = self._run_batch([DONE])
+
+            async def run():
+                qc.enqueue({"id": "1", "source": "qobuz", "ui_title": "A"})
+                await qc._worker_task
+
+            asyncio.run(run())
+            self.assertIsNone(self.svc.notification_history[-1]["action"])
 
     def test_scenario_cross_device_sync_notification_flow(self):
         """Verifies DSP Offload updates the 'sync' notification and completes with summary."""

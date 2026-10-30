@@ -28,7 +28,7 @@ from utils.dsp import (
     TARGET_SAMPLE_RATE,
     extract_features_from_pcm,
 )
-from .discovery import BeaconBroadcaster, resolve_local_ip
+from .discovery import BeaconBroadcaster, lan_ip
 from .transcoder import TranscodeProfile, find_tool, transcode_audio
 
 logger = logging.getLogger("sync.server")
@@ -39,6 +39,11 @@ MAX_PORT_ATTEMPTS = 5
 # scripted loop in seconds otherwise; rotating it makes guessing pointless.
 MAX_PIN_FAILURES = 5
 TOKEN_PREF = "companion_server_token"
+# Requests a connected-but-idle phone makes on its own (heartbeat, transfer
+# poll). They are not use: counting them kept the server up for as long as a
+# phone sat in range, so the idle auto-off never fired.
+_PASSIVE_PATHS = frozenset({"/api/v1/ping", "/api/v1/transfers/pending"})
+_IDLE_CHECK_S = 30.0
 
 
 _SERVER: Optional["CompanionServer"] = None
@@ -226,7 +231,10 @@ class CompanionServer:
 
         self._is_running = False
         self._last_active_time = time.time()
+        self._in_flight = 0
         self._idle_task: Optional[asyncio.Task] = None
+        # Why the server last stopped: "idle" for the auto-off, else "".
+        self.stopped_reason = ""
 
     @property
     def is_running(self) -> bool:
@@ -234,6 +242,21 @@ class CompanionServer:
 
     def _touch(self):
         self._last_active_time = time.time()
+
+    @web.middleware
+    async def _activity_middleware(self, request: web.Request, handler):
+        if request.path in _PASSIVE_PATHS:
+            return await handler(request)
+        self._in_flight += 1
+        self._touch()
+        try:
+            return await handler(request)
+        finally:
+            self._in_flight -= 1
+            self._touch()
+
+    def _idle_expired(self) -> bool:
+        return self._in_flight == 0 and time.time() - self._last_active_time > self.idle_timeout_s
 
     def _load_transfers(self) -> list[dict]:
         if not self._transfers_path:
@@ -331,7 +354,6 @@ class CompanionServer:
     # ─── Endpoints ─────────────────────────────────────────────────────────────
 
     async def handle_ping(self, request: web.Request) -> web.Response:
-        self._touch()
         authorized = self._check_auth(request)
         if authorized:
             name = unquote(request.headers.get("X-Device-Name", "Phone"))
@@ -355,7 +377,6 @@ class CompanionServer:
         })
 
     async def handle_pair(self, request: web.Request) -> web.Response:
-        self._touch()
         try:
             body = await request.json()
         except Exception:
@@ -382,7 +403,6 @@ class CompanionServer:
 
     async def handle_dsp_match(self, request: web.Request) -> web.Response:
         """Check a list of track paths or titles against Mac's feature cache."""
-        self._touch()
         if not self._check_auth(request):
             return web.json_response({"error": "Unauthorized"}, status=401)
 
@@ -440,7 +460,6 @@ class CompanionServer:
         """Receive an audio upload, decode to PCM via ffmpeg, run feature extraction,
         and update feature_cache.db.
         """
-        self._touch()
         if not self._check_auth(request):
             return web.json_response({"error": "Unauthorized"}, status=401)
 
@@ -520,7 +539,6 @@ class CompanionServer:
 
     async def handle_stream_audio(self, request: web.Request) -> web.StreamResponse:
         """Stream an audio file from the Mac library, optionally transcoding on-the-fly."""
-        self._touch()
         if not self._check_auth(request):
             raise web.HTTPUnauthorized()
 
@@ -555,7 +573,6 @@ class CompanionServer:
 
     async def handle_bundle_upload(self, request: web.Request) -> web.Response:
         """Receive an exported state zip bundle from Android."""
-        self._touch()
         if not self._check_auth(request):
             return web.json_response({"error": "Unauthorized"}, status=401)
 
@@ -676,54 +693,91 @@ class CompanionServer:
         finally:
             self._release_sleep_lock()
 
+    async def _prepare_transfer(self, path: str, profile: TranscodeProfile, precompute_dsp: bool) -> Optional[dict]:
+        """Mac-side work for one track: DSP features and, for AAC profiles,
+        the encode itself. transcode_audio caches by path+mtime, so the
+        phone's later stream request is served from the finished file."""
+        dsp_features = await self.get_or_extract_features(path) if precompute_dsp else None
+        if profile != TranscodeProfile.ORIGINAL:
+            self._acquire_sleep_lock()
+            try:
+                await transcode_audio(path, profile)
+            except Exception as ex:
+                # The stream handler retries (and falls back to the original).
+                logger.warning("Pre-encode failed for %s: %s", path, ex)
+            finally:
+                self._release_sleep_lock()
+        return dsp_features
+
     async def queue_tracks_for_transfer(
         self,
         tracks: list[dict],
         quality: str = "aac_vbr_max",
-        precompute_dsp: bool = True
+        precompute_dsp: bool = True,
+        progress: Optional[Callable[[int, int, str], None]] = None,
+        cancel_event: Optional[asyncio.Event] = None,
     ) -> list[dict]:
-        """Prepare and enqueue tracks on Mac for Phone to receive."""
-        local_ip = resolve_local_ip()
-        port = self.bound_port or self.preferred_port
-        queued = []
+        """Prepare and enqueue tracks on Mac for Phone to receive.
 
+        The whole batch is prepared before any of it is published: the phone
+        polls the pending list, and publishing track by track made it offer
+        the first finished track on its own, then the rest in a second pop-up.
+        `progress(done, total, title)` is called as tracks finish; a set
+        `cancel_event` abandons the batch without publishing anything.
+        """
+        local_ip = lan_ip()
+        port = self.bound_port or self.preferred_port
+        profile = TranscodeProfile(quality) if quality in TranscodeProfile._value2member_map_ else TranscodeProfile.ORIGINAL
+
+        todo = []
         for t in tracks:
             path = t.get("path")
-            if not path or not os.path.isfile(path):
-                continue
+            if path and os.path.isfile(path):
+                title = t.get("title") or t.get("track_title") or Path(path).stem
+                todo.append((t, path, title))
+        total = len(todo)
+        done = 0
+        if progress and total:
+            progress(0, total, "")
 
-            title = t.get("title") or t.get("track_title") or Path(path).stem
-            artist = t.get("artist") or t.get("artist_name") or "Unknown"
-            album = t.get("album") or t.get("album_title") or "Unknown Album"
-            track_id = _transfer_id(path, quality)
+        sem = asyncio.Semaphore(3)
 
-            dsp_features = None
-            if precompute_dsp:
-                dsp_features = await self.get_or_extract_features(path)
+        async def _one(t: dict, path: str, title: str) -> Optional[dict]:
+            nonlocal done
+            async with sem:
+                if cancel_event is not None and cancel_event.is_set():
+                    return None
+                dsp_features = await self._prepare_transfer(path, profile, precompute_dsp)
+            done += 1
+            if progress:
+                progress(done, total, title)
 
-            ext = "m4a" if ("aac" in quality.lower() or path.endswith(".m4a")) else Path(path).suffix.lstrip(".") or "flac"
+            ext = "m4a" if (profile != TranscodeProfile.ORIGINAL or path.endswith(".m4a")) else Path(path).suffix.lstrip(".") or "flac"
             # The phone rebuilds the host part from the address it actually
             # reached us on (USB tunnel vs LAN); stream_path is what it needs.
             stream_path = f"/api/v1/tracks/stream?path={quote(path, safe='')}&quality={quote(quality)}"
-            stream_url = f"http://{local_ip}:{port}{stream_path}"
-
-            item = {
-                "id": track_id,
+            return {
+                "id": _transfer_id(path, quality),
                 "title": title,
-                "artist": artist,
-                "album": album,
+                "artist": t.get("artist") or t.get("artist_name") or "Unknown",
+                "album": t.get("album") or t.get("album_title") or "Unknown Album",
                 "path": path,
                 "quality": quality,
                 "extension": ext,
-                "stream_url": stream_url,
+                "stream_url": f"http://{local_ip}:{port}{stream_path}",
                 "stream_path": stream_path,
                 "dsp_features": dsp_features,
                 "timestamp": time.time(),
             }
-            self._pending_transfers = [x for x in self._pending_transfers if x.get("id") != track_id]
-            self._pending_transfers.append(item)
-            queued.append(item)
 
+        results = await asyncio.gather(*(_one(*x) for x in todo))
+        if cancel_event is not None and cancel_event.is_set():
+            logger.info("Transfer preparation cancelled (%d of %d done)", done, total)
+            return []
+
+        queued = [r for r in results if r]
+        ids = {r["id"] for r in queued}
+        self._pending_transfers = [x for x in self._pending_transfers if x.get("id") not in ids] + queued
         self._touch()
         self._save_transfers()
         self._notify()
@@ -731,7 +785,6 @@ class CompanionServer:
         return queued
 
     async def handle_get_pending_transfers(self, request: web.Request) -> web.Response:
-        self._touch()
         if not self._check_auth(request):
             return web.json_response({"error": "Unauthorized"}, status=401)
         return web.json_response({
@@ -741,7 +794,6 @@ class CompanionServer:
         })
 
     async def handle_queue_transfers(self, request: web.Request) -> web.Response:
-        self._touch()
         if not self._check_auth(request):
             return web.json_response({"error": "Unauthorized"}, status=401)
         try:
@@ -756,7 +808,6 @@ class CompanionServer:
         return web.json_response({"status": "ok", "queued": len(queued)})
 
     async def handle_ack_transfers(self, request: web.Request) -> web.Response:
-        self._touch()
         if not self._check_auth(request):
             return web.json_response({"error": "Unauthorized"}, status=401)
         try:
@@ -786,7 +837,7 @@ class CompanionServer:
         if self._is_running:
             return self.bound_port or self.preferred_port
 
-        self._app = web.Application()
+        self._app = web.Application(middlewares=[self._activity_middleware])
         self._app.router.add_get("/api/v1/ping", self.handle_ping)
         self._app.router.add_post("/api/v1/pair", self.handle_pair)
         self._app.router.add_post("/api/v1/dsp/match", self.handle_dsp_match)
@@ -819,6 +870,7 @@ class CompanionServer:
             raise RuntimeError(f"Could not bind CompanionServer to any port in {self.preferred_port}..{target_port}")
 
         self._is_running = True
+        self.stopped_reason = ""
         self._touch()
 
         # Start UDP beacon broadcaster
@@ -830,16 +882,17 @@ class CompanionServer:
 
         logger.info(
             "CompanionServer running on %s:%d (PIN: %s)",
-            resolve_local_ip(), self.bound_port, self.pin
+            lan_ip(), self.bound_port, self.pin
         )
         self._notify()
         return self.bound_port
 
-    async def stop(self):
+    async def stop(self, reason: str = ""):
         """Cleanly shut down the server, broadcaster, and background workers."""
         if not self._is_running:
             return
         self._is_running = False
+        self.stopped_reason = reason
 
         if self._broadcaster:
             self._broadcaster.stop()
@@ -865,15 +918,12 @@ class CompanionServer:
         self._notify()
 
     async def _idle_watchdog(self):
-        """Auto-shutdown after idle_timeout_s without requests."""
+        """Auto-off after idle_timeout_s without real use. Waiting transfers
+        don't hold it open: they are persisted and offered again the next
+        time the server starts."""
         while self._is_running:
-            await asyncio.sleep(30)
-            # Never idle out while a transfer is waiting: the phone may only
-            # check in when the user next opens the app.
-            if self._pending_transfers:
-                continue
-            if time.time() - self._last_active_time > self.idle_timeout_s:
+            await asyncio.sleep(_IDLE_CHECK_S)
+            if self._idle_expired():
                 logger.info("CompanionServer idle for > %ds; auto-stopping", self.idle_timeout_s)
-                asyncio.create_task(self.stop())
+                asyncio.create_task(self.stop("idle"))
                 break
-

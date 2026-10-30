@@ -20,11 +20,18 @@ class _FakeService:
     async def show_progress_notification(self, **kw):
         self.calls.append(kw)
 
+    async def show_alert_notification(self, **kw):
+        self.calls.append({"alert": True, **kw})
+
+    async def cancel_alert_notification(self, key):
+        self.calls.append({"cancel_alert": key})
+
     def register_notification_action_handler(self, job, cb):
         self.action_handlers[job] = cb
 
-    def unregister_notification_action_handler(self, job):
-        self.action_handlers.pop(job, None)
+    def unregister_notification_action_handler(self, job, callback=None):
+        if callback is None or self.action_handlers.get(job) is callback:
+            self.action_handlers.pop(job, None)
 
 
 def _drive(fn):
@@ -55,6 +62,33 @@ class TestNotifier(unittest.TestCase):
         calls = _drive(lambda n: (n.update(1, 2, "x"), n.finish("All done")))
         self.assertEqual(calls[-1]["done"], True)
         self.assertEqual(calls[-1]["content"], "All done")
+
+    def test_cancel_button_only_when_something_listens(self):
+        svc = _FakeService()
+
+        async def main():
+            pn.ProgressNotifier("download", "Downloads").update(1, 2, "x")
+            pn.ProgressNotifier("dsp", "Analysing", on_cancel=lambda: None).update(1, 2, "x")
+            await asyncio.sleep(0)
+
+        with patch.object(pn, "_service", return_value=svc):
+            asyncio.run(main())
+        self.assertEqual([(c["job"], c["cancellable"]) for c in svc.calls],
+                         [("download", False), ("dsp", True)])
+
+    def test_finish_leaves_a_newer_runs_cancel_handler(self):
+        svc = _FakeService()
+
+        async def main():
+            old = pn.ProgressNotifier("dsp", "A", on_cancel=lambda: None)
+            new = pn.ProgressNotifier("dsp", "B", on_cancel=lambda: None)
+            old.finish()
+            self.assertIn("dsp", svc.action_handlers)
+            new.finish()
+            self.assertNotIn("dsp", svc.action_handlers)
+
+        with patch.object(pn, "_service", return_value=svc):
+            asyncio.run(main())
 
     def test_metadata_cb_forwards_to_inner(self):
         seen = []
@@ -93,6 +127,46 @@ class TestNotifier(unittest.TestCase):
             asyncio.run(run())
             self.assertEqual(len(svc.calls), 2)
             self.assertEqual(svc.calls[1]["content"], "Track 1 - speed 5 MB/s")
+
+    def test_finish_with_action_keeps_a_retry_button(self):
+        calls = _drive(lambda n: (n.update(1, 2, "x"),
+                                  n.finish("2 failed.", action=("Retry", "downloads:retry"))))
+        self.assertEqual((calls[-1]["action_label"], calls[-1]["action_target"]),
+                         ("Retry", "downloads:retry"))
+
+    def test_empty_summary_drops_the_action(self):
+        # Empty content cancels the card; a button on nothing makes no sense.
+        calls = _drive(lambda n: (n.update(1, 2, "x"), n.finish("", action=("Retry", "x"))))
+        self.assertNotIn("action_label", calls[-1])
+
+    def test_metadata_retry_only_for_whole_run_failures(self):
+        self.assertEqual(pn.metadata_retry_action({"status": "error: offline"}),
+                         ("Retry", "workbench:sync"))
+        self.assertEqual(pn.metadata_retry_action({"status": "aborted"}),
+                         ("Retry", "workbench:sync"))
+        self.assertIsNone(pn.metadata_retry_action({"status": "completed", "enriched": 3}))
+        self.assertIsNone(pn.metadata_retry_action({"status": "cancelled"}))
+
+    def test_post_and_cancel_alert(self):
+        svc = _FakeService()
+
+        async def main():
+            pn.post_alert("scan", "T", "C", navigate_to="library",
+                          action=("Analyse", "library:analyse"), icon="dsp")
+            pn.cancel_alert("scan")
+            await asyncio.sleep(0)
+
+        with patch.object(pn, "_service", return_value=svc):
+            asyncio.run(main())
+        self.assertEqual(svc.calls[0]["key"], "scan")
+        self.assertEqual(svc.calls[0]["action_target"], "library:analyse")
+        self.assertFalse(svc.calls[0]["urgent"])
+        self.assertEqual(svc.calls[1], {"cancel_alert": "scan"})
+
+    def test_alerts_are_a_noop_without_the_native_bridge(self):
+        with patch.object(pn, "_service", return_value=None):
+            pn.post_alert("x", "t", "c")  # no loop, no service: must not raise
+            pn.cancel_alert("x")
 
 
 if __name__ == "__main__":

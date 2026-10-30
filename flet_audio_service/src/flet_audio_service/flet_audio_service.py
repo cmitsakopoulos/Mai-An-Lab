@@ -111,9 +111,11 @@ class AudioServiceControl(Service):
         object.__setattr__(self, "_pending_ops", {})
         # Handlers for notification action callbacks, keyed by job ("download", "sync", "dsp", etc.).
         object.__setattr__(self, "_notification_action_handlers", {})
-        # Last action per job that arrived before any handler was registered
-        # (a notification tap that cold-started the app lands before the UI
-        # wires its handlers). Replayed on registration.
+        # A notification tap that arrived before main.py registered its
+        # "navigate" handler (a tap that cold-started the app lands before the
+        # UI is built). Replayed on registration. Only navigation is buffered:
+        # a stale "cancel" replayed into the NEXT job of the same kind would
+        # cancel it the moment it registered.
         object.__setattr__(self, "_unhandled_notification_actions", {})
 
         def internal_on_decode_complete(e):
@@ -203,7 +205,7 @@ class AudioServiceControl(Service):
             _log(f"notification_action received: job={job}, action={action}")
             handlers = object.__getattribute__(self, "_notification_action_handlers")
             cb = handlers.get(job) or handlers.get("all")
-            if not cb:
+            if not cb and job == "navigate":
                 object.__getattribute__(self, "_unhandled_notification_actions")[job] = action
             if cb:
                 try:
@@ -309,13 +311,22 @@ class AudioServiceControl(Service):
         total: int,
         done: bool = False,
         job: str = "dsp",
+        cancellable: bool = True,
+        action_label: str = "",
+        action_target: str = "",
     ):
         """Show / update / finish a native Android progress notification.
 
         `job` keys the notification ("dsp", "metadata", ...) so concurrent
         tasks each get their own. total <= 0 shows an indeterminate bar.
         done=True with empty content cancels it; done=True with content leaves
-        a short-lived, dismissible summary."""
+        a short-lived, dismissible summary. `cancellable` shows the Cancel
+        button; leave it off for jobs nothing listens to.
+
+        On a done summary, `action_label` + `action_target` add a button (e.g.
+        "Retry" → "downloads:retry") and keep the card until it is dismissed.
+        The button opens the app with that navigate target, which arrives as a
+        "navigate" notification action."""
         await self._wait_ready()
         await self._invoke_method(
             "show_progress_notification",
@@ -326,8 +337,48 @@ class AudioServiceControl(Service):
                 "progress": progress,
                 "total": total,
                 "done": done,
+                "cancellable": cancellable,
+                "action_label": action_label or None,
+                "action_target": action_target or None,
             },
         )
+
+    async def show_alert_notification(
+        self,
+        key: str,
+        title: str,
+        content: str,
+        navigate_to: str = "",
+        action_label: str = "",
+        action_target: str = "",
+        urgent: bool = False,
+        icon: str = "",
+    ):
+        """Post a one-shot card that isn't a progress bar. `key` names it, so a
+        newer card with the same key replaces the old one. Tapping opens the
+        app on `navigate_to`; `action_label` + `action_target` add a button
+        that opens `action_target`. `urgent` uses the Alerts channel (with
+        sound); otherwise the quiet Task Results channel. `icon` is a job
+        name ("download", "sync", "dsp", "metadata") or "" for the note."""
+        await self._wait_ready()
+        await self._invoke_method(
+            "show_alert_notification",
+            {
+                "key": key,
+                "title": title,
+                "content": content,
+                "navigate_to": navigate_to,
+                "action_label": action_label or None,
+                "action_target": action_target or None,
+                "urgent": urgent,
+                "icon": icon,
+            },
+        )
+
+    async def cancel_alert_notification(self, key: str):
+        """Remove the card posted with `key`, if it is still showing."""
+        await self._wait_ready()
+        await self._invoke_method("cancel_alert_notification", {"key": key})
 
     def register_notification_action_handler(
         self, job: str, callback: Any
@@ -347,13 +398,16 @@ class AudioServiceControl(Service):
             except Exception as ex:
                 _log(f"replayed notification_action for {job} failed: {ex}")
 
-    def unregister_notification_action_handler(self, job: str) -> None:
-        """Unregister a notification action callback."""
+    def unregister_notification_action_handler(self, job: str, callback: Any = None) -> None:
+        """Unregister a notification action callback. With `callback`, only if
+        it is still the registered one: two runs of the same job (say a DSP
+        pass from Library and one from Settings) must not drop each other's."""
         try:
             handlers = object.__getattribute__(self, "_notification_action_handlers")
-            handlers.pop(job, None)
         except AttributeError:
-            pass
+            return
+        if callback is None or handlers.get(job) is callback:
+            handlers.pop(job, None)
 
     # ── Queue-op handshake helpers ────────────────────────────────────────────
 

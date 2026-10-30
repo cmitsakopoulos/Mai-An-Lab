@@ -6,8 +6,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import platform
 import socket
+import subprocess
 import time
 from typing import Callable, Optional
 
@@ -23,6 +25,12 @@ _REPORT_INTERVAL_S = 10.0
 # pyjnius — absent from the serious_python build. Sending a broadcast needs no
 # lock, and the Mac answers the query by UNICAST, which is always delivered.
 _QUERY_INTERVAL_S = 2.0
+# Interface names of tunnels. A phone on the LAN can't reach the Mac through
+# them, so they are never advertised or broadcast on.
+_VPN_PREFIXES = ("utun", "ipsec", "ppp", "tun", "tap", "wg", "gpd")
+# ifconfig is a subprocess; the beacon asks every 2 s.
+_IFACE_CACHE_S = 10.0
+_iface_cache: tuple[float, list[dict]] = (-1e9, [])
 
 
 def resolve_local_ip() -> str:
@@ -40,6 +48,100 @@ def resolve_local_ip() -> str:
             return "127.0.0.1"
     finally:
         s.close()
+
+
+def local_interfaces() -> list[dict]:
+    """This machine's IPv4 addresses, default-route one first:
+    [{"name", "ip", "prefix", "broadcast", "vpn"}].
+
+    macOS parses ifconfig, which knows every interface and its real netmask.
+    Elsewhere (Android has no usable ifconfig) it is the default-route address
+    with an assumed /24.
+    """
+    global _iface_cache
+    now = time.monotonic()
+    if now - _iface_cache[0] < _IFACE_CACHE_S:
+        return [dict(i) for i in _iface_cache[1]]
+    out: list[dict] = []
+    if platform.system() == "Darwin":
+        exe = "/sbin/ifconfig" if os.path.exists("/sbin/ifconfig") else "ifconfig"
+        try:
+            text = subprocess.run([exe], capture_output=True, text=True, timeout=2).stdout
+        except Exception:
+            text = ""
+        name = ""
+        for line in text.splitlines():
+            if line and not line[0].isspace():
+                name = line.split(":", 1)[0]
+                continue
+            parts = line.split()
+            if len(parts) < 2 or parts[0] != "inet" or parts[1].startswith(("127.", "169.254.")):
+                continue
+            prefix, bcast = 24, None
+            try:
+                if "netmask" in parts:
+                    prefix = bin(int(parts[parts.index("netmask") + 1], 16)).count("1")
+                if "broadcast" in parts:
+                    bcast = parts[parts.index("broadcast") + 1]
+            except (ValueError, IndexError):
+                pass
+            out.append({"name": name, "ip": parts[1], "prefix": prefix,
+                        "broadcast": bcast, "vpn": name.startswith(_VPN_PREFIXES)})
+    primary = resolve_local_ip()
+    if not out and not primary.startswith("127."):
+        out.append({"name": "", "ip": primary, "prefix": 24,
+                    "broadcast": _slash24_broadcast(primary), "vpn": False})
+    out.sort(key=lambda i: i["ip"] != primary)
+    _iface_cache = (now, out)
+    return [dict(i) for i in out]
+
+
+def lan_ip() -> str:
+    """The address a phone on the same network should use: the default-route
+    address unless that is a VPN tunnel."""
+    for iface in local_interfaces():
+        if not iface["vpn"]:
+            return iface["ip"]
+    return resolve_local_ip()
+
+
+def _slash24_broadcast(ip: str) -> Optional[str]:
+    parts = ip.split(".")
+    if len(parts) == 4 and parts[0] not in ("127", "0"):
+        return f"{parts[0]}.{parts[1]}.{parts[2]}.255"
+    return None
+
+
+async def sweep_subnet(local_ip: str, port: int, timeout: float = 0.7,
+                       concurrency: int = 64) -> list[str]:
+    """Hosts in local_ip's /24 with `port` open, by TCP connect.
+
+    The fallback for networks that drop broadcasts but still route unicast
+    between devices (some mesh and ISP routers). User-triggered only: on a
+    managed network a sweep looks like a port scan.
+    """
+    parts = local_ip.split(".")
+    if len(parts) != 4:
+        return []
+    base = ".".join(parts[:3])
+    sem = asyncio.Semaphore(concurrency)
+
+    async def _try(host: str) -> Optional[str]:
+        async with sem:
+            try:
+                _reader, writer = await asyncio.wait_for(
+                    asyncio.open_connection(host, port), timeout)
+            except Exception:
+                return None
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
+            return host
+
+    found = await asyncio.gather(*(_try(f"{base}.{i}") for i in range(1, 255)))
+    return [h for h in found if h]
 
 
 def _bind_udp(port: int) -> socket.socket:
@@ -85,16 +187,16 @@ def _beacon_payload(device_name: str, port: int) -> bytes:
         "version": 1,
         "type": "beacon",
         "name": device_name,
-        "ip": resolve_local_ip(),
+        "ip": lan_ip(),
         "port": port,
     }).encode("utf-8")
 
 
 def _broadcast_targets(local_ip: str) -> list[str]:
     targets = ["255.255.255.255"]
-    parts = local_ip.split(".")
-    if len(parts) == 4 and parts[0] not in ("127", "0"):
-        targets.append(f"{parts[0]}.{parts[1]}.{parts[2]}.255")
+    bcast = _slash24_broadcast(local_ip)
+    if bcast:
+        targets.append(bcast)
     return targets
 
 
@@ -112,6 +214,16 @@ class BeaconBroadcaster:
         self._sock: Optional[socket.socket] = None
         self._resp_task: Optional[asyncio.Task] = None
         self._resp_sock: Optional[socket.socket] = None
+
+    def _broadcast_targets(self) -> list[str]:
+        """Every non-tunnel interface's real broadcast address. 255.255.255.255
+        alone leaves only the default-route interface, which on a Mac with a
+        VPN up is the tunnel, and a /24 guess is wrong on bigger networks."""
+        targets = ["255.255.255.255"]
+        for iface in local_interfaces():
+            if iface["broadcast"] and not iface["vpn"] and iface["broadcast"] not in targets:
+                targets.append(iface["broadcast"])
+        return targets
 
     def start(self):
         if self._running:
@@ -156,7 +268,7 @@ class BeaconBroadcaster:
         while self._running:
             try:
                 payload = _beacon_payload(self.device_name, self.port)
-                for target in _broadcast_targets(resolve_local_ip()):
+                for target in self._broadcast_targets():
                     try:
                         await loop.sock_sendto(self._sock, payload, (target, UDP_PORT))
                     except Exception as err:

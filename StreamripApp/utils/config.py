@@ -251,7 +251,7 @@ class AssistantConfig:
     llm_enabled: bool = True
     llm_provider: str = "gemini"
     gemini_api_key: str = ""
-    gemini_model: str = "gemini-3.5-flash-lite"
+    gemini_model: str = "gemini-3.5-flash-lite"  # = llm_engine.DEFAULT_GEMINI_MODEL
     ollama_endpoint: str = "http://localhost:11434/v1"
     ollama_model: str = "llama3.2"
     personality_prompt: str = ""

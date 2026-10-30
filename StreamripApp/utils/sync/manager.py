@@ -7,6 +7,9 @@ and incoming transfer prompts.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import errno
+import ipaddress
 import logging
 import time
 from typing import Callable, Optional
@@ -14,7 +17,7 @@ from typing import Callable, Optional
 import flet as ft
 
 from ui.tokens import BG, CYAN, DIM, BORDER, ACCENT_GREEN, ACCENT_RED
-from utils.sync.discovery import BeaconListener
+from utils.sync.discovery import BeaconListener, resolve_local_ip, sweep_subnet
 from utils.sync.client import CompanionClient
 from utils.sync.server import DEFAULT_PORT
 
@@ -22,6 +25,11 @@ logger = logging.getLogger("sync.manager")
 
 _PROBE_INTERVAL_S = 4.0
 _HEARTBEAT_INTERVAL_S = 15.0
+# In the background the heartbeat stands down (battery), but a transfer sent
+# from the Mac right after the phone is pocketed should still be noticed: one
+# cheap pending-transfers poll this often, until the idle auto-off sleeps the
+# link (background polls don't count as use, so they never extend it).
+_BG_TRANSFER_POLL_S = 60.0
 # Missed heartbeats before the link is declared down. One miss is common on
 # Wi-Fi power-save wakeups; two in a row (~30 s) is a gone Mac.
 _MISSES_BEFORE_DROP = 2
@@ -30,6 +38,49 @@ _MISSES_BEFORE_DROP = 2
 # otherwise re-open the dialog the moment it closed.
 _PIN_SNOOZE_S = 120.0
 _LOOPBACK = ("127.0.0.1", "::1", "localhost")
+# Idle auto-off: no pairing, transfer, offload or user tap for this long and
+# discovery, probing and heartbeats stop until asked again.
+IDLE_TIMEOUT_S = 15 * 60
+# Downloads handed to the queue keep the link up, but a job the queue dropped
+# without reporting must not keep it up forever.
+_IN_FLIGHT_GRACE_S = 60 * 60
+# How long "Find Mac" waits for a broadcast-query reply before sweeping.
+_FIND_QUERY_WAIT_S = 3.0
+
+
+_QUALITY_LABELS = {
+    "aac_vbr_max": "AAC VBR",
+    "aac_320k": "AAC 320",
+    "aac_256k": "AAC 256",
+    "aac_192k": "AAC 192",
+}
+
+
+def transfer_quality_label(t: dict) -> str:
+    """What the Mac actually sends: the AAC profile, or for "original" the
+    source file's format (FLAC, MP3…)."""
+    q = str(t.get("quality") or "original")
+    if q in _QUALITY_LABELS:
+        return _QUALITY_LABELS[q]
+    return (str(t.get("extension") or "").upper() or "ORIGINAL")
+
+
+def _explain_connect_error(ex: BaseException, host: str, port: int) -> str:
+    """One sentence on why host:port didn't answer, in terms the user can act
+    on: refused means the Mac is reachable and the server is off; silence
+    means the network (or the Mac being away) is in the way."""
+    os_err = getattr(ex, "os_error", None) or ex
+    if isinstance(os_err, ConnectionRefusedError):
+        return (f"{host} is reachable, but nothing answers on port {port}. Turn on "
+                "Companion Server on the Mac, or check the port it shows.")
+    if (isinstance(ex, (asyncio.TimeoutError, TimeoutError))
+            or getattr(os_err, "errno", None) in (errno.EHOSTUNREACH, errno.ENETUNREACH)):
+        return (f"No answer from {host}. Either the Mac is asleep or on another network, "
+                "or this network keeps devices apart (office, campus, hotel and guest "
+                "Wi-Fi often do). Then only your phone's hotspot or a USB cable will work.")
+    if isinstance(ex, RuntimeError):
+        return f"Something answered at {host}:{port}, but it isn't the Mai-An Companion Server."
+    return f"Could not reach {host}:{port} ({ex})."
 
 _INSTANCE: Optional["CompanionSyncManager"] = None
 
@@ -70,12 +121,20 @@ class CompanionSyncManager:
         self._transfer_dialog: Optional[ft.AlertDialog] = None
         self._pin_snoozed_until: dict[str, float] = {}
         self._prompted_transfer_ids: set[str] = set()
+        # Transfers already announced by a background notification.
+        self._notified_transfer_ids: set[str] = set()
+        self._bg_polled_at = 0.0
         # Handed to the download queue and not yet finished. Acked to the Mac
         # only when the file is on disk, so a failed download stays queued
         # there instead of vanishing.
         self._in_flight_ids: set[str] = set()
         self._unacked_ids: set[str] = set()
         self._status_listeners: list[Callable[[], None]] = []
+        # Idle auto-off. `enabled` (the user's preference) survives it; a
+        # sleeping manager wakes on Find Mac, the switch, or the next launch.
+        self.is_asleep = False
+        self._last_activity = time.monotonic()
+        self._busy = 0
 
     def rebind(self, app):
         if app is self.app:
@@ -103,6 +162,58 @@ class CompanionSyncManager:
     @property
     def enabled(self) -> bool:
         return self._enabled
+
+    # ─── Idle auto-off ─────────────────────────────────────────────────────────
+
+    def touch(self):
+        """Mark real use: pairing, transfers, offload, a user tap. Heartbeats
+        and probes don't count, or the link could never idle out."""
+        self._last_activity = time.monotonic()
+
+    @contextlib.contextmanager
+    def activity(self):
+        """Hold the link awake for a long job (offload, backup upload)."""
+        self._busy += 1
+        self.touch()
+        try:
+            yield
+        finally:
+            self._busy -= 1
+            self.touch()
+
+    def _idle_expired(self) -> bool:
+        if not self._enabled or self.is_asleep or self._busy:
+            return False
+        idle = time.monotonic() - self._last_activity
+        if self._in_flight_ids and idle < _IN_FLIGHT_GRACE_S:
+            return False
+        return idle >= IDLE_TIMEOUT_S
+
+    async def _maybe_sleep(self) -> bool:
+        if not self._idle_expired():
+            return False
+        await self._flush_acks()
+        self._sleep()
+        return True
+
+    def _sleep(self):
+        """Stop discovery, probing and heartbeats. Called from inside the
+        probe or heartbeat loop too; both exit on is_asleep."""
+        self.is_asleep = True
+        self._stop_listener()
+        current = asyncio.current_task()
+        for task in (self._probe_task, self._heartbeat_task):
+            if task and not task.done() and task is not current:
+                task.cancel()
+        self._probe_task = self._heartbeat_task = None
+        self.is_connected = False
+        self.is_searching = False
+        self.client = None
+        self.app._companion_client = None
+        self.last_error = ""
+        self._misses = 0
+        logger.info("Companion Sync idle for %d min; paused", IDLE_TIMEOUT_S // 60)
+        self._notify()
 
     @property
     def _pairing_dialog_open(self) -> bool:
@@ -135,6 +246,8 @@ class CompanionSyncManager:
     async def start(self):
         """Enable Companion Sync and start background discovery."""
         self._enabled = True
+        self.is_asleep = False
+        self.touch()
         self._save_pref("companion_sync_enabled", True)
         self.is_searching = not self.is_connected
         self.last_error = ""
@@ -150,6 +263,7 @@ class CompanionSyncManager:
     async def stop(self):
         """Disable Companion Sync, stop discovery, and disconnect."""
         self._enabled = False
+        self.is_asleep = False
         self._save_pref("companion_sync_enabled", False)
         self.is_searching = False
         self.is_connected = False
@@ -173,7 +287,11 @@ class CompanionSyncManager:
         self._stop_listener()
 
     def handle_app_resume(self):
-        if not self._enabled:
+        if not self._enabled or self.is_asleep:
+            return
+        if self._idle_expired():
+            # The loops idle in the background and may not have noticed yet.
+            asyncio.create_task(self._maybe_sleep())
             return
         if self.is_connected:
             asyncio.create_task(self._heartbeat_once())
@@ -239,10 +357,10 @@ class CompanionSyncManager:
         self.is_connected = False
         self.client = None
         self.app._companion_client = None
-        self.is_searching = self._enabled
+        self.is_searching = self._enabled and not self.is_asleep
         self.last_error = reason
         self._misses = 0
-        if self._enabled:
+        if self.is_searching:
             self._start_listener()
         if was:
             logger.info("Companion link down: %s", reason or "disconnected")
@@ -252,7 +370,7 @@ class CompanionSyncManager:
 
     def _on_beacon_received(self, server_info: dict):
         """Callback invoked when UDP beacon from Mac is heard."""
-        if not self._enabled or self.is_connected:
+        if not self._enabled or self.is_asleep or self.is_connected:
             return
         asyncio.create_task(self.handle_discovered_server(server_info))
 
@@ -277,8 +395,10 @@ class CompanionSyncManager:
 
     async def _probe_loop(self):
         """Periodically probes local loopback (USB adb reverse tunnel) and cached IP."""
-        while self._enabled:
+        while self._enabled and not self.is_asleep:
             try:
+                if await self._maybe_sleep():
+                    break
                 await self._probe_once()
             except Exception as ex:
                 logger.debug("probe failed: %s", ex)
@@ -295,14 +415,15 @@ class CompanionSyncManager:
         """Connect to a Mac found via beacon, probe, or manual entry.
 
         Pings with the saved token; the server says whether it accepts it. An
-        unauthorized reply leads to the PIN prompt. `interactive` (manual
-        connect) re-raises network errors and ignores the PIN snooze.
+        unauthorized reply leads to the PIN prompt. `interactive` (a user tap)
+        waits its turn instead of yielding to a background attempt, allows a
+        slower answer, re-raises network errors and ignores the PIN snooze.
         """
         host = server_info.get("ip")
         port = int(server_info.get("port") or DEFAULT_PORT)
         if not host:
             return
-        if self._connect_lock.locked():
+        if self._connect_lock.locked() and not interactive:
             return  # a beacon and a probe raced; one attempt is enough
         async with self._connect_lock:
             if self.is_connected and self.client and (self.client.host, self.client.port) == (host, port):
@@ -310,13 +431,15 @@ class CompanionSyncManager:
             token = self._pref("companion_paired_token", "") or None
             client = CompanionClient(host, port, auth_token=token)
             try:
-                info = await client.ping(timeout=1.5)
+                info = await client.ping(timeout=4.0 if interactive else 1.5)
             except Exception as ex:
                 if interactive:
                     raise
                 logger.debug("ping %s:%d failed: %s", host, port, ex)
                 return
             if info.get("status") != "ok":
+                if interactive:
+                    raise RuntimeError("not a companion server")
                 return
             if info.get("authorized"):
                 self._set_connected(client, info)
@@ -330,6 +453,92 @@ class CompanionSyncManager:
         self.discovered_server = {"name": name, "ip": host, "port": port}
         self._notify()
         await self.prompt_pin_dialog({"name": name, "ip": host, "port": port})
+
+    # ─── Find Mac / manual connect (user-triggered) ────────────────────────────
+
+    def _outcome(self, how: str = "") -> Optional[str]:
+        if self.is_connected and self.discovered_server:
+            s = self.discovered_server
+            return f"Connected to {s.get('name')} ({s.get('ip')}){how}."
+        if self._pairing_dialog_open and self.discovered_server:
+            s = self.discovered_server
+            return f"Found {s.get('name')} ({s.get('ip')}){how}. Enter the PIN shown on the Mac."
+        return None
+
+    async def find_mac(self) -> str:
+        """The "Find Mac" / "Test connection" button. Wakes the link, then
+        tries each path in turn and says what it learned:
+        USB tunnel and last address → broadcast query → /24 sweep."""
+        if not self._enabled or self.is_asleep:
+            await self.start()
+        self.touch()
+        self._pin_snoozed_until.clear()
+
+        client = self.client
+        if self.is_connected and client:
+            t0 = time.perf_counter()
+            try:
+                await client.ping(timeout=3.0)
+                ms = (time.perf_counter() - t0) * 1000
+                return f"{self._outcome()[:-1]} · answered in {ms:.0f} ms."
+            except Exception as ex:
+                self._set_disconnected("Mac stopped responding")
+                logger.info("test ping failed: %s", ex)
+
+        await self._probe_once()
+        found = self._outcome()
+        if found:
+            return found
+
+        # A fresh listener re-reports at once, even a Mac it heard recently.
+        self._stop_listener()
+        self._start_listener()
+        deadline = time.monotonic() + _FIND_QUERY_WAIT_S
+        while time.monotonic() < deadline:
+            await asyncio.sleep(0.25)
+            found = self._outcome()
+            if found:
+                return found
+
+        my_ip = resolve_local_ip()
+        ports = [DEFAULT_PORT]
+        cached_port = int(self._pref("companion_paired_port", DEFAULT_PORT) or DEFAULT_PORT)
+        if cached_port not in ports:
+            ports.append(cached_port)
+        for port in ports:
+            for host in await sweep_subnet(my_ip, port):
+                try:
+                    await self.handle_discovered_server({"ip": host, "port": port}, interactive=True)
+                except Exception:
+                    continue
+                found = self._outcome(" by scanning: this network blocks discovery "
+                                      "broadcasts, so the address is saved for next time")
+                if found:
+                    return found
+
+        try:
+            on_lan = ipaddress.ip_address(my_ip).is_private and not my_ip.startswith("127.")
+        except ValueError:
+            on_lan = False
+        if not on_lan:
+            return (f"This phone isn't on a local network (its address is {my_ip}). "
+                    "Join the Mac's Wi-Fi, or use your phone's hotspot or a USB cable.")
+        return (f"No Mac answered. This phone is {my_ip}. Check Companion Server is on; "
+                "if the address the Mac shows starts differently, the two aren't on the "
+                "same network. If it matches, type it under Manual IP: when that fails "
+                "too, this network keeps devices apart, and only your phone's hotspot or "
+                "a USB cable will work.")
+
+    async def connect_manual(self, host: str, port: int) -> str:
+        if not self._enabled or self.is_asleep:
+            await self.start()
+        self.touch()
+        self._pin_snoozed_until.pop(host, None)
+        try:
+            await self.handle_discovered_server({"ip": host, "port": port}, interactive=True)
+        except Exception as ex:
+            return _explain_connect_error(ex, host, port)
+        return self._outcome() or f"{host}:{port} answered, but the connection didn't complete."
 
     # ─── PIN Pairing Pop-Up Dialog ─────────────────────────────────────────────
 
@@ -393,6 +602,7 @@ class CompanionSyncManager:
                 self._save_pref("companion_paired_token", token)
                 info = await client.ping(timeout=3.0)
                 paired = True
+                self.touch()
                 self.app.dismiss_dialog(dlg)
                 self._set_connected(client, info)
                 self.app.show_snackbar(f"Connected to {name}", icon=ft.Icons.CHECK_CIRCLE)
@@ -470,12 +680,23 @@ class CompanionSyncManager:
     async def _heartbeat_loop(self):
         """Liveness check + transfer poll. Without it a Mac that quit or
         slept stayed "Connected" forever and every action failed."""
-        while self._enabled:
+        while self._enabled and not self.is_asleep:
             try:
                 await asyncio.sleep(_HEARTBEAT_INTERVAL_S)
             except asyncio.CancelledError:
                 break
+            # Checked before the background skip, so a phone left in a
+            # pocket stops its loops too.
+            if await self._maybe_sleep():
+                break
             if self._in_background():
+                now = time.monotonic()
+                if now - self._bg_polled_at >= _BG_TRANSFER_POLL_S:
+                    self._bg_polled_at = now
+                    try:
+                        await self._background_transfer_check()
+                    except Exception as ex:
+                        logger.debug("background transfer check failed: %s", ex)
                 continue
             try:
                 await self._heartbeat_once()
@@ -502,14 +723,38 @@ class CompanionSyncManager:
         if transfers and prompt_user and not self._transfer_dialog_open and not self._in_background():
             ids = {str(t.get("id")) for t in transfers if t.get("id")}
             if ids - self._prompted_transfer_ids:
+                self.touch()  # the Mac sent something new: that's use
                 self._prompted_transfer_ids.update(ids)
                 await self.prompt_transfer_dialog(transfers)
         return transfers
 
+    async def _background_transfer_check(self):
+        """Backgrounded: no dialog can show, so announce new transfers with a
+        notification that opens the Sync screen. Not counted as a miss on
+        failure (the foreground heartbeat owns liveness) and not as use."""
+        transfers = await self.check_pending_transfers(prompt_user=False)
+        ids = {str(t.get("id")) for t in transfers if t.get("id")}
+        fresh = ids - self._prompted_transfer_ids - self._notified_transfer_ids
+        if not fresh:
+            return
+        self._notified_transfer_ids.update(fresh)
+        from utils.progress_notify import post_alert
+        n = len(ids)
+        mac = (self.discovered_server or {}).get("name") or "Your Mac"
+        post_alert(
+            "transfers",
+            f"{mac} has {n} track{'s' if n != 1 else ''} for you",
+            "Tap to review and download them.",
+            navigate_to="sync:transfers", urgent=True, icon="sync",
+        )
+
     def download_transfers(self, transfers: list[dict]) -> int:
         """Hand transfers to the download queue. Returns how many were queued."""
         client = self.client
-        qc = getattr(self.app, "queue_controller", None)
+        # The app holds its QueueController as `app.queue`; this used to ask
+        # for `app.queue_controller`, which doesn't exist, so "Download" on the
+        # transfer dialog silently queued nothing.
+        qc = getattr(self.app, "queue", None)
         if not client or not qc:
             return 0
         items = []
@@ -530,8 +775,10 @@ class CompanionSyncManager:
                 "artist": t.get("artist"),
                 "album": t.get("album"),
                 "dsp_features": t.get("dsp_features"),
+                "quality_label": transfer_quality_label(t),
             })
         if items:
+            self.touch()
             qc.enqueue_many(items, quality_tier="original")
         self._notify()
         return len(items)
@@ -539,6 +786,7 @@ class CompanionSyncManager:
     def on_transfer_finished(self, transfer_id: str, ok: bool):
         """Called by the download queue when a companion job ends."""
         self._in_flight_ids.discard(transfer_id)
+        self.touch()
         if ok:
             self._unacked_ids.add(transfer_id)
             asyncio.create_task(self._flush_acks())
@@ -562,6 +810,9 @@ class CompanionSyncManager:
         """Presents a pop-up dialog alerting user that tracks are ready to download."""
         if self._transfer_dialog_open:
             return
+        # The dialog supersedes the background notification about them.
+        from utils.progress_notify import cancel_alert
+        cancel_alert("transfers")
 
         count = len(transfers)
         mac_name = (self.discovered_server.get("name") if self.discovered_server else "Mac Companion")
@@ -580,6 +831,27 @@ class CompanionSyncManager:
         page_w = self.app.page.width if (self.app.page and self.app.page.width) else 400
         dialog_w = min(380, max(280, page_w - 48))
 
+        labels = sorted({transfer_quality_label(t) for t in transfers})
+        with_dsp = sum(1 for t in transfers if t.get("dsp_features"))
+        summary = f"{count} track{'s' if count != 1 else ''} · {', '.join(labels)}"
+        if with_dsp:
+            summary += " · acoustic features included" if with_dsp == count else f" · features for {with_dsp}"
+
+        track_rows = [
+            ft.Column([
+                ft.Text(t.get("title") or "Unknown", size=13, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+                ft.Text(t.get("artist") or "", size=11, color=DIM, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+            ], spacing=0, tight=True)
+            for t in transfers
+        ]
+        track_list = ft.Container(
+            content=ft.ListView(track_rows, spacing=8, scroll=ft.ScrollMode.AUTO),
+            height=min(260, 44 * len(track_rows) + 16),
+            border=ft.Border.all(1, BORDER),
+            border_radius=10,
+            padding=ft.Padding.symmetric(horizontal=12, vertical=8),
+        )
+
         dlg = ft.AlertDialog(
             title=ft.Row([
                 ft.Icon(ft.Icons.PHONELINK_RING_ROUNDED, color=ACCENT_GREEN, size=24),
@@ -587,12 +859,9 @@ class CompanionSyncManager:
             ], spacing=8),
             content=ft.Container(
                 content=ft.Column([
-                    ft.Text(
-                        f"{count} track{'s' if count != 1 else ''} queued from your Mac library. "
-                        "Download now with pre-computed acoustic features?",
-                        color=DIM, size=13,
-                    ),
-                ], spacing=8, tight=True),
+                    ft.Text(summary, color=DIM, size=13),
+                    track_list,
+                ], spacing=10, tight=True),
                 width=dialog_w,
             ),
             actions=[

@@ -19,12 +19,22 @@ _DEFAULT_COLOR = "#FFFFFF"
 
 SUPPORTED_SOURCES = ("qobuz", "deezer")
 
+# Whole-search ceiling: sign-in plus the three per-type lookups.
+SEARCH_TIMEOUT_S = 45
+
 # Web URL templates, used to build a link the download path can parse back into
 # (media_type, id, source) via streamrip_api._detect_type_and_id.
 _SOURCE_URL_TEMPLATES = {
     "qobuz": "https://www.qobuz.com/{media_type}/{id}",
     "deezer": "https://www.deezer.com/{media_type}/{id}",
 }
+
+
+def _as_int(value) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _page_items(source: str, page: dict, media_type: str) -> list:
@@ -274,7 +284,17 @@ class StreamripSearcher:
 
     async def _run_search_wrapper(self, query, media_types, limit, offset, callback, progress_callback=None, source="qobuz"):
         try:
-            results = await self._search_async(query, media_types, limit, offset, progress_callback, source)
+            # The client sessions carry aiohttp's default 5-minute timeout per
+            # request, with retries, so a stalled sign-in or a dead network left
+            # the "Signing in…" card spinning for what looked like forever.
+            results = await asyncio.wait_for(
+                self._search_async(query, media_types, limit, offset, progress_callback, source),
+                SEARCH_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            logger.error("Search for %r on %s timed out after %ss", query, source, SEARCH_TIMEOUT_S)
+            results = {"error": f"{source.title()} didn't answer within {SEARCH_TIMEOUT_S} seconds. "
+                                "Check your connection and try again."}
         except Exception as exc:
             logger.error("Search failed: %s", exc, exc_info=True)
             results = {"error": str(exc)}
@@ -419,6 +439,8 @@ class StreamripSearcher:
                 "year": year,
                 "album": album_name,
                 "image": image_url,
+                # Albums only; lets Search show "You have 8/12".
+                "num_tracks": _as_int(getattr(r, "num_tracks", 0)),
                 "ui_title": getattr(r, "name", "Unknown"),
                 "ui_subtitle": getattr(r, "artist", f"{getattr(r, 'num_albums', '?')} Albums" if m_type == "artist" else ""),
                 "ui_detail": "  •  ".join(detail_parts),

@@ -21,6 +21,32 @@ const MethodChannel _decodeChannel =
     MethodChannel('com.flet.flet_audio_service/decode');
 
 
+/// Posts a one-shot (non-progress) card; see ProgressNotifications.buildAlert.
+/// Top-level so the handler can use it with no live Flet session.
+void _showAlert({
+  required String key,
+  String icon = '',
+  required String title,
+  required String content,
+  String navigateTo = '',
+  String? actionLabel,
+  String? actionTarget,
+  bool urgent = false,
+}) {
+  _decodeChannel.invokeMethod('showAlertNotification', {
+    'key': key,
+    'icon': icon,
+    'title': title,
+    'content': content,
+    'navigateTo': navigateTo,
+    'actionLabel': actionLabel,
+    'actionTarget': actionTarget,
+    'urgent': urgent,
+  }).catchError((e) {
+    debugPrint("FletAudioService: showAlertNotification failed → $e");
+  });
+}
+
 class Extension extends FletExtension {
   @override
   FletService? createService(Control control) {
@@ -55,7 +81,6 @@ class FletAudioService extends FletService with WidgetsBindingObserver {
   StreamSubscription? _playerStateSub;
   StreamSubscription? _positionSub;
   StreamSubscription? _durationSub;
-  StreamSubscription? _errorSub;
   // Fires on EVERY currentIndex change (including gapless auto-advance, which
   // playerStateStream/durationStream miss). This is the authoritative signal
   // that Python mirrors current_index from; without it Python only learned of
@@ -329,6 +354,7 @@ class FletAudioService extends FletService with WidgetsBindingObserver {
         final progress = (a['progress'] as num?)?.toInt() ?? 0;
         final total = (a['total'] as num?)?.toInt() ?? 0;
         final done = (a['done'] as bool?) ?? false;
+        final cancellable = (a['cancellable'] as bool?) ?? true;
         _decodeChannel.invokeMethod('showProgressNotification', {
           'job': job,
           'title': title,
@@ -336,6 +362,32 @@ class FletAudioService extends FletService with WidgetsBindingObserver {
           'progress': progress,
           'total': total,
           'done': done,
+          'cancellable': cancellable,
+          'actionLabel': a['action_label'] as String?,
+          'actionTarget': a['action_target'] as String?,
+        }).catchError((e) {
+          // Fire-and-forget: an unawaited channel error would otherwise
+          // surface as an unhandled zone error.
+          debugPrint("FletAudioService: showProgressNotification failed → $e");
+        });
+
+      case 'show_alert_notification':
+        _showAlert(
+          key: (a['key'] as String?) ?? 'alert',
+          icon: (a['icon'] as String?) ?? '',
+          title: (a['title'] as String?) ?? '',
+          content: (a['content'] as String?) ?? '',
+          navigateTo: (a['navigate_to'] as String?) ?? '',
+          actionLabel: a['action_label'] as String?,
+          actionTarget: a['action_target'] as String?,
+          urgent: (a['urgent'] as bool?) ?? false,
+        );
+
+      case 'cancel_alert_notification':
+        _decodeChannel.invokeMethod('cancelAlertNotification', {
+          'key': (a['key'] as String?) ?? 'alert',
+        }).catchError((e) {
+          debugPrint("FletAudioService: cancelAlertNotification failed → $e");
         });
 
       case 'decode_pcm':
@@ -814,7 +866,6 @@ class FletAudioService extends FletService with WidgetsBindingObserver {
     _playerStateSub?.cancel();
     _positionSub?.cancel();
     _durationSub?.cancel();
-    _errorSub?.cancel();
     _indexSub?.cancel();
 
     // Authoritative index mirroring: fires on skip, notification next/previous,
@@ -841,12 +892,11 @@ class FletAudioService extends FletService with WidgetsBindingObserver {
       _emitState(extra: {'duration_ms': duration.inMilliseconds});
     });
 
-    _errorSub = _handler!._player.playbackEventStream.listen(
-      (_) {},
-      onError: (Object e, StackTrace st) {
-        control.triggerEvent("error", e.toString());
-      },
-    );
+    // Playback failures come from the handler, which also skips past them
+    // (just_audio 0.10 no longer raises them on playbackEventStream, so the
+    // old onError listener here never fired). Payload: JSON
+    // {message, title, artist, action: skipped|stopped|none}.
+    _handler!.onPlaybackError = _forwardPlaybackError;
 
     // Art resolves asynchronously after the index change; re-emit so Python
     // gets it for the track that is actually playing.
@@ -967,8 +1017,11 @@ class FletAudioService extends FletService with WidgetsBindingObserver {
           androidStopForegroundOnPause: false,
           // Android 14+ MediaStyle notifications require an explicit icon;
           // omitting this can cause SystemUI to kill the foreground service
-          // on screen-lock. mipmap/ic_launcher always exists in a Flet app.
-          androidNotificationIcon: 'mipmap/ic_launcher',
+          // on screen-lock. It must be monochrome: the status bar draws only
+          // the alpha channel, so the (opaque, adaptive) launcher icon showed
+          // as a white blob. Shipped by this plugin; res/raw/keep kept it
+          // from the release resource shrinker, which can't see this string.
+          androidNotificationIcon: 'drawable/ic_stat_playback',
           // Guard for network artUris (local art arrives pre-scaled from the
           // plugin's resolveArtwork): never hand a full-resolution cover to
           // the notification / media session.
@@ -1008,13 +1061,19 @@ class FletAudioService extends FletService with WidgetsBindingObserver {
     _positionTimer?.cancel();
     _positionTimer = null;
     _durationSub?.cancel();
-    _errorSub?.cancel();
     _indexSub?.cancel();
+    if (_handler?.onPlaybackError == _forwardPlaybackError) {
+      _handler?.onPlaybackError = null;
+    }
     if (_handler?.onCurrentArtResolved == _emitState) {
       _handler?.onCurrentArtResolved = null;
     }
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
+  }
+
+  void _forwardPlaybackError(Map<String, dynamic> info) {
+    control.triggerEvent("error", jsonEncode(info));
   }
 
   @override
@@ -1174,7 +1233,112 @@ class AudioPlayerHandler extends BaseAudioHandler with QueueHandler, SeekHandler
       }
     });
 
+    _player.errorStream.listen(_onPlayerError);
+    _player.processingStateStream.listen((state) {
+      if (state == ProcessingState.ready) _errorsInRow = 0;
+      // A new load after giving up (the user picked another track) starts a
+      // fresh count.
+      if (state == ProcessingState.loading && _gaveUpOnError) {
+        _gaveUpOnError = false;
+        _errorsInRow = 0;
+      }
+    });
+
     _initAudioSession();
+  }
+
+  // ── Playback failures ─────────────────────────────────────────────────────
+  // A file that can't play (deleted, moved, storage access revoked, corrupt)
+  // leaves ExoPlayer idle. Two problems with that, both fixed here:
+  //  * audio_service treats ANY move to idle as a full stop: it tears down the
+  //    media service and its notification, so in the background playback just
+  //    ended, silently. While a skip is possible, _transformEvent reports
+  //    buffering instead, which keeps the service.
+  //  * just_audio's own maxSkipsOnError can't help: our whole queue is ONE
+  //    ConcatenatingAudioSource child, so it sees a one-item playlist and just
+  //    pauses. And an errored player ignores seeks until it is loaded again,
+  //    so the skip is a reload at the next index.
+  // Lives in the handler, not the Flet control, so it works with no session.
+  static const _maxSkipsOnError = 3;
+  int _errorsInRow = 0;
+  // Set once we stop skipping: the player stays idle with the error code
+  // still set, and _transformEvent must report that idle from then on.
+  bool _gaveUpOnError = false;
+
+  /// Set by the live FletAudioService: forwards a failure (and what was done
+  /// about it) to Python for an in-app toast.
+  void Function(Map<String, dynamic> info)? onPlaybackError;
+
+  bool get _canSkipOnError =>
+      !_gaveUpOnError &&
+      _errorsInRow < _maxSkipsOnError &&
+      _player.nextIndex != null;
+
+  void _onPlayerError(PlayerException e) {
+    final idx = e.index ?? _player.currentIndex;
+    final failedId = _idAt(idx);
+    final tag = _player.sequenceState.currentSource?.tag;
+    final title = tag is MediaItem ? tag.title : '';
+    final artist = tag is MediaItem ? (tag.artist ?? '') : '';
+    debugPrint("FletAudioService: playback error at $idx ($title): $e");
+    // A beat first: an error from a source a queue op is replacing clears on
+    // its own. Only a player still idle on the same item is a dead track.
+    Future.delayed(const Duration(milliseconds: 300), () async {
+      if (_player.processingState != ProcessingState.idle) return;
+      if (_player.currentIndex != idx || _idAt(_player.currentIndex) != failedId) return;
+      var action = 'stopped';
+      if (_canSkipOnError) {
+        _errorsInRow++;
+        try {
+          await _reloadAt(_player.nextIndex!);
+          action = 'skipped';
+        } catch (err) {
+          debugPrint("FletAudioService: skip after error failed → $err");
+        }
+      }
+      if (action == 'stopped') {
+        _gaveUpOnError = true;
+        try {
+          await _player.pause();
+        } catch (_) {}
+        // Report the idle we were holding back, so audio_service releases
+        // the service instead of showing "buffering" forever.
+        playbackState.add(playbackState.value.copyWith(
+            processingState: AudioProcessingState.idle, playing: false));
+      }
+      _reportPlaybackError(e.message ?? 'error ${e.code}', title, artist, action);
+    });
+  }
+
+  Future<void> _reloadAt(int index) async {
+    final wasPlaying = _player.playing;
+    await _player.setAudioSource(_playlist, preload: true, initialIndex: index);
+    if (wasPlaying && !_player.playing) unawaited(_player.play());
+  }
+
+  void _reportPlaybackError(String message, String title, String artist, String action) {
+    final forward = onPlaybackError;
+    forward?.call({
+      'message': message,
+      'title': title,
+      'artist': artist,
+      'action': action,
+    });
+    // In the app, Python's toast says it; otherwise a card, since nobody saw
+    // the music stop or jump.
+    final foreground =
+        WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed;
+    if (foreground && forward != null) return;
+    final name = title.isEmpty ? 'a track' : '“$title”';
+    _showAlert(
+      key: 'playback_error',
+      icon: 'playback',
+      title: action == 'skipped' ? "Couldn't play $name" : 'Playback stopped',
+      content: action == 'skipped'
+          ? 'Skipped to the next track. The file may have been moved, deleted or be unreadable.'
+          : "Couldn't play $name or the tracks after it. Check that the music folder is still there and the app can read it.",
+      navigateTo: 'home',
+    );
   }
 
   /// Id (= the src Python sent) of live playlist row [idx], or null. Every
@@ -1478,14 +1642,20 @@ class AudioPlayerHandler extends BaseAudioHandler with QueueHandler, SeekHandler
         MediaAction.setRepeatMode,
       },
       androidCompactActionIndices: const [0, 1, 3],
-      processingState: const {
-            ProcessingState.idle: AudioProcessingState.idle,
-            ProcessingState.loading: AudioProcessingState.loading,
-            ProcessingState.buffering: AudioProcessingState.buffering,
-            ProcessingState.ready: AudioProcessingState.ready,
-            ProcessingState.completed: AudioProcessingState.completed,
-          }[_player.processingState] ??
-          AudioProcessingState.idle,
+      // An error leaves the player idle; reporting idle would make
+      // audio_service stop the service before _onPlayerError can skip.
+      processingState: (_player.processingState == ProcessingState.idle &&
+              event.errorCode != null &&
+              _canSkipOnError)
+          ? AudioProcessingState.buffering
+          : const {
+                ProcessingState.idle: AudioProcessingState.idle,
+                ProcessingState.loading: AudioProcessingState.loading,
+                ProcessingState.buffering: AudioProcessingState.buffering,
+                ProcessingState.ready: AudioProcessingState.ready,
+                ProcessingState.completed: AudioProcessingState.completed,
+              }[_player.processingState] ??
+              AudioProcessingState.idle,
       playing: _player.playing,
       updatePosition: event.updatePosition,
       bufferedPosition: event.bufferedPosition,

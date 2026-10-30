@@ -135,6 +135,8 @@ class DatabaseManager:
             await self._migrate_pca(self._conn)
             await self._migrate_clusters(self._conn)
             await self._migrate_enrichment(self._conn)
+            await self._migrate_ai_research(self._conn)
+            await self._migrate_artist_releases(self._conn)
             await self._migrate_autoplay_hidden(self._conn)
             await self._migrate_autoplay_hop_rejects(self._conn)
             await self._migrate_album_genre_bucket(self._conn)
@@ -286,15 +288,14 @@ class DatabaseManager:
                     "ON track_neighbors(track_path, edge_kind, weight DESC)"
                 )
 
-                # Persistent playback history. Drives two things:
-                #   1) Long-term avoid set for the assistant's similarity walk
-                #      (in-memory _recent loses everything on app restart).
-                #   2) Listen-signal feedback that re-ranks mood candidates
-                #      (skipped-early tracks sink, completed ones float up).
-                # event ∈ {'played', 'skipped_early', 'completed'}. seed_path
-                # is set when the track was reached via "play similar" so we
-                # can later attribute skips/completions back to the seed for
-                # online edge tuning if we ever want it.
+                # Persistent playback history: the long-term avoid set for the
+                # assistant's similarity walk (in-memory _recent loses
+                # everything on app restart) and the "recently played" list.
+                # event ∈ {'played', 'skipped_early', 'completed'}; the listen
+                # events are bookkeeping for play counts only. Nothing ranks
+                # by them: the app deliberately ships no taste model.
+                # seed_path records the "play similar" seed a track came from
+                # (written, not currently read).
                 await conn.execute('''
                     CREATE TABLE IF NOT EXISTS playback_history (
                         track_path TEXT NOT NULL,
@@ -1077,6 +1078,33 @@ class DatabaseManager:
         async with conn.execute(sql, (title, artist)) as cursor:
             row = await cursor.fetchone()
             return dict(row) if row else None
+
+    async def get_album_owned_count(self, title, artist) -> int:
+        """Lock-free read: how many tracks of this album the library holds
+        (0 when the album isn't in it). Same name match as get_album_by_meta."""
+        sql = '''
+            SELECT COUNT(t.id) FROM albums al
+            JOIN artists ar ON al.artist_id = ar.id
+            JOIN tracks t ON t.album_id = al.id
+            WHERE al.title = ? COLLATE NOCASE AND ar.name = ? COLLATE NOCASE
+        '''
+        conn = await self.get_connection()
+        async with conn.execute(sql, (title, artist)) as cursor:
+            row = await cursor.fetchone()
+            return int(row[0]) if row else 0
+
+    async def get_artist_owned_count(self, name) -> int:
+        """Lock-free read: how many of this artist's tracks the library holds."""
+        sql = '''
+            SELECT COUNT(t.id) FROM artists ar
+            JOIN albums al ON al.artist_id = ar.id
+            JOIN tracks t ON t.album_id = al.id
+            WHERE ar.name = ? COLLATE NOCASE
+        '''
+        conn = await self.get_connection()
+        async with conn.execute(sql, (name,)) as cursor:
+            row = await cursor.fetchone()
+            return int(row[0]) if row else 0
 
     # ─── Playlist Schema Migration ─────────────────────────────────────────────
 
@@ -2450,6 +2478,188 @@ class DatabaseManager:
             out["provenance"] = {}
         return out
 
+    async def _migrate_artist_releases(self, conn):
+        """Idempotent: per-artist discography cache for the Search landing
+        page's new releases (utils/new_releases.py). `source` is 'deezer',
+        'musicbrainz' or 'none' (looked up, not identified); `releases` is a
+        JSON list of {title, date, type, cover, source}."""
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS artist_releases (
+                artist_name TEXT PRIMARY KEY COLLATE NOCASE,
+                source      TEXT NOT NULL,
+                source_id   TEXT,
+                releases    TEXT NOT NULL,
+                fetched_at  REAL NOT NULL
+            )
+        ''')
+        await conn.commit()
+
+    async def get_artist_release_cache(self) -> dict[str, dict]:
+        """{lower-cased artist name: row} with `releases` decoded."""
+        conn = await self.get_connection()
+        async with conn.execute(
+            "SELECT artist_name, source, source_id, releases, fetched_at FROM artist_releases"
+        ) as cursor:
+            rows = await cursor.fetchall()
+        out: dict[str, dict] = {}
+        for name, source, source_id, releases, fetched_at in rows:
+            try:
+                decoded = json.loads(releases)
+            except Exception:
+                decoded = []
+            out[name.lower()] = {"artist_name": name, "source": source, "source_id": source_id,
+                                 "releases": decoded, "fetched_at": fetched_at or 0.0}
+        return out
+
+    async def save_artist_releases(self, artist_name: str, source: str,
+                                   source_id: str | None, releases: list[dict]) -> None:
+        async with self._write_lock:
+            conn = await self.get_connection()
+            await conn.execute(
+                "INSERT OR REPLACE INTO artist_releases "
+                "(artist_name, source, source_id, releases, fetched_at) VALUES (?, ?, ?, ?, ?)",
+                (artist_name, source, source_id, json.dumps(releases), time.time()),
+            )
+            await conn.commit()
+
+    async def get_release_lookup_artists(self) -> list[str]:
+        """Library artists, most-owned first, so a pass cut short by the OS
+        has covered the artists that matter most to this library."""
+        conn = await self.get_connection()
+        async with conn.execute(
+            "SELECT name FROM artists WHERE track_count > 0 ORDER BY track_count DESC"
+        ) as cursor:
+            return [r[0] for r in await cursor.fetchall() if r[0]]
+
+    async def get_artist_owned_titles(self, artist_name: str) -> tuple[list[str], list[str]]:
+        """(album titles, track titles) the library holds for this artist."""
+        conn = await self.get_connection()
+        async with conn.execute(
+            "SELECT al.title FROM albums al JOIN artists ar ON ar.id = al.artist_id "
+            "WHERE ar.name = ? COLLATE NOCASE", (artist_name,),
+        ) as cursor:
+            albums = [r[0] for r in await cursor.fetchall() if r[0]]
+        async with conn.execute(
+            "SELECT t.title FROM tracks t JOIN albums al ON al.id = t.album_id "
+            "JOIN artists ar ON ar.id = al.artist_id WHERE ar.name = ? COLLATE NOCASE",
+            (artist_name,),
+        ) as cursor:
+            tracks = [r[0] for r in await cursor.fetchall() if r[0]]
+        return albums, tracks
+
+    async def _migrate_ai_research(self, conn):
+        """Idempotent: the AI research cache (utils/metadata_ai.py).
+
+        Kept apart from artist_enrichment on purpose. A research answer is a
+        SUGGESTION until the user accepts it; storing it in artist_enrichment
+        would feed it straight to the walk. `state` is 'pending' (shown in the
+        workbench), 'accepted' or 'dismissed' — the last two keep the answer so
+        the same artist is never researched (and billed) twice."""
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS artist_ai_research (
+                artist_name TEXT PRIMARY KEY COLLATE NOCASE,
+                payload     TEXT NOT NULL,   -- JSON, see metadata_ai.research_artist
+                state       TEXT NOT NULL DEFAULT 'pending',
+                created_at  REAL NOT NULL
+            )
+        ''')
+        await conn.commit()
+
+    async def save_ai_research(self, artist_name: str, payload: dict,
+                               state: str = "pending") -> None:
+        async with self._write_lock:
+            conn = await self.get_connection()
+            await conn.execute(
+                "INSERT OR REPLACE INTO artist_ai_research "
+                "(artist_name, payload, state, created_at) "
+                "VALUES (?, ?, ?, strftime('%s','now'))",
+                (artist_name, json.dumps(payload), state),
+            )
+            await conn.commit()
+
+    async def set_ai_research_state(self, artist_name: str, state: str) -> None:
+        async with self._write_lock:
+            conn = await self.get_connection()
+            await conn.execute(
+                "UPDATE artist_ai_research SET state = ? WHERE artist_name = ?",
+                (state, artist_name),
+            )
+            await conn.commit()
+
+    async def get_ai_research(self, artist_name: str) -> dict | None:
+        """{'payload', 'state', 'created_at'} for one artist, or None."""
+        conn = await self.get_connection()
+        async with conn.execute(
+            "SELECT payload, state, created_at FROM artist_ai_research "
+            "WHERE artist_name = ?", (artist_name,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if not row:
+            return None
+        try:
+            payload = json.loads(row[0])
+        except Exception:
+            return None
+        return {"payload": payload, "state": row[1], "created_at": row[2]}
+
+    async def get_pending_ai_research(self) -> dict[str, dict]:
+        """{artist_name: payload} for every suggestion still awaiting the user.
+        Rows whose artist already has a manual answer are skipped: the user
+        settled it some other way."""
+        conn = await self.get_connection()
+        async with conn.execute(
+            "SELECT r.artist_name, r.payload FROM artist_ai_research r "
+            "LEFT JOIN artist_enrichment e ON e.artist_name = r.artist_name "
+            "WHERE r.state = 'pending' AND (e.source IS NULL OR e.source <> 'manual')"
+        ) as cursor:
+            rows = await cursor.fetchall()
+        out: dict[str, dict] = {}
+        for name, payload in rows:
+            try:
+                out[name] = json.loads(payload)
+            except Exception:
+                continue
+        return out
+
+    async def get_researched_artist_names(self) -> set[str]:
+        """Lower-cased names with ANY cached answer, whatever its state."""
+        conn = await self.get_connection()
+        async with conn.execute("SELECT artist_name FROM artist_ai_research") as cursor:
+            rows = await cursor.fetchall()
+        return {r[0].lower() for r in rows if r[0]}
+
+    async def get_artist_research_evidence(self, artist_name: str) -> dict:
+        """What the library knows about an artist, for the AI to identify WHICH
+        artist of that name this is: album titles + years, a sample of track
+        titles, the files' own genre tags, and any partial enrichment."""
+        conn = await self.get_connection()
+        async with conn.execute(
+            "SELECT al.title, al.year, al.genre FROM albums al "
+            "JOIN artists ar ON ar.id = al.artist_id WHERE ar.name = ? "
+            "ORDER BY al.track_count DESC LIMIT 12", (artist_name,),
+        ) as cursor:
+            albums = [dict(title=r[0], year=r[1] or "") for r in await cursor.fetchall()]
+        async with conn.execute(
+            "SELECT t.title FROM tracks t JOIN albums al ON al.id = t.album_id "
+            "JOIN artists ar ON ar.id = al.artist_id "
+            "WHERE ar.name = ? AND t.title IS NOT NULL AND t.title <> '' "
+            "ORDER BY t.id LIMIT 12", (artist_name,),
+        ) as cursor:
+            tracks = [r[0] for r in await cursor.fetchall()]
+        enr = await self.get_artist_enrichment(artist_name) or {}
+        return {
+            "artist": artist_name,
+            "albums": albums,
+            "tracks": tracks,
+            "file_tags": await self.get_artist_source_genres(artist_name),
+            "known_country": enr.get("country") or "",
+            "known_area": enr.get("area") or "",
+            "known_genres": [
+                (g.get("name") if isinstance(g, dict) else str(g))
+                for g in (enr.get("genres") or [])
+            ],
+        }
+
     async def get_artist_workbench_item(self, name: str) -> dict | None:
         """Lock-free read of one artist's workbench row, whether in gaps or already complete."""
         if not name:
@@ -2563,9 +2773,14 @@ class DatabaseManager:
     async def set_manual_artist_enrichment(
         self, artist_name: str, *, country: str | None = None,
         genres: list[str] | list[dict] | None = None,
+        origin: str = "manual",
     ) -> None:
         """User-entered override. Stored as source='manual', status='ok' so it feeds
-        the genre model and is never overwritten by automated MusicBrainz syncs."""
+        the genre model and is never overwritten by automated MusicBrainz syncs.
+
+        `origin` only changes the per-field provenance: an accepted AI suggestion
+        is the user's decision (sticky, like any manual row) but stays labelled
+        'ai' so it can be told apart from values typed by hand."""
         genre_objs = []
         if genres:
             for g in genres:
@@ -2576,8 +2791,8 @@ class DatabaseManager:
         await self.upsert_artist_enrichment(
             artist_name, country=(country or None), genres=genre_objs,
             source="manual", status="ok", score=100, force=True,
-            provenance={"country": "manual" if country else None,
-                        "genres": "manual" if genre_objs else None},
+            provenance={"country": origin if country else None,
+                        "genres": origin if genre_objs else None},
         )
 
     async def get_genre_vocabulary(self, limit: int = 60) -> list[dict]:

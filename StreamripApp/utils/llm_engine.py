@@ -19,6 +19,16 @@ import aiohttp
 logger = logging.getLogger(__name__)
 
 _GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+_GEMINI_MODELS_URL = "https://generativelanguage.googleapis.com/v1beta/models"
+
+# The one default. Settings, config.py and the runner all read this instead of
+# carrying their own literal (they had drifted to three different models).
+DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite"
+
+# Model families that can't hold a text chat: embeddings, image/audio/video
+# generation, speech, live-audio, and the specialised agent models.
+_NON_CHAT_MARKERS = ("embedding", "image", "tts", "live", "audio", "veo",
+                     "imagen", "robotics", "computer-use", "aqa")
 
 
 @dataclass
@@ -40,13 +50,13 @@ class LLMEngine:
         self,
         provider: str = "gemini",
         api_key: str = "",
-        model: str = "gemini-2.5-flash",
+        model: str = DEFAULT_GEMINI_MODEL,
         ollama_endpoint: str = "http://localhost:11434/v1",
         ollama_model: str = "llama3.2",
     ):
         self.provider = provider
         self.api_key = api_key
-        self.model = model or "gemini-2.5-flash"
+        self.model = model or DEFAULT_GEMINI_MODEL
         self.ollama_endpoint = ollama_endpoint.rstrip("/")
         self.ollama_model = ollama_model or "llama3.2"
 
@@ -168,3 +178,43 @@ class LLMEngine:
                 fn_args = {}
             parsed.append({"id": tc.get("id") or fn_name, "name": fn_name, "args": fn_args})
         return parsed
+
+
+async def list_gemini_models(api_key: str, timeout: int = 15) -> List[Dict[str, str]]:
+    """Chat-capable Gemini models this key can use, newest id first, as
+    [{"id": "gemini-…", "name": display name}]. Google retires and adds models
+    every few months, so a hardcoded list goes stale; the Settings dropdown is
+    filled from this instead. Raises RuntimeError with the provider's reason
+    on failure (bad key, offline) so the caller can show it."""
+    key = (api_key or "").strip()
+    if not key:
+        raise RuntimeError("No Gemini API key set.")
+    out: List[Dict[str, str]] = []
+    page_token = ""
+    async with aiohttp.ClientSession() as session:
+        for _ in range(10):  # pages; the catalogue is well under 1000 models
+            params = {"pageSize": "1000"}
+            if page_token:
+                params["pageToken"] = page_token
+            async with session.get(
+                _GEMINI_MODELS_URL, params=params,
+                headers={"x-goog-api-key": key},
+                timeout=aiohttp.ClientTimeout(total=timeout),
+            ) as resp:
+                if resp.status != 200:
+                    text = await resp.text()
+                    raise RuntimeError(f"HTTP {resp.status}: {text[:200]}")
+                data = await resp.json()
+            for m in data.get("models") or []:
+                mid = str(m.get("name") or "").removeprefix("models/")
+                methods = m.get("supportedGenerationMethods") or []
+                if not mid.startswith("gemini-") or "generateContent" not in methods:
+                    continue
+                if any(tag in mid for tag in _NON_CHAT_MARKERS):
+                    continue
+                out.append({"id": mid, "name": str(m.get("displayName") or mid)})
+            page_token = data.get("nextPageToken") or ""
+            if not page_token:
+                break
+    out.sort(key=lambda m: m["id"], reverse=True)
+    return out

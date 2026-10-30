@@ -982,11 +982,11 @@ class AssistantRunner:
             return await self._execute_intent(intent)
 
         provider = acfg.llm_provider if acfg else "gemini"
-        from utils.llm_engine import LLMEngine
+        from utils.llm_engine import DEFAULT_GEMINI_MODEL, LLMEngine
         engine = LLMEngine(
             provider=provider,
             api_key=acfg.gemini_api_key if acfg else "",
-            model=acfg.gemini_model if acfg else "gemini-2.5-flash",
+            model=(acfg.gemini_model if acfg else "") or DEFAULT_GEMINI_MODEL,
             ollama_endpoint=acfg.ollama_endpoint if acfg else "http://localhost:11434/v1",
             ollama_model=acfg.ollama_model if acfg else "llama3.2",
         )
@@ -1022,7 +1022,9 @@ class AssistantRunner:
             "an artist's albums, an album's tracks, playlists and their contents, recently played, "
             "and rich per-track details incl. bpm/energy) and action tools (search, play/enqueue/"
             "play-next, play whole albums or playlists, the DSP similarity walk, mood steering (steer_mood), "
-            "transport control, saving playlists, and Qobuz online search). "
+            "transport control, saving playlists, and Qobuz online search), plus metadata curation (metadata status, "
+            "an artist's stored genre/country, web research of an artist with sources, and applying genres/country — "
+            "research only ever creates a suggestion; applying always asks the user first). "
             "When users ask for specific acoustic properties (energy, brightness, tempo) or vibe requests, "
             "use search_by_acoustic_profile or steer_mood. Answer library questions by calling the read tools and "
             "reasoning over the results — e.g. counts, 'most played', 'how many by X', 'what's on this album'. "
@@ -2475,14 +2477,39 @@ class AssistantRunner:
             deferred_play=True,
         )
 
+    async def _current_track_dict(self) -> Optional[dict]:
+        """The playing track as a dict. The engine keeps the now-playing
+        title/artist/album as plain STRINGS (current_track is the title, not a
+        row), so the DB row for current_path is the authority; the engine's
+        strings, then the queue row, are fallbacks."""
+        eng = self.engine
+        path = getattr(eng, "current_path", "") or ""
+        if path:
+            try:
+                row = await self.db.get_track_full(path)
+            except Exception:
+                row = None
+            if row:
+                row = dict(row)
+                row.pop("timbre", None)  # BLOB; never reaches extras/history
+                return row
+        title = getattr(eng, "current_track", "")
+        if isinstance(title, str) and title:
+            return {
+                "path": path,
+                "title": title,
+                "artist": getattr(eng, "current_artist", "") or "",
+                "album": getattr(eng, "current_album", "") or "",
+                "duration": getattr(eng, "duration", 0.0) or 0.0,
+            }
+        queue = getattr(eng, "queue", None) or []
+        idx = getattr(eng, "current_index", 0)
+        if isinstance(idx, int) and 0 <= idx < len(queue) and isinstance(queue[idx], dict):
+            return queue[idx]
+        return None
+
     async def _handle_track_info(self, intent: ai.Intent) -> AssistantResponse:
-        current = None
-        if hasattr(self.engine, "current_track") and self.engine.current_track:
-            current = self.engine.current_track
-        elif self.engine.queue and hasattr(self.engine, "current_index"):
-            idx = getattr(self.engine, "current_index", 0)
-            if 0 <= idx < len(self.engine.queue):
-                current = self.engine.queue[idx]
+        current = await self._current_track_dict()
 
         if not current:
             return AssistantResponse(
@@ -2494,7 +2521,10 @@ class AssistantRunner:
         title = current.get("track_title") or current.get("title") or "Unknown Track"
         artist = current.get("artist_name") or current.get("artist") or "Unknown Artist"
         album = current.get("album_title") or current.get("album") or "Single / Unknown Album"
-        duration = float(current.get("duration", 0.0) or 0.0)
+        try:
+            duration = float(current.get("duration", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            duration = 0.0
         dur_str = f"{int(duration // 60)}m {int(duration % 60)}s" if duration > 0 else "Unknown length"
 
         spoken = self._say("track_info", title=title, artist=artist, album=album, duration=dur_str)

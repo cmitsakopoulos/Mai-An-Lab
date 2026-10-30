@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import urllib.parse
 import flet as ft
 
 from ui.tokens import (
@@ -54,6 +55,7 @@ from utils.metadata_enrich import (
     search_musicbrainz_artists_candidates,
     musicbrainz_artist_details,
 )
+from utils import metadata_ai
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +95,14 @@ _SOURCE_STYLE = {
     "files":       ("FILES", ACCENT_GREEN),
     "qobuz":       ("QOBUZ", "#FF9F0A"),
     "manual":      ("YOURS", ACCENT_AMBER),
+    "ai":          ("AI", "#5E5CE6"),
+}
+
+# AI research accent: distinct from country purple and the provider colours.
+_AI = "#5E5CE6"
+_PROVIDERS = {
+    "musicbrainz": ("MusicBrainz", ft.Icons.PUBLIC_ROUNDED, CYAN),
+    "qobuz": ("Qobuz", ft.Icons.STOREFRONT_ROUNDED, "#FF9F0A"),
 }
 
 # Fixed column widths, kept here so the header and the rows can never drift
@@ -100,6 +110,7 @@ _SOURCE_STYLE = {
 # remaining width instead of the scraps four fixed columns used to leave them.
 _CHECK_W = 34
 _TRACKS_W = 26
+_ACCEPT_W = 34
 
 
 def _flag(cc: str | None) -> str:
@@ -141,6 +152,11 @@ class MetadataWorkbenchPane(ft.Column):
         self.low_conf: list[dict] = []
         self.vocab: list[dict] = []
         self.countries: list[dict] = []
+        # AI research: pending suggestions by artist, names already researched
+        # (any outcome), and whether a Gemini key is configured at all.
+        self.ai_pending: dict[str, dict] = {}
+        self.researched: set[str] = set()
+        self.ai_ready = False
 
         # ── view state ──
         self.filter = "needs"      # needs | suggested | all | uncertain
@@ -157,6 +173,10 @@ class MetadataWorkbenchPane(ft.Column):
         self.s_cur = self.s_total = 0
         self.s_ok = self.s_sup = self.s_blank = self.s_err = 0
         self.s_name = ""
+        self.researching = False
+        self.r_cur = self.r_total = self.r_found = self.r_unknown = 0
+        self.r_name = ""
+        self._url_launcher = ft.UrlLauncher()
 
         # ── chrome ──
         self._h_hero = ft.Container()
@@ -212,6 +232,9 @@ class MetadataWorkbenchPane(ft.Column):
             self.low_conf = await self.db.get_low_confidence_artists(limit=500)
             self.vocab = await self.db.get_genre_vocabulary(limit=40)
             self.countries = await self.db.get_library_countries()
+            self.ai_pending = await self.db.get_pending_ai_research()
+            self.researched = await self.db.get_researched_artist_names()
+            self.ai_ready = metadata_ai.research_available()
         except Exception as exc:
             logger.exception("Metadata workbench load failed: %s", exc)
         if self.search:
@@ -263,15 +286,30 @@ class MetadataWorkbenchPane(ft.Column):
         self._safe_update()
 
     # ── HERO ─────────────────────────────────────────────────────────────────
+    def _research_targets(self) -> list[str]:
+        """Artists nothing can place that haven't been researched yet."""
+        return [g["artist_name"] for g in self.all_gaps
+                if g.get("gap_severity") == 0
+                and g["artist_name"].lower() not in self.researched]
+
     def _render_hero(self):
+        """One sentence of status and at most two buttons.
+
+        The provider pair used to be two pills plus a description line above
+        the Sync button — three controls for a choice most people make once.
+        It is now a menu on the Sync button itself."""
         cov = self.coverage
         artists = cov.get("artists", 0)
         placeable = cov.get("placeable", 0)
         blocking = cov.get("blocking", 0)
+        n_sugg = len(self._suggestion_rows())
 
         if self.syncing:
             body = self._sync_banner()
+        elif self.researching:
+            body = self._research_banner()
         else:
+            targets = self._research_targets()
             if artists == 0:
                 headline, sub, tone = "No artists yet", "Index your library to begin.", DIM
             elif blocking == 0:
@@ -282,75 +320,39 @@ class MetadataWorkbenchPane(ft.Column):
                 headline = f"{placeable:,} of {artists:,} artists placeable"
                 sub = f"{blocking} still need a genre or a country."
                 tone = ACCENT_AMBER
+            if n_sugg:
+                sub += f" {n_sugg} suggestion{'s' if n_sugg != 1 else ''} ready to review."
 
-            def _select_provider(p: str):
-                if self.sync_provider != p:
-                    self.sync_provider = p
-                    if hasattr(self.app, "set_pref"):
-                        self.app.set_pref("sync_provider", p)
-                    elif hasattr(self.app, "_prefs") and isinstance(self.app._prefs, dict):
-                        self.app._prefs["sync_provider"] = p
-                    self._render_hero()
-                    self._safe_update()
+            actions: list[ft.Control] = [self._sync_button(disabled=(artists == 0))]
+            if targets and self.ai_ready:
+                actions.append(self._filled_btn(
+                    f"Research {len(targets)}", lambda _e: self._start_research(targets),
+                    icon=ft.Icons.AUTO_AWESOME_ROUNDED, bg=_AI))
+            elif n_sugg:
+                actions.append(self._filled_btn(
+                    "Review", lambda _e: self._set_filter("suggested"),
+                    icon=ft.Icons.CHECKLIST_ROUNDED))
 
-            mb_active = self.sync_provider == "musicbrainz"
-            qz_active = self.sync_provider == "qobuz"
-
-            mb_btn = ft.Container(
-                content=ft.Row([
-                    ft.Icon(ft.Icons.PUBLIC_ROUNDED, size=13, color=CYAN if mb_active else DIM),
-                    ft.Text("MusicBrainz", size=12, weight=ft.FontWeight.W_600 if mb_active else ft.FontWeight.W_400,
-                            color=TEXT if mb_active else DIM),
-                ], spacing=6, alignment=ft.MainAxisAlignment.CENTER),
-                bgcolor=apply_opacity(0.15, CYAN) if mb_active else "transparent",
-                border=ft.Border.all(1, CYAN if mb_active else BORDER),
-                border_radius=RADIUS_PILL,
-                padding=ft.Padding.symmetric(horizontal=12, vertical=6),
-                ink=True,
-                on_click=lambda _e: _select_provider("musicbrainz"),
-            )
-
-            qz_btn = ft.Container(
-                content=ft.Row([
-                    ft.Icon(ft.Icons.STOREFRONT_ROUNDED, size=13, color="#FF9F0A" if qz_active else DIM),
-                    ft.Text("Qobuz", size=12, weight=ft.FontWeight.W_600 if qz_active else ft.FontWeight.W_400,
-                            color=TEXT if qz_active else DIM),
-                ], spacing=6, alignment=ft.MainAxisAlignment.CENTER),
-                bgcolor=apply_opacity(0.15, "#FF9F0A") if qz_active else "transparent",
-                border=ft.Border.all(1, "#FF9F0A" if qz_active else BORDER),
-                border_radius=RADIUS_PILL,
-                padding=ft.Padding.symmetric(horizontal=12, vertical=6),
-                ink=True,
-                on_click=lambda _e: _select_provider("qobuz"),
-            )
-
-            provider_desc = (
-                "MusicBrainz: Open community DB · Authoritative country & community tags"
-                if mb_active else
-                "Qobuz: Curated store catalog · Deep album genre consensus"
-            )
-
-            body = ft.Column([
+            lines: list[ft.Control] = [
                 ft.Row([
                     ft.Container(width=3, height=34, bgcolor=tone, border_radius=2),
                     ft.Column([
                         ft.Text(headline, size=14.5, weight=ft.FontWeight.W_700,
                                 color=TEXT, max_lines=2,
                                 overflow=ft.TextOverflow.ELLIPSIS),
-                        ft.Text(sub, size=11.5, color=DIM, max_lines=2,
+                        ft.Text(sub, size=11.5, color=DIM, max_lines=3,
                                 overflow=ft.TextOverflow.ELLIPSIS),
                     ], spacing=2, expand=True, tight=True),
                 ], spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER),
-                ft.Row([
-                    mb_btn,
-                    qz_btn,
-                    ft.Container(expand=True),
-                    self._filled_btn("Sync", lambda _e: self._start_sync(),
-                                     icon=ft.Icons.CLOUD_SYNC_ROUNDED,
-                                     disabled=(artists == 0)),
-                ], vertical_alignment=ft.CrossAxisAlignment.CENTER, spacing=8),
-                ft.Text(provider_desc, size=10.5, color=DIM),
-            ], spacing=6, tight=True)
+                ft.Row(actions, spacing=8, wrap=True, run_spacing=8,
+                       alignment=ft.MainAxisAlignment.END),
+            ]
+            if targets and not self.ai_ready:
+                lines.append(ft.Text(
+                    "Tip: add a Gemini API key in Settings → AI Assistant and the "
+                    "app can research these artists on the web for you.",
+                    size=10.5, color=DIM))
+            body = ft.Column(lines, spacing=10, tight=True)
 
         self._h_hero.content = ft.Column([
             ft.Container(
@@ -362,6 +364,58 @@ class MetadataWorkbenchPane(ft.Column):
             self._search_field,
             ft.Container(height=10),
         ], spacing=0)
+
+    def _sync_button(self, *, disabled: bool) -> ft.Control:
+        """'Sync' plus a menu to pick the source it syncs from."""
+        label, icon, accent = _PROVIDERS.get(self.sync_provider, _PROVIDERS["musicbrainz"])
+
+        def _select_provider(p: str):
+            if self.sync_provider == p:
+                return
+            self.sync_provider = p
+            if hasattr(self.app, "set_pref"):
+                self.app.set_pref("sync_provider", p)
+            elif hasattr(self.app, "_prefs") and isinstance(self.app._prefs, dict):
+                self.app._prefs["sync_provider"] = p
+            self._render_hero()
+            self._safe_update()
+
+        items = []
+        for key, (plabel, picon, pacc) in _PROVIDERS.items():
+            on = key == self.sync_provider
+            items.append(ft.PopupMenuItem(
+                content=ft.Row([
+                    ft.Icon(ft.Icons.CHECK_ROUNDED if on else picon, size=15,
+                            color=pacc if on else DIM),
+                    ft.Text(f"Sync from {plabel}", size=12.5,
+                            color=TEXT if on else DIM,
+                            weight=ft.FontWeight.W_700 if on else ft.FontWeight.W_400),
+                ], spacing=8, tight=True),
+                on_click=lambda _e, k=key: _select_provider(k),
+            ))
+        menu = ft.PopupMenuButton(
+            items=items, tooltip="Choose the sync source",
+            content=ft.Container(
+                content=ft.Icon(ft.Icons.ARROW_DROP_DOWN_ROUNDED, size=20, color=accent),
+                padding=ft.Padding.symmetric(horizontal=6, vertical=8),
+            ),
+        )
+        btn = ft.Container(
+            content=ft.Row([
+                ft.Icon(icon, size=15, color=accent),
+                ft.Text(f"Sync · {label}", size=12.5, weight=ft.FontWeight.W_600,
+                        color=TEXT),
+            ], spacing=7, tight=True),
+            padding=ft.Padding.only(left=14, top=10, bottom=10),
+            on_click=None if disabled else (lambda _e: self._start_sync()),
+            ink=not disabled,
+        )
+        return ft.Container(
+            content=ft.Row([btn, menu], spacing=0, tight=True,
+                           vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            border=ft.Border.all(1, BORDER), border_radius=RADIUS_PILL,
+            opacity=0.5 if disabled else 1.0,
+        )
 
     def _sync_banner(self) -> ft.Control:
         pct = (self.s_cur / self.s_total) if self.s_total else None
@@ -411,7 +465,7 @@ class MetadataWorkbenchPane(ft.Column):
 
     # ── SYNC ─────────────────────────────────────────────────────────────────
     def _start_sync(self):
-        if self.syncing:
+        if self.syncing or self.researching:
             return
         self.syncing = True
         self.cancel_event = asyncio.Event()
@@ -436,7 +490,8 @@ class MetadataWorkbenchPane(ft.Column):
             self._update_sync_banner()
 
         from utils.progress_notify import (
-            ProgressNotifier, metadata_progress_cb, metadata_summary_text,
+            ProgressNotifier, metadata_progress_cb, metadata_retry_action,
+            metadata_summary_text,
         )
         notifier = ProgressNotifier("metadata", "Syncing artist metadata", on_cancel=self.cancel_event.set)
         summary: dict = {}
@@ -451,7 +506,8 @@ class MetadataWorkbenchPane(ft.Column):
             logger.exception("Workbench sync failed: %s", exc)
             summary = {"status": f"error: {exc}"}
         finally:
-            notifier.finish(metadata_summary_text(summary))
+            notifier.finish(metadata_summary_text(summary),
+                            action=metadata_retry_action(summary))
             self.syncing = False
             await self._reload_async()
             self._report_sync(summary)
@@ -498,6 +554,150 @@ class MetadataWorkbenchPane(ft.Column):
             self.cancel_event.set()
 
 
+    # ── AI RESEARCH ──────────────────────────────────────────────────────────
+    def _research_banner(self) -> ft.Control:
+        pct = (self.r_cur / self.r_total) if self.r_total else None
+        self._r_bar = ft.ProgressBar(value=pct, color=_AI, bgcolor=SURFACE2, height=5)
+        self._r_label = ft.Text(
+            f"Researching {self.r_cur} of {self.r_total} · {self.r_name}"[:64],
+            size=12.5, color=TEXT, weight=ft.FontWeight.W_600,
+            overflow=ft.TextOverflow.ELLIPSIS, max_lines=1,
+        )
+        self._r_counts = ft.Row([
+            self._counter("suggested", self.r_found, _AI),
+            self._counter("not found", self.r_unknown, DIM),
+        ], spacing=14, wrap=True, run_spacing=4)
+        return ft.Column([
+            self._r_label,
+            self._r_bar,
+            ft.Row([
+                self._r_counts,
+                ft.Container(expand=True),
+                self._ghost_btn("Stop", lambda _e: self._cancel_sync(), fg=ACCENT_RED),
+            ], vertical_alignment=ft.CrossAxisAlignment.CENTER),
+        ], spacing=9)
+
+    def _start_research(self, names: list[str]):
+        """Research artists on the web, one grounded Gemini call each. Answers
+        land as suggestions under the Suggestions filter; nothing is saved to
+        an artist until the user accepts it."""
+        if self.syncing or self.researching or not names:
+            return
+        self.researching = True
+        self.cancel_event = asyncio.Event()
+        self.r_cur, self.r_total = 0, len(names)
+        self.r_found = self.r_unknown = 0
+        self.r_name = "Starting…"
+        self._render_hero()
+        self._safe_update()
+        self.app.page.run_task(self._do_research, list(names))
+
+    async def _do_research(self, names: list[str]):
+        from utils.progress_notify import ProgressNotifier
+        notifier = ProgressNotifier("metadata", "Researching artists",
+                                    on_cancel=self.cancel_event.set)
+
+        def cb(i, total, name, res):
+            self.r_cur, self.r_total, self.r_name = i, total, name
+            st = res.get("status")
+            if st == "ok":
+                self.r_found += 1
+            elif st != "skipped":
+                self.r_unknown += 1
+            notifier.update(i, total, f"{i} / {total} artists · {name}")
+            if getattr(self, "_r_bar", None) is not None:
+                self._r_bar.value = i / total if total else None
+                self._r_label.value = f"Researching {i} of {total} · {name}"[:64]
+                for ctrl, n in zip(self._r_counts.controls, (self.r_found, self.r_unknown)):
+                    ctrl.controls[0].value = str(n)
+                self._safe_update()
+
+        summary: dict = {}
+        try:
+            summary = await metadata_ai.research_artists(
+                self.db, names, progress=cb, cancel_event=self.cancel_event)
+        except Exception as exc:
+            logger.exception("AI research run failed: %s", exc)
+            summary = {"status": f"error: {exc}"}
+        finally:
+            status = summary.get("status") or ""
+            found = summary.get("found", 0)
+            notifier.finish(
+                f"Research failed: {status[6:].strip()}" if status.startswith("error")
+                else f"{found} suggestion{'s' if found != 1 else ''} to review"
+                if found else "No new suggestions found",
+                action=("Review", "workbench:suggestions") if found else None,
+            )
+            self.researching = False
+            await self._reload_async()
+            self._report_research(summary)
+
+    def _report_research(self, summary: dict):
+        status = (summary or {}).get("status") or ""
+        found = summary.get("found", 0)
+        unknown = summary.get("unknown", 0) + summary.get("failed", 0)
+        if status.startswith("error"):
+            self.app.show_snackbar(status[6:].strip(), color=ACCENT_RED)
+            return
+        if found:
+            self._set_filter("suggested")
+        msg = (f"{found} suggestion{'s' if found != 1 else ''} ready to review"
+               if found else "The web had nothing reliable on these artists")
+        if unknown and found:
+            msg += f" · {unknown} not found"
+        if status == "cancelled":
+            msg = "Stopped. " + msg
+        self.app.show_snackbar(msg, icon=ft.Icons.AUTO_AWESOME_ROUNDED,
+                               color=_AI if found else ACCENT_AMBER)
+
+    # ── SUGGESTIONS ──────────────────────────────────────────────────────────
+    def _suggestion_rows(self) -> list[dict]:
+        """Rows with something to accept: an AI answer, or a tag the artist's
+        own files already carry."""
+        return [g for g in self.all_gaps
+                if g["artist_name"] in self.ai_pending
+                or g.get("gap_severity") == 1]
+
+    def _suggestion_of(self, g: dict) -> tuple[list[str], str, str]:
+        """(genres, country, origin) this row would get on Accept."""
+        ai = self.ai_pending.get(g["artist_name"])
+        if ai:
+            return list(ai.get("genres") or []), ai.get("country") or "", "ai"
+        files = [f.lower() for f in (g.get("source_genres") or [])[:3]]
+        return files, "", "files"
+
+    def _accept(self, names: list[str]):
+        """Accept the suggestion on each row. AI answers and file tags both
+        MERGE into what the artist already has."""
+        async def _do():
+            by_name = {g["artist_name"]: g for g in self.all_gaps}
+            n = 0
+            for name in names:
+                g = by_name.get(name)
+                if not g:
+                    continue
+                try:
+                    if name in self.ai_pending:
+                        await metadata_ai.accept_suggestion(self.db, name)
+                    else:
+                        genres, _cc, _o = self._suggestion_of(g)
+                        if not genres:
+                            continue
+                        await self.db.bulk_tag_artists(
+                            [name], genre=",".join(genres), refresh_model=False)
+                    n += 1
+                except Exception as exc:
+                    logger.exception("accept failed for %s: %s", name, exc)
+            for name in names:
+                self.selected.discard(name)
+            await self._reload_async()
+            if n:
+                self.app.show_snackbar(
+                    f"Accepted {n} suggestion{'s' if n != 1 else ''}",
+                    icon=ft.Icons.CHECK_CIRCLE, color=CYAN)
+                self._schedule_walk_refresh()
+        self.app.page.run_task(_do)
+
     # ── FILTER ───────────────────────────────────────────────────────────────
     def _render_filter(self):
         # Counts do NOT go in the labels. `CupertinoSegmentedBar` sets
@@ -506,7 +706,7 @@ class MetadataWorkbenchPane(ft.Column):
         # 'Suggested 1('. The count belongs in the list caption below.
         segs = [
             ("needs", "Needs you", None, ACCENT_RED),
-            ("suggested", "Suggested", None, ACCENT_GREEN),
+            ("suggested", "Suggestions", None, ACCENT_GREEN),
             ("uncertain", "Review", None, ACCENT_AMBER),
             ("all", "All", None, CYAN),
         ]
@@ -542,9 +742,11 @@ class MetadataWorkbenchPane(ft.Column):
         else:
             pool = self.all_gaps
             if self.filter == "needs":
-                pool = [g for g in pool if g.get("gap_severity") == 0]
+                # An artist with an answer waiting is under Suggestions, not here.
+                pool = [g for g in pool if g.get("gap_severity") == 0
+                        and g["artist_name"] not in self.ai_pending]
             elif self.filter == "suggested":
-                pool = [g for g in pool if g.get("gap_severity") == 1]
+                pool = self._suggestion_rows()
         if q:
             def _matches_q(g):
                 if q in (g.get("artist_name") or "").lower():
@@ -574,7 +776,7 @@ class MetadataWorkbenchPane(ft.Column):
         plural = "s" if n != 1 else ""
         caption = {
             "needs": f"{n} artist{plural} Auto-Play can't place yet",
-            "suggested": f"{n} artist{plural} your own files can already tag",
+            "suggested": f"{n} suggestion{plural} — tick ✓ to accept, or tap to adjust",
             "uncertain": f"{n} match{'es' if n != 1 else ''} MusicBrainz wasn't sure about",
             "all": f"{n} artist{plural} with incomplete metadata",
         }[self.filter]
@@ -612,7 +814,8 @@ class MetadataWorkbenchPane(ft.Column):
                 ft.Container(content=h("GENRE"), expand=4),
                 ft.Container(content=h("♪", text_align=ft.TextAlign.RIGHT),
                              width=_TRACKS_W),
-            ], spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            ] + ([ft.Container(width=_ACCEPT_W)] if self.filter == "suggested" else []),
+                spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER),
             padding=ft.Padding.only(left=8, right=10, top=9, bottom=5),
         )
 
@@ -626,8 +829,16 @@ class MetadataWorkbenchPane(ft.Column):
         prov = g.get("provenance") or {}
         selected = name in self.selected
 
-        # Genre cell: what we have, else what a source proposes.
-        if genres:
+        # Genre cell: an AI answer waiting, else what we have, else what the
+        # files propose.
+        ai = self.ai_pending.get(name)
+        if ai:
+            bits = list(ai.get("genres") or [])[:3]
+            if ai.get("country"):
+                bits.append(ai["country"])
+            gtext, gcolor = ", ".join(bits) or "—", _AI
+            src_key = "ai"
+        elif genres:
             gtext, gcolor = ", ".join(genres[:3]), TEXT
             src_key = prov.get("genres")
         elif files:
@@ -638,6 +849,8 @@ class MetadataWorkbenchPane(ft.Column):
             src_key = None
 
         badge_text, badge_color = _SOURCE_STYLE.get(src_key or "", ("", DIM))
+        if ai and ai.get("confidence"):
+            badge_text = f"AI · {ai['confidence'].upper()}"
 
         # `fill_color` as a bare colour fills the box in EVERY state, so every
         # unselected row rendered as a solid accent square that read as already
@@ -689,7 +902,16 @@ class MetadataWorkbenchPane(ft.Column):
                                 text_align=ft.TextAlign.RIGHT),
                 width=_TRACKS_W,
             ),
-        ], spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER)
+        ] + ([ft.Container(
+            content=ft.IconButton(
+                icon=ft.Icons.CHECK_CIRCLE_OUTLINE_ROUNDED, icon_size=20,
+                icon_color=_AI if ai else ACCENT_GREEN, tooltip="Accept",
+                on_click=lambda _e, n=name: self._accept([n]),
+                style=ft.ButtonStyle(padding=0),
+            ),
+            width=_ACCEPT_W, alignment=ft.Alignment(0, 0),
+        )] if self.filter == "suggested" else []),
+            spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER)
 
         row = ft.Container(
             content=inner,
@@ -741,6 +963,9 @@ class MetadataWorkbenchPane(ft.Column):
             icon, title, sub = (ft.Icons.CHECK_CIRCLE_ROUNDED,
                                 "Every artist can be placed.",
                                 "Auto-Play has a genre or a country for all of them.")
+        elif self.filter == "suggested":
+            icon, title, sub = (ft.Icons.CHECK_CIRCLE_ROUNDED, "No suggestions waiting.",
+                                "Research artists under Needs you, or Sync.")
         elif self.filter == "uncertain":
             icon, title, sub = (ft.Icons.CHECK_CIRCLE_ROUNDED, "Nothing to review.",
                                 "Every match MusicBrainz returned is resolved.")
@@ -770,8 +995,13 @@ class MetadataWorkbenchPane(ft.Column):
             return
         self._h_bins.visible = True
         n = len(self.selected)
+        if self.filter == "suggested":
+            self._render_accept_tray(n)
+            return
 
         bins: list[ft.Control] = []
+        if self.ai_ready:
+            bins.append(self._bin("Research", kind="research", count=0))
         for v in self.vocab[:10]:
             bins.append(self._bin(v["name"], kind="genre", count=v.get("artists", 0)))
         for c in self.countries[:4]:
@@ -807,13 +1037,35 @@ class MetadataWorkbenchPane(ft.Column):
             border=ft.Border.only(top=ft.BorderSide(1, BORDER_SUBTLE)),
         )
 
+    def _render_accept_tray(self, n: int):
+        rows = self._visible()
+        target = sorted(self.selected) if n else [g["artist_name"] for g in rows]
+        label = (f"Accept {n} selected" if n else f"Accept all {len(rows)}")
+        self._h_bins.content = ft.Container(
+            content=ft.Row([
+                ft.Text("Accepting saves the suggestion as your own answer. "
+                        "AI answers keep an AI label.",
+                        size=10.5, color=TEXT_TERTIARY, expand=True, max_lines=2),
+                (ft.TextButton("Clear", on_click=lambda _e: self._clear_selection(),
+                               style=ft.ButtonStyle(color=DIM)) if n else ft.Container()),
+                self._filled_btn(label, lambda _e: self._accept(target),
+                                 icon=ft.Icons.DONE_ALL_ROUNDED,
+                                 disabled=not target),
+            ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            padding=ft.Padding.only(left=2, right=2, top=8, bottom=6),
+            border=ft.Border.only(top=ft.BorderSide(1, BORDER_SUBTLE)),
+        )
+
     def _bin(self, label: str, *, kind: str, count: int) -> ft.Control:
-        accent = {"genre": CYAN, "country": "#BF5AF2", "new": DIM}[kind]
+        accent = {"genre": CYAN, "country": "#BF5AF2", "new": DIM, "research": _AI}[kind]
         armed = bool(self.selected)
         text = label
 
         inner = ft.Container(
             content=ft.Row([
+                (ft.Icon(ft.Icons.AUTO_AWESOME_ROUNDED, size=13,
+                         color=accent if armed else DIM)
+                 if kind == "research" else ft.Container(width=0)),
                 ft.Text(text, size=12, weight=ft.FontWeight.W_600,
                         color=accent if armed else DIM),
                 (ft.Text(str(count), size=9.5, color=TEXT_TERTIARY,
@@ -837,6 +1089,10 @@ class MetadataWorkbenchPane(ft.Column):
             return
         if kind == "new":
             self._prompt_new_genre(names)
+            return
+        if kind == "research":
+            self.selected.clear()
+            self._start_research(names)
             return
         genre = label if kind == "genre" else None
         country = label if kind == "country" else None
@@ -983,8 +1239,10 @@ class MetadataWorkbenchPane(ft.Column):
             country_row.controls = []
             # Tap a country, don't type an ISO code. The library already knows
             # which countries it contains, and the answer is nearly always one.
-            for c in self.countries[:8]:
-                code = c["code"]
+            codes = [c["code"] for c in self.countries[:8]]
+            if country["v"] and country["v"] not in codes:
+                codes.insert(0, country["v"])  # e.g. set from an AI answer
+            for code in codes:
                 on = country["v"] == code
                 ch = _chip(code, on=on, accent="#BF5AF2")
                 ch.on_click = lambda _e, code=code: (
@@ -1009,6 +1267,154 @@ class MetadataWorkbenchPane(ft.Column):
             _rebuild()
         custom.on_submit = _add_custom
         _rebuild()
+
+        # ── AI suggestion section ──
+        ai_box = ft.Column(spacing=8, tight=True)
+        ai_state = {"payload": self.ai_pending.get(name), "busy": False, "loaded": False}
+
+        def _use(gs=(), cc="", toggle=False):
+            for g in gs:
+                if toggle and g.lower() in genres:
+                    genres.discard(g.lower())
+                else:
+                    genres.add(g.lower())
+            if cc:
+                country["v"] = "" if (toggle and country["v"] == cc) else cc
+            _rebuild()
+            _render_ai()
+
+        def _dismiss_ai():
+            async def _do():
+                await metadata_ai.dismiss_suggestion(self.db, name)
+                self.ai_pending.pop(name, None)
+                ai_state["payload"] = None
+                ai_state["dismissed"] = True
+                _render_ai()
+                self._render_list()
+                self._render_hero()
+                self._safe_update()
+            self.app.page.run_task(_do)
+
+        def _research(force: bool):
+            async def _do():
+                ai_state["busy"] = True
+                _render_ai()
+                try:
+                    res = await metadata_ai.research_artist(self.db, name, force=force)
+                except Exception as exc:
+                    ai_state["busy"] = False
+                    _render_ai()
+                    self.app.show_snackbar(str(exc), color=ACCENT_RED)
+                    return
+                ai_state.update(busy=False, payload=res, dismissed=False)
+                self.researched.add(name.lower())
+                if res.get("status") == "ok":
+                    self.ai_pending[name] = res
+                else:
+                    self.ai_pending.pop(name, None)
+                _render_ai()
+                self._render_list()
+                self._render_hero()
+                self._safe_update()
+            self.app.page.run_task(_do)
+
+        def _render_ai():
+            p = ai_state["payload"]
+            ctrls: list[ft.Control] = []
+            if ai_state["busy"]:
+                ctrls.append(ft.Row([
+                    ft.ProgressRing(width=15, height=15, stroke_width=2, color=_AI),
+                    ft.Text("Searching the web…", size=12, color=DIM),
+                ], spacing=8))
+            elif p and p.get("status") == "ok" and not ai_state.get("dismissed"):
+                conf = p.get("confidence") or "low"
+                if p.get("summary"):
+                    ctrls.append(ft.Text(p["summary"], size=12.5, color=TEXT))
+                if p.get("matched_as") and p["matched_as"].lower() != name.lower():
+                    ctrls.append(ft.Text(f"Matched as: {p['matched_as']}", size=11, color=DIM))
+                sug = []
+                new = set(p.get("new_genres") or [])
+                for g in p.get("genres") or []:
+                    c = _chip(g + ("  (new)" if g in new else ""),
+                              on=g in genres, accent=_AI, prefix="" if g in genres else "+ ")
+                    c.on_click = lambda _e, g=g: _use([g], toggle=True)
+                    sug.append(c)
+                cc = p.get("country") or ""
+                if cc:
+                    c = _chip(f"{cc} · {_country_label(cc)}", on=country["v"] == cc,
+                              accent="#BF5AF2", prefix="" if country["v"] == cc else "+ ")
+                    c.on_click = lambda _e, cc=cc: _use((), cc, toggle=True)
+                    sug.append(c)
+                if sug:
+                    ctrls.append(ft.Row(sug, wrap=True, spacing=6, run_spacing=6))
+                if not p.get("grounded"):
+                    ctrls.append(ft.Text(
+                        "No web sources came back, so this is from the model's memory "
+                        "and no country is offered.", size=10.5, color=ACCENT_AMBER))
+                links = [self._link(src.get("title") or "source", src["uri"])
+                         for src in (p.get("sources") or [])[:5] if src.get("uri")]
+                if links:
+                    ctrls.append(ft.Row([ft.Text("Sources", size=10, color=TEXT_TERTIARY)]
+                                        + links, wrap=True, spacing=4, run_spacing=2))
+                searches = [self._link(q, "https://www.google.com/search?q="
+                                       + urllib.parse.quote_plus(q), icon=ft.Icons.SEARCH_ROUNDED)
+                            for q in (p.get("queries") or [])[:3]]
+                if searches:
+                    ctrls.append(ft.Row([ft.Text("Google", size=10, color=TEXT_TERTIARY)]
+                                        + searches, wrap=True, spacing=4, run_spacing=2))
+                ctrls.append(ft.Row([
+                    self._ghost_btn("Use all", lambda _e: _use(p.get("genres") or [], cc),
+                                    fg=_AI, icon=ft.Icons.DONE_ALL_ROUNDED),
+                    self._ghost_btn("Dismiss", lambda _e: _dismiss_ai(), fg=DIM),
+                    self._ghost_btn("Again", lambda _e: _research(True), fg=DIM,
+                                    icon=ft.Icons.REFRESH_ROUNDED),
+                ], spacing=8, wrap=True))
+                head_note = f"{conf} confidence"
+                ai_box.controls = [self._sheet_section(
+                    f"AI SUGGESTION · {head_note.upper()}", ft.Icons.AUTO_AWESOME_ROUNDED,
+                    _AI, ft.Column(ctrls, spacing=8, tight=True))]
+                _refresh_ai()
+                return
+            elif p:
+                ctrls.append(ft.Text(
+                    f"The web had nothing reliable on {name}." if p.get("status") != "ok"
+                    else "Suggestion dismissed.", size=12, color=DIM))
+                ctrls.append(ft.Row([self._ghost_btn(
+                    "Search again", lambda _e: _research(True), fg=_AI,
+                    icon=ft.Icons.REFRESH_ROUNDED)]))
+            else:
+                ctrls.append(ft.Text(
+                    "Search the web for this artist's genre and country. Nothing is "
+                    "saved until you accept it.", size=11.5, color=DIM))
+                ctrls.append(ft.Row([self._filled_btn(
+                    "Research on the web", lambda _e: _research(False),
+                    icon=ft.Icons.AUTO_AWESOME_ROUNDED, bg=_AI)]))
+            ai_box.controls = [self._sheet_section(
+                "AI RESEARCH", ft.Icons.AUTO_AWESOME_ROUNDED, _AI,
+                ft.Column(ctrls, spacing=8, tight=True))]
+            _refresh_ai()
+
+        def _refresh_ai():
+            try:
+                ai_box.update()
+            except Exception:
+                self._safe_update()
+
+        async def _load_cached_ai():
+            if ai_state["payload"] is None:
+                try:
+                    cached = await self.db.get_ai_research(name)
+                except Exception:
+                    cached = None
+                if cached:
+                    ai_state["payload"] = cached["payload"]
+                    ai_state["dismissed"] = cached["state"] == "dismissed" and \
+                        cached["payload"].get("status") == "ok"
+            _render_ai()
+
+        if self.ai_ready or ai_state["payload"]:
+            _render_ai()
+            self.app.page.run_task(_load_cached_ai)
 
         def _save(_e):
             # Capture any unsubmitted genre left in the custom input field
@@ -1067,9 +1473,12 @@ class MetadataWorkbenchPane(ft.Column):
                     msg += f" ({reason})"
                 self.app.show_snackbar(msg, color=ACCENT_AMBER)
 
-        body = [
+        # The AI section only exists when research can run or an answer is on
+        # file; an empty column would still cost a gap at the top of the sheet.
+        body = ([ai_box] if (self.ai_ready or ai_state["payload"]) else []) + [
             self._sheet_section("GENRES", ft.Icons.LABEL_ROUNDED, CYAN, chips_row),
             self._sheet_section("COUNTRY", ft.Icons.PUBLIC_ROUNDED, "#BF5AF2", country_row),
+            ft.Text("OTHER SOURCES", size=10, color=TEXT_TERTIARY, weight=ft.FontWeight.W_800),
             ft.Row([
                 self._ghost_btn("Find on MusicBrainz",
                                 lambda _e: _close(lambda: self._open_mb_dialog(name)),
@@ -1126,6 +1535,17 @@ class MetadataWorkbenchPane(ft.Column):
             on_dismiss=_on_sheet_dismissed,
         )
         self.app.page.show_dialog(sheet)
+
+    def _link(self, label: str, url: str, *, icon=ft.Icons.OPEN_IN_NEW_ROUNDED) -> ft.Control:
+        return ft.Container(
+            content=ft.Row([
+                ft.Icon(icon, size=11, color=_AI),
+                ft.Text(label[:40], size=11, color=_AI),
+            ], spacing=3, tight=True),
+            padding=ft.Padding.symmetric(horizontal=6, vertical=3),
+            border_radius=6, ink=True,
+            on_click=lambda _e, u=url: self.app.page.run_task(self._url_launcher.launch_url, u),
+        )
 
     def _sheet_section(self, label, icon, accent, content) -> ft.Control:
         return ft.Column([
@@ -1292,7 +1712,7 @@ class MetadataWorkbenchPane(ft.Column):
             self.app.page.run_task(_do)
 
     # ── shared button styles ─────────────────────────────────────────────────
-    def _filled_btn(self, text, on_click, *, icon=None, disabled=False):
+    def _filled_btn(self, text, on_click, *, icon=None, disabled=False, bg=CYAN):
         row = []
         if icon:
             row.append(ft.Icon(icon, size=16, color=BG))
@@ -1300,7 +1720,7 @@ class MetadataWorkbenchPane(ft.Column):
         return ft.Container(
             content=ft.Row(row, spacing=7, tight=True,
                            alignment=ft.MainAxisAlignment.CENTER),
-            bgcolor=apply_opacity(0.4, CYAN) if disabled else CYAN,
+            bgcolor=apply_opacity(0.4, bg) if disabled else bg,
             border_radius=RADIUS_PILL,
             padding=ft.Padding.symmetric(horizontal=16, vertical=10),
             on_click=None if disabled else on_click, ink=not disabled,

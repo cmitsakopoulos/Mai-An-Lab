@@ -65,6 +65,26 @@ class ConnectionSignal(ft.Row):
                 bar.bgcolor = inactive_color
 
 
+def _release_date_label(date: str | None) -> str:
+    """"Today", "3 days ago", or "12 Oct" (with the year once it isn't this
+    year's)."""
+    import datetime as _dt
+    try:
+        d = _dt.date.fromisoformat(str(date)[:10])
+    except ValueError:
+        return str(date or "")
+    days = (_dt.date.today() - d).days
+    if days <= 0:
+        return "Today"
+    if days == 1:
+        return "Yesterday"
+    if days < 7:
+        return f"{days} days ago"
+    if d.year == _dt.date.today().year:
+        return f"{d.day} {d.strftime('%b')}"
+    return f"{d.day} {d.strftime('%b %Y')}"
+
+
 class SearchView:
     def __init__(self, app: "StreamripFletApp"):
         from utils.streamrip_search import StreamripSearcher
@@ -120,6 +140,15 @@ class SearchView:
         self._selected_records: dict[str, dict] = {}
         self._hide_search_card_task: asyncio.Task | None = None
         self._hide_preview_card_task: asyncio.Task | None = None
+
+        # Library-aware search: what the user already owns that matches the
+        # query, keyed by media_type like cached_results. Shown above the remote
+        # results, and instead of them when the remote search fails (an expired
+        # token shouldn't hide what is already on the phone).
+        self._local_matches: dict[str, list[dict]] = {}
+        self._local_task: asyncio.Task | None = None
+        self._remote_pending = False
+        self._remote_error: str | None = None
 
 
         # ── Search Bar & Sources ───────────────────────────────────────────
@@ -683,29 +712,7 @@ class SearchView:
             
             # 2. Update page index and instantiate new controls
             self.current_page = new_page
-            
-            active_type = self.view_mode[:-1]  # "tracks" -> "track"
-            source = self.cached_results.get(active_type, [])
-            
-            # Re-slice items
-            start_idx = self.current_page * self.items_per_page
-            end_idx = start_idx + self.items_per_page
-            page_items = source[start_idx:end_idx]
-            
-            controls = []
-            
-            if self.current_page > 0:
-                controls.append(self._build_top_ghost())
-                
-            for i, r in enumerate(page_items):
-                card = self._result_card(start_idx + i, r, depth=0, stagger_index=i)
-                controls.append(card)
-                
-            if self.current_page < self.total_pages - 1:
-                controls.append(self._build_bottom_ghost())
-                    
-            # Update controls
-            self._results_list.controls = controls
+            self._results_list.controls = self._page_controls()
             self._update_pagination_ui()
             
             # 3. Teleport off-screen to the other side instantly
@@ -757,6 +764,12 @@ class SearchView:
 
     def on_show(self):
         """Called as the Search tab is switched back to."""
+        # Startup pre-builds this tab in a worker thread while the app is still
+        # restoring, and _refresh_landing_page bails out during a restore, so
+        # the landing cards stayed empty for the whole session. Rebuilding them
+        # on show also keeps the counts current after downloads.
+        if not (self._search_field.value or "").strip():
+            self.refresh_setup_state()
         target = getattr(self, "_saved_scroll", 0.0)
         if target <= 0:
             return
@@ -805,10 +818,16 @@ class SearchView:
                 pass
         
         landing_cfg = cfg.get("landing", {})
-        show_most_listened = bool(landing_cfg.get("show_search_history", True))
-        show_stats   = bool(landing_cfg.get("show_library_stats", True))
-        show_artists = bool(landing_cfg.get("show_top_artists", True))
-        show_genres  = bool(landing_cfg.get("show_top_genres", True))
+        # "show_search_history" is the historical key of the most-listened
+        # tracks card, kept so existing configs still apply.
+        sections = {
+            "recent_searches": bool(landing_cfg.get("show_recent_searches", True)),
+            "new_releases": bool(landing_cfg.get("show_new_releases", True)),
+            "most_listened": bool(landing_cfg.get("show_search_history", True)),
+            "top_artists": bool(landing_cfg.get("show_top_artists", True)),
+            "top_genres": bool(landing_cfg.get("show_top_genres", True)),
+            "stats": bool(landing_cfg.get("show_library_stats", True)),
+        }
 
         def _apply():
             search_field = getattr(self, "_search_field", None)
@@ -833,43 +852,44 @@ class SearchView:
                 is_empty = not bool(self._search_field.value)
                 self._landing_container.visible = is_empty
                 if is_empty:
-                    self.page.run_task(
-                        self._refresh_landing_page, show_most_listened, show_stats,
-                        show_artists, show_genres,
-                    )
+                    self.page.run_task(self._refresh_landing_page, sections)
         
         if update:
             self.app.safe_update(_apply)
         else:
             _apply()
 
-    async def _refresh_landing_page(self, show_most_listened, show_stats,
-                                    show_artists=True, show_genres=True):
+    async def _refresh_landing_page(self, sections: dict):
+        """Rebuild the landing cards, top to bottom: what you were looking
+        for, what's new from your artists, what you play, then the stats."""
         if getattr(self.app, "_is_restarting", False):
             return
-            
-        self._landing_container.controls.clear()
-        
+
+        cards: list[ft.Control] = []
         try:
             db = self.app.db_manager
-            if show_stats:
-                stats_content = await self._get_library_stats_content()
-                self._landing_container.controls.append(
-                    self._build_landing_card("Library at a Glance", ft.Icons.INSERT_CHART_OUTLINED_ROUNDED, stats_content)
-                )
-            
-            if show_most_listened:
+            if sections.get("recent_searches"):
+                from utils.search_history import load_searches
+                recent = [q for q in await asyncio.to_thread(load_searches) if isinstance(q, str) and q.strip()]
+                if recent:
+                    cards.append(self._build_recent_searches(recent[:8]))
+
+            if sections.get("new_releases"):
+                card = await self._build_new_releases_card()
+                if card is not None:
+                    cards.append(card)
+
+            if sections.get("most_listened"):
                 most_played_tracks = await db.get_most_played(limit=5)
                 if most_played_tracks:
-                    most_played_content = self._build_most_played_content(most_played_tracks)
-                    self._landing_container.controls.append(
-                        self._build_landing_card("Most Listened Tracks", ft.Icons.REPLAY_ROUNDED, most_played_content)
-                    )
+                    cards.append(self._build_landing_card(
+                        "Most Listened Tracks", ft.Icons.REPLAY_ROUNDED,
+                        self._build_most_played_content(most_played_tracks)))
 
-            if show_artists:
+            if sections.get("top_artists"):
                 top_artists = await db.get_most_played_artists(limit=5)
                 if top_artists:
-                    self._landing_container.controls.append(self._build_landing_card(
+                    cards.append(self._build_landing_card(
                         "Most Listened Artists", ft.Icons.PERSON_ROUNDED,
                         self._build_top_list_content(
                             top_artists, ft.Icons.PERSON_OUTLINE_ROUNDED, "artists",
@@ -877,10 +897,10 @@ class SearchView:
                         ),
                     ))
 
-            if show_genres:
+            if sections.get("top_genres"):
                 top_genres = await db.get_most_played_genres(limit=5)
                 if top_genres:
-                    self._landing_container.controls.append(self._build_landing_card(
+                    cards.append(self._build_landing_card(
                         "Most Listened Genres", ft.Icons.CATEGORY_ROUNDED,
                         self._build_top_list_content(
                             top_genres, ft.Icons.LABEL_OUTLINE_ROUNDED, "genres",
@@ -888,11 +908,113 @@ class SearchView:
                         ),
                     ))
 
+            if sections.get("stats"):
+                cards.append(self._build_landing_card(
+                    "Library at a Glance", ft.Icons.INSERT_CHART_OUTLINED_ROUNDED,
+                    await self._get_library_stats_content()))
+
         except Exception as e:
             logger.warning(f"Failed to refresh landing page during transition: {e}")
             return
 
+        # Swapped in one go, so a refresh never flashes an empty landing page.
+        self._landing_container.controls = cards
         self.app.safe_update(lambda: None)
+
+    # ── landing: recent searches + new releases ─────────────────────────────
+    def _build_recent_searches(self, queries: list[str]) -> ft.Control:
+        chips = [
+            ft.Container(
+                content=ft.Row([
+                    ft.Icon(ft.Icons.HISTORY_ROUNDED, color=DIM, size=14),
+                    ft.Text(q, color=TEXT, size=12, max_lines=1,
+                            overflow=ft.TextOverflow.ELLIPSIS),
+                ], spacing=6, tight=True),
+                bgcolor=SURFACE,
+                border=ft.Border.all(1, BORDER_SUBTLE),
+                border_radius=RADIUS_PILL,
+                padding=ft.Padding.symmetric(horizontal=12, vertical=7),
+                on_click=lambda e, q=q: self._do_recent(q),
+            )
+            for q in queries
+        ]
+        return ft.Container(
+            content=ft.Column([
+                ft.Text("Recent searches", color=DIM, size=12, weight=ft.FontWeight.W_600),
+                ft.Row(chips, wrap=True, spacing=8, run_spacing=8),
+            ], spacing=8),
+            margin=ft.Margin.only(bottom=16),
+        )
+
+    async def _build_new_releases_card(self) -> ft.Control | None:
+        from utils.new_releases import get_new_releases
+        releases = await get_new_releases(self.app.db_manager, limit=30)
+        if not releases:
+            if getattr(self.app, "new_releases_refreshing", False):
+                return self._build_landing_card(
+                    "New From Your Artists", ft.Icons.NEW_RELEASES_ROUNDED,
+                    ft.Row([
+                        ft.ProgressRing(width=14, height=14, stroke_width=2, color=CYAN),
+                        ft.Text("Checking your artists for new releases…", color=DIM, size=12),
+                    ], spacing=10),
+                )
+            return None
+
+        albums = [r for r in releases if r.get("type") != "single"][:12]
+        singles = [r for r in releases if r.get("type") == "single"][:12]
+        rows: list[ft.Control] = []
+        for label, items in (("Albums & EPs", albums), ("Singles", singles)):
+            if not items:
+                continue
+            rows.append(ft.Text(label, color=DIM, size=11, weight=ft.FontWeight.W_600))
+            rows.append(ft.ListView(
+                controls=[self._release_tile(r) for r in items],
+                horizontal=True, spacing=12, height=172,
+            ))
+        rows.append(ft.Text("From Deezer and MusicBrainz, checked weekly. Tap one to search for it.",
+                            color=DIM, size=10))
+        return self._build_landing_card(
+            "New From Your Artists", ft.Icons.NEW_RELEASES_ROUNDED,
+            ft.Column(rows, spacing=8),
+        )
+
+    _RELEASE_TYPE_LABELS = {"album": "Album", "ep": "EP", "single": "Single"}
+
+    def _release_tile(self, rel: dict) -> ft.Control:
+        size = 116
+        placeholder = ft.Container(
+            content=ft.Icon(ft.Icons.ALBUM_ROUNDED, color=DIM, size=36),
+            width=size, height=size, bgcolor=SURFACE2,
+            border_radius=10, alignment=ft.Alignment(0, 0),
+        )
+        cover = ft.Image(
+            src=rel["cover"], width=size, height=size, fit=ft.BoxFit.COVER,
+            border_radius=ft.BorderRadius.all(10), cache_width=size * 2,
+            error_content=placeholder,
+        ) if rel.get("cover") else placeholder
+        kind = self._RELEASE_TYPE_LABELS.get(rel.get("type"), "Release")
+        return ft.Container(
+            content=ft.Column([
+                cover,
+                ft.Text(rel.get("title") or "", color=TEXT, size=12, weight=ft.FontWeight.W_600,
+                        max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+                ft.Text(rel.get("artist") or "", color=DIM, size=11,
+                        max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+                ft.Text(f"{kind} · {_release_date_label(rel.get('date'))}", color=DIM, size=10),
+            ], spacing=2, tight=True),
+            width=size,
+            on_click=lambda e, r=rel: self._search_release(r),
+        )
+
+    def _search_release(self, rel: dict):
+        """Look a release up on the selected source, where it can be
+        previewed and downloaded."""
+        query = f"{rel.get('artist', '')} {rel.get('title', '')}".strip()
+        self._search_field.value = query
+        self._clear_btn.visible = True
+        self.view_mode = "tracks" if rel.get("type") == "single" else "albums"
+        self._update_view_tabs()
+        self.page.run_task(self.start_search)
 
     def _build_most_played_content(self, tracks):
         items = []
@@ -1073,6 +1195,8 @@ class SearchView:
             self._error_label.visible = False
             self._source_cache.clear()
             self._cache_query.clear()
+            self._local_matches = {}
+            self._remote_error = None
             self.expanded_nodes.clear()
             self.node_cache.clear()
             self.current_page = 0
@@ -1208,6 +1332,11 @@ class SearchView:
             self._results_list.offset = ft.Offset(0, 0)
         self.app.safe_update(_mutate_start)
 
+        self._remote_pending = True
+        self._remote_error = None
+        self._local_matches = {}
+        self._local_task = asyncio.create_task(self._show_local_matches(query, search_id))
+
         def search_progress_callback(status, detail):
             if self.current_search_id == search_id:
                 self.update_search_progress(status, detail)
@@ -1229,7 +1358,15 @@ class SearchView:
     def _on_results(self, results, *args, **kwargs):
         async def _update_ui():
             self._search_indicator.visible = False
-            
+            self._remote_pending = False
+            # The library half of the search is fast and usually done already;
+            # waiting for it means every render below includes it.
+            if self._local_task is not None:
+                try:
+                    await self._local_task
+                except Exception:
+                    pass
+
             if results is None:
                 self._show_search_error(
                     f"Couldn't reach {self._source_label()} — check your internet connection and try again."
@@ -1243,24 +1380,14 @@ class SearchView:
                 return
 
             if not results:
-                self._error_label.visible = False
-                self._empty_label.visible = True
-                self._results_list.controls.clear()
-                self._update_pagination_ui()
-                self.page.update()
+                # Cleared rather than left holding the previous query's results,
+                # which the artists/albums/tracks toggle would otherwise show.
+                self.cached_results = {"track": [], "album": [], "artist": []}
+                self.current_page = 0
+                self._rebuild_results()
                 return
 
-            async def _check_library(r):
-                m_type = r.get("media_type", "track")
-                title = strip_markup(r.get("ui_title", r.get("name", "")))
-                artist = strip_markup(r.get("ui_subtitle", r.get("artist", "")))
-                if m_type == "track":
-                    exists = await self.app.db_manager.get_track_by_meta(title, artist)
-                else:
-                    exists = await self.app.db_manager.get_album_by_meta(title, artist)
-                r["is_in_library"] = bool(exists)
-
-            await asyncio.gather(*[_check_library(r) for r in results])
+            await asyncio.gather(*[self._annotate_ownership(r) for r in results])
 
             # Full search: route every result into its typed bucket, and stamp
             # the cache with the query it answers so a later source switch can
@@ -1281,45 +1408,239 @@ class SearchView:
         """Surface a search connection/auth failure inline in the results area
         instead of the misleading empty state or the full-screen crash boundary.
         Caller is responsible for the surrounding page.update()."""
+        message = message or "An unknown error occurred while searching."
         self._setup_prompt.visible = False
-        self._error_detail.value = message or "An unknown error occurred while searching."
-        self._error_label.visible = True
+        self._error_detail.value = message
         self._empty_label.visible = False
         self._landing_container.visible = False
         self._results_list.controls.clear()
         self._pagination_bar.visible = False
+        if any(self._local_matches.values()):
+            # Matches from the library still stand; the failure becomes a
+            # banner above them instead of a screen that hides them.
+            self._remote_error = message
+            self.cached_results = {"track": [], "album": [], "artist": []}
+            self.current_page = 0
+            self._error_label.visible = False
+            self._results_list.controls.extend(self._page_controls())
+        else:
+            self._error_label.visible = True
 
-    def _rebuild_results(self):
+    def _page_controls(self) -> list[ft.Control]:
+        """Rows for the current page of the active type, with the library
+        section on top of page one."""
         active_type = self.view_mode[:-1]  # "tracks" -> "track"
         source = self.cached_results.get(active_type, [])
-
-        self._results_list.controls.clear()
-
         self.total_pages = math.ceil(len(source) / self.items_per_page)
-        
-        # Sliced items for current page
         start_idx = self.current_page * self.items_per_page
-        end_idx = start_idx + self.items_per_page
-        page_items = source[start_idx:end_idx]
+        page_items = source[start_idx:start_idx + self.items_per_page]
+
+        controls: list[ft.Control] = []
+        if self.current_page == 0:
+            if self._remote_error and not source:
+                controls.append(self._build_error_banner(self._remote_error))
+            local = self._build_local_section()
+            if local is not None:
+                controls.append(local)
+                if not source and not self._remote_error:
+                    controls.append(ft.Container(
+                        content=ft.Text(f"No {self._source_label()} results for this search.",
+                                        color=DIM, size=12),
+                        padding=ft.Padding.only(left=8, top=4),
+                    ))
+        if self.current_page > 0:
+            controls.append(self._build_top_ghost())
+        for i, r in enumerate(page_items):
+            controls.append(self._result_card(start_idx + i, r, depth=0, stagger_index=i))
+        if self.current_page < self.total_pages - 1:
+            controls.append(self._build_bottom_ghost())
+        return controls
+
+    def _rebuild_results(self):
+        controls = self._page_controls()
+        self._results_list.controls.clear()
+        self._results_list.controls.extend(controls)
 
         self._setup_prompt.visible = False
         self._error_label.visible = False
-        self._empty_label.visible = not source
-
-        first_chunk = []
-        if self.current_page > 0:
-            first_chunk.append(self._build_top_ghost())
-
-        for i, r in enumerate(page_items):
-            card = self._result_card(start_idx + i, r, depth=0, stagger_index=i)
-            first_chunk.append(card)
-
-        if self.current_page < self.total_pages - 1:
-            first_chunk.append(self._build_bottom_ghost())
-
-        self._results_list.controls.extend(first_chunk)
+        self._empty_label.visible = not controls
         self._update_pagination_ui()
         self.app.safe_update(lambda: None)
+
+    # ── library-aware search ────────────────────────────────────────────────
+    LOCAL_PREVIEW_ROWS = 3
+
+    async def _annotate_ownership(self, r: dict) -> None:
+        """Stamp what the library already holds for a remote result:
+        `is_in_library` (owned outright) and, for albums and artists,
+        `owned_tracks`. A partly owned album is not "in library": its
+        download button stays a download button."""
+        db = self.app.db_manager
+        m_type = r.get("media_type", "track")
+        title = strip_markup(r.get("ui_title", r.get("name", "")))
+        artist = strip_markup(r.get("ui_subtitle", r.get("artist", "")))
+        if m_type == "track":
+            r["is_in_library"] = bool(await db.get_track_by_meta(title, artist))
+        elif m_type == "album":
+            owned = await db.get_album_owned_count(title, artist)
+            total = r.get("num_tracks") or 0
+            r["owned_tracks"] = owned
+            r["is_in_library"] = owned > 0 and (not total or owned >= total)
+        elif m_type == "artist":
+            r["owned_tracks"] = await db.get_artist_owned_count(title)
+            r["is_in_library"] = False
+
+    def _ownership_badge(self, r: dict) -> ft.Control | None:
+        m_type = r.get("media_type", "track")
+        owned = r.get("owned_tracks") or 0
+        label = None
+        if m_type == "track" and r.get("is_in_library"):
+            label = "IN LIBRARY"
+        elif m_type == "album" and owned:
+            total = r.get("num_tracks") or 0
+            label = "IN LIBRARY" if r.get("is_in_library") else f"YOU HAVE {owned}/{total}"
+        elif m_type == "artist" and owned:
+            label = f"{owned} TRACK{'S' if owned != 1 else ''} OWNED"
+        if label is None:
+            return None
+        return ft.Container(
+            content=ft.Text(label, color=CYAN, size=8, weight=ft.FontWeight.W_700),
+            bgcolor=apply_opacity(0.15, CYAN),
+            border_radius=3,
+            padding=ft.Padding.symmetric(horizontal=4, vertical=1),
+        )
+
+    async def _load_local_matches(self, query: str) -> dict[str, list[dict]]:
+        db = self.app.db_manager
+
+        async def _matches(coro, key: str) -> list[dict]:
+            rows = await coro
+            # The Library's "closest match" fallback suits browsing; here it
+            # would claim the user owns something the query never named.
+            if getattr(rows, "is_closest", False):
+                return []
+            q = query.lower()
+
+            def rank(row):
+                text = str(row.get(key) or "").lower()
+                return 0 if text == q else 1 if text.startswith(q) else 2
+            return sorted(rows, key=rank)
+
+        tracks, albums, artists = await asyncio.gather(
+            _matches(db.get_all_tracks(query), "title"),
+            _matches(db.get_all_albums(query), "album"),
+            _matches(db.get_all_artists(query), "name"),
+        )
+        return {"track": tracks, "album": albums, "artist": artists}
+
+    async def _show_local_matches(self, query: str, search_id: int) -> None:
+        try:
+            matches = await self._load_local_matches(query)
+        except Exception:
+            logger.warning("Library half of the search failed", exc_info=True)
+            return
+        if self.current_search_id != search_id:
+            return
+        self._local_matches = matches
+        section = self._build_local_section()
+        if section is None:
+            return
+
+        def _insert():
+            # Only above the skeleton rows: once the remote answer has landed,
+            # its render already includes this section.
+            if self._remote_pending and self.current_search_id == search_id:
+                self._results_list.controls.insert(0, section)
+        self.app.safe_update(_insert)
+
+    def _build_local_section(self) -> ft.Control | None:
+        """The "In your library" card for the active type, or None."""
+        m_type = self.view_mode[:-1]
+        rows = self._local_matches.get(m_type) or []
+        if not rows:
+            return None
+        query = (self._search_field.value or "").strip()
+
+        items = [self._local_row(m_type, row) for row in rows[:self.LOCAL_PREVIEW_ROWS]]
+        if len(rows) > self.LOCAL_PREVIEW_ROWS:
+            items.append(ft.Container(
+                content=ft.Row([
+                    ft.Text(f"See all {len(rows)} in Library", color=CYAN, size=12,
+                            weight=ft.FontWeight.W_600),
+                    ft.Icon(ft.Icons.CHEVRON_RIGHT_ROUNDED, color=CYAN, size=16),
+                ], spacing=2, tight=True),
+                padding=ft.Padding.only(top=6),
+                on_click=lambda e: self._open_in_library(self.view_mode, query),
+            ))
+
+        return ft.Container(
+            content=ft.Column([
+                ft.Row([
+                    ft.Icon(ft.Icons.LIBRARY_MUSIC_ROUNDED, color=CYAN, size=16),
+                    ft.Text("In your library", color=TEXT, size=13, weight=ft.FontWeight.W_600),
+                    ft.Text(str(len(rows)), color=DIM, size=12),
+                ], spacing=8),
+                *items,
+            ], spacing=2, tight=True),
+            bgcolor=SURFACE,
+            border=ft.Border.all(1, BORDER_SUBTLE),
+            border_radius=RADIUS_CARD,
+            padding=ft.Padding.only(left=14, right=14, top=12, bottom=10),
+            margin=ft.Margin.only(bottom=6),
+        )
+
+    def _local_row(self, m_type: str, row: dict) -> ft.Control:
+        if m_type == "track":
+            title = row.get("title") or "Unknown"
+            sub = " · ".join(p for p in (row.get("artist"), row.get("album")) if p)
+            icon = ft.Icons.PLAY_CIRCLE_OUTLINE_ROUNDED
+            on_click = lambda e, p=row.get("path"): self.page.run_task(self.app.play_track, p)
+        elif m_type == "album":
+            title = row.get("album") or "Unknown"
+            n = row.get("track_count") or 0
+            sub = " · ".join(str(p) for p in (
+                row.get("artist"), row.get("year"), f"{n} track{'s' if n != 1 else ''}" if n else "",
+            ) if p)
+            icon = ft.Icons.ALBUM_ROUNDED
+            on_click = lambda e, t=title: self._open_in_library("albums", t)
+        else:
+            title = row.get("name") or "Unknown"
+            albums, tracks = row.get("album_count") or 0, row.get("track_count") or 0
+            sub = f"{albums} album{'s' if albums != 1 else ''} · {tracks} track{'s' if tracks != 1 else ''}"
+            icon = ft.Icons.PERSON_ROUNDED
+            on_click = lambda e, t=title: self._open_in_library("artists", t)
+        return ft.Container(
+            content=ft.Row([
+                ft.Icon(icon, color=self._row_accent(m_type), size=18),
+                ft.Column([
+                    ft.Text(title, color=TEXT, size=13, weight=ft.FontWeight.W_600,
+                            max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+                    ft.Text(sub, color=DIM, size=11, max_lines=1,
+                            overflow=ft.TextOverflow.ELLIPSIS),
+                ], spacing=1, expand=True),
+            ], spacing=12),
+            padding=ft.Padding.symmetric(vertical=7),
+            on_click=on_click,
+        )
+
+    def _build_error_banner(self, message: str) -> ft.Control:
+        return ft.Container(
+            content=ft.Row([
+                ft.Icon(ft.Icons.CLOUD_OFF_ROUNDED, color="#FF6B6B", size=20),
+                ft.Column([
+                    ft.Text(f"Couldn't search {self._source_label()}", color=TEXT, size=13,
+                            weight=ft.FontWeight.W_600),
+                    ft.Text(message, color=DIM, size=11, max_lines=3,
+                            overflow=ft.TextOverflow.ELLIPSIS),
+                ], spacing=1, expand=True),
+                ft.TextButton("Retry", on_click=lambda _: self.page.run_task(self.start_search)),
+            ], spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            bgcolor=apply_opacity(0.08, "#FF6B6B"),
+            border=ft.Border.all(1, apply_opacity(0.3, "#FF6B6B")),
+            border_radius=RADIUS_CARD,
+            padding=ft.Padding.only(left=14, right=6, top=8, bottom=8),
+            margin=ft.Margin.only(bottom=6),
+        )
 
     def _set_view_mode(self, mode: str):
         self.view_mode = mode
@@ -1329,7 +1650,7 @@ class SearchView:
         query = (self._search_field.value or "").strip()
         if query:
             cache_populated = any(v for v in self.cached_results.values())
-            if cache_populated:
+            if cache_populated or any(self._local_matches.values()):
                 self._rebuild_results()
             else:
                 asyncio.create_task(self.start_search())
@@ -1690,6 +2011,7 @@ class SearchView:
             subtitle=ft.Row(
                 [
                     self._source_badge(r),
+                    *[b for b in (self._ownership_badge(r),) if b is not None],
                     ft.Text("  \u00b7  ".join(sub_parts), color=DIM, size=12,
                             max_lines=1, overflow=ft.TextOverflow.ELLIPSIS, expand=True),
                 ],
@@ -1813,16 +2135,7 @@ class SearchView:
                 self.node_cache[node_id] = children
                 if node_id not in self.expanded_nodes: return
                 async def _process():
-                    async def _check_child(c):
-                        title = strip_markup(c.get("ui_title", c.get("name", "")))
-                        artist = strip_markup(c.get("ui_subtitle", c.get("artist", "")))
-                        if c.get("media_type") == "track":
-                            exists = await self.app.db_manager.get_track_by_meta(title, artist)
-                        else: # album
-                            exists = await self.app.db_manager.get_album_by_meta(title, artist)
-                        c["is_in_library"] = bool(exists)
-
-                    await asyncio.gather(*[_check_child(c) for c in children])
+                    await asyncio.gather(*[self._annotate_ownership(c) for c in children])
                     
                     def _insert():
                         try:

@@ -110,14 +110,17 @@ async def test_queue_remove_and_move():
 
 @pytest.mark.asyncio
 async def test_track_info_handler():
+    # Mirrors the REAL engine: now-playing fields are strings, not a row dict
+    # (a dict here is how the .get()-on-a-str crash shipped).
     db = AsyncMock()
-    engine = MagicMock()
-    engine.current_track = {
-        "track_title": "Comfortably Numb",
-        "artist_name": "Pink Floyd",
-        "album_title": "The Wall",
-        "duration": 382.0
+    db.get_track_full.return_value = {
+        "path": "/m/numb.flac", "title": "Comfortably Numb",
+        "artist": "Pink Floyd", "album": "The Wall", "duration": 382.0,
+        "timbre": b"\x00\x01",
     }
+    engine = MagicMock()
+    engine.current_path = "/m/numb.flac"
+    engine.current_track = "Comfortably Numb"
     runner = AssistantRunner(db, engine)
 
     intent = ai.parse("tell me about this song")
@@ -126,6 +129,24 @@ async def test_track_info_handler():
     assert "Comfortably Numb" in res.spoken
     assert "Pink Floyd" in res.spoken
     assert "The Wall" in res.spoken
+    assert "timbre" not in res.extras["track"]
+
+
+@pytest.mark.asyncio
+async def test_track_info_falls_back_to_engine_strings():
+    db = AsyncMock()
+    db.get_track_full.return_value = None
+    engine = MagicMock()
+    engine.current_path = "/m/unknown.flac"
+    engine.current_track = "Untitled"
+    engine.current_artist = "Somebody"
+    engine.current_album = ""
+    engine.duration = 61.0
+    runner = AssistantRunner(db, engine)
+
+    res = await runner.dispatch(ai.parse("tell me about this song"))
+    assert res.success is True
+    assert "Untitled" in res.spoken and "Somebody" in res.spoken
 
 
 @pytest.mark.asyncio

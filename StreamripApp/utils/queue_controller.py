@@ -52,6 +52,9 @@ class QueueController:
         # with the screen off. None while the worker is idle.
         self._notifier: ProgressNotifier | None = None
         self._batch_counts = {DONE: 0, FAILED: 0, CANCELLED: 0}
+        # Failed job ids of the current/last batch: the summary card's Retry
+        # covers exactly the failures it reports, not older ones.
+        self._batch_failed_ids: list[str] = []
 
     # ── observation ─────────────────────────────────────────────────────────
     def add_listener(self, fn) -> None:
@@ -113,7 +116,9 @@ class QueueController:
 
         meta = dict(item_data)
         meta["quality"]       = self._quality_int(source, quality_tier)
-        meta["quality_label"] = quality_tier.upper()
+        # Companion transfers carry the Mac's actual encode ("AAC 320"); the
+        # tier only says the phone takes the bytes as-is.
+        meta["quality_label"] = item_data.get("quality_label") or quality_tier.upper()
 
         return {
             "id":       f"dl{next(self._ids)}",
@@ -194,6 +199,27 @@ class QueueController:
         self._notify()
         return fresh
 
+    def retryable_failures(self) -> list[dict]:
+        """The last batch's failed jobs that a Retry can re-queue. Mac
+        transfers are left out: the sync manager re-offers those itself on its
+        next poll, so retrying them here as well would download them twice."""
+        ids = set(self._batch_failed_ids)
+        return [
+            j for j in self._history
+            if j.get("id") in ids and j.get("state") == FAILED
+            and not (j.get("metadata") or {}).get("companion_transfer_id")
+            and not j.get("companion_transfer_id")
+        ]
+
+    def retry_failed(self) -> int:
+        """Re-queue the last batch's retryable failures (the summary
+        notification's Retry)."""
+        count = 0
+        for job in self.retryable_failures():
+            if self.retry(job["id"]) is not None:
+                count += 1
+        return count
+
     def clear_finished(self) -> int:
         count = len(self._history)
         self._history.clear()
@@ -232,6 +258,7 @@ class QueueController:
         if hasattr(self._notifier, "set_cancel_handler"):
             self._notifier.set_cancel_handler(self.clear)
         self._batch_counts = {DONE: 0, FAILED: 0, CANCELLED: 0}
+        self._batch_failed_ids = []
         self._notify()
         try:
             while self._pending:
@@ -248,6 +275,8 @@ class QueueController:
                 state = job.get("state")
                 if state in self._batch_counts:
                     self._batch_counts[state] += 1
+                if state == FAILED:
+                    self._batch_failed_ids.append(job.get("id"))
                 self._push_history(job)
                 self.current_job = None
                 self._notify()
@@ -263,7 +292,8 @@ class QueueController:
             if self._notifier is not None:
                 # Also on cancellation/crash: an unfinished notifier would keep
                 # the native task service (and its wakelock) running.
-                self._notifier.finish(self._batch_summary())
+                retry = ("Retry", "downloads:retry") if self.retryable_failures() else None
+                self._notifier.finish(self._batch_summary(), action=retry)
                 self._notifier = None
             self._notify()
             # Re-index ONCE, after the whole queue drains. This used to run per

@@ -23,6 +23,8 @@ def _view():
     v._saved_scroll = 0.0
     v._is_programmatic_scroll = False
     v._results_list = ft.ListView()
+    v._search_field = ft.TextField(value="")
+    v.refresh_setup_state = MagicMock()
     return v
 
 
@@ -73,6 +75,19 @@ class TestScrollPreservation(unittest.TestCase):
         v.on_hide()
         v.on_show()
         v.page.run_task.assert_not_called()
+
+    def test_show_refreshes_the_landing_page_when_idle(self):
+        """Startup pre-builds this tab while the app is restoring, when the
+        landing refresh bails out, so showing the tab must fill it."""
+        v = _view()
+        v.on_show()
+        v.refresh_setup_state.assert_called_once()
+
+    def test_show_leaves_an_active_query_alone(self):
+        v = _view()
+        v._search_field.value = "burial"
+        v.on_show()
+        v.refresh_setup_state.assert_not_called()
 
     def test_negative_offsets_are_never_saved(self):
         """-1 is Flet's jump-to-end sentinel, not a position to restore to."""
@@ -173,3 +188,21 @@ class TestTabLifecycleDispatch(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSearchTimeout(unittest.TestCase):
+    def test_a_stalled_search_reports_an_error_instead_of_spinning(self):
+        from unittest.mock import patch
+        from utils import streamrip_search as ss
+
+        async def stall(*_a, **_k):
+            await asyncio.sleep(10)
+
+        got = []
+        searcher = ss.StreamripSearcher.__new__(ss.StreamripSearcher)
+        with patch.object(ss, "SEARCH_TIMEOUT_S", 0.05), \
+             patch.object(searcher, "_search_async", stall):
+            asyncio.run(searcher._run_search_wrapper(
+                "q", ["track"], 10, 0, got.append, None, "qobuz"))
+        self.assertEqual(len(got), 1)
+        self.assertIn("didn't answer", got[0]["error"])

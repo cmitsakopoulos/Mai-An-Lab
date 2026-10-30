@@ -23,6 +23,12 @@ import androidx.core.content.ContextCompat
  *
  * Driven by the progress notification bridge: the first running job starts
  * the service, and the last finished one stops it.
+ *
+ * Notifications: the oldest running job IS the foreground notification (its
+ * own card, Cancel and tap target included); every other running job gets its
+ * own card. There used to be an "N Background Tasks Active" summary on top of
+ * per-job cards, which showed every job twice and carried a Cancel that
+ * belonged to no job.
  */
 class LibraryTaskService : Service() {
 
@@ -31,7 +37,8 @@ class LibraryTaskService : Service() {
         val title: String,
         val content: String,
         val progress: Int,
-        val total: Int
+        val total: Int,
+        val cancellable: Boolean = true,
     )
 
     companion object {
@@ -58,7 +65,7 @@ class LibraryTaskService : Service() {
         fun update(context: Context, job: String, state: Job): Boolean {
             jobs[job] = state
             instance?.let {
-                it.refresh()
+                it.refresh(job)
                 return true
             }
             if (startPending) return true
@@ -89,6 +96,8 @@ class LibraryTaskService : Service() {
 
     private val handler = Handler(Looper.getMainLooper())
     private var wakeLock: PowerManager.WakeLock? = null
+    // Job currently shown by the foreground (anchor) notification.
+    private var anchorKey: String? = null
     private val staleCheck = Runnable {
         Log.w(TAG, "no progress for ${STALE_MS / 60000} min; releasing ${jobs.keys}")
         jobs.clear()
@@ -119,7 +128,14 @@ class LibraryTaskService : Service() {
         return START_NOT_STICKY
     }
 
-    fun refresh() {
+    /**
+     * Repaints the notifications. [changed] is the job that just reported
+     * progress: only its notification is re-posted, so N concurrent jobs at
+     * ~1 update/s each stay under Android's ~5 updates/s per-app limit, past
+     * which updates are silently dropped. null repaints everything (start,
+     * or a job finished and the anchor may have moved).
+     */
+    fun refresh(changed: String? = null) {
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         val running = jobs.values.toList()
 
@@ -128,35 +144,34 @@ class LibraryTaskService : Service() {
             return
         }
 
-        // Update foreground anchor notification
-        try {
-            nm.notify(ANCHOR_NOTIFICATION_ID, buildAnchorNotification())
-        } catch (e: SecurityException) {
-            Log.w(TAG, "notify denied: ${e.message}")
+        val anchor = running.first()
+        val anchorMoved = anchor.jobKey != anchorKey
+        anchorKey = anchor.jobKey
+        if (anchorMoved) {
+            // The new anchor may have had its own card as a secondary job.
+            nm.cancel(notificationIdFor(anchor.jobKey))
         }
 
-        // If multiple jobs are running, update individual cards for non-dismissed jobs
-        if (running.size > 1) {
-            for (j in running) {
-                if (FletAudioServicePlugin.dismissedJobs.contains(j.jobKey)) continue
-                val id = notificationIdFor(j.jobKey)
-                try {
-                    nm.notify(
-                        id,
-                        ProgressNotifications.build(
-                            this, id, j.jobKey, j.title, j.content, j.progress, j.total, done = false
-                        )
-                    )
-                } catch (e: SecurityException) {
-                    Log.w(TAG, "notify denied for ${j.jobKey}: ${e.message}")
-                }
+        if (anchorMoved || changed == null || changed == anchor.jobKey) {
+            try {
+                nm.notify(ANCHOR_NOTIFICATION_ID, buildAnchorNotification())
+            } catch (e: SecurityException) {
+                Log.w(TAG, "notify denied: ${e.message}")
             }
-        } else {
-            // When single job is active, clear individual notification ID to avoid duplicate with anchor
-            val single = running.first()
-            val singleId = notificationIdFor(single.jobKey)
-            if (singleId != ANCHOR_NOTIFICATION_ID) {
-                nm.cancel(singleId)
+        }
+
+        for (j in running.drop(1)) {
+            if (changed != null && changed != j.jobKey) continue
+            // Swiped away: stays away until the job ends (it is not the
+            // foreground notification, so nothing requires it).
+            if (FletAudioServicePlugin.dismissedJobs.contains(j.jobKey)) continue
+            val id = notificationIdFor(j.jobKey)
+            try {
+                nm.notify(id, ProgressNotifications.build(
+                    this, id, j.jobKey, j.title, j.content, j.progress, j.total,
+                    done = false, cancellable = j.cancellable))
+            } catch (e: SecurityException) {
+                Log.w(TAG, "notify denied for ${j.jobKey}: ${e.message}")
             }
         }
 
@@ -173,6 +188,7 @@ class LibraryTaskService : Service() {
 
     fun stopNow() {
         handler.removeCallbacks(staleCheck)
+        anchorKey = null
         wakeLock?.let { if (it.isHeld) it.release() }
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
         if (instance === this) instance = null
@@ -194,33 +210,22 @@ class LibraryTaskService : Service() {
     }
 
     private fun buildAnchorNotification(): Notification {
-        val running = jobs.values.toList()
-        if (running.size == 1) {
-            val single = running.first()
-            return ProgressNotifications.build(
-                this,
-                ANCHOR_NOTIFICATION_ID,
-                single.jobKey,
-                single.title,
-                single.content,
-                single.progress,
-                single.total,
-                done = false
-            )
-        }
-
-        val count = running.size
-        val title = "$count Background Tasks Active"
-        val content = running.joinToString(" • ") { "${it.title}: ${it.content}" }
+        // Empty only for the instant between startForeground and stopNow when
+        // every job finished before the service came up.
+        val anchor = jobs.values.firstOrNull()
+            ?: return ProgressNotifications.build(
+                this, ANCHOR_NOTIFICATION_ID, "library", "", "", 0, 0,
+                done = false, cancellable = false)
         return ProgressNotifications.build(
             this,
             ANCHOR_NOTIFICATION_ID,
-            "library",
-            title,
-            content,
-            0,
-            0,
-            done = false
+            anchor.jobKey,
+            anchor.title,
+            anchor.content,
+            anchor.progress,
+            anchor.total,
+            done = false,
+            cancellable = anchor.cancellable,
         )
     }
 }

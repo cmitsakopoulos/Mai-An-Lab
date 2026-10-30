@@ -261,6 +261,9 @@ def test_metadata_workbench_open_editor_handoff():
     pane.all_gaps = []
     pane.coverage = {}
     pane.low_conf = []
+    pane.ai_pending = {}
+    pane.researched = set()
+    pane.ai_ready = False
     pane._row_refs = {}
     pane._list = ft.Column()
     pane._seg = MagicMock()
@@ -329,6 +332,9 @@ async def test_metadata_workbench_focus_artist_non_gap():
     pane.all_gaps = []
     pane.coverage = {}
     pane.low_conf = []
+    pane.ai_pending = {}
+    pane.researched = set()
+    pane.ai_ready = False
     pane.vocab = []
     pane.countries = []
     pane._row_refs = {}
@@ -375,6 +381,9 @@ async def test_metadata_workbench_unsubmitted_and_comma_genres():
     pane.all_gaps = []
     pane.coverage = {}
     pane.low_conf = []
+    pane.ai_pending = {}
+    pane.researched = set()
+    pane.ai_ready = False
     pane._row_refs = {}
     pane._list = ft.Column()
     pane._reload_async = AsyncMock()

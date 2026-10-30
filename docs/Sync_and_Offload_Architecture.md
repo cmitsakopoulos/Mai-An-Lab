@@ -30,7 +30,7 @@ To solve this, developers previously authored CLI scripts:
   * **How It Turns ON:**
     1. **Manual Toggle:** A clean switch in Settings $\to$ Companion & Sync: `[ Toggle: Companion Server (On / Off) ]`.
     2. **Context Trigger:** Initiating "Send to Phone..." in the Library view prompts: *"Companion Server is currently offline. Start server for this transfer? [Start & Send]"*.
-    3. **Auto-Sleep Timer:** After 15 minutes of idle time without active sync or connections, the server automatically shuts down to prevent leaving an open port running indefinitely.
+    3. **Auto-Sleep Timer:** After 15 minutes without real use, the server automatically shuts down to prevent leaving an open port running indefinitely. Heartbeats and transfer polls (`/ping`, `/transfers/pending`) are not use, or a phone in range would keep it up forever. Waiting transfers don't hold it open either: they are persisted and offered again once the server is back on. See §5.1a.
 * **The Reality on Android:** Android's Doze Mode and background execution limits (introduced in Android 8.0+ and tightened through Android 14+) aggressively throttle background CPU, suspend network sockets, and sleep Wi-Fi radios when an app is in the background or the screen is off. Running a background daemon on Android to constantly listen for a Mac drains battery and risks OS process termination.
 * **The Solution (User-Initiated / View-Initiated Check on Android):**
   * On Android: When the user opens the "Companion & Sync" page in Settings (or pulls down to refresh), Android starts a 10-second UDP listener on port `54545`. Simultaneously, Android attempts a direct HTTP `GET /api/v1/ping` to the **last known Mac IP address** cached in settings.
@@ -203,7 +203,7 @@ All communications occur via standard HTTP/1.1 REST using JSON and binary octet-
 
 ### 5.1. UDP Discovery (Beacon + Query/Response)
 * **Port:** UDP `54545`.
-* **Beacon:** the Mac broadcasts every 2 s to `255.255.255.255` and the subnet broadcast address.
+* **Beacon:** the Mac broadcasts every 2 s to `255.255.255.255` and to the real broadcast address of every non-VPN interface, read from `ifconfig` (a `/24` guess is wrong on a `/16` campus network, and `255.255.255.255` alone goes out the default route, which is the tunnel when a VPN is up). The advertised `ip` is the first non-VPN address.
 * **Query/response (primary path on Android):** Android drops inbound broadcast datagrams unless the app holds a `WifiManager.MulticastLock`, which needs pyjnius, and pyjnius is not in the serious_python build. So the phone broadcasts a query every 2 s (sending needs no lock), and the Mac answers by **unicast** to the sender, which is always delivered.
 * The listener uses the datagram's **source address** as the Mac's IP (the advertised `ip` can name another interface on a multi-homed Mac). It re-reports a known server at most every 10 s.
 * The listener runs only while searching: it stops once connected and whenever the app goes to the background.
@@ -215,7 +215,16 @@ All communications occur via standard HTTP/1.1 REST using JSON and binary octet-
 ```
 * **macOS:** the app (or the terminal running it) needs Local Network access (System Settings → Privacy & Security → Local Network). If it is denied, sends fail with `EHOSTUNREACH` and nothing else reports it.
 
-### 5.1a. Authentication & Connection Lifecycle
+### 5.1a. When Discovery Fails: "Find Mac" & Idle Auto-Off
+* **Find Mac (phone):** user-triggered, in order: USB tunnel and last known address → a fresh broadcast query (3 s) → a TCP-connect sweep of the phone's `/24` on port 8945 (and the cached port). Its result is shown as a sentence that stays on screen. When connected, the same button becomes **Test Connection** and reports the round-trip time.
+* **What each outcome means:**
+  * Found by the sweep: the network drops broadcasts but routes unicast. The address is saved, so later probes reach it directly.
+  * Manual IP refused: the Mac is reachable, and the server is off or on another port.
+  * Manual IP timed out: the network isolates clients (or the Mac is away). Only the hotspot, USB, or an overlay like Tailscale will work.
+* **Large networks:** the Mac's Sync Hub warns when its subnet is wider than `/24` (typical of office and campus Wi-Fi, which block discovery and often isolate clients), lists its other addresses, and flags a VPN on the default route.
+* **Idle auto-off (phone):** after 15 min without pairing, transfers, offload, backup or a Find Mac tap, the manager stops discovery, probing and heartbeats and shows "Paused". The enabled preference is kept. It wakes on Find Mac, the switch, Manual IP, or the next app launch, but not on app resume. Downloads still in the queue hold it awake, for at most 1 h.
+
+### 5.1b. Authentication & Connection Lifecycle
 * **Token:** one 128-bit bearer token per Mac, persisted in prefs (`companion_server_token`) so pairings survive Mac restarts. "Reset Pairing" on the Mac issues a new token and a new PIN.
 * **PIN:** 4 digits, rotated after 5 wrong attempts.
 * **Loopback trust:** requests from `127.0.0.1` (the `adb reverse` USB tunnel) skip the token, since physical access to the cable is the trust anchor.

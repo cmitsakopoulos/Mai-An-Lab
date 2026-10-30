@@ -186,6 +186,10 @@ _QUEUE_STATE: dict = {"held": False}
 # Serialises flet_prefs.json writes across sessions (see _save_pref).
 _PREFS_WRITE_LOCK = threading.Lock()
 _BOOT_ENRICH_DELAY_S = 30.0
+# New-releases refresh for the Search landing page: once per process, after the
+# metadata pass has had its head start (both talk to MusicBrainz).
+_RELEASES_STATE: dict = {"started": False, "running": False}
+_BOOT_RELEASES_DELAY_S = 90.0
 # The native handler's resume record (see FletAudioService setResumePath).
 NATIVE_RESUME_NAME = "native_resume.json"
 from utils.error_boundary import ErrorBoundary
@@ -573,6 +577,11 @@ class StreamripFletApp:
             _ENRICH_STATE["boot_done"] = True
             self.schedule_metadata_enrichment(delay=_BOOT_ENRICH_DELAY_S)
 
+        # Discographies of library artists for "New from your artists". Only
+        # artists not checked in the last week are fetched, so most boots
+        # cost nothing.
+        self.ensure_new_releases_refresh(delay=_BOOT_RELEASES_DELAY_S)
+
         # Similarity-graph readiness check, off the hot path. Without this the
         # ONLY automatic build was the state-ZIP auto-import branch above, so a
         # library that was analysed but never had its graph built — or whose
@@ -655,6 +664,42 @@ class StreamripFletApp:
                 return
             await asyncio.sleep(min(quiet - idle, 0.5))
 
+    @property
+    def new_releases_refreshing(self) -> bool:
+        return _RELEASES_STATE["running"]
+
+    def ensure_new_releases_refresh(self, delay: float = 0.0):
+        """Start this process's new-releases pass, once. Called at boot and
+        when the landing toggle is switched on."""
+        if _RELEASES_STATE["started"]:
+            return
+        try:
+            from utils.streamrip_api import load_config
+            if not load_config().get("landing", {}).get("show_new_releases", True):
+                return
+        except Exception:
+            pass
+        _RELEASES_STATE["started"] = True
+        asyncio.create_task(self._refresh_new_releases_async(delay))
+
+    async def _refresh_new_releases_async(self, delay: float):
+        await asyncio.sleep(delay)
+        await self._await_scroll_quiet()
+        from utils.new_releases import refresh_new_releases
+        _RELEASES_STATE["running"] = True
+        written = 0
+        try:
+            written = await refresh_new_releases(self.db_manager)
+            logger.info("New releases: %d artists refreshed", written)
+        except Exception:
+            # Never fatal: the landing page keeps whatever the cache holds.
+            logger.warning("New releases refresh failed", exc_info=True)
+        finally:
+            _RELEASES_STATE["running"] = False
+        search = getattr(self, "search_view", None)
+        if written and search is not None:
+            search.refresh_setup_state()
+
     def schedule_metadata_enrichment(self, delay: float = 5.0):
         """Run the automatic artist-metadata pass in `delay` seconds.
 
@@ -704,7 +749,8 @@ class StreamripFletApp:
         try:
             from utils.metadata_enrich import enrich_pending
             from utils.progress_notify import (
-                ProgressNotifier, metadata_progress_cb, metadata_summary_text,
+                ProgressNotifier, metadata_progress_cb, metadata_retry_action,
+                metadata_summary_text,
             )
             provider = self._prefs.get("sync_provider", "musicbrainz")
             notifier = ProgressNotifier("metadata", "Fetching artist metadata")
@@ -730,7 +776,8 @@ class StreamripFletApp:
             # Always close the notification: an unfinished one stayed "ongoing"
             # forever and now also keeps the native task service running.
             if notifier is not None:
-                notifier.finish(metadata_summary_text(summary))
+                notifier.finish(metadata_summary_text(summary),
+                                action=metadata_retry_action(summary))
 
     async def _auto_export_state_snapshot(self):
         """Background task: write a deterministic state bundle to the standard
@@ -2556,20 +2603,42 @@ class StreamripFletApp:
         self.settings_view._on_open_metadata_workbench_click(genre_filter=genre_name)
 
     def _on_notification_navigate(self, _job: str, target: str):
-        """A progress notification was tapped: open the screen it is about.
-        Targets come from ProgressNotifications.kt's navigate_to extra."""
+        """A notification (or one of its buttons) was tapped: open the screen
+        it is about, then run its action. Targets come from the navigate_to
+        extra as "screen" or "screen:action" — ProgressNotifications.kt for
+        taps, and the action_target Python attached for buttons. Buttons open
+        the app rather than calling back, so they still work after the run
+        that posted them has ended (or the process was restarted)."""
         logger.info("notification tap → %s", target)
+        screen, _, action = (target or "").partition(":")
         try:
-            if target == "sync":
+            if screen == "sync":
                 self.switch_tab(3)
                 self.settings_view._on_open_sync_hub_click()
-            elif target == "workbench":
+                if action == "transfers":
+                    manager = getattr(self, "companion_manager", None)
+                    if manager is not None:
+                        self.page.run_task(manager.check_pending_transfers, True)
+            elif screen == "workbench":
                 self.switch_tab(3)
                 self.settings_view._on_open_metadata_workbench_click()
-            elif target == "downloads":
+                pane = getattr(self.settings_view, "_metadata_workbench_pane", None)
+                if pane is not None and action == "sync":
+                    pane._start_sync()
+                elif pane is not None and action == "suggestions":
+                    pane._set_filter("suggested")
+            elif screen == "downloads":
                 self.download_dock.expand()
-            elif target == "library":
+                if action == "retry":
+                    n = self.queue.retry_failed()
+                    self.show_snackbar(
+                        f"Retrying {n} download{'s' if n != 1 else ''}." if n
+                        else "Nothing to retry. The failed downloads are no longer in the list."
+                    )
+            elif screen == "library":
                 self.switch_tab(2)
+                if action == "analyse":
+                    self.page.run_task(self.library_view._do_compute_dsp)
         except Exception:
             logger.exception("notification navigation to %s failed", target)
 
@@ -2945,6 +3014,23 @@ class StreamripFletApp:
 
     # ── snackbar ─────────────────────────────────────────────────────────────
     def _on_playback_error_toast(self, detail: str):
+        # Android: the native handler has already confirmed a dead track and
+        # says what it did (JSON {message, title, artist, action}).
+        info = None
+        if str(detail).startswith("{"):
+            try:
+                info = json.loads(detail)
+            except ValueError:
+                info = None
+        if isinstance(info, dict):
+            logger.warning("Playback failure: %s", info)
+            name = f"“{info['title']}”" if info.get("title") else "a track"
+            if info.get("action") == "skipped":
+                text = f"Couldn't play {name}. Skipped to the next track."
+            else:
+                text = f"Playback stopped: couldn't play {name} or the tracks after it."
+            self.show_snackbar(text, icon=ft.Icons.ERROR_OUTLINE, color="#FF4444")
+            return
         # Swallow transient just_audio load/abort races that fire during rapid
         # skip/mutation; they self-recover and shouldn't alarm the user. Only
         # surface genuine, sticky failures.

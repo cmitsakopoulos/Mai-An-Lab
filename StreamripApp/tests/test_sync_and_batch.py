@@ -8,7 +8,7 @@ import subprocess
 import tempfile
 import unicodedata
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from utils.db_manager import DatabaseManager
 from utils.dsp import FEATURES_VERSION
@@ -28,7 +28,7 @@ class FakeApp:
         self.page.width = 400
         self.is_background = False
         self.snacks = []
-        self.queue_controller = None
+        self.queue = None  # QueueController, as on the real app
         self.db_manager = None
         self.companion_manager = None
         self._companion_manager = None
@@ -497,7 +497,7 @@ class TestSyncAndBatch(unittest.IsolatedAsyncioTestCase):
         server = CompanionServer(port=_free_port(), trust_loopback=False)
         port = await server.start()
         app = FakeApp()
-        app.queue_controller = MagicMock()
+        app.queue = MagicMock()
         manager = mgr_mod.CompanionSyncManager(app)
         try:
             src = os.path.join(self.test_dir, "a.wav")
@@ -510,7 +510,7 @@ class TestSyncAndBatch(unittest.IsolatedAsyncioTestCase):
             transfers = await manager.check_pending_transfers()
             self.assertEqual(manager.download_transfers(transfers), 1)
             tid = transfers[0]["id"]
-            item = app.queue_controller.enqueue_many.call_args[0][0][0]
+            item = app.queue.enqueue_many.call_args[0][0][0]
             self.assertEqual(item["companion_transfer_id"], tid)
             # In flight: not offered again, still pending on the Mac.
             self.assertEqual(await manager.check_pending_transfers(), [])
@@ -523,6 +523,41 @@ class TestSyncAndBatch(unittest.IsolatedAsyncioTestCase):
             manager.on_transfer_finished(tid, ok=True)
             await manager._flush_acks()
             self.assertEqual(server._pending_transfers, [])
+        finally:
+            await server.stop()
+
+    async def test_background_transfers_announced_once_by_notification(self):
+        from unittest.mock import patch
+        from utils import progress_notify as pn
+        from utils.sync import manager as mgr_mod
+        server = CompanionServer(port=_free_port(), trust_loopback=False)
+        port = await server.start()
+        app = FakeApp()
+        app.is_background = True
+        manager = mgr_mod.CompanionSyncManager(app)
+        alerts = []
+        try:
+            src = os.path.join(self.test_dir, "a.wav")
+            _make_tone(src, 2)
+            await server.queue_tracks_for_transfer([{"path": src}], quality="original", precompute_dsp=False)
+            client = CompanionClient("127.0.0.1", port)
+            await client.pair(server.pin)
+            manager.client, manager.is_connected = client, True
+
+            last_use = manager._last_activity
+            with patch.object(pn, "post_alert", lambda *a, **k: alerts.append((a, k))):
+                await manager._background_transfer_check()
+                await manager._background_transfer_check()  # same transfer: no repeat
+            self.assertEqual(len(alerts), 1)
+            (key, title, _content), kw = alerts[0]
+            self.assertEqual(key, "transfers")
+            self.assertIn("1 track for you", title)
+            self.assertEqual(kw["navigate_to"], "sync:transfers")
+            self.assertTrue(kw["urgent"])
+            # No dialog was raised from the background...
+            self.assertEqual(manager._prompted_transfer_ids, set())
+            # ...and polling isn't use: it must not hold the idle auto-off off.
+            self.assertEqual(manager._last_activity, last_use)
         finally:
             await server.stop()
 
@@ -554,6 +589,28 @@ class TestSyncAndBatch(unittest.IsolatedAsyncioTestCase):
         # Replayed once, not on every registration.
         svc.register_notification_action_handler("navigate", lambda j, a: got.append((j, a)))
         self.assertEqual(len(got), 1)
+
+    async def test_stale_cancel_is_not_replayed_into_the_next_job(self):
+        from flet_audio_service.flet_audio_service import AudioServiceControl
+        svc = AudioServiceControl()
+        # Cancel tapped after the DSP run's handler was gone (or the FGS
+        # timeout's "all"): nobody is listening, and it must stay that way.
+        svc.on_notification_action(MagicMock(data=json.dumps({"job": "dsp", "action": "cancel"})))
+        svc.on_notification_action(MagicMock(data=json.dumps({"job": "all", "action": "fgs_timeout"})))
+        got = []
+        svc.register_notification_action_handler("dsp", lambda j, a: got.append((j, a)))
+        self.assertEqual(got, [])
+
+    async def test_unregister_keeps_a_newer_handler_for_the_same_job(self):
+        from flet_audio_service.flet_audio_service import AudioServiceControl
+        svc = AudioServiceControl()
+        first, second = (lambda j, a: None), (lambda j, a: None)
+        svc.register_notification_action_handler("dsp", first)
+        svc.register_notification_action_handler("dsp", second)
+        svc.unregister_notification_action_handler("dsp", first)
+        self.assertIs(svc._notification_action_handlers.get("dsp"), second)
+        svc.unregister_notification_action_handler("dsp", second)
+        self.assertNotIn("dsp", svc._notification_action_handlers)
 
     async def test_discovery_responder_answers_unicast_query(self):
         import utils.sync.discovery as disc
@@ -596,6 +653,216 @@ class TestSyncAndBatch(unittest.IsolatedAsyncioTestCase):
                 lst.stop()
         self.assertEqual(len(found), 1)
         self.assertEqual((found[0]["ip"], found[0]["port"]), ("127.0.0.1", 8946))
+
+
+    async def test_server_idle_ignores_heartbeats_but_not_real_use(self):
+        server = CompanionServer(port=_free_port(), idle_timeout_s=60)
+        port = await server.start()
+        try:
+            client = CompanionClient("127.0.0.1", port)
+            server._last_active_time -= 120
+            await client.ping()
+            await client.get_pending_transfers()
+            # A phone sitting in range heartbeats forever; that isn't use.
+            self.assertTrue(server._idle_expired())
+            await client.ack_transfers([])
+            self.assertFalse(server._idle_expired())
+            server._last_active_time -= 120
+            server._in_flight = 1  # a long upload or decode still running
+            self.assertFalse(server._idle_expired())
+            server._in_flight = 0
+        finally:
+            await server.stop()
+
+    async def test_server_idle_watchdog_turns_off_with_transfers_waiting(self):
+        import utils.sync.server as srv_mod
+        # From the module being patched: other suites swap sys.modules, and
+        # the import at the top of this file can be a stale copy.
+        server = srv_mod.CompanionServer(port=_free_port(), idle_timeout_s=0)
+        server._pending_transfers = [{"id": "x", "path": "/nope"}]
+        with patch.object(srv_mod, "_IDLE_CHECK_S", 0.05):
+            await server.start()
+            for _ in range(60):
+                await asyncio.sleep(0.05)
+                if server.stopped_reason:
+                    break
+        self.assertFalse(server.is_running)
+        self.assertEqual(server.stopped_reason, "idle")
+
+    async def test_manager_sleeps_when_idle_and_wakes_on_find(self):
+        from utils.sync import manager as mgr_mod
+        app = FakeApp({"companion_sync_enabled": True})
+        manager = mgr_mod.CompanionSyncManager(app)
+        with patch("utils.sync.manager.BeaconListener"), \
+             patch.object(manager, "_candidates", return_value=[]):
+            await manager.start()
+            try:
+                manager._last_activity -= mgr_mod.IDLE_TIMEOUT_S + 1
+                with manager.activity():  # an offload or backup in progress
+                    self.assertFalse(await manager._maybe_sleep())
+                manager._last_activity -= mgr_mod.IDLE_TIMEOUT_S + 1
+                manager._in_flight_ids.add("t1")  # downloads still running
+                self.assertFalse(await manager._maybe_sleep())
+                manager._in_flight_ids.clear()
+
+                self.assertTrue(await manager._maybe_sleep())
+                self.assertTrue(manager.is_asleep)
+                self.assertTrue(manager.enabled)  # the preference survives
+                self.assertIsNone(manager.listener)
+                self.assertIsNone(manager._probe_task)
+                self.assertIsNone(manager._heartbeat_task)
+                manager.handle_app_resume()
+                self.assertIsNone(manager.listener)  # coming back to the app doesn't wake it
+
+                with patch.object(mgr_mod, "_FIND_QUERY_WAIT_S", 0), \
+                     patch.object(mgr_mod, "sweep_subnet", AsyncMock(return_value=[])), \
+                     patch.object(mgr_mod, "resolve_local_ip", return_value="192.168.1.20"):
+                    msg = await manager.find_mac()
+                self.assertFalse(manager.is_asleep)
+                self.assertIn("No Mac answered", msg)
+                self.assertIn("192.168.1.20", msg)
+            finally:
+                await manager.stop()
+
+    async def test_find_mac_falls_back_to_subnet_sweep(self):
+        from utils.sync import manager as mgr_mod
+        server = CompanionServer(port=_free_port())
+        port = await server.start()
+        app = FakeApp({"companion_sync_enabled": True, "companion_paired_port": port})
+        manager = mgr_mod.CompanionSyncManager(app)
+        try:
+            # No USB tunnel, no cached host, and broadcasts that never arrive:
+            # only the sweep of the phone's /24 can find the Mac.
+            with patch("utils.sync.manager.BeaconListener"), \
+                 patch.object(mgr_mod, "_FIND_QUERY_WAIT_S", 0), \
+                 patch.object(mgr_mod, "resolve_local_ip", return_value="127.0.0.1"), \
+                 patch.object(manager, "_candidates", return_value=[]):
+                msg = await manager.find_mac()
+            self.assertTrue(manager.is_connected)
+            self.assertIn("by scanning", msg)
+        finally:
+            await manager.stop()
+            await server.stop()
+
+    async def test_manual_connect_explains_what_failed(self):
+        from utils.sync import manager as mgr_mod
+        manager = mgr_mod.CompanionSyncManager(FakeApp())
+        try:
+            with patch("utils.sync.manager.BeaconListener"), \
+                 patch.object(manager, "_candidates", return_value=[]):
+                msg = await manager.connect_manual("127.0.0.1", _free_port())
+            self.assertIn("nothing answers on port", msg)
+            self.assertIn("keeps devices apart", mgr_mod._explain_connect_error(
+                asyncio.TimeoutError(), "10.0.0.5", 8945))
+        finally:
+            await manager.stop()
+
+    def test_local_interfaces_parses_ifconfig_and_skips_vpn(self):
+        import utils.sync.discovery as disc
+        out = ("lo0: flags=8049<UP,LOOPBACK>\n\tinet 127.0.0.1 netmask 0xff000000\n"
+               "en0: flags=8863<UP,BROADCAST>\n"
+               "\tinet 10.188.113.136 netmask 0xffff0000 broadcast 10.188.255.255\n"
+               "utun4: flags=8051<UP,POINTOPOINT>\n\tinet 10.8.0.2 --> 10.8.0.1 netmask 0xffffff00\n")
+        with patch.object(disc, "_iface_cache", (-1e9, [])), \
+             patch.object(disc.platform, "system", return_value="Darwin"), \
+             patch.object(disc.subprocess, "run", return_value=MagicMock(stdout=out)), \
+             patch.object(disc, "resolve_local_ip", return_value="10.8.0.2"):
+            ifaces = disc.local_interfaces()
+            self.assertEqual([i["name"] for i in ifaces], ["utun4", "en0"])  # default route first
+            self.assertTrue(ifaces[0]["vpn"])
+            self.assertEqual(ifaces[1]["prefix"], 16)
+            # A phone can't come in through the tunnel: advertise and
+            # broadcast on the LAN interface, with its real (/16) broadcast.
+            self.assertEqual(disc.lan_ip(), "10.188.113.136")
+            self.assertEqual(disc.BeaconBroadcaster(8945)._broadcast_targets(),
+                             ["255.255.255.255", "10.188.255.255"])
+
+
+    # ── Send-to-phone flow (2026-10-29 device report) ───────────────────────
+
+    async def test_batch_is_published_only_when_fully_prepared(self):
+        """The phone polls the pending list; publishing track-by-track made it
+        pop one dialog for the first finished track and another for the rest."""
+        server = CompanionServer(port=_free_port())
+        paths = []
+        for i in range(3):
+            p = os.path.join(self.test_dir, f"t{i}.m4a")
+            open(p, "wb").write(b"x")
+            paths.append(p)
+        seen_pending, progress = [], []
+
+        async def fake_prepare(path, profile, precompute):
+            seen_pending.append(len(server._pending_transfers))
+            await asyncio.sleep(0)
+            return {"bpm": 120} if precompute else None
+
+        with patch.object(server, "_prepare_transfer", fake_prepare):
+            queued = await server.queue_tracks_for_transfer(
+                [{"path": p, "title": f"T{i}"} for i, p in enumerate(paths)],
+                quality="aac_320k", precompute_dsp=True,
+                progress=lambda d, t, title: progress.append((d, t)))
+        self.assertEqual(seen_pending, [0, 0, 0])
+        self.assertEqual(len(server._pending_transfers), 3)
+        self.assertEqual(progress[0], (0, 3))
+        self.assertEqual(progress[-1], (3, 3))
+        self.assertTrue(all(q["extension"] == "m4a" for q in queued))
+
+        # Cancelled: nothing reaches the phone.
+        cancel = asyncio.Event()
+        cancel.set()
+        server._pending_transfers = []
+        with patch.object(server, "_prepare_transfer", fake_prepare):
+            self.assertEqual(await server.queue_tracks_for_transfer(
+                [{"path": paths[0]}], cancel_event=cancel), [])
+        self.assertEqual(server._pending_transfers, [])
+
+    async def test_companion_download_shows_real_quality(self):
+        from utils.sync import manager as mgr_mod
+        from utils.queue_controller import QueueController
+        self.assertEqual(mgr_mod.transfer_quality_label({"quality": "aac_320k"}), "AAC 320")
+        self.assertEqual(mgr_mod.transfer_quality_label(
+            {"quality": "original", "extension": "flac"}), "FLAC")
+
+        app = FakeApp()
+        app.queue = MagicMock()
+        manager = mgr_mod.CompanionSyncManager(app)
+        manager.client = MagicMock()
+        manager.client.stream_url.return_value = "http://x/stream"
+        manager.download_transfers([{"id": "a", "title": "A", "quality": "aac_320k", "extension": "m4a"}])
+        item = app.queue.enqueue_many.call_args[0][0][0]
+        job = QueueController.__new__(QueueController)
+        import itertools
+        job._ids = itertools.count(1)
+        self.assertEqual(job._make_job(item, "original")["quality_label"], "AAC 320")
+
+    async def test_selection_bar_and_bitrate_badge_render_values(self):
+        import flet as ft
+        from ui.views.library import LibraryView
+        view = LibraryView.__new__(LibraryView)
+        view._selected_track_paths = {"/a", "/b"}
+        view._selection_count_text = ft.Text("0 selected")
+        # Flet 1.0 Button has no `.text`: the label is `content`.
+        view._selection_send_btn = ft.Button("Send (0)", disabled=True)
+        view._selection_bar = MagicMock()
+        view._update_selection_bar()
+        self.assertEqual(view._selection_send_btn.content, "Send (2)")
+        self.assertFalse(view._selection_send_btn.disabled)
+
+        # tinytag stores kbit/s; the badge used to divide by 1000 again.
+        card = view._build_context_menu_track_card(
+            {"path": "", "title": "T", "bitrate": 320.4, "format": "m4a"})
+        texts = []
+
+        def walk(c):
+            if isinstance(c, ft.Text):
+                texts.append(c.value)
+            for attr in ("content", "controls"):
+                v = getattr(c, attr, None)
+                for child in (v if isinstance(v, list) else [v]):
+                    if isinstance(child, ft.Control):
+                        walk(child)
+        walk(card)
+        self.assertIn("320 kbps", texts)
 
 
 if __name__ == "__main__":

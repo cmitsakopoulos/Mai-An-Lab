@@ -3042,7 +3042,7 @@ class LibraryView:
                 has_rows = bool(self._flat_rows)
 
                 def finalize_tracks():
-                    self._stats_label.text = stats_text
+                    self._stats_label.value = stats_text
                     self._init_track_list()
                     self._slide_window_to(
                         *self._ideal_window(0.0, self._last_viewport)
@@ -3203,7 +3203,7 @@ class LibraryView:
                     return
                     
                 def finalize_network():
-                    self._stats_label.text = stats_text
+                    self._stats_label.value = stats_text
                     self._search_spinner.visible = False
                     
                     is_empty = not first_chunk
@@ -3254,7 +3254,7 @@ class LibraryView:
                 self._current_gen = gen
 
                 def finalize():
-                    self._stats_label.text = stats_text
+                    self._stats_label.value = stats_text
                     self._library_list.controls.extend(first_chunk)
                     self._search_spinner.visible = False
                     
@@ -4149,10 +4149,12 @@ class LibraryView:
             badge_controls.append(
                 ft.Text(fmt_time(dur), size=11, color=TEXT_TERTIARY, weight=ft.FontWeight.W_500)
             )
+        # The scanner stores tinytag's bitrate, which is already kbit/s; the old
+        # `// 1000` turned every track into "0 kbps".
         bitrate = meta.get("bitrate")
         if bitrate and bitrate > 0:
             badge_controls.append(
-                ft.Text(f"{bitrate // 1000} kbps", size=10, color=DIM)
+                ft.Text(f"{round(bitrate)} kbps", size=10, color=DIM)
             )
 
         badges_row = ft.Row(badge_controls, spacing=8, wrap=True, vertical_alignment=ft.CrossAxisAlignment.CENTER) if badge_controls else None
@@ -4502,6 +4504,10 @@ class LibraryView:
             schedule = getattr(self.app, "schedule_metadata_enrichment", None)
             if schedule is not None:
                 schedule()
+            # A quiet scan is the one after a download or Mac transfer lands:
+            # nobody is in the Library to see the "not analysed" state.
+            if quiet:
+                self.page.run_task(self._announce_unanalysed)
 
         if not quiet:
             def _hide_scanner():
@@ -4515,6 +4521,31 @@ class LibraryView:
 
             msg = f"Scan complete. Indexed {count} items." if count else "Library is up to date."
             self.app.show_snackbar(msg, icon=ft.Icons.CHECK_CIRCLE_OUTLINE if "Indexed" in msg else ft.Icons.INFO_OUTLINE, color=CYAN)
+
+    async def _announce_unanalysed(self):
+        """Offer to analyse tracks that just arrived. Until they are, auto-play
+        and the similar-track features can't use them, and nothing else says
+        so outside the Library tab."""
+        if self._analyzing_dsp:
+            return
+        from utils.progress_notify import cancel_alert, post_alert
+        try:
+            from utils import track_graph as tg
+            missing = await self.app.db_manager.get_tracks_missing_features(tg.FEATURES_VERSION)
+        except Exception as exc:
+            logger.warning("unanalysed-track count failed: %s", exc)
+            return
+        n = len(missing)
+        if not n:
+            cancel_alert("scan")
+            return
+        s = "s" if n != 1 else ""
+        post_alert(
+            "scan", "New music in your library",
+            f"{n} track{s} {'are' if n != 1 else 'is'} not analysed yet, so auto-play "
+            f"and similar-track picks can't use {'them' if n != 1 else 'it'}.",
+            navigate_to="library", action=("Analyse", "library:analyse"), icon="dsp",
+        )
 
     # ── tab lifecycle ───────────────────────────────────────────────────────
     def on_show(self):
@@ -4530,7 +4561,9 @@ class LibraryView:
 
     async def _do_compute_dsp(self):
         from utils import track_graph as tg
+        from utils.progress_notify import cancel_alert
         import sys
+        cancel_alert("scan")  # the "not analysed yet" card is being acted on
         if hasattr(sys, "getandroidapilevel") and audio_engine.audio_service is None:
             self.app.show_snackbar(
                 "Audio service not ready — native analyser unavailable.",
@@ -4708,7 +4741,7 @@ class LibraryView:
     def _update_selection_bar(self):
         count = len(self._selected_track_paths)
         self._selection_count_text.value = f"{count} selected"
-        self._selection_send_btn.text = f"Send ({count})"
+        self._selection_send_btn.content = f"Send ({count})"
         self._selection_send_btn.disabled = (count == 0)
         try:
             self._selection_bar.update()
@@ -4842,12 +4875,12 @@ class LibraryView:
             return
 
         from utils.sync.server import DEFAULT_PORT, get_companion_server
-        from utils.sync.discovery import resolve_local_ip
+        from utils.sync.discovery import lan_ip
 
         server = get_companion_server(self.app)
 
         is_running = server.is_running
-        ip = resolve_local_ip()
+        ip = lan_ip()
         port = server.bound_port or DEFAULT_PORT
 
         quality_dropdown = ft.Dropdown(
@@ -4880,38 +4913,76 @@ class LibraryView:
             color=ACCENT_GREEN if is_running else DIM,
         )
 
-        async def _start_transfer(_e=None):
+        # Preparation runs inside this dialog: the phone is only told about the
+        # batch once every track is analysed (and encoded), so it gets a single
+        # pop-up with everything rather than one per finished track.
+        progress_bar = ft.ProgressBar(value=0, color=ACCENT_GREEN, bgcolor=BORDER_SUBTLE, visible=False)
+        progress_text = ft.Text("", size=12, color=DIM, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS, visible=False)
+        cancel_event = asyncio.Event()
+
+        def _refresh():
+            try:
+                dlg.update()
+            except Exception:
+                pass
+
+        def _on_progress(done: int, total: int, title: str):
+            progress_bar.value = (done / total) if total else None
+            verb = "Analysing" if dsp_checkbox.value else "Encoding"
+            progress_text.value = f"{verb} {done} of {total}" + (f" · {title}" if title else "")
+            _refresh()
+
+        def _cancel(_e=None):
+            cancel_event.set()
             self.app.dismiss_dialog(dlg)
-            self.app.show_snackbar("Preparing transfer on Mac...", icon=ft.Icons.SYNC_ROUNDED)
+
+        async def _start_transfer(_e=None):
+            quality = quality_dropdown.value or "aac_vbr_max"
+            precompute = bool(dsp_checkbox.value)
+
+            quality_dropdown.disabled = True
+            dsp_checkbox.disabled = True
+            progress_bar.visible = progress_text.visible = True
+            progress_bar.value = None  # indeterminate until the first track lands
+            progress_text.value = "Preparing…"
+            send_btn.disabled = True
+            dlg.modal = True  # a stray tap outside must not hide the progress
+            _refresh()
 
             if not server.is_running:
                 try:
                     await server.start()
                 except Exception as ex:
+                    self.app.dismiss_dialog(dlg)
                     self.app.show_snackbar(f"Failed to start Companion Server: {ex}", color=ACCENT_RED)
                     return
-
-            quality = quality_dropdown.value or "aac_vbr_max"
-            precompute = bool(dsp_checkbox.value)
 
             try:
                 queued = await server.queue_tracks_for_transfer(
                     tracks=tracks,
                     quality=quality,
                     precompute_dsp=precompute,
+                    progress=_on_progress,
+                    cancel_event=cancel_event,
                 )
-                if not queued:
-                    self.app.show_snackbar("None of the selected files exist on disk.", color=ACCENT_RED)
-                    return
-                self.app.show_snackbar(
-                    f"Queued {len(queued)} track{'s' if len(queued) != 1 else ''} for Phone (PIN: {server.pin}) · "
-                    "the phone offers them as soon as it connects",
-                    icon=ft.Icons.CHECK_CIRCLE,
-                )
-                if self._selection_mode:
-                    self._exit_selection_mode()
             except Exception as ex:
+                self.app.dismiss_dialog(dlg)
                 self.app.show_snackbar(f"Failed to queue transfer: {ex}", color=ACCENT_RED)
+                return
+            if cancel_event.is_set():
+                return
+            self.app.dismiss_dialog(dlg)
+            if not queued:
+                self.app.show_snackbar("None of the selected files exist on disk.", color=ACCENT_RED)
+                return
+            self.app.show_snackbar(
+                f"{len(queued)} track{'s' if len(queued) != 1 else ''} ready for your phone (PIN: {server.pin})",
+                icon=ft.Icons.CHECK_CIRCLE,
+            )
+            if self._selection_mode:
+                self._exit_selection_mode()
+
+        send_btn = ft.Button("Send to Phone", bgcolor=ACCENT_GREEN, color=BG, on_click=lambda e: self.page.run_task(_start_transfer))
 
         page_w = self.page.width if (self.page and self.page.width) else 440
         dialog_w = min(400, max(280, page_w - 48))
@@ -4935,12 +5006,14 @@ class LibraryView:
                     quality_dropdown,
                     dsp_row,
                     status_text,
+                    progress_bar,
+                    progress_text,
                 ], spacing=14, tight=True, scroll=ft.ScrollMode.ADAPTIVE),
                 width=dialog_w,
             ),
             actions=[
-                ft.TextButton("Cancel", on_click=lambda _: self.app.dismiss_dialog(dlg)),
-                ft.Button("Send to Phone", bgcolor=ACCENT_GREEN, color=BG, on_click=lambda e: self.page.run_task(_start_transfer)),
+                ft.TextButton("Cancel", on_click=_cancel),
+                send_btn,
             ],
             actions_alignment=ft.MainAxisAlignment.END,
         )

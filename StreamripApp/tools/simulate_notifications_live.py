@@ -45,10 +45,12 @@ class TerminalNotificationDrawer:
     def register_notification_action_handler(self, job: str, callback):
         self.action_handlers[job] = callback
 
-    def unregister_notification_action_handler(self, job: str):
-        self.action_handlers.pop(job, None)
+    def unregister_notification_action_handler(self, job: str, callback=None):
+        if callback is None or self.action_handlers.get(job) is callback:
+            self.action_handlers.pop(job, None)
 
-    async def show_progress_notification(self, title, content, progress, total, done=False, job="dsp"):
+    async def show_progress_notification(self, title, content, progress, total, done=False, job="dsp", cancellable=True,
+                                         action_label="", action_target=""):
         if done and not content:
             self.active_notifications.pop(job, None)
         else:

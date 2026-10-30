@@ -270,7 +270,7 @@ class TestDownloadNotification(unittest.TestCase):
             def update(self, done, total, content):
                 calls.append(("update", done, total, content))
 
-            def finish(self, content=""):
+            def finish(self, content="", action=None):
                 calls.append(("finish", content))
 
         async def run():
@@ -319,7 +319,7 @@ class TestDownloadNotification(unittest.TestCase):
             def update(self, *_):
                 pass
 
-            def finish(self, content=""):
+            def finish(self, content="", action=None):
                 calls.append(content)
 
         async def run():
