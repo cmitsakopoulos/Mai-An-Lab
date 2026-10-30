@@ -16,11 +16,19 @@ import logging
 import os
 import shutil
 import sqlite3
+import threading
 import time
+import uuid
 import zipfile
 from typing import Optional
 
 logger = logging.getLogger("state_export")
+
+# One auto-snapshot at a time. A UI restart (the setup wizard's finish, a theme
+# change) re-runs startup, which starts a second export while the first is
+# still writing; with shared temp names one could delete the other's database
+# copy mid-zip and publish a bundle with no library in it.
+_SNAPSHOT_LOCK = threading.Lock()
 
 # Bump this when the bundle layout or any of the included file formats change
 # in an incompatible way. Import refuses bundles with a different major.
@@ -178,15 +186,25 @@ def export_state_snapshot(
     one file.
 
     Returns the absolute path of the written file, or raises on failure."""
+    with _SNAPSHOT_LOCK:
+        return _export_state_snapshot_locked(db_path, config_path, out_dir, search_history_path)
+
+
+def _export_state_snapshot_locked(db_path, config_path, out_dir, search_history_path) -> str:
     os.makedirs(out_dir, exist_ok=True)
     out_path = os.path.join(out_dir, "mai_an_lab_state_latest.zip")
 
-    tmp_db = out_path + ".db.tmp"
+    # Unique per call: a crashed earlier export (or another process's) can
+    # leave temp files behind, and they must never be mistaken for ours.
+    tag = uuid.uuid4().hex[:8]
+    tmp_db = f"{out_path}.{tag}.db.tmp"
     _snapshot_sqlite(db_path, tmp_db)
+    if not os.path.exists(tmp_db) and os.path.exists(db_path) and os.path.getsize(db_path) > 0:
+        raise RuntimeError(f"library DB snapshot failed; not publishing a bundle without it ({db_path})")
 
     # Write to a temp file first, then atomically replace, so a crash
     # mid-write never leaves a truncated bundle on disk.
-    tmp_zip = out_path + ".writing.tmp"
+    tmp_zip = f"{out_path}.{tag}.writing.tmp"
     contents: dict[str, dict] = {}
     try:
         with zipfile.ZipFile(tmp_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:

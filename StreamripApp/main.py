@@ -226,6 +226,8 @@ class StreamripFletApp:
         # Mirrors self.autoplay.enabled (persisted as the "play_similar_mode"
         # pref); the AutoPlay controller is created in _heavy_init.
         self.play_similar_mode: bool = False
+        self.autoplay = None
+        self._ui_ready: bool = False
         self._companion_server = None
         self._companion_client = None
         self._companion_manager = None
@@ -253,7 +255,12 @@ class StreamripFletApp:
             # The session may be torn down from here on, and nothing refills
             # auto-play without it: queue enough to ride it out. Runs on every
             # background state (hide then pause); a full buffer makes it a no-op.
-            self.autoplay.prefill_for_background()
+            autoplay = getattr(self, "autoplay", None) or _AUTOPLAY
+            if autoplay is not None:
+                try:
+                    autoplay.prefill_for_background()
+                except Exception as ex:
+                    logger.warning("AutoPlay prefill_for_background failed: %s", ex)
             now_bg = True
         elif state == "resume":
             now_bg = False
@@ -275,10 +282,13 @@ class StreamripFletApp:
         # Player handlers skip UI work while backgrounded, so the mini player
         # and Now Playing may show a stale track, play/pause state or duration.
         # One refresh (also re-highlights the playing rows) and a full flush.
-        self.safe_update(self._refresh_now_playing_ui)
-        self.page.run_task(self._prune_caches_async)
+        if getattr(self, "_ui_ready", False):
+            self.safe_update(self._refresh_now_playing_ui)
+        if hasattr(self, "_prune_caches_async"):
+            self.page.run_task(self._prune_caches_async)
         # Pick up listens that finished while we were in the background.
-        self._schedule_ledger_drain(0.0)
+        if getattr(self, "db_manager", None) and (getattr(self, "autoplay", None) or _AUTOPLAY):
+            self._schedule_ledger_drain(0.0)
         if getattr(self, "companion_manager", None):
             # Re-checks a link that may have died while hidden, or re-probes
             # and restarts discovery, and offers transfers queued meanwhile.
@@ -343,6 +353,7 @@ class StreamripFletApp:
             logger.warning("Restart already in progress, ignoring.")
             return
             
+        self._ui_ready = False
         self._forced_tab = target_tab
         self._post_restart_message = post_message
         self.page.clean()
@@ -407,6 +418,17 @@ class StreamripFletApp:
                 # Delete the import ZIP
                 os.remove(import_zip)
                 logger.info("Auto-import state ZIP processed and deleted.")
+
+                # A restored install is not a first run. The onboarding marker
+                # lives in app-private storage, which the reinstall wiped, so
+                # without this the setup wizard opened after every rebuild, and
+                # finishing it overwrote the restored appearance, startup tab
+                # and download folder with its defaults.
+                try:
+                    with open(os.path.join(DATA_DIR, ".onboarded"), "w", encoding="utf-8") as f:
+                        f.write("1")
+                except OSError:
+                    logger.warning("Auto-import: couldn't write the onboarding marker", exc_info=True)
 
                 # Re-initialize DB manager and rebuild graph and PCA space immediately
                 self.db_manager = DatabaseManager(db_path)
@@ -522,7 +544,7 @@ class StreamripFletApp:
         audio_engine.bind(
             on_playback_error=lambda _, d: self._on_playback_error_toast(d),
             on_queue_mutated=_on_queue_mutated,
-            on_queue_end=lambda _i, _v: self.autoplay.on_queue_dry(),
+            on_queue_end=lambda _i, _v: (self.autoplay.on_queue_dry() if getattr(self, "autoplay", None) else None),
             on_native_ready=lambda _i, _v: self._schedule_ledger_drain(0.0),
         )
 
@@ -543,7 +565,8 @@ class StreamripFletApp:
             # this side last heard. Ask the player where it is instead.
             _QUEUE_STATE["held"] = True
             audio_engine.probe_native()
-            self.autoplay.resume(audio_engine.current_path)
+            if getattr(self, "autoplay", None):
+                self.autoplay.resume(audio_engine.current_path)
             self.safe_update(self._refresh_now_playing_ui)
             if self.queue_sheet and self.queue_sheet._initialized:
                 self.safe_update(self.queue_sheet.refresh)
@@ -1467,6 +1490,7 @@ class StreamripFletApp:
 
         # Initial render
         self.page.update()
+        self._ui_ready = True
 
         if getattr(self, "_post_restart_message", None):
             msg = self._post_restart_message
@@ -1674,7 +1698,9 @@ class StreamripFletApp:
             self._capture_listen_without_ledger(path, restoring)
 
         if not restoring:
-            self.autoplay.on_track_changed(path)
+            autoplay = getattr(self, "autoplay", None) or _AUTOPLAY
+            if autoplay:
+                autoplay.on_track_changed(path)
 
         self.safe_update(self._refresh_now_playing_ui)
 
@@ -1688,6 +1714,8 @@ class StreamripFletApp:
         """Push the engine's current track/state/art into the mini player and
         Now Playing and re-highlight the playing rows. Runs inside a
         safe_update flush."""
+        if not getattr(self, "_ui_ready", False):
+            return
         path   = audio_engine.current_path
         track  = audio_engine.current_track  or ""
         artist = audio_engine.current_artist or ""
@@ -1726,7 +1754,9 @@ class StreamripFletApp:
         with the screen off as a 10-second skip."""
         prev = self._last_played_path
         if prev and prev != path and not restoring:
-            self.autoplay.on_listen(prev, self._last_play_position, self._last_play_duration)
+            autoplay = getattr(self, "autoplay", None) or _AUTOPLAY
+            if autoplay:
+                autoplay.on_listen(prev, self._last_play_position, self._last_play_duration)
         self._last_played_path = path or ""
         self._last_play_position = 0.0
         self._last_play_duration = float(audio_engine.duration or 0.0)
@@ -1939,7 +1969,9 @@ class StreamripFletApp:
             restored_path = queue[index].get("path")
             if restored_path:
                 self._extract_artwork_async(restored_path)
-                self.autoplay.resume(restored_path)
+                autoplay = getattr(self, "autoplay", None) or _AUTOPLAY
+                if autoplay:
+                    autoplay.resume(restored_path)
 
             # Manually drive the now-playing UI since restore_queue runs
             # entirely synchronously. _set("current_path", ...) dispatches
@@ -2209,6 +2241,10 @@ class StreamripFletApp:
         a later line is caught by the next track change / resume / ready."""
         if not getattr(audio_engine, "has_native_play_log", False):
             return
+        db = getattr(self, "db_manager", None)
+        autoplay = getattr(self, "autoplay", None) or _AUTOPLAY
+        if not db or not autoplay:
+            return
         existing = getattr(self, "_ledger_drain_task", None)
         if existing is not None and not existing.done():
             return
@@ -2216,8 +2252,8 @@ class StreamripFletApp:
         async def _do_drain():
             try:
                 await asyncio.sleep(delay)
-                await play_ledger.drain_ledger(DATA_DIR, self.db_manager,
-                                               on_entries=self.autoplay.on_listens)
+                await play_ledger.drain_ledger(DATA_DIR, db,
+                                               on_entries=autoplay.on_listens)
             except asyncio.CancelledError:
                 pass
             except Exception as exc:
@@ -2298,7 +2334,8 @@ class StreamripFletApp:
                     break
             if existing_idx != -1:
                 audio_engine.play_track_at(existing_idx)
-                self.autoplay.on_user_chose(target_path)
+                if getattr(self, "autoplay", None):
+                    self.autoplay.on_user_chose(target_path)
                 return
 
         db = self.db_manager
@@ -2427,7 +2464,8 @@ class StreamripFletApp:
         # NON-DESTRUCTIVE: the tapped song plays within the FULL list; with
         # auto-play on, similar tracks are then inserted right after it.
         audio_engine.set_queue(tracks, start_index=target_idx)
-        self.autoplay.on_user_chose(target_path)
+        if getattr(self, "autoplay", None):
+            self.autoplay.on_user_chose(target_path)
 
     def set_play_similar_mode(self, enabled: bool):
         """Auto-play on/off (UI: the chain icon in Now Playing)."""
@@ -2444,7 +2482,8 @@ class StreamripFletApp:
             self._save_pref("is_shuffle", False)
         # Non-destructive both ways: on inserts a buffer after the current
         # track; off drops only that buffer (the queue tail was never removed).
-        self.autoplay.set_enabled(enabled, audio_engine.current_path)
+        if getattr(self, "autoplay", None):
+            self.autoplay.set_enabled(enabled, audio_engine.current_path)
         if hasattr(self, "queue_sheet") and self.queue_sheet and self.queue_sheet._initialized:
             self.safe_update(self.queue_sheet.refresh)
 
@@ -2453,7 +2492,8 @@ class StreamripFletApp:
         pending buffer as a new station from the playing track."""
         if mode not in VARIETY_MODES:
             return
-        self.autoplay.set_variety(mode)
+        if getattr(self, "autoplay", None):
+            self.autoplay.set_variety(mode)
         self._save_pref("autoplay_variety", mode)
 
     async def start_radio(self, path: str):
@@ -2475,7 +2515,8 @@ class StreamripFletApp:
                 idx = audio_engine.current_index + 1 if len(audio_engine.queue) > 1 else 0
             audio_engine.play_track_at(idx)
         if self.play_similar_mode:
-            self.autoplay.start(path)
+            if getattr(self, "autoplay", None):
+                self.autoplay.start(path)
         else:
             self.set_play_similar_mode(True)
 

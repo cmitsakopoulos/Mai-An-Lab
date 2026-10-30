@@ -9,6 +9,7 @@ OpenAI chat-completions dialect, so a single request/response path serves both
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from dataclasses import dataclass, field
@@ -124,38 +125,46 @@ class LLMEngine:
                 for t in tools
             ]
 
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    url, headers=headers, json=payload,
-                    timeout=aiohttp.ClientTimeout(total=timeout),
-                ) as resp:
-                    if resp.status != 200:
-                        err_text = await resp.text()
-                        logger.error("LLM API error (%d): %s", resp.status, err_text)
+        for attempt in (1, 2):
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(
+                        url, headers=headers, json=payload,
+                        timeout=aiohttp.ClientTimeout(total=timeout, connect=10),
+                    ) as resp:
+                        if resp.status != 200:
+                            err_text = await resp.text()
+                            logger.error("LLM API error (%d): %s", resp.status, err_text)
+                            return LLMResponse(
+                                success=False,
+                                error_message=f"Provider returned HTTP {resp.status}: {err_text[:200]}",
+                            )
+
+                        data = await resp.json()
+                        choices = data.get("choices", [])
+                        if not choices:
+                            return LLMResponse(success=False, error_message="Empty response from provider.")
+
+                        message = choices[0].get("message", {})
+                        text_content = message.get("content") or ""
+                        parsed_tool_calls = self._parse_tool_calls(message.get("tool_calls", []))
                         return LLMResponse(
-                            success=False,
-                            error_message=f"Provider returned HTTP {resp.status}: {err_text[:200]}",
+                            content=text_content,
+                            tool_calls=parsed_tool_calls,
+                            success=True,
+                            raw_message=message,
                         )
 
-                    data = await resp.json()
-                    choices = data.get("choices", [])
-                    if not choices:
-                        return LLMResponse(success=False, error_message="Empty response from provider.")
-
-                    message = choices[0].get("message", {})
-                    text_content = message.get("content") or ""
-                    parsed_tool_calls = self._parse_tool_calls(message.get("tool_calls", []))
-                    return LLMResponse(
-                        content=text_content,
-                        tool_calls=parsed_tool_calls,
-                        success=True,
-                        raw_message=message,
-                    )
-
-        except Exception as e:
-            logger.exception("Failed to reach LLM provider: %s", e)
-            return LLMResponse(success=False, error_message=f"Network error: {e}")
+            except aiohttp.ClientConnectorError as e:
+                if attempt == 1:
+                    logger.warning("DNS/Connection hiccup (%s), retrying in 1.5s...", e)
+                    await asyncio.sleep(1.5)
+                    continue
+                logger.exception("Failed to reach LLM provider: %s", e)
+                return LLMResponse(success=False, error_message=f"Network error: {e}")
+            except Exception as e:
+                logger.exception("Failed to reach LLM provider: %s", e)
+                return LLMResponse(success=False, error_message=f"Network error: {e}")
 
     @staticmethod
     def _parse_tool_calls(raw_tool_calls: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

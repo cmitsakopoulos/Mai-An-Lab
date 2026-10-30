@@ -187,7 +187,9 @@ require_device
 
 # Launch; the startup hook imports mai_an_lab_state_import.zip (replacing
 # library.db, so DSP features + coords ride back in), rebuilds the similarity
-# graph, then deletes the bundle.
+# graph, then deletes the bundle. The log is cleared first so step 7 can follow
+# exactly this boot's import and export lines.
+"$ADB" logcat -c 2>/dev/null || true
 "$ADB" shell monkey -p "$PACKAGE" -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1
 echo "Relaunched."
 
@@ -199,12 +201,28 @@ fi
 echo "The app is reinjecting your state + rebuilding the graph on boot."
 
 # ── 7. Verify: confirm the features/graph actually landed ────────────────────
-# Wait for a FRESH snapshot (newer than the pre-rebuild one) — it only appears
-# once the reinstalled app has booted, imported, and re-exported.
-echo "Waiting for the app to re-export a post-import snapshot (up to ~150s)..."
+# Follows the app's own log lines for this boot, so the wait shows what the
+# app is doing and ends as soon as it has re-exported (or says why it couldn't),
+# rather than polling silently. Falls back to the snapshot's mtime when the log
+# isn't readable. Ctrl-C here is harmless: reinstall and reinjection are done.
+echo "Following the app's import and re-export (up to ~150s; Ctrl-C is safe now)..."
 NEW_SNAP=""
-for _ in $(seq 1 30); do
+EXPORT_FAILED=""
+PRINTED=0
+for i in $(seq 1 30); do
     sleep 5
+    LOG="$("$ADB" logcat -d 2>/dev/null | tr -d '\r' | grep -E 'Auto-import|Auto-export|Auto-snapshot' | sed -E 's/^.*(Auto-)/  \1/')"
+    COUNT="$(printf '%s' "$LOG" | grep -c .)"
+    if [ "$COUNT" -gt "$PRINTED" ]; then
+        printf '%s\n' "$LOG" | tail -n +"$((PRINTED + 1))"
+        PRINTED="$COUNT"
+    elif [ $((i % 6)) -eq 0 ]; then
+        echo "  ...still waiting ($((i * 5))s)"
+    fi
+    if printf '%s' "$LOG" | grep -q "Auto-export state snapshot failed"; then
+        EXPORT_FAILED=1
+        break
+    fi
     CAND="$(discover_snapshot)"
     if [ -n "$CAND" ]; then
         CAND_MTIME="$(snapshot_mtime "$CAND")"
@@ -215,6 +233,18 @@ for _ in $(seq 1 30); do
     fi
 done
 
+if [ -z "$NEW_SNAP" ]; then
+    LOGFILE="$BACKUP_DIR/postinstall_logcat_$(date +%Y%m%d_%H%M%S).txt"
+    "$ADB" logcat -d > "$LOGFILE" 2>/dev/null
+    if [ -n "$EXPORT_FAILED" ]; then
+        echo "The app imported your state but couldn't write a fresh snapshot (reason above)."
+    else
+        echo "No fresh snapshot after 150s."
+    fi
+    echo "Your data was reinjected either way. Full device log saved to:"
+    echo "  $LOGFILE"
+fi
+
 if [ -n "$NEW_SNAP" ] && [ -f "$APPRAISE" ]; then
     VERIFY="$BACKUP_DIR/mai_an_lab_state_postimport.zip"
     if "$ADB" pull "$NEW_SNAP" "$VERIFY" >/dev/null 2>&1; then
@@ -224,9 +254,6 @@ if [ -n "$NEW_SNAP" ] && [ -f "$APPRAISE" ]; then
         echo "If DSP features are present but graph coordinates are 0, the graph is"
         echo "still rebuilding in the background — re-appraise in a minute."
     fi
-else
-    echo "No fresh snapshot seen yet — the app may still be importing/rebuilding."
-    echo "Give it a minute, then: python3 $APPRAISE <pulled snapshot>"
 fi
 
 echo "Host-side safety copy kept in tools/state_backups/ if anything goes wrong."

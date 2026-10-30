@@ -252,6 +252,7 @@ class AssistantConfig:
     llm_provider: str = "gemini"
     gemini_api_key: str = ""
     gemini_model: str = "gemini-3.5-flash-lite"  # = llm_engine.DEFAULT_GEMINI_MODEL
+    research_mode: str = "hybrid"  # "hybrid", "weights", "web_snippets", "google_grounding"
     ollama_endpoint: str = "http://localhost:11434/v1"
     ollama_model: str = "llama3.2"
     personality_prompt: str = ""
@@ -320,7 +321,9 @@ class ConfigData:
         conversion = ConversionConfig(**toml["conversion"])  # type: ignore
         misc = MiscConfig(**toml["misc"])  # type: ignore
         assistant_dict = dict(toml.get("assistant", {}))
-        assistant = AssistantConfig(**assistant_dict) if assistant_dict else AssistantConfig()
+        valid_keys = {f.name for f in fields(AssistantConfig)}
+        filtered_assistant = {k: v for k, v in assistant_dict.items() if k in valid_keys}
+        assistant = AssistantConfig(**filtered_assistant) if filtered_assistant else AssistantConfig()
 
         return cls(
             toml=toml,

@@ -69,6 +69,9 @@ def fake_gemini(monkeypatch):
 
     monkeypatch.setattr(_ai(), "_generate", fake_generate)
     monkeypatch.setattr(_ai(), "load_research_settings", lambda: ("k", "gemini-test"))
+    async def fake_snippets(*a, **k):
+        return []
+    monkeypatch.setattr(_ai(), "_fetch_web_snippets", fake_snippets)
     return state
 
 
@@ -279,3 +282,47 @@ async def test_agent_apply_rejects_bad_country_and_unknown_artist(fake_gemini):
         nothing = await execute_tool("apply_artist_metadata", {"artist": "A"}, r)
         assert not nothing["success"] and r.confirm is None
         await db.close()
+
+
+def test_validate_allows_memory_country_when_enabled():
+    # When allow_memory_country=True and confidence is high, keep country even without web sources
+    v = _ai().validate(_GOOD, [], ["hip hop"], allow_memory_country=True)
+    assert v["status"] == "ok"
+    assert v["country"] == "GR"
+    assert v["confidence"] == "high"
+
+    # When confidence is low in memory mode, drop country to protect Auto-Play regional fencing
+    v_low = _ai().validate({**_GOOD, "confidence": "low"}, [], ["hip hop"], allow_memory_country=True)
+    assert v_low["country"] == ""
+    assert v_low["confidence"] == "low"
+
+
+@pytest.mark.asyncio
+async def test_research_dual_paradigm_weights_mode(fake_gemini, monkeypatch):
+    with tempfile.TemporaryDirectory() as d:
+        db = await _db_with(d, "Snik")
+        # In weights mode, no web chunks in response
+        fake_gemini["answers"]["Snik"] = _gemini_response(_GOOD, sources=0)
+        res = await _ai().research_artist(db, "Snik", mode="weights")
+        assert res["status"] == "ok"
+        assert res["origin_mode"] == "weights"
+        assert res["country"] == "GR"
+        assert "internal training knowledge" in fake_gemini["calls"][-1]
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_research_dual_paradigm_snippets_mode(fake_gemini, monkeypatch):
+    with tempfile.TemporaryDirectory() as d:
+        db = await _db_with(d, "Snik")
+        fake_gemini["answers"]["Snik"] = _gemini_response(_GOOD, sources=0)
+        async def mock_snippets(*a, **k):
+            return [{"title": "Snik Bio", "uri": "https://example.com/snik", "snippet": "Greek trap artist."}]
+        monkeypatch.setattr(_ai(), "_fetch_web_snippets", mock_snippets)
+        res = await _ai().research_artist(db, "Snik", mode="web_snippets")
+        assert res["status"] == "ok"
+        assert res["origin_mode"] == "web_snippets"
+        assert len(res["sources"]) == 1
+        assert "LIVE WEB SEARCH SNIPPETS" in fake_gemini["calls"][-1]
+        await db.close()
+

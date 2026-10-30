@@ -44,6 +44,18 @@ TOKEN_PREF = "companion_server_token"
 # phone sat in range, so the idle auto-off never fired.
 _PASSIVE_PATHS = frozenset({"/api/v1/ping", "/api/v1/transfers/pending"})
 _IDLE_CHECK_S = 30.0
+# The paired phone's name, kept across restarts: it labels "Send to <phone>"
+# and decides whether that action is offered at all.
+CLIENT_NAME_PREF = "companion_last_client_name"
+# Tracks the phone may push into the library. Anything else is refused: a
+# token must not turn into write access for arbitrary files.
+_RECEIVABLE_EXTS = frozenset({
+    ".flac", ".mp3", ".m4a", ".aac", ".alac", ".ogg", ".opus",
+    ".wav", ".aif", ".aiff", ".wv", ".ape",
+})
+# A pushed batch is announced (and the library rescanned) once its last track
+# lands; this is the fallback if the phone vanishes mid-batch.
+_RECEIVE_SETTLE_S = 60.0
 
 
 _SERVER: Optional["CompanionServer"] = None
@@ -72,9 +84,88 @@ def get_companion_server(app) -> "CompanionServer":
         _SERVER = CompanionServer(db_manager=getattr(app, "db_manager", None),
                                   auth_token=token, transfers_path=state_path)
     _SERVER.db_manager = getattr(app, "db_manager", None) or _SERVER.db_manager
-    _SERVER.on_token_reset = lambda t: app._save_pref(TOKEN_PREF, t)
+
+    def _on_token_reset(token: str):
+        app._save_pref(TOKEN_PREF, token)
+        app._save_pref(CLIENT_NAME_PREF, "")  # every phone is unpaired now
+
+    def _on_client_seen(name: str):
+        if name and (getattr(app, "_prefs", None) or {}).get(CLIENT_NAME_PREF) != name:
+            app._save_pref(CLIENT_NAME_PREF, name)
+
+    def _receive_dir() -> str:
+        from utils.storage_paths import pick_download_dir
+        from utils.streamrip_api import get_default_download_path
+        return pick_download_dir(getattr(app, "target_folder", None) or get_default_download_path(),
+                                 getattr(app, "library_folder", ""))
+
+    def _on_tracks_received(paths: list[str], sender: str):
+        n = len(paths)
+        try:
+            app.show_snackbar(f"Received {n} track{'s' if n != 1 else ''} from {sender}")
+        except Exception:
+            pass
+        view = getattr(app, "library_view", None)
+        if view is not None:
+            try:
+                view.start_scan(quiet=True)
+            except Exception:
+                logger.exception("library scan after receive failed")
+
+    _SERVER.on_token_reset = _on_token_reset
+    _SERVER.on_client_seen = _on_client_seen
+    _SERVER.receive_dir = _receive_dir
+    _SERVER.on_tracks_received = _on_tracks_received
     app._companion_server = _SERVER
     return _SERVER
+
+
+async def stored_features(db_manager, path: str) -> Optional[dict]:
+    """A track's acoustic features from the library DB, in wire form
+    (timbre base64-encoded), or None when it hasn't been analysed."""
+    if not db_manager:
+        return None
+    try:
+        conn = await db_manager.get_connection()
+        async with conn.execute(
+            "SELECT bpm, energy, brightness, rolloff, beat_strength, "
+            "spectral_flatness, spectral_contrast, key_index, timbre, features_version "
+            "FROM play_counts WHERE track_path = ?",
+            (path,)
+        ) as cur:
+            row = await cur.fetchone()
+    except Exception as ex:
+        logger.debug("db_manager lookup failed: %s", ex)
+        return None
+    if not row or row[0] is None:
+        return None
+    timbre_blob = row[8]
+    return {
+        "bpm": row[0], "energy": row[1], "brightness": row[2],
+        "rolloff": row[3], "beat_strength": row[4],
+        "spectral_flatness": row[5], "spectral_contrast": row[6],
+        "key_index": row[7],
+        "timbre_b64": base64.b64encode(timbre_blob).decode("ascii") if timbre_blob else "",
+        "features_version": row[9] or FEATURES_VERSION,
+    }
+
+
+async def persist_features(db_manager, path: str, dsp: dict) -> None:
+    """Store wire-form features (see stored_features) against a local file."""
+    timbre_blob = base64.b64decode(dsp["timbre_b64"]) if dsp.get("timbre_b64") else None
+    await db_manager.update_track_features(
+        path=path,
+        bpm=dsp.get("bpm"),
+        energy=dsp.get("energy"),
+        brightness=dsp.get("brightness"),
+        rolloff=dsp.get("rolloff"),
+        beat_strength=dsp.get("beat_strength"),
+        spectral_flatness=dsp.get("spectral_flatness"),
+        spectral_contrast=dsp.get("spectral_contrast"),
+        key_index=dsp.get("key_index"),
+        timbre_blob=timbre_blob,
+        features_version=dsp.get("features_version", FEATURES_VERSION),
+    )
 
 
 def _run_decode(ffmpeg: str, src: str, out_pcm: str, seek: bool) -> tuple[bool, str]:
@@ -212,6 +303,19 @@ class CompanionServer:
         self.idle_timeout_s = idle_timeout_s
         self.trust_loopback = trust_loopback
         self.on_token_reset: Optional[Callable[[str], None]] = None
+        # Host hooks (wired by get_companion_server): remember the paired
+        # phone's name; where pushed tracks go; what to do once they landed.
+        self.on_client_seen: Optional[Callable[[str], None]] = None
+        self.receive_dir: Optional[Callable[[], str]] = None
+        self.on_tracks_received: Optional[Callable[[list[str], str], None]] = None
+        self._received: list[str] = []
+        self._received_from = ""
+        self._received_flush: Optional[asyncio.Task] = None
+        # Batches being prepared for the phone: aggregate progress for the
+        # host UI, and their cancel events.
+        self._prep_done = 0
+        self._prep_total = 0
+        self._prep_cancels: set[asyncio.Event] = set()
         self._pin_failures = 0
         # Who last talked to us, for the host UI: (device name, ip, monotonic).
         self.last_client: Optional[tuple[str, str, float]] = None
@@ -239,6 +343,23 @@ class CompanionServer:
     @property
     def is_running(self) -> bool:
         return self._is_running
+
+    @property
+    def preparing(self) -> Optional[tuple[int, int]]:
+        """(done, total) across batches being prepared for the phone."""
+        return (self._prep_done, self._prep_total) if self._prep_total else None
+
+    def cancel_preparing(self):
+        for ev in list(self._prep_cancels):
+            ev.set()
+
+    def _client_seen(self, name: str, remote: str):
+        self.last_client = (name, remote or "", time.monotonic())
+        if self.on_client_seen:
+            try:
+                self.on_client_seen(name)
+            except Exception as ex:
+                logger.debug("on_client_seen failed: %s", ex)
 
     def _touch(self):
         self._last_active_time = time.time()
@@ -356,8 +477,7 @@ class CompanionServer:
     async def handle_ping(self, request: web.Request) -> web.Response:
         authorized = self._check_auth(request)
         if authorized:
-            name = unquote(request.headers.get("X-Device-Name", "Phone"))
-            self.last_client = (name, request.remote or "", time.monotonic())
+            self._client_seen(unquote(request.headers.get("X-Device-Name", "Phone")), request.remote)
         total_tracks = 0
         if self.db_manager:
             try:
@@ -387,7 +507,7 @@ class CompanionServer:
         if secrets.compare_digest(pin_attempt, self.pin):
             logger.info("Successfully paired with client: %s", client_name)
             self._pin_failures = 0
-            self.last_client = (client_name, request.remote or "", time.monotonic())
+            self._client_seen(client_name, request.remote)
             self._notify()
             return web.json_response({
                 "status": "paired",
@@ -597,6 +717,110 @@ class CompanionServer:
         logger.info("Saved state bundle uploaded from client to %s", dest)
         return web.json_response({"status": "ok", "saved_path": str(dest)})
 
+    async def handle_receive_track(self, request: web.Request) -> web.Response:
+        """A track pushed from the phone ("Send to Mac"). Saved under the
+        download folder as Artist/Album/<file>, with the phone's acoustic
+        features when it sent them. A `meta` JSON part precedes the file;
+        its `remaining` count tells us when the batch is complete."""
+        if not self._check_auth(request):
+            return web.json_response({"error": "Unauthorized"}, status=401)
+        if not self.receive_dir:
+            return web.json_response({"error": "This Mac is not accepting tracks"}, status=503)
+
+        from utils.filepath_utils import clean_filename, normalize_nfc
+
+        reader = await request.multipart()
+        meta: dict = {}
+        part = await reader.next()
+        while part is not None and part.name != "file":
+            if part.name == "meta":
+                try:
+                    meta = json.loads(await part.text() or "{}")
+                except ValueError:
+                    meta = {}
+            part = await reader.next()
+        if part is None:
+            return web.json_response({"error": "No file uploaded"}, status=400)
+
+        # The name only, never a path: the phone doesn't choose where we write.
+        name = clean_filename(Path(part.filename or "").name)
+        if Path(name).suffix.lower() not in _RECEIVABLE_EXTS:
+            return web.json_response({"error": "Not an audio file"}, status=415)
+        try:
+            dest_dir = await asyncio.to_thread(self.receive_dir)
+        except Exception as ex:
+            return web.json_response({"error": str(ex)}, status=507)
+        artist = clean_filename(str(meta.get("artist") or ""))
+        album = clean_filename(str(meta.get("album") or ""))
+        if artist and album and artist != "Unknown":
+            dest_dir = os.path.join(dest_dir, artist, album)
+        os.makedirs(dest_dir, exist_ok=True)
+        dest = normalize_nfc(os.path.join(dest_dir, name))
+
+        fd, part_path = tempfile.mkstemp(dir=dest_dir, suffix=".part")
+        duplicate = False
+        try:
+            size = 0
+            with os.fdopen(fd, "wb") as fh:
+                while True:
+                    chunk = await part.read_chunk()
+                    if not chunk:
+                        break
+                    fh.write(chunk)
+                    size += len(chunk)
+            if size == 0:
+                return web.json_response({"error": "Empty file"}, status=400)
+            if os.path.exists(dest) and os.path.getsize(dest) == size:
+                duplicate = True  # sent before
+            else:
+                if os.path.exists(dest):
+                    # A different track with the same file name: never overwrite.
+                    stem, ext = os.path.splitext(dest)
+                    n = 2
+                    while os.path.exists(f"{stem} ({n}){ext}"):
+                        n += 1
+                    dest = f"{stem} ({n}){ext}"
+                os.replace(part_path, dest)
+        finally:
+            if os.path.exists(part_path):
+                try:
+                    os.remove(part_path)
+                except OSError:
+                    pass
+
+        dsp = meta.get("dsp_features")
+        if dsp and not duplicate and self.db_manager:
+            try:
+                await persist_features(self.db_manager, dest, dsp)
+            except Exception as ex:
+                logger.warning("Could not store features sent with %s: %s", dest, ex)
+
+        sender = unquote(request.headers.get("X-Device-Name", "Phone"))
+        self._client_seen(sender, request.remote)
+        if not duplicate:
+            self._received.append(dest)
+            self._received_from = sender
+        remaining = int(meta.get("remaining") or 0)
+        if self._received_flush and not self._received_flush.done():
+            self._received_flush.cancel()
+        self._received_flush = asyncio.create_task(
+            self._flush_received(0.0 if remaining <= 0 else _RECEIVE_SETTLE_S))
+        logger.info("Received %s from %s%s", dest, sender, " (duplicate)" if duplicate else "")
+        return web.json_response({"status": "ok", "path": dest, "duplicate": duplicate})
+
+    async def _flush_received(self, delay: float):
+        """Announce a finished pushed batch once, not per track."""
+        try:
+            await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            return
+        paths, self._received = self._received, []
+        if paths and self.on_tracks_received:
+            try:
+                self.on_tracks_received(paths, self._received_from or "Phone")
+            except Exception:
+                logger.exception("on_tracks_received failed")
+
     # ─── Track Transfer Queue & Precomputation ──────────────────────────────────
 
     async def get_or_extract_features(self, file_path: str) -> Optional[dict]:
@@ -630,28 +854,9 @@ class CompanionServer:
             logger.debug("Cache lookup failed: %s", ex)
 
         # 2. Check db_manager if available
-        if self.db_manager:
-            try:
-                conn = await self.db_manager.get_connection()
-                async with conn.execute(
-                    "SELECT bpm, energy, brightness, rolloff, beat_strength, "
-                    "spectral_flatness, spectral_contrast, key_index, timbre, features_version "
-                    "FROM play_counts WHERE track_path = ?",
-                    (file_path,)
-                ) as cur:
-                    row = await cur.fetchone()
-                    if row and row[0] is not None:
-                        timbre_blob = row[8]
-                        timbre_b64 = base64.b64encode(timbre_blob).decode("ascii") if timbre_blob else ""
-                        return {
-                            "bpm": row[0], "energy": row[1], "brightness": row[2],
-                            "rolloff": row[3], "beat_strength": row[4],
-                            "spectral_flatness": row[5], "spectral_contrast": row[6],
-                            "key_index": row[7], "timbre_b64": timbre_b64,
-                            "features_version": row[9] or FEATURES_VERSION,
-                        }
-            except Exception as ex:
-                logger.debug("db_manager lookup failed: %s", ex)
+        stored = await stored_features(self.db_manager, file_path)
+        if stored:
+            return stored
 
         # 3. Compute via ffmpeg
         try:
@@ -739,16 +944,23 @@ class CompanionServer:
         done = 0
         if progress and total:
             progress(0, total, "")
+        if cancel_event is None:
+            cancel_event = asyncio.Event()
+        self._prep_cancels.add(cancel_event)
+        self._prep_total += total
+        self._notify()
 
         sem = asyncio.Semaphore(3)
 
         async def _one(t: dict, path: str, title: str) -> Optional[dict]:
             nonlocal done
             async with sem:
-                if cancel_event is not None and cancel_event.is_set():
+                if cancel_event.is_set():
                     return None
                 dsp_features = await self._prepare_transfer(path, profile, precompute_dsp)
             done += 1
+            self._prep_done += 1
+            self._notify()
             if progress:
                 progress(done, total, title)
 
@@ -770,8 +982,14 @@ class CompanionServer:
                 "timestamp": time.time(),
             }
 
-        results = await asyncio.gather(*(_one(*x) for x in todo))
-        if cancel_event is not None and cancel_event.is_set():
+        try:
+            results = await asyncio.gather(*(_one(*x) for x in todo))
+        finally:
+            self._prep_cancels.discard(cancel_event)
+            self._prep_total -= total
+            self._prep_done -= done
+            self._notify()
+        if cancel_event.is_set():
             logger.info("Transfer preparation cancelled (%d of %d done)", done, total)
             return []
 
@@ -844,6 +1062,7 @@ class CompanionServer:
         self._app.router.add_post("/api/v1/dsp/extract", self.handle_dsp_extract)
         self._app.router.add_get("/api/v1/tracks/stream", self.handle_stream_audio)
         self._app.router.add_post("/api/v1/bundle/upload", self.handle_bundle_upload)
+        self._app.router.add_post("/api/v1/tracks/receive", self.handle_receive_track)
         self._app.router.add_get("/api/v1/transfers/pending", self.handle_get_pending_transfers)
         self._app.router.add_post("/api/v1/transfers/queue", self.handle_queue_transfers)
         self._app.router.add_post("/api/v1/transfers/ack", self.handle_ack_transfers)

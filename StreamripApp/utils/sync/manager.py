@@ -11,9 +11,11 @@ import contextlib
 import errno
 import ipaddress
 import logging
+import os
 import time
 from typing import Callable, Optional
 
+import aiohttp
 import flet as ft
 
 from ui.tokens import BG, CYAN, DIM, BORDER, ACCENT_GREEN, ACCENT_RED
@@ -46,6 +48,12 @@ IDLE_TIMEOUT_S = 15 * 60
 _IN_FLIGHT_GRACE_S = 60 * 60
 # How long "Find Mac" waits for a broadcast-query reply before sweeping.
 _FIND_QUERY_WAIT_S = 3.0
+# Off (the default): tracks the Mac sends are downloaded without a prompt.
+ASK_BEFORE_DOWNLOAD_PREF = "companion_ask_before_download"
+# Failed downloads of one transfer before auto-accept leaves it to the dialog.
+_AUTO_ACCEPT_MAX_FAILURES = 2
+# Consecutive network failures before a Send to Mac batch gives up.
+_MAX_SEND_NET_FAILURES = 3
 
 
 _QUALITY_LABELS = {
@@ -63,6 +71,25 @@ def transfer_quality_label(t: dict) -> str:
     if q in _QUALITY_LABELS:
         return _QUALITY_LABELS[q]
     return (str(t.get("extension") or "").upper() or "ORIGINAL")
+
+
+_DEVICE_NAME: Optional[str] = None
+
+
+def device_name() -> str:
+    """This phone's model ("Pixel 9 Pro"), which the Mac shows as "Send to
+    Pixel 9 Pro". platform.node() is just "localhost" on Android."""
+    global _DEVICE_NAME
+    if _DEVICE_NAME is None:
+        name = ""
+        try:
+            import subprocess
+            name = subprocess.run(["getprop", "ro.product.model"], capture_output=True,
+                                  text=True, timeout=2).stdout.strip()
+        except Exception:
+            pass
+        _DEVICE_NAME = name or "Android Phone"
+    return _DEVICE_NAME
 
 
 def _explain_connect_error(ex: BaseException, host: str, port: int) -> str:
@@ -129,6 +156,11 @@ class CompanionSyncManager:
         # there instead of vanishing.
         self._in_flight_ids: set[str] = set()
         self._unacked_ids: set[str] = set()
+        self._auto_failures: dict[str, int] = {}
+        # Send to Mac: tracks waiting to be pushed, and the worker pushing them.
+        self._send_queue: list[dict] = []
+        self._send_task: Optional[asyncio.Task] = None
+        self._send_cancelled = False
         self._status_listeners: list[Callable[[], None]] = []
         # Idle auto-off. `enabled` (the user's preference) survives it; a
         # sleeping manager wakes on Find Mac, the switch, or the next launch.
@@ -429,7 +461,7 @@ class CompanionSyncManager:
             if self.is_connected and self.client and (self.client.host, self.client.port) == (host, port):
                 return
             token = self._pref("companion_paired_token", "") or None
-            client = CompanionClient(host, port, auth_token=token)
+            client = CompanionClient(host, port, auth_token=token, device_name=device_name())
             try:
                 info = await client.ping(timeout=4.0 if interactive else 1.5)
             except Exception as ex:
@@ -596,7 +628,7 @@ class CompanionSyncManager:
             pair_btn.content = "Pairing…"
             _refresh()
 
-            client = CompanionClient(host=host, port=port)
+            client = CompanionClient(host=host, port=port, device_name=device_name())
             try:
                 token = await client.pair(entered_pin)
                 self._save_pref("companion_paired_token", token)
@@ -721,6 +753,14 @@ class CompanionSyncManager:
 
         transfers = [t for t in transfers if str(t.get("id")) not in self._in_flight_ids]
         if transfers and prompt_user and not self._transfer_dialog_open and not self._in_background():
+            n = self._auto_accept(transfers)
+            if n:
+                self.app.show_snackbar(
+                    f"Receiving {n} track{'s' if n != 1 else ''} from {self._mac_name()}",
+                    icon=ft.Icons.DOWNLOAD_ROUNDED,
+                )
+                transfers = [t for t in transfers if str(t.get("id")) not in self._in_flight_ids]
+        if transfers and prompt_user and not self._transfer_dialog_open and not self._in_background():
             ids = {str(t.get("id")) for t in transfers if t.get("id")}
             if ids - self._prompted_transfer_ids:
                 self.touch()  # the Mac sent something new: that's use
@@ -733,6 +773,9 @@ class CompanionSyncManager:
         notification that opens the Sync screen. Not counted as a miss on
         failure (the foreground heartbeat owns liveness) and not as use."""
         transfers = await self.check_pending_transfers(prompt_user=False)
+        if transfers and self._auto_accept(transfers):
+            # The download queue's own notification takes it from here.
+            transfers = [t for t in transfers if str(t.get("id")) not in self._in_flight_ids]
         ids = {str(t.get("id")) for t in transfers if t.get("id")}
         fresh = ids - self._prompted_transfer_ids - self._notified_transfer_ids
         if not fresh:
@@ -740,7 +783,7 @@ class CompanionSyncManager:
         self._notified_transfer_ids.update(fresh)
         from utils.progress_notify import post_alert
         n = len(ids)
-        mac = (self.discovered_server or {}).get("name") or "Your Mac"
+        mac = self._mac_name("Your Mac")
         post_alert(
             "transfers",
             f"{mac} has {n} track{'s' if n != 1 else ''} for you",
@@ -788,12 +831,136 @@ class CompanionSyncManager:
         self._in_flight_ids.discard(transfer_id)
         self.touch()
         if ok:
+            self._auto_failures.pop(transfer_id, None)
             self._unacked_ids.add(transfer_id)
             asyncio.create_task(self._flush_acks())
         else:
-            # Let the next poll offer it again.
+            # Let the next poll offer it again (asking, once auto-accept has
+            # given up on it).
+            self._auto_failures[transfer_id] = self._auto_failures.get(transfer_id, 0) + 1
             self._prompted_transfer_ids.discard(transfer_id)
         self._notify()
+
+    # ─── Auto-accept ───────────────────────────────────────────────────────────
+
+    @property
+    def ask_before_download(self) -> bool:
+        return bool(self._pref(ASK_BEFORE_DOWNLOAD_PREF, False))
+
+    def set_ask_before_download(self, ask: bool):
+        self._save_pref(ASK_BEFORE_DOWNLOAD_PREF, bool(ask))
+        self._notify()
+
+    def _mac_name(self, default: str = "your Mac") -> str:
+        return ((self.discovered_server or {}).get("name")
+                or self._pref("companion_paired_name", "") or default)
+
+    def _auto_accept(self, transfers: list[dict]) -> int:
+        """Download what the paired Mac sent without asking: sending it was
+        the decision. A transfer that keeps failing drops back to the dialog
+        instead of being retried on every poll."""
+        if self.ask_before_download:
+            return 0
+        auto = [t for t in transfers
+                if self._auto_failures.get(str(t.get("id")), 0) < _AUTO_ACCEPT_MAX_FAILURES]
+        return self.download_transfers(auto) if auto else 0
+
+    # ─── Send to Mac ───────────────────────────────────────────────────────────
+
+    @property
+    def is_sending(self) -> bool:
+        return bool(self._send_task and not self._send_task.done())
+
+    def send_tracks(self, tracks: list[dict]) -> int:
+        """Queue library tracks for the Mac. One worker drains the queue, so
+        a second tap mid-send extends the batch instead of racing it.
+        Returns how many were newly queued."""
+        if not self.client or not self.is_connected:
+            return 0
+        queued = {t.get("path") for t in self._send_queue}
+        new = [t for t in tracks if t.get("path") and t["path"] not in queued]
+        self._send_queue.extend(new)
+        if new and not self.is_sending:
+            self._send_cancelled = False
+            self._send_task = asyncio.create_task(self._send_worker())
+        return len(new)
+
+    def cancel_send(self):
+        self._send_cancelled = True
+
+    async def _send_worker(self):
+        from utils.progress_notify import ProgressNotifier
+        from utils.sync.server import stored_features
+
+        mac = self._mac_name()
+        notifier = ProgressNotifier("sync", f"Sending to {mac}", on_cancel=self.cancel_send)
+        sent = dup = failed = net_failures = 0
+        error = ""
+        try:
+            with self.activity():
+                while self._send_queue and not self._send_cancelled:
+                    client = self.client
+                    if not client or not self.is_connected:
+                        error = f"Lost connection to {mac}"
+                        break
+                    t = self._send_queue.pop(0)
+                    path = t["path"]
+                    title = t.get("track_title") or t.get("title") or os.path.basename(path)
+                    done = sent + dup + failed
+                    total = done + len(self._send_queue) + 1
+                    notifier.update(done, total, f"{title} · {done + 1} of {total}")
+                    meta = {
+                        "title": title,
+                        "artist": t.get("artist_name") or t.get("artist") or "",
+                        "album": t.get("album") or t.get("album_title") or "",
+                        "dsp_features": await stored_features(getattr(self.app, "db_manager", None), path),
+                        "remaining": len(self._send_queue),
+                    }
+                    try:
+                        reply = await client.push_track(path, meta)
+                        if reply.get("duplicate"):
+                            dup += 1
+                        else:
+                            sent += 1
+                        net_failures = 0
+                    except PermissionError:
+                        self._save_pref("companion_paired_token", "")
+                        self._set_disconnected("Pairing was revoked on the Mac")
+                        failed += 1
+                        error = "Pairing was revoked on the Mac"
+                        break
+                    except (aiohttp.ClientConnectionError, asyncio.TimeoutError) as ex:
+                        failed += 1
+                        net_failures += 1
+                        logger.warning("Send to Mac failed for %s: %s", path, ex)
+                        if net_failures >= _MAX_SEND_NET_FAILURES:
+                            error = f"Lost connection to {mac}"
+                            break
+                    except Exception as ex:
+                        failed += 1
+                        logger.warning("Send to Mac failed for %s: %s", path, ex)
+                    self._notify()
+        finally:
+            failed += len(self._send_queue)
+            self._send_queue.clear()
+            cancelled = self._send_cancelled
+            self._send_cancelled = False
+            parts = []
+            if sent:
+                parts.append(f"Sent {sent} track{'s' if sent != 1 else ''} to {mac}")
+            if dup:
+                parts.append(f"{dup} already there")
+            if failed:
+                parts.append("cancelled" if cancelled and not error else f"{failed} failed")
+            summary = " · ".join(parts) + (f" ({error})" if error else "")
+            notifier.finish(summary)
+            if summary:
+                self.app.show_snackbar(
+                    summary,
+                    icon=ft.Icons.CHECK_CIRCLE if not failed else ft.Icons.ERROR_OUTLINE_ROUNDED,
+                    color=ACCENT_RED if failed and not (sent or dup) else CYAN,
+                )
+            self._notify()
 
     async def _flush_acks(self):
         client = self.client

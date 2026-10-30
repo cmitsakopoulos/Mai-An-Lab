@@ -92,13 +92,101 @@ def load_research_settings() -> tuple[str, str]:
     return key, model
 
 
+def load_research_mode() -> str:
+    """Active research paradigm: 'hybrid' (default), 'weights', 'web_snippets', or 'google_grounding'."""
+    try:
+        from utils.streamrip_api import load_config
+        cfg = load_config() or {}
+        acfg = dict(cfg.get("assistant") or {})
+    except Exception as exc:
+        logger.warning("AI research: couldn't read config for mode: %s", exc)
+        acfg = {}
+    return str(acfg.get("research_mode") or "hybrid").strip().lower()
+
+
 def research_available() -> bool:
     return bool(load_research_settings()[0])
 
 
+# ── web snippet searcher (free tier open grounding) ───────────────────────────
+
+async def _fetch_web_snippets(
+    artist: str,
+    evidence: Optional[dict] = None,
+    session=None,
+    timeout: float = 3.5,
+) -> List[Dict[str, str]]:
+    """Fetch real-time web search snippets for an artist using DuckDuckGo Lite,
+    falling back to the Wikipedia Search API. Returns a list of dicts:
+    [{'title': ..., 'uri': ..., 'snippet': ...}]. Fails gracefully to an empty
+    list on timeouts, network errors, or bot blocks."""
+    import aiohttp
+    import urllib.parse
+    from bs4 import BeautifulSoup
+
+    snippets: List[Dict[str, str]] = []
+    own = session is None
+    if own:
+        session = aiohttp.ClientSession(
+            headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
+        )
+
+    # 1. Primary: DuckDuckGo Lite search
+    try:
+        q = f"{artist} music artist"
+        async with session.post(
+            "https://lite.duckduckgo.com/lite/",
+            data={"q": q},
+            timeout=aiohttp.ClientTimeout(total=timeout),
+        ) as resp:
+            if resp.status == 200:
+                html = await resp.text()
+                soup = BeautifulSoup(html, "html.parser")
+                for td in soup.find_all("td", class_="result-snippet")[:4]:
+                    text = td.get_text(" ", strip=True)
+                    if text:
+                        snippets.append({
+                            "title": f"DuckDuckGo: {artist}",
+                            "uri": "https://duckduckgo.com",
+                            "snippet": text,
+                        })
+    except Exception as exc:
+        logger.debug("DuckDuckGo snippet lookup failed for %s: %s", artist, exc)
+
+    # 2. Secondary fallback: Wikipedia Search API
+    if not snippets:
+        try:
+            wiki_url = f"https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch={urllib.parse.quote(artist + ' music')}&format=json"
+            async with session.get(wiki_url, timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    for item in (data.get("query", {}).get("search") or [])[:3]:
+                        raw_s = item.get("snippet", "")
+                        clean_s = re.sub(r"<[^<]+?>", "", raw_s).strip()
+                        title = item.get("title", "")
+                        if clean_s:
+                            snippets.append({
+                                "title": f"Wikipedia: {title}",
+                                "uri": f"https://en.wikipedia.org/wiki/{urllib.parse.quote(title)}",
+                                "snippet": clean_s,
+                            })
+        except Exception as exc:
+            logger.debug("Wikipedia snippet fallback failed for %s: %s", artist, exc)
+
+    if own:
+        await session.close()
+
+    return snippets
+
+
 # ── prompt ────────────────────────────────────────────────────────────────────
 
-def build_prompt(evidence: dict, vocabulary: List[str]) -> str:
+def build_prompt(
+    evidence: dict,
+    vocabulary: List[str],
+    snippets: Optional[List[Dict[str, str]]] = None,
+    mode: str = "hybrid",
+) -> str:
     albums = "; ".join(
         f"{a['title']} ({a['year']})" if a.get("year") else a["title"]
         for a in evidence.get("albums") or []
@@ -113,7 +201,20 @@ def build_prompt(evidence: dict, vocabulary: List[str]) -> str:
     if evidence.get("known_genres"):
         known.append("genres " + ", ".join(evidence["known_genres"]))
     vocab = ", ".join(vocabulary[:_VOCAB_IN_PROMPT]) or "(empty library vocabulary)"
-    return f"""You identify music artists for a personal music library. Search the web.
+
+    snippet_block = ""
+    if snippets:
+        formatted = "\n".join(f"- {s.get('title', '')}: {s.get('snippet', '')}" for s in snippets)
+        snippet_block = f"\nLIVE WEB SEARCH SNIPPETS:\n{formatted}\n"
+
+    if mode == "google_grounding":
+        instruction = "Search the web."
+    elif snippets:
+        instruction = "Use the live web search snippets and your music knowledge to identify the artist."
+    else:
+        instruction = "Use your internal training knowledge (global/regional music scenes, forums, and discographies) to identify this artist. Match strictly against the user's files."
+
+    return f"""You identify music artists for a personal music library. {instruction}
 
 ARTIST: {evidence.get('artist')}
 The user's files by this artist (use them to make sure you have the RIGHT artist — many acts share a name):
@@ -121,11 +222,11 @@ The user's files by this artist (use them to make sure you have the RIGHT artist
 - Track titles: {tracks}
 - Genre tags in the files: {tags}
 - Already known: {'; '.join(known) or 'nothing'}
-
+{snippet_block}
 Find the artist's main genres and country of origin.
 - genres: up to {_MAX_GENRES}, lower-case, most specific first. Prefer these words the library already uses: {vocab}. Use a different word only if none of those fit.
 - country: ISO 3166-1 alpha-2 code of where the artist is from (e.g. GR, US, GB). For a group, where it formed.
-- If the search results don't clearly describe THIS artist, set identified to false. A blank answer is far better than a guess: wrong tags corrupt the user's auto-play.
+- If the artist cannot be identified or does not match the user's tracks/albums, set identified to false. A blank answer is far better than a guess: wrong tags corrupt the user's auto-play.
 
 Reply with ONLY this JSON object, no other text:
 {{"identified": true, "matched_as": "the artist as the sources describe them", "summary": "one short sentence, e.g. Greek rapper from Athens, active since 2015", "genres": [], "country": "", "confidence": "high|medium|low"}}"""
@@ -134,35 +235,44 @@ Reply with ONLY this JSON object, no other text:
 # ── call ──────────────────────────────────────────────────────────────────────
 
 async def _generate(api_key: str, model: str, prompt: str, *, session=None,
-                    timeout: int = 60) -> dict:
-    """One grounded generateContent call → the raw response JSON. Raises
-    ResearchUnavailable for key/quota/model problems, RuntimeError otherwise."""
+                    timeout: int = 60, use_grounding: bool = False) -> dict:
+    """One generateContent call → raw response JSON. When use_grounding is True,
+    attaches the googleSearch tool (paid tier). Otherwise sends a clean text prompt
+    (compatible with the 100% free Gemini API tier). Raises ResearchUnavailable
+    for key/quota/model problems, RuntimeError otherwise."""
     import aiohttp
 
-    payload = {
+    payload: Dict[str, Any] = {
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-        "tools": [{"googleSearch": {}}],
-        # No responseMimeType: JSON mode with a search tool isn't supported on
-        # every model this key may select, and the parser below copes with
-        # fences and stray prose.
         "generationConfig": {"temperature": 0.2},
     }
+    if use_grounding:
+        payload["tools"] = [{"googleSearch": {}}]
+
     own = session is None
     if own:
         session = aiohttp.ClientSession()
     try:
-        async with session.post(
-            _GENERATE_URL.format(model=model), json=payload,
-            headers={"x-goog-api-key": api_key, "Content-Type": "application/json"},
-            timeout=aiohttp.ClientTimeout(total=timeout),
-        ) as resp:
-            if resp.status != 200:
-                text = (await resp.text())[:300]
-                logger.error("AI research HTTP %d for model %s: %s", resp.status, model, text)
-                if resp.status in (400, 401, 403, 404, 429):
-                    raise ResearchUnavailable(_http_reason(resp.status, text, model))
-                raise RuntimeError(f"HTTP {resp.status}: {text}")
-            return await resp.json()
+        for attempt in (1, 2):
+            try:
+                async with session.post(
+                    _GENERATE_URL.format(model=model), json=payload,
+                    headers={"x-goog-api-key": api_key, "Content-Type": "application/json"},
+                    timeout=aiohttp.ClientTimeout(total=timeout, connect=10),
+                ) as resp:
+                    if resp.status != 200:
+                        text = (await resp.text())[:300]
+                        logger.error("AI research HTTP %d for model %s: %s", resp.status, model, text)
+                        if resp.status in (400, 401, 403, 404, 429):
+                            raise ResearchUnavailable(_http_reason(resp.status, text, model))
+                        raise RuntimeError(f"HTTP {resp.status}: {text}")
+                    return await resp.json()
+            except aiohttp.ClientConnectorError as exc:
+                if attempt == 1:
+                    logger.warning("DNS/Connection hiccup during AI generation (%s), retrying in 1.5s...", exc)
+                    await asyncio.sleep(1.5)
+                    continue
+                raise ResearchUnavailable(f"Network error contacting Gemini: {exc}")
     finally:
         if own:
             await session.close()
@@ -177,7 +287,7 @@ def _http_reason(status: int, text: str, model: str) -> str:
     if status == 404 or "not found" in low:
         return f"Model '{model}' isn't available for this key — pick another in Settings → AI Assistant."
     if "google_search" in low or "googlesearch" in low or "tool" in low:
-        return f"Model '{model}' can't use Google Search — pick a Gemini 2.5+ model in Settings."
+        return f"Model '{model}' can't use Google Search — switch Research Paradigm to 'Smart Hybrid' or 'Training Weights' in Settings → AI Assistant."
     return f"Gemini returned HTTP {status}."
 
 
@@ -249,7 +359,7 @@ def _clean_genres(raw: Any, vocabulary: List[str]) -> tuple[List[str], List[str]
 
 
 def validate(answer: Optional[dict], sources: List[Dict[str, str]],
-             vocabulary: List[str]) -> dict:
+             vocabulary: List[str], allow_memory_country: bool = False) -> dict:
     """Reduce a raw model answer to what the workbench may offer."""
     if not answer:
         return {"status": "unparsed", "identified": False, "genres": [],
@@ -261,10 +371,13 @@ def validate(answer: Optional[dict], sources: List[Dict[str, str]],
     conf = str(answer.get("confidence") or "").lower()
     conf = conf if conf in _CONFIDENCE else "low"
     grounded = bool(sources)
-    if not grounded:
-        # Answered from memory. Genres are still offered (low confidence), but
-        # never a country — that is the field the walk fences regions on.
+    if not grounded and not allow_memory_country:
         country, conf = "", "low"
+    elif not grounded and allow_memory_country:
+        # In memory/training weights mode, keep country if identified with medium or high confidence.
+        # If confidence is low, drop country to avoid misclassifying regional Auto-Play.
+        if conf == "low":
+            country = ""
     status = "ok" if (genres or country) else "unknown"
     return {
         "status": status,
@@ -282,12 +395,14 @@ def validate(answer: Optional[dict], sources: List[Dict[str, str]],
 
 async def research_artist(db, artist_name: str, *, api_key: str = "", model: str = "",
                           session=None, force: bool = False,
-                          vocabulary: Optional[List[str]] = None) -> dict:
+                          vocabulary: Optional[List[str]] = None,
+                          mode: str = "") -> dict:
     """Research one artist and cache the answer as a PENDING suggestion.
 
     Returns the payload: {'artist', 'status' ('ok'|'unknown'|'unparsed'),
     'genres', 'new_genres', 'country', 'confidence', 'summary', 'matched_as',
-    'sources' [{title, uri}], 'queries', 'grounded', 'model', 'researched_at'}.
+    'sources' [{title, uri}], 'queries', 'grounded', 'model', 'researched_at',
+    'origin_mode'}.
     A cached answer is returned without a call unless `force`. Raises
     ResearchUnavailable when research can't run at all."""
     if not force:
@@ -305,17 +420,54 @@ async def research_artist(db, artist_name: str, *, api_key: str = "", model: str
     if vocabulary is None:
         vocabulary = [v["name"] for v in await db.get_genre_vocabulary(limit=_VOCAB_IN_PROMPT)]
 
+    effective_mode = (mode or load_research_mode() or "hybrid").lower()
     evidence = await db.get_artist_research_evidence(artist_name)
-    data = await _generate(api_key, model, build_prompt(evidence, vocabulary), session=session)
-    sources, queries = _grounding(data)
-    result = validate(parse_answer(_response_text(data)), sources, vocabulary)
+
+    snippets: List[Dict[str, str]] = []
+    sources: List[Dict[str, str]] = []
+    queries: List[str] = []
+    use_grounding = (effective_mode == "google_grounding")
+    origin_mode = effective_mode
+
+    if effective_mode in ("hybrid", "web_snippets"):
+        snippets = await _fetch_web_snippets(artist_name, evidence=evidence, session=session)
+        if snippets:
+            sources = [{"title": s.get("title", artist_name), "uri": s.get("uri", "")} for s in snippets]
+            queries = [f"{artist_name} music artist"]
+            origin_mode = "web_snippets"
+        elif effective_mode == "hybrid":
+            # Silent graceful fallback to training weights
+            origin_mode = "weights"
+            logger.info("Web snippets unavailable for %s; falling back to training weights.", artist_name)
+    elif effective_mode == "weights":
+        origin_mode = "weights"
+
+    prompt = build_prompt(evidence, vocabulary, snippets=snippets, mode=effective_mode)
+    try:
+        data = await _generate(api_key, model, prompt, session=session, use_grounding=use_grounding)
+    except TypeError:
+        # Backward compatibility if _generate was monkeypatched with (api_key, model, prompt, session=session)
+        data = await _generate(api_key, model, prompt, session=session)
+
+    # If the response contains native grounding metadata (from Google grounding or test fixtures), use it
+    g_sources, g_queries = _grounding(data)
+    if g_sources:
+        sources = g_sources
+        queries = g_queries
+    elif snippets:
+        sources = [{"title": s.get("title", artist_name), "uri": s.get("uri", "")} for s in snippets]
+        queries = [f"{artist_name} music artist"]
+
+    allow_mem_country = (effective_mode in ("hybrid", "weights"))
+    result = validate(parse_answer(_response_text(data)), sources, vocabulary, allow_memory_country=allow_mem_country)
     result.update({
         "artist": artist_name, "sources": sources, "queries": queries,
         "grounded": bool(sources), "model": model, "researched_at": time.time(),
+        "origin_mode": origin_mode,
     })
     logger.warning(
-        "AI research %s → %s genres=%s country=%s conf=%s sources=%d",
-        artist_name, result["status"], result["genres"], result["country"] or "-",
+        "AI research %s (%s) → %s genres=%s country=%s conf=%s sources=%d",
+        artist_name, origin_mode, result["status"], result["genres"], result["country"] or "-",
         result["confidence"], len(sources),
     )
     # Unknown answers are cached too (as dismissed): asking again costs a
@@ -330,6 +482,7 @@ async def research_artists(
     progress: Optional[Callable[[int, int, str, dict], None]] = None,
     cancel_event: Optional[asyncio.Event] = None,
     spacing_s: float = _BATCH_SPACING_S,
+    mode: str = "",
 ) -> dict:
     """Research several artists in turn. Returns a summary:
     {'status': 'ok'|'cancelled'|'error: …', 'total', 'found', 'unknown',
@@ -362,7 +515,7 @@ async def research_artists(
             try:
                 res = await research_artist(db, name, api_key=api_key, model=model,
                                             session=session, force=True,
-                                            vocabulary=vocab)
+                                            vocabulary=vocab, mode=mode)
             except ResearchUnavailable as exc:
                 summary["status"] = f"error: {exc}"
                 break

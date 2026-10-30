@@ -410,26 +410,10 @@ class QueueController:
                     dsp = metadata.get("dsp_features")
                     if dsp and dest_paths and getattr(self.app, "db_manager", None):
                         try:
-                            import base64
-                            from utils.dsp import FEATURES_VERSION
                             from utils.filepath_utils import normalize_nfc
+                            from utils.sync.server import persist_features
                             dest_file = normalize_nfc(dest_paths[0])
-                            timbre_blob = None
-                            if "timbre_b64" in dsp and dsp["timbre_b64"]:
-                                timbre_blob = base64.b64decode(dsp["timbre_b64"])
-                            await self.app.db_manager.update_track_features(
-                                path=dest_file,
-                                bpm=dsp.get("bpm"),
-                                energy=dsp.get("energy"),
-                                brightness=dsp.get("brightness"),
-                                rolloff=dsp.get("rolloff"),
-                                beat_strength=dsp.get("beat_strength"),
-                                spectral_flatness=dsp.get("spectral_flatness"),
-                                spectral_contrast=dsp.get("spectral_contrast"),
-                                key_index=dsp.get("key_index"),
-                                timbre_blob=timbre_blob,
-                                features_version=dsp.get("features_version", FEATURES_VERSION),
-                            )
+                            await persist_features(self.app.db_manager, dest_file, dsp)
                             logger.info(f"Persisted pre-computed DSP features for {dest_file}")
                         except Exception as dsp_err:
                             logger.warning(f"Failed to persist pre-computed DSP features: {dsp_err}")

@@ -111,6 +111,20 @@ class TestBundleRoundTrip(unittest.TestCase):
         self.db = DatabaseManager(self.db_path)
         _run(self.db.initialize())
 
+    def test_overlapping_snapshots_always_carry_the_library(self):
+        """A UI restart starts a second export while the first is writing.
+        With shared temp names one deleted the other's DB copy mid-zip."""
+        from concurrent.futures import ThreadPoolExecutor
+        export = lambda _: state_export.export_state_snapshot(
+            db_path=self.db_path, config_path=self.config_path,
+            out_dir=self.bundle_dir, search_history_path=None)
+        with ThreadPoolExecutor(4) as pool:
+            outs = list(pool.map(export, range(8)))
+        for out in set(outs):
+            with zipfile.ZipFile(out) as zf:
+                self.assertIn("library.db", zf.namelist())
+        self.assertEqual(sorted(os.listdir(self.bundle_dir)), ["mai_an_lab_state_latest.zip"])
+
     def test_snapshot_overwrites_previous(self):
         state_export.export_state_snapshot(
             db_path=self.db_path,

@@ -20,7 +20,14 @@ class TestAssistantAffirmative(unittest.TestCase):
             "yes",
             "yeah",
             "sure",
-            "go ahead"
+            "go ahead",
+            "yesa",
+            "yess",
+            "go ahead and apply it",
+            "apply it",
+            "apply suggestion",
+            "sure thing",
+            "yes please"
         ]
         
         for synonym in synonyms:
@@ -39,7 +46,9 @@ class TestAssistantAffirmative(unittest.TestCase):
             "nah",
             "cancel",
             "forget it",
-            "nevermind"
+            "nevermind",
+            "don't apply",
+            "no thanks"
         ]
         
         for neg in negatives:
@@ -50,6 +59,30 @@ class TestAssistantAffirmative(unittest.TestCase):
                     ai.INTENT_NEGATIVE, 
                     f"Negative '{neg}' should parse as INTENT_NEGATIVE but got {intent.name}"
                 )
+
+    def test_runner_pending_confirmation_relaxed_resolution(self):
+        import asyncio
+        from unittest.mock import MagicMock
+        from utils.assistant_runner import AssistantRunner, PendingConfirmation
+
+        runner = AssistantRunner(db_manager=MagicMock(), audio_engine=MagicMock())
+        called = False
+
+        async def _on_yes():
+            nonlocal called
+            called = True
+            from utils.assistant_runner import AssistantResponse
+            return AssistantResponse(spoken="Applied", displayed="Applied")
+
+        runner._pending = PendingConfirmation(
+            prompt="Shall I apply?",
+            on_yes_msg="Applied",
+            on_yes_callback=_on_yes,
+        )
+
+        resp = asyncio.run(runner.dispatch_text("yesa"))
+        self.assertTrue(called)
+        self.assertEqual(resp.displayed, "Applied")
 
 if __name__ == "__main__":
     unittest.main()

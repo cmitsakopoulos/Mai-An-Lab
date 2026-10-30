@@ -94,12 +94,23 @@ def _build_patterns() -> list[tuple[str, re.Pattern]]:
         # Match these BEFORE play/queue so a bare "yes" or "no" during a
         # pending-confirmation turn doesn't get misread as a search query.
         (INTENT_AFFIRMATIVE,  re.compile(
-            r"^\s*(?:yes|yeah|yep|yup|sure|ok|okay|do\s+it|go\s+ahead|please\s+do|"
-            r"confirm|affirmative|sounds\s+good|alright|proceed|please\s+proceed|do\s+proceed|"
-            r"make\s+it\s+so|absolutely|definitely|indeed|of\s+course)\s*[.!]?\s*$", re.I)),
+            r"^\s*(?:"
+            r"yes|yeah|yep|yup|yea|yesa|yess+|yessir|yupp+|yeep|"
+            r"sure|sure\s+thing|surely|suree|ok|okay|okk|okayy|alright|alrighty|"
+            r"do\s+it|do\s+that|go\s+ahead|go\s+for\s+it|please\s+do|yes\s+please|yeah\s+please|"
+            r"apply(?:\s+it|\s+suggestion|\s+that)?|save(?:\s+it|\s+suggestion|\s+that)?|accept(?:\s+it|\s+suggestion|\s+that)?|"
+            r"confirm|confirmed|affirmative|sounds\s+good|sounds\s+great|"
+            r"proceed|please\s+proceed|do\s+proceed|make\s+it\s+so|"
+            r"absolutely|definitely|indeed|of\s+course|"
+            r"(?:yes|yeah|sure|ok|okay|go\s+ahead)\s+(?:and\s+)?(?:do|apply|tag|save|proceed)(?:\s+(?:it|them|that|suggestion))?"
+            r")\s*[.!]?\s*$", re.I)),
         (INTENT_NEGATIVE,     re.compile(
-            r"^\s*(?:no|nope|nah|not\s+now|later|cancel|stop|forget\s+it|"
-            r"negative|never\s+mind|nevermind)\s*[.!]?\s*$", re.I)),
+            r"^\s*(?:"
+            r"no|nope|nah|noo+|noa|nay|"
+            r"no\s+thanks?|no\s+thank\s+you|not\s+now|later|cancel|cancelled|stop|"
+            r"forget\s+it|negative|never\s+mind|nevermind|don't(?:\s+do\s+it|\s+apply)?|"
+            r"skip(?:\s+it)?|dismiss(?:\s+it)?"
+            r")\s*[.!]?\s*$", re.I)),
 
         # ── Choice selection (multi-choice pending dialogue) ───────────────────
         (INTENT_CHOICE_SELECT, re.compile(

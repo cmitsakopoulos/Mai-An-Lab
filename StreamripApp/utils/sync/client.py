@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import logging
 import os
 import time
@@ -223,6 +224,22 @@ class CompanionClient:
                 data.add_field("file", f, filename=os.path.basename(bundle_path))
                 async with session.post(f"{self.base_url}/api/v1/bundle/upload", data=data) as resp:
                     self._check(resp, "Upload")
+                    return await resp.json()
+
+    async def push_track(self, path: str, meta: dict) -> dict:
+        """Send one library track to the Mac ("Send to Mac"). `meta` carries
+        artist/album (the Mac files it under them), optional `dsp_features`,
+        and `remaining`: tracks still to come in this batch."""
+        if not os.path.isfile(path):
+            raise FileNotFoundError(path)
+        async with aiohttp.ClientSession(timeout=_TRANSFER_TIMEOUT, headers=self._headers()) as session:
+            data = aiohttp.FormData()
+            data.add_field("meta", json.dumps(meta), content_type="application/json")
+            with open(path, "rb") as fh:
+                data.add_field("file", fh, filename=os.path.basename(path),
+                               content_type="application/octet-stream")
+                async with session.post(f"{self.base_url}/api/v1/tracks/receive", data=data) as resp:
+                    self._check(resp, "Send to Mac")
                     return await resp.json()
 
     async def get_pending_transfers(self) -> list[dict]:

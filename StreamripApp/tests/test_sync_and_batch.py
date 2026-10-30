@@ -6,6 +6,7 @@ import shutil
 import socket
 import subprocess
 import tempfile
+import time
 import unicodedata
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -268,70 +269,225 @@ class TestSyncAndBatch(unittest.IsolatedAsyncioTestCase):
         await manager.stop()
         self.assertFalse(manager.enabled)
 
-    async def test_send_to_phone_dialog_and_transfer_action(self):
-        from unittest.mock import MagicMock, AsyncMock
-        import warnings
-        import flet as ft
-        import flet.utils.validation as v
-        from ui.views.library import LibraryView
-
-        # Setup mock app and page
-        mock_app = MagicMock()
-        mock_page = MagicMock()
-        mock_page.width = 800
-        mock_app.page = mock_page
-        mock_server = MagicMock()
-        mock_server.is_running = True
-        mock_server.bound_port = 8945
-        mock_server.pin = "1234"
-        mock_server.queue_tracks_for_transfer = AsyncMock(return_value=[{"id": "t1"}])
-        mock_app._companion_server = mock_server
+    async def test_send_on_mac_applies_saved_defaults_without_a_dialog(self):
+        from utils.sync import send as send_mod
         import utils.sync.server as srv_mod
-        patch.object(srv_mod, "_SERVER", mock_server).start()
-        self.addCleanup(patch.stopall)
+        from utils.sync.server import CLIENT_NAME_PREF
+        app = FakeApp({
+            CLIENT_NAME_PREF: "Pixel 9",
+            send_mod.SEND_QUALITY_PREF: "aac_256k",
+            send_mod.SEND_FEATURES_PREF: False,
+        })
+        server = MagicMock(is_running=True, last_client=("Pixel 9", "", time.monotonic()))
+        server.queue_tracks_for_transfer = AsyncMock(return_value=[{"id": "t1"}])
+        with patch.object(srv_mod, "_SERVER", server), patch.object(send_mod, "is_android", lambda: False):
+            n = await send_mod.send_tracks(app, [{"path": "/x/a.flac"}])
+        self.assertEqual(n, 1)
+        kw = server.queue_tracks_for_transfer.call_args.kwargs
+        self.assertEqual(kw["quality"], "aac_256k")
+        self.assertFalse(kw["precompute_dsp"])
+        app.page.show_dialog.assert_not_called()
+        self.assertTrue(any("Pixel 9" in s for s in app.snacks))
 
-        # LibraryView dummy instance
-        view = LibraryView.__new__(LibraryView)
-        view.app = mock_app
-        view.page = mock_page
-        view._selection_mode = True
-        view._exit_selection_mode = MagicMock()
+    async def test_companion_target_follows_platform_and_pairing(self):
+        from utils.sync import send as send_mod
+        import utils.sync.server as srv_mod
+        from utils.sync.manager import CompanionSyncManager
 
-        test_tracks = [{"id": 1, "path": "/test/track.flac", "title": "Test Track"}]
+        # Mac: always offered; generic until a phone pairs, then named after
+        # it; reset makes it generic again.
+        unpaired = send_mod.CompanionTarget("phone", "Phone", False)
+        app = FakeApp()
+        with patch.object(send_mod, "is_android", lambda: False), patch.object(srv_mod, "_SERVER", None):
+            self.assertEqual(send_mod.companion_target(app), unpaired)
+            server = srv_mod.get_companion_server(app)
+            server.preferred_port = _free_port()
+            port = await server.start()
+            try:
+                await CompanionClient("127.0.0.1", port).pair(server.pin, device_name="Pixel 9")
+                target = send_mod.companion_target(app)
+                self.assertEqual((target.kind, target.label), ("phone", "Send to Pixel 9"))
+                server.reset_pairing()
+                self.assertEqual(send_mod.companion_target(app), unpaired)
+            finally:
+                await server.stop()
 
-        with warnings.catch_warnings(record=True) as recorded_warnings:
-            warnings.simplefilter("always")
-            view._open_send_to_phone_dialog(test_tracks)
+        # Phone: offered linked or not, named after the paired Mac.
+        app = FakeApp({"companion_paired_name": "Studio Mac", "companion_paired_token": "tok"})
+        app.companion_manager = CompanionSyncManager(app)
+        with patch.object(send_mod, "is_android", lambda: True):
+            target = send_mod.companion_target(app)
+            self.assertEqual((target.kind, target.label, target.paired),
+                             ("mac", "Send to Studio Mac", True))
+            app._prefs["companion_paired_token"] = ""
+            self.assertFalse(send_mod.companion_target(app).paired)
 
-        # Ensure no deprecation warnings were raised
-        dep_warnings = [w for w in recorded_warnings if issubclass(w.category, DeprecationWarning)]
-        self.assertEqual(len(dep_warnings), 0, f"Encountered unexpected deprecation warnings: {dep_warnings}")
+    async def test_send_explains_why_it_cannot_reach_the_other_device(self):
+        from utils.sync import send as send_mod
+        import utils.sync.server as srv_mod
+        from utils.sync.manager import CompanionSyncManager
+        tracks = [{"path": "/x/a.flac"}]
 
-        # Ensure dialog was shown
-        mock_page.show_dialog.assert_called_once()
-        dlg = mock_page.show_dialog.call_args[0][0]
-        self.assertIsInstance(dlg, ft.AlertDialog)
+        # Phone, never paired: told to pair, nothing attempted.
+        app = FakeApp()
+        app.companion_manager = manager = CompanionSyncManager(app)
+        manager._probe_once = AsyncMock()
+        with patch.object(send_mod, "is_android", lambda: True):
+            self.assertEqual(await send_mod.send_tracks(app, tracks), 0)
+            manager._probe_once.assert_not_called()
+            self.assertIn("Not paired", app.snacks[-1])
 
-        # Find the "Send to Phone" action button
-        send_btn = next((b for b in dlg.actions if getattr(b, "content", "") == "Send to Phone" or getattr(b, "text", "") == "Send to Phone"), None)
-        self.assertIsNotNone(send_btn)
+            # Paired but the Mac doesn't answer: one reconnect try, then advice.
+            app._prefs.update({"companion_paired_token": "tok", "companion_paired_name": "Studio Mac"})
+            manager.start = AsyncMock()
+            self.assertEqual(await send_mod.send_tracks(app, tracks), 0)
+            manager._probe_once.assert_awaited_once()
+            self.assertIn("Can't reach Studio Mac", app.snacks[-1])
+            self.assertIn("Companion Server is on", app.snacks[-1])
 
-        # Trigger on_click which calls page.run_task(_start_transfer)
-        # Capture the coroutine task created by run_task
-        task = None
-        def _mock_run_task(handler, *args, **kwargs):
-            nonlocal task
-            task = asyncio.create_task(handler(*args, **kwargs))
-            return task
-        mock_page.run_task.side_effect = _mock_run_task
+            # The reconnect works: the tracks go.
+            async def _connects():
+                manager.is_connected = True
+                manager.client = MagicMock()
+            manager._probe_once = AsyncMock(side_effect=_connects)
+            with patch.object(manager, "_send_worker", AsyncMock()):
+                self.assertEqual(await send_mod.send_tracks(app, tracks), 1)
 
-        # Calling on_click(None) must not raise TypeError: missing 1 required positional argument
-        send_btn.on_click(None)
-        self.assertIsNotNone(task)
-        await task
+        # Mac, phone offline: the batch is queued and the toast says it's waiting.
+        app = FakeApp({srv_mod.CLIENT_NAME_PREF: "Pixel 9"})
+        server = MagicMock(is_running=True, last_client=None)
+        server.queue_tracks_for_transfer = AsyncMock(return_value=[{"id": "t1"}])
+        with patch.object(srv_mod, "_SERVER", server), patch.object(send_mod, "is_android", lambda: False):
+            self.assertEqual(await send_mod.send_tracks(app, tracks), 1)
+        self.assertIn("Pixel 9 isn't connected", app.snacks[-1])
 
-        mock_server.queue_tracks_for_transfer.assert_awaited_once()
-        mock_app.show_snackbar.assert_called()
+    async def test_push_track_files_it_on_the_mac_with_features(self):
+        from utils.sync.server import stored_features
+        recv_dir = os.path.join(self.test_dir, "mac_music")
+        os.makedirs(recv_dir)
+        server = CompanionServer(port=_free_port(), trust_loopback=False, db_manager=self.db_manager)
+        server.receive_dir = lambda: recv_dir
+        batches = []
+        server.on_tracks_received = lambda paths, sender: batches.append((paths, sender))
+        port = await server.start()
+        try:
+            client = CompanionClient("127.0.0.1", port, device_name="Pixel 9")
+            await client.pair(server.pin)
+            src_a = os.path.join(self.test_dir, "a.wav")
+            src_b = os.path.join(self.test_dir, "b.wav")
+            _make_tone(src_a, 2)
+            _make_tone(src_b, 2)
+            feats = {"bpm": 120.0, "energy": 0.5, "brightness": 0.4, "rolloff": 0.3,
+                     "beat_strength": 0.2, "spectral_flatness": 0.1, "spectral_contrast": 0.6,
+                     "key_index": 3, "timbre_b64": "", "features_version": FEATURES_VERSION}
+            r1 = await client.push_track(src_a, {"artist": "Χάρις", "album": "Α", "dsp_features": feats, "remaining": 1})
+            self.assertEqual(batches, [])  # batch not finished yet
+            r2 = await client.push_track(src_b, {"artist": "Χάρις", "album": "Α", "remaining": 0})
+            await asyncio.sleep(0.05)
+            self.assertEqual(r1["path"], os.path.join(recv_dir, "Χάρις", "Α", "a.wav"))
+            self.assertTrue(os.path.isfile(r2["path"]))
+            self.assertEqual(batches, [([r1["path"], r2["path"]], "Pixel 9")])
+            self.assertEqual((await stored_features(self.db_manager, r1["path"]))["bpm"], 120.0)
+
+            again = await client.push_track(src_a, {"artist": "Χάρις", "album": "Α"})
+            self.assertTrue(again["duplicate"])
+            self.assertEqual(again["path"], r1["path"])
+
+            junk = os.path.join(self.test_dir, "evil.sh")
+            with open(junk, "w") as fh:
+                fh.write("echo hi")
+            with self.assertRaises(RuntimeError):
+                await client.push_track(junk, {})
+            with self.assertRaises(PermissionError):
+                await CompanionClient("127.0.0.1", port).push_track(src_a, {})
+        finally:
+            await server.stop()
+
+    async def test_manager_sends_tracks_to_mac_in_one_batch(self):
+        from utils.sync.manager import CompanionSyncManager
+        recv_dir = os.path.join(self.test_dir, "mac_music")
+        os.makedirs(recv_dir)
+        server = CompanionServer(port=_free_port(), trust_loopback=False)
+        server.receive_dir = lambda: recv_dir
+        batches = []
+        server.on_tracks_received = lambda paths, sender: batches.append(paths)
+        port = await server.start()
+        app = FakeApp({"companion_paired_name": "Studio Mac"})
+        app.db_manager = self.db_manager
+        manager = CompanionSyncManager(app)
+        try:
+            client = CompanionClient("127.0.0.1", port)
+            await client.pair(server.pin)
+            manager.client, manager.is_connected = client, True
+            srcs = []
+            for name in ("a.wav", "b.wav"):
+                srcs.append(os.path.join(self.test_dir, name))
+                _make_tone(srcs[-1], 2)
+            self.assertEqual(manager.send_tracks([{"path": p} for p in srcs]), 2)
+            self.assertEqual(manager.send_tracks([{"path": srcs[0]}]), 0)  # already queued
+            await manager._send_task
+            await asyncio.sleep(0.05)
+            self.assertEqual(len(batches), 1)
+            self.assertEqual(len(batches[0]), 2)
+            self.assertIn("Sent 2 tracks to Studio Mac", app.snacks[-1])
+        finally:
+            await server.stop()
+
+    async def test_transfers_from_mac_download_without_asking(self):
+        from utils.sync import manager as mgr_mod
+        server = CompanionServer(port=_free_port(), trust_loopback=False)
+        port = await server.start()
+        app = FakeApp()
+        app.queue = MagicMock()
+        manager = mgr_mod.CompanionSyncManager(app)
+        try:
+            src = os.path.join(self.test_dir, "a.wav")
+            _make_tone(src, 2)
+            await server.queue_tracks_for_transfer([{"path": src}], quality="original", precompute_dsp=False)
+            client = CompanionClient("127.0.0.1", port)
+            await client.pair(server.pin)
+            manager.client, manager.is_connected = client, True
+
+            with patch.object(manager, "prompt_transfer_dialog", AsyncMock()) as dialog:
+                self.assertEqual(await manager.check_pending_transfers(prompt_user=True), [])
+                app.queue.enqueue_many.assert_called_once()
+                dialog.assert_not_awaited()
+                tid = app.queue.enqueue_many.call_args[0][0][0]["companion_transfer_id"]
+
+                # Failing twice hands it back to the dialog instead of looping.
+                manager.on_transfer_finished(tid, ok=False)
+                await manager.check_pending_transfers(prompt_user=True)
+                manager.on_transfer_finished(tid, ok=False)
+                await manager.check_pending_transfers(prompt_user=True)
+                self.assertEqual(app.queue.enqueue_many.call_count, 2)
+                dialog.assert_awaited_once()
+
+            manager.set_ask_before_download(True)
+            self.assertTrue(manager._auto_accept([{"id": "new"}]) == 0)
+        finally:
+            await server.stop()
+
+    async def test_mac_progress_and_cancel_for_preparing_batches(self):
+        server = CompanionServer(port=_free_port(), trust_loopback=False)
+        seen = []
+        server.subscribe(lambda: seen.append(server.preparing))
+        src = os.path.join(self.test_dir, "a.wav")
+        _make_tone(src, 2)
+        gate = asyncio.Event()
+
+        async def slow_prepare(*_a):
+            await gate.wait()
+            return None
+
+        with patch.object(server, "_prepare_transfer", slow_prepare):
+            task = asyncio.create_task(server.queue_tracks_for_transfer([{"path": src}], quality="original"))
+            await asyncio.sleep(0.01)
+            self.assertEqual(server.preparing, (0, 1))
+            server.cancel_preparing()
+            gate.set()
+            self.assertEqual(await task, [])
+        self.assertIsNone(server.preparing)
+        self.assertIn((0, 1), seen)
 
     # ── Regression tests for the on-device sync bugs ────────────────────────
 
@@ -841,12 +997,21 @@ class TestSyncAndBatch(unittest.IsolatedAsyncioTestCase):
         view = LibraryView.__new__(LibraryView)
         view._selected_track_paths = {"/a", "/b"}
         view._selection_count_text = ft.Text("0 selected")
-        # Flet 1.0 Button has no `.text`: the label is `content`.
-        view._selection_send_btn = ft.Button("Send (0)", disabled=True)
+        view._selection_send_btn = ft.IconButton(ft.Icons.PHONE_IPHONE_ROUNDED)
+        view._selection_actions = [ft.IconButton(ft.Icons.PLAY_ARROW_ROUNDED), view._selection_send_btn]
         view._selection_bar = MagicMock()
-        view._update_selection_bar()
-        self.assertEqual(view._selection_send_btn.content, "Send (2)")
-        self.assertFalse(view._selection_send_btn.disabled)
+        from utils.sync.server import CLIENT_NAME_PREF
+        view.app = FakeApp({CLIENT_NAME_PREF: "Pixel 9"})
+        with patch("utils.sync.send.is_android", lambda: False):
+            view._update_selection_bar()
+        self.assertEqual(view._selection_count_text.value, "2 selected")
+        self.assertTrue(all(not b.disabled for b in view._selection_actions))
+        self.assertEqual(view._selection_send_btn.tooltip, "Send to Pixel 9")
+
+        view.app = FakeApp()  # no paired phone: still offered, tapping explains
+        with patch("utils.sync.send.is_android", lambda: False):
+            view._update_selection_bar()
+        self.assertEqual(view._selection_send_btn.tooltip, "Send to Phone")
 
         # tinytag stores kbit/s; the badge used to divide by 1000 again.
         card = view._build_context_menu_track_card(

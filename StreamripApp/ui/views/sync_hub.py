@@ -26,6 +26,9 @@ from utils.dsp import FEATURES_VERSION
 from utils.sync.discovery import local_interfaces
 from utils.sync.server import CompanionServer, DEFAULT_PORT, get_companion_server
 from utils.sync.client import CompanionClient
+from utils.sync.send import (
+    SEND_FEATURES_PREF, SEND_QUALITY_OPTIONS, SEND_QUALITY_PREF, companion_target, send_defaults,
+)
 
 logger = logging.getLogger("sync.hub")
 
@@ -257,9 +260,58 @@ class SyncHubPane(ft.Container):
             border=ft.Border.all(1, BORDER_SUBTLE),
         )
 
+        # "Send to <phone>" applies these without asking each time.
+        quality, features = send_defaults(self.app)
+        self._send_quality_dd = ft.Dropdown(
+            label="Audio quality",
+            value=quality,
+            options=[ft.DropdownOption(key=k, text=t) for k, t in SEND_QUALITY_OPTIONS],
+            on_select=lambda e: self.app._save_pref(SEND_QUALITY_PREF, e.control.value),
+            dense=True,
+            border=ft.OutlineInputBorder(side=ft.BorderSide(1, BORDER), border_radius=8),
+        )
+        self._send_features_switch = ft.Switch(
+            value=features,
+            active_color=CYAN,
+            on_change=lambda e: self.app._save_pref(SEND_FEATURES_PREF, bool(e.control.value)),
+        )
+        self._send_target_text = ft.Text("", color=DIM, size=12)
+        self._send_progress_bar = ft.ProgressBar(value=0, color=ACCENT_GREEN, bgcolor=SURFACE, height=4, visible=False)
+        self._send_progress_row = ft.Row([
+            ft.Container(content=ft.Text("", color=DIM, size=12), expand=True),
+            ft.TextButton("Cancel", icon=ft.Icons.CANCEL_ROUNDED,
+                          on_click=lambda _: self._server and self._server.cancel_preparing()),
+        ], visible=False, vertical_alignment=ft.CrossAxisAlignment.CENTER)
+
+        send_card = ft.Container(
+            content=ft.Column([
+                ft.Row([
+                    ft.Icon(ft.Icons.PHONE_IPHONE_ROUNDED, color=ACCENT_GREEN, size=22),
+                    ft.Text("Sending to Phone", weight=ft.FontWeight.BOLD, color=TEXT, size=15, expand=True),
+                ], spacing=8),
+                self._send_target_text,
+                self._send_progress_bar,
+                self._send_progress_row,
+                self._send_quality_dd,
+                ft.Row([
+                    ft.Column([
+                        ft.Text("Include acoustic features", color=TEXT, size=13, weight=ft.FontWeight.W_600),
+                        ft.Text("Analysed here so auto-play works on the phone straight away",
+                                color=DIM, size=11),
+                    ], spacing=1, expand=True),
+                    self._send_features_switch,
+                ], vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            ], spacing=10),
+            padding=16,
+            bgcolor=SURFACE2,
+            border_radius=RADIUS_CARD,
+            border=ft.Border.all(1, BORDER_SUBTLE),
+        )
+
         self._refresh_macos_state()
         return ft.ListView([
             server_card,
+            send_card,
             tools_card,
         ], spacing=16, expand=True)
 
@@ -322,6 +374,19 @@ class SyncHubPane(ft.Container):
             f"{n} track{'s' if n != 1 else ''} waiting for the phone to download."
             + ("" if running else " Offered again when the server is back on."))
         self._mac_pending_row.visible = n > 0
+
+        target = companion_target(self.app)
+        self._send_target_text.value = (
+            f"Long-press a track or album and choose Send to {target.name}. These settings apply every time."
+            if target.paired else
+            "Pair a phone first: turn the server on and enter the PIN on the phone. "
+            "Then long-press a track or album and choose Send to Phone.")
+        prep = srv.preparing
+        self._send_progress_bar.visible = self._send_progress_row.visible = prep is not None
+        if prep:
+            done, total = prep
+            self._send_progress_bar.value = done / total if total else None
+            self._send_progress_row.controls[0].content.value = f"Preparing {done} of {total} for the phone…"
 
     def _on_clear_pending_click(self, _e):
         if self._server:
@@ -470,8 +535,21 @@ class SyncHubPane(ft.Container):
                     self._download_transfers_btn,
                     self._check_transfers_btn,
                 ], wrap=True, spacing=8),
+                ft.Row([
+                    ft.Column([
+                        ft.Text("Ask before downloading", color=TEXT, size=13, weight=ft.FontWeight.W_600),
+                        ft.Text("Off: tracks sent from the Mac download on their own",
+                                color=DIM, size=11),
+                    ], spacing=1, expand=True),
+                    ft.Switch(
+                        value=self._manager.ask_before_download if self._manager else False,
+                        active_color=CYAN,
+                        on_change=lambda e: self._manager and self._manager.set_ask_before_download(
+                            bool(e.control.value)),
+                    ),
+                ], vertical_alignment=ft.CrossAxisAlignment.CENTER),
                 ft.Text(
-                    "Download queued audio files and acoustic features directly from your Mac.",
+                    "To send the other way, long-press a track or album and choose Send to your Mac.",
                     color=DIM, size=12,
                 ),
             ], spacing=10),

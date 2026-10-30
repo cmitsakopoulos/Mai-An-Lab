@@ -354,6 +354,25 @@ class TestQueueModes(unittest.TestCase):
         self.app._on_lifecycle(ev(AppLifecycleState.RESUME))
         self.assertFalse(self.app.is_background)
 
+    def test_lifecycle_safe_before_autoplay_initialized(self):
+        """Lifecycle transitions before _heavy_init completes (self.autoplay
+        is None or unset) must not crash with AttributeError."""
+        from flet.controls.types import AppLifecycleState
+        self.app._BACKGROUND_STATES = main.StreamripFletApp._BACKGROUND_STATES
+        self.app._on_lifecycle = main.StreamripFletApp._on_lifecycle.__get__(self.app, main.StreamripFletApp)
+        self.app.is_background = False
+        self.app.autoplay = None
+        ev = lambda s: MagicMock(state=s, data=None)
+
+        # Transitioning to background when autoplay is None must not crash
+        self.app._on_lifecycle(ev(AppLifecycleState.HIDE))
+        self.assertTrue(self.app.is_background)
+        self.app._on_lifecycle(ev(AppLifecycleState.PAUSE))
+        self.assertTrue(self.app.is_background)
+        # Resuming before UI / autoplay are ready must not crash
+        self.app._on_lifecycle(ev(AppLifecycleState.RESUME))
+        self.assertFalse(self.app.is_background)
+
     def test_play_similar_toggle_and_session_recovery(self):
         # 1. Start sequential play in regular mode
         run_async(self.app._play_track_core("/music/song1.mp3"))

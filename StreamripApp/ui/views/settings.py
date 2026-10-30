@@ -423,6 +423,20 @@ class SettingsView:
             text_style=ft.TextStyle(color=TEXT, size=13),
             label_style=ft.TextStyle(color=CYAN, size=11),
         )
+        self._assistant_research_mode_dropdown = ft.Dropdown(
+            label="Artist Research Paradigm",
+            options=[
+                ft.dropdown.Option(key="hybrid", text="Smart Hybrid (Web Snippets + Training Weights) [Recommended]"),
+                ft.dropdown.Option(key="weights", text="Training Weights Only (Memory, Reddit, Forums)"),
+                ft.dropdown.Option(key="web_snippets", text="Web Search Snippets (DuckDuckGo Lite)"),
+                ft.dropdown.Option(key="google_grounding", text="Google Search Grounding (Requires Paid Project)"),
+            ],
+            value="hybrid",
+            bgcolor=SURFACE2,
+            border=_input_border(BORDER, CYAN, 10),
+            text_style=ft.TextStyle(color=TEXT, size=13),
+            label_style=ft.TextStyle(color=CYAN, size=11),
+        )
         self._assistant_ollama_url_field = ft.TextField(
             label="Local Endpoint URL",
             hint_text="http://localhost:11434/v1",
@@ -777,6 +791,7 @@ class SettingsView:
                 "provider": getattr(self, "_assistant_provider_dropdown", None) and self._assistant_provider_dropdown.value,
                 "api_key": getattr(self, "_assistant_api_key_field", None) and (self._assistant_api_key_field.value or "").strip(),
                 "model": getattr(self, "_assistant_model_dropdown", None) and self._assistant_model_dropdown.value,
+                "research_mode": getattr(self, "_assistant_research_mode_dropdown", None) and self._assistant_research_mode_dropdown.value,
                 "ollama_url": getattr(self, "_assistant_ollama_url_field", None) and (self._assistant_ollama_url_field.value or "").strip(),
                 "ollama_model": getattr(self, "_assistant_ollama_model_field", None) and (self._assistant_ollama_model_field.value or "").strip(),
                 "personality": getattr(self, "_assistant_personality_field", None) and (self._assistant_personality_field.value or "").strip(),
@@ -2486,6 +2501,7 @@ class SettingsView:
             self._assistant_provider_dropdown.value = str(assistant_cfg.get("llm_provider", "gemini"))
             self._assistant_api_key_field.value = str(assistant_cfg.get("gemini_api_key", ""))
             self._assistant_model_dropdown.value = str(assistant_cfg.get("gemini_model") or DEFAULT_GEMINI_MODEL)
+            self._assistant_research_mode_dropdown.value = str(assistant_cfg.get("research_mode", "hybrid"))
             self._ensure_model_option(self._assistant_model_dropdown.value)
             if (self._assistant_api_key_field.value or "").strip() and not self._gemini_models_loaded:
                 self.app.page.run_task(self._refresh_gemini_models, False)
@@ -3477,6 +3493,7 @@ class SettingsView:
                 "llm_provider": self._assistant_provider_dropdown.value or "gemini",
                 "gemini_api_key": (self._assistant_api_key_field.value or "").strip(),
                 "gemini_model": self._assistant_model_dropdown.value or DEFAULT_GEMINI_MODEL,
+                "research_mode": self._assistant_research_mode_dropdown.value or "hybrid",
                 "ollama_endpoint": (self._assistant_ollama_url_field.value or "").strip() or "http://localhost:11434/v1",
                 "ollama_model": (self._assistant_ollama_model_field.value or "").strip() or "llama3.2",
                 "personality_prompt": (self._assistant_personality_field.value or "").strip(),
@@ -3575,6 +3592,7 @@ class SettingsView:
         self._assistant_provider_dropdown.on_select = lambda e: (self._update_assistant_provider_visibility(e), save_cb(e))
         self._assistant_api_key_field.on_change = save_cb
         self._assistant_model_dropdown.on_select = save_cb
+        self._assistant_research_mode_dropdown.on_select = save_cb
         self._assistant_ollama_url_field.on_change = save_cb
         self._assistant_ollama_model_field.on_change = save_cb
         self._assistant_personality_field.on_change = save_cb
@@ -3591,6 +3609,9 @@ class SettingsView:
                     on_click=lambda _e: self.app.page.run_task(self._refresh_gemini_models),
                 ),
             ], spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            ft.Container(height=5),
+            self._assistant_research_mode_dropdown,
+            ft.Text("• Smart Hybrid & Training Weights work 100% free with no credit card required.", color=DIM, size=11),
         ], spacing=10)
 
         self._ollama_group_container = ft.Column([

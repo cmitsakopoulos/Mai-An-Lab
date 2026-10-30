@@ -711,7 +711,26 @@ class AssistantRunner:
         # Resolve pending confirmation first.
         pending = self._pending
         if pending is not None:
-            if intent.name == ai.INTENT_AFFIRMATIVE:
+            is_yes = (intent.name == ai.INTENT_AFFIRMATIVE)
+            is_no = (intent.name == ai.INTENT_NEGATIVE)
+
+            # Relaxed/fuzzy fallback for confirmation turns so minor typos or
+            # natural phrasings ("yesa", "go ahead and apply it", "yes please apply")
+            # are recognized rather than silently discarding the callback.
+            if not is_yes and not is_no:
+                raw_s = (intent.raw or intent.query or "").strip().lower()
+                tokens = re.findall(r"\b\w+\b", raw_s)
+                if tokens:
+                    first = tokens[0]
+                    if first in ("yes", "yeah", "yep", "yup", "yea", "yesa", "yess", "yessir",
+                                 "sure", "ok", "okay", "alright", "definitely", "absolutely"):
+                        is_yes = True
+                    elif first in ("no", "nope", "nah", "cancel", "dont", "nevermind", "stop"):
+                        is_no = True
+                    elif any(w in ("apply", "accept", "save", "confirm") for w in tokens) and not any(w in ("dont", "not", "no", "never") for w in tokens):
+                        is_yes = True
+
+            if is_yes:
                 self._pending = None
                 if pending.on_yes_callback is not None:
                     try:
@@ -728,7 +747,7 @@ class AssistantRunner:
                     displayed=pending.on_yes_msg,
                     action=pending.on_yes_action,
                 )
-            if intent.name == ai.INTENT_NEGATIVE:
+            if is_no:
                 self._pending = None
                 if pending.on_no_callback is not None:
                     try:

@@ -1347,10 +1347,20 @@ class MetadataWorkbenchPane(ft.Column):
                     sug.append(c)
                 if sug:
                     ctrls.append(ft.Row(sug, wrap=True, spacing=6, run_spacing=6))
+                origin_mode = p.get("origin_mode")
                 if not p.get("grounded"):
+                    if p.get("country"):
+                        ctrls.append(ft.Text(
+                            "Derived from Gemini's training memory (forums, Reddit & cultural discography).",
+                            size=10.5, color=CYAN))
+                    else:
+                        ctrls.append(ft.Text(
+                            "Derived from the model's training memory; confidence was low, so no country is offered.",
+                            size=10.5, color=ACCENT_AMBER))
+                elif origin_mode == "web_snippets":
                     ctrls.append(ft.Text(
-                        "No web sources came back, so this is from the model's memory "
-                        "and no country is offered.", size=10.5, color=ACCENT_AMBER))
+                        "Grounded via live web search snippets (DuckDuckGo / Open Web).",
+                        size=10.5, color=CYAN))
                 links = [self._link(src.get("title") or "source", src["uri"])
                          for src in (p.get("sources") or [])[:5] if src.get("uri")]
                 if links:
