@@ -5,6 +5,7 @@ import datetime as dt
 import os
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -185,16 +186,12 @@ class TestLanding(unittest.TestCase):
             return [{"title": "T", "artist": "A", "count": 3, "path": "/x",
                      "name": "N", "plays": 2, "tracks_played": 1, "albums_played": 1}]
 
-        async def zero(*a, **k):
-            return 0
-
-        async def empty(*a, **k):
-            return []
+        async def counts(*a, **k):
+            return {"tracks": 0, "albums": 0, "artists": 0, "playlists": 0}
         db.get_most_played = rows
         db.get_most_played_artists = rows
         db.get_most_played_genres = rows
-        db.get_total_tracks = zero
-        db.get_all_artists = db.get_all_albums = db.get_all_playlists = empty
+        db.get_library_counts = counts
         v._landing_container = ft.ListView()
         release = [{"title": "Dreamfear", "artist": "Burial", "date": _days_ago(3),
                     "type": "ep", "cover": ""}]
@@ -204,7 +201,7 @@ class TestLanding(unittest.TestCase):
         with patch("utils.new_releases.get_new_releases", releases), \
              patch("utils.search_history.load_searches", lambda: ["burial", "mad clip"]):
             asyncio.run(v._refresh_landing_page({k: True for k in (
-                "recent_searches", "new_releases", "most_listened", "top_artists",
+                "new_releases", "most_listened", "top_artists",
                 "top_genres", "stats")}))
 
         def title(card):
@@ -212,7 +209,7 @@ class TestLanding(unittest.TestCase):
             first = col.controls[0]
             return first.value if isinstance(first, ft.Text) else first.controls[1].value
         self.assertEqual([title(c) for c in v._landing_container.controls], [
-            "Recent searches", "New From Your Artists", "Most Listened Tracks",
+            "New From Your Artists", "Most Listened Tracks",
             "Most Listened Artists", "Most Listened Genres", "Library at a Glance",
         ])
 
@@ -222,6 +219,312 @@ class TestLanding(unittest.TestCase):
         self.assertEqual(_release_date_label(_days_ago(1)), "Yesterday")
         self.assertEqual(_release_date_label(_days_ago(3)), "3 days ago")
         self.assertEqual(_release_date_label("2019-03-07"), "7 Mar 2019")
+
+    def test_new_releases_shelf_has_navigation_controls_and_safe_height(self):
+        from ui.views.search import SearchView
+        v = SearchView.__new__(SearchView)
+        v.app = MagicMock()
+        v.page = MagicMock()
+        v.app.new_releases_refreshing = False
+
+        fake_releases = [
+            {"title": f"Album {i}", "artist": "Artist", "date": _days_ago(i),
+             "type": "album", "cover": ""}
+            for i in range(5)
+        ]
+        async def _mock_releases(*a, **k):
+            return fake_releases
+
+        with patch("utils.new_releases.get_new_releases", _mock_releases):
+            card = asyncio.run(v._build_new_releases_card())
+
+        self.assertIsNotNone(card)
+        col = card.content.controls[2]  # content column under the divider
+        shelf_lv = None
+        header_row = None
+        for ctrl in col.controls:
+            if isinstance(ctrl, ft.ListView):
+                shelf_lv = ctrl
+            elif isinstance(ctrl, ft.Row) and len(ctrl.controls) >= 3:
+                header_row = ctrl
+
+        self.assertIsNotNone(shelf_lv)
+        self.assertEqual(shelf_lv.height, 196)
+        self.assertFalse(shelf_lv.build_controls_on_demand)
+
+        # Header has nav chevrons
+        self.assertIsNotNone(header_row)
+        nav_box = header_row.controls[2]
+        self.assertTrue(nav_box.visible)
+        prev_btn, next_btn = nav_box.controls[0], nav_box.controls[1]
+        self.assertEqual(prev_btn.icon, ft.Icons.CHEVRON_LEFT_ROUNDED)
+        self.assertEqual(next_btn.icon, ft.Icons.CHEVRON_RIGHT_ROUNDED)
+
+        # Scrolling triggers run_task safely
+        prev_btn.on_click(None)
+        self.assertEqual(v.app.page.run_task.call_count, 1)
+
+    def test_library_stats_grid_and_deep_links(self):
+        from ui.views.search import SearchView
+        v = SearchView.__new__(SearchView)
+        v.app = MagicMock()
+        db = v.app.db_manager
+
+        async def _counts():
+            return {"tracks": 14820, "albums": 85, "artists": 420, "playlists": 12}
+
+        db.get_library_counts = _counts
+
+        v._open_in_library = MagicMock()
+
+        stats_content = asyncio.run(v._get_library_stats_content())
+        self.assertIsInstance(stats_content, ft.Column)
+        self.assertEqual(len(stats_content.controls), 2)  # 2 rows
+
+        row1 = stats_content.controls[0]
+        row2 = stats_content.controls[1]
+        self.assertEqual(len(row1.controls), 2)
+        self.assertEqual(len(row2.controls), 2)
+
+        # Verify formatted numbers
+        tracks_card = row1.controls[0]
+        # Text control inside card's column
+        val_text = tracks_card.content.controls[2]
+        self.assertEqual(val_text.value, "14,820")
+
+        # Verify deep link callback
+        tracks_card.on_click(None)
+        v._open_in_library.assert_called_with("tracks", "")
+
+        artists_card = row2.controls[0]
+        artists_card.on_click(None)
+        v._open_in_library.assert_called_with("artists", "")
+
+    def test_landing_page_does_not_retrigger_when_not_stale(self):
+        from ui.views.search import SearchView
+        v = SearchView.__new__(SearchView)
+        v.app = MagicMock()
+        v.page = MagicMock()
+        v._search_field = ft.TextField(value="")
+        v._landing_container = ft.ListView(controls=[ft.Container()])
+        v._landing_stale = False
+        v._landing_built_at = time.monotonic()
+        v._configured_sources = lambda cfg: ["qobuz"]
+        v.selected_source = "qobuz"
+        v._setup_prompt = ft.Container()
+
+        v.refresh_setup_state(update=False)
+        # Should not launch _refresh_landing_page since landing is already populated and fresh
+        v.page.run_task.assert_not_called()
+
+        # When marked stale, it triggers re-query
+        v.mark_landing_stale()
+        self.assertTrue(v._landing_stale)
+        v.refresh_setup_state(update=False)
+        self.assertEqual(v.page.run_task.call_count, 1)
+
+        # Fresh but aged past the TTL (play counts move): re-queried too
+        v.page.run_task.reset_mock()
+        v._landing_stale = False
+        v._landing_built_at = time.monotonic() - v._LANDING_TTL_S - 1
+        v.refresh_setup_state(update=False)
+        self.assertEqual(v.page.run_task.call_count, 1)
+
+
+class TestDailySyncAndBatching(unittest.TestCase):
+    def setUp(self):
+        from utils.db_manager import DatabaseManager
+        self.db = DatabaseManager(":memory:")
+        asyncio.run(self.db.initialize())
+
+    def tearDown(self):
+        asyncio.run(self.db.close())
+
+    def test_daily_release_sync_ledger_and_gates(self):
+        import time
+        import datetime
+
+        # Initial check: no sync has ever run
+        self.assertTrue(asyncio.run(self.db.should_run_daily_release_sync()))
+
+        # Start a sync
+        log_id = asyncio.run(self.db.log_release_sync_start(trigger_type="daily_auto"))
+        latest = asyncio.run(self.db.get_latest_release_sync())
+        self.assertEqual(latest["status"], "running")
+        self.assertEqual(latest["trigger_type"], "daily_auto")
+
+        # Running recently (< 1h) -> gate returns False to prevent duplicate runs
+        self.assertFalse(asyncio.run(self.db.should_run_daily_release_sync()))
+
+        # Finish sync today
+        asyncio.run(self.db.log_release_sync_finish(log_id, artists_checked=10, new_found=2, status="completed"))
+        latest = asyncio.run(self.db.get_latest_release_sync())
+        self.assertEqual(latest["status"], "completed")
+        self.assertEqual(latest["artists_checked"], 10)
+        self.assertEqual(latest["new_found"], 2)
+
+        # Finished today -> should NOT run again today
+        self.assertFalse(asyncio.run(self.db.should_run_daily_release_sync()))
+
+        # Simulate midnight crossing: finished yesterday, but only 2 hours ago (< 12h cooldown)
+        yesterday = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
+        two_hours_ago = time.time() - (2 * 3600)
+        async def _set_yesterday_recent():
+            conn = await self.db.get_connection()
+            await conn.execute("UPDATE release_sync_log SET sync_date = ?, finished_at = ? WHERE id = ?",
+                               (yesterday, two_hours_ago, log_id))
+            await conn.commit()
+        asyncio.run(_set_yesterday_recent())
+        # Should be protected by 12h cooldown
+        self.assertFalse(asyncio.run(self.db.should_run_daily_release_sync()))
+
+        # Simulate normal next day: finished yesterday, 14 hours ago (>= 12h cooldown)
+        fourteen_hours_ago = time.time() - (14 * 3600)
+        async def _set_yesterday_ready():
+            conn = await self.db.get_connection()
+            await conn.execute("UPDATE release_sync_log SET sync_date = ?, finished_at = ? WHERE id = ?",
+                               (yesterday, fourteen_hours_ago, log_id))
+            await conn.commit()
+        asyncio.run(_set_yesterday_ready())
+        self.assertTrue(asyncio.run(self.db.should_run_daily_release_sync()))
+
+        # Simulate clock skew: finished_at is warped into the future
+        future_time = time.time() + 7200
+        async def _set_future_skew():
+            conn = await self.db.get_connection()
+            await conn.execute("UPDATE release_sync_log SET sync_date = ?, finished_at = ? WHERE id = ?",
+                               (datetime.date.today().isoformat(), future_time, log_id))
+            await conn.commit()
+        asyncio.run(_set_future_skew())
+        # Skew detected -> resets gate to True
+        self.assertTrue(asyncio.run(self.db.should_run_daily_release_sync()))
+
+    def test_batched_owned_titles_query(self):
+        # Insert test artist, album, track
+        async def _populate():
+            conn = await self.db.get_connection()
+            await conn.execute("INSERT INTO artists (id, name, track_count) VALUES (1, 'Burial', 2)")
+            await conn.execute("INSERT INTO albums (id, artist_id, title) VALUES (1, 1, 'Untrue') ")
+            await conn.execute("INSERT INTO tracks (id, album_id, title, path) VALUES (1, 1, 'Archangel', '/music/archangel.flac')")
+            await conn.commit()
+        asyncio.run(_populate())
+
+        owned_map = asyncio.run(self.db.get_all_owned_artist_titles())
+        self.assertIn("burial", owned_map)
+        titles = owned_map["burial"]
+        self.assertIn("Untrue", titles)
+        self.assertIn("Archangel", titles)
+
+    def test_library_counts(self):
+        async def _populate():
+            conn = await self.db.get_connection()
+            await conn.execute("INSERT INTO artists (id, name, track_count) VALUES (1, 'Burial', 2)")
+            await conn.execute("INSERT INTO albums (id, artist_id, title) VALUES (1, 1, 'Untrue')")
+            await conn.execute("INSERT INTO tracks (id, album_id, title, path) VALUES (1, 1, 'Archangel', '/a.flac')")
+            await conn.execute("INSERT INTO tracks (id, album_id, title, path) VALUES (2, 1, 'Near Dark', '/b.flac')")
+            await conn.commit()
+        asyncio.run(_populate())
+        self.assertEqual(asyncio.run(self.db.get_library_counts()),
+                         {"tracks": 2, "albums": 1, "artists": 1, "playlists": 0})
+
+    def test_manual_refresh_button_ui_and_trigger(self):
+        from ui.views.search import SearchView
+        v = SearchView.__new__(SearchView)
+        v.app = MagicMock()
+        v.app.new_releases_refreshing = False
+        v.app.db_manager = self.db
+        v.mark_landing_stale = MagicMock()
+        v.refresh_setup_state = MagicMock()
+
+        # Idle state shows refresh icon button
+        btn = asyncio.run(v._build_releases_refresh_button())
+        self.assertIsInstance(btn, ft.IconButton)
+        self.assertEqual(btn.icon, ft.Icons.REFRESH_ROUNDED)
+
+        # Trigger manual refresh
+        v._on_manual_releases_refresh()
+        v.app.trigger_manual_new_releases_refresh.assert_called_once()
+        v.mark_landing_stale.assert_called_once()
+        v.refresh_setup_state.assert_called_with(force=True)
+
+        # When refreshing, returns ProgressRing spinner
+        v.app.new_releases_refreshing = True
+        btn_refreshing = asyncio.run(v._build_releases_refresh_button())
+        self.assertIsInstance(btn_refreshing, ft.Container)
+        self.assertIsInstance(btn_refreshing.content, ft.ProgressRing)
+
+
+class TestReleaseRefreshTrigger(unittest.TestCase):
+    """main.py's pass scheduling: one pass at a time, manual re-checks every
+    artist, and the landing re-check waits for boot and then runs hourly."""
+
+    def setUp(self):
+        import main
+        self.main = main
+        self.saved = dict(main._RELEASES_STATE)
+        main._RELEASES_STATE.update(pending=False, running=False, gate_checked_at=None)
+        self.addCleanup(main._RELEASES_STATE.update, self.saved)
+        self.app = main.StreamripFletApp.__new__(main.StreamripFletApp)
+        self.app.db_manager = MagicMock()
+        self.app.search_view = MagicMock()
+
+        async def _quiet():
+            return None
+        self.app._await_scroll_quiet = _quiet
+        cfg = patch("utils.streamrip_api.load_config", lambda: {})
+        cfg.start()
+        self.addCleanup(cfg.stop)
+
+    def _run(self, fn):
+        async def _go():
+            fn()
+            # let the created task finish
+            for _ in range(5):
+                await asyncio.sleep(0)
+        asyncio.run(_go())
+
+    def test_manual_claims_running_synchronously_and_rechecks_everything(self):
+        seen = {}
+
+        async def _refresh(db, **kw):
+            seen.update(kw)
+            return 7
+
+        with patch("utils.new_releases.refresh_new_releases", _refresh):
+            async def _go():
+                self.app.trigger_manual_new_releases_refresh()
+                # the spinner reads this before the task has even started
+                self.assertTrue(self.app.new_releases_refreshing)
+                self.app.trigger_manual_new_releases_refresh()  # double tap: ignored
+                for _ in range(5):
+                    await asyncio.sleep(0)
+            asyncio.run(_go())
+
+        self.assertEqual(seen, {"trigger_type": "manual", "refresh_after_s": 0.0})
+        self.assertFalse(self.app.new_releases_refreshing)
+        self.assertFalse(self.main._RELEASES_STATE["pending"])
+        self.app.search_view.on_new_releases_refreshed.assert_called_once_with(7)
+
+    def test_gate_skip_clears_pending_and_does_not_notify(self):
+        async def _no():
+            return False
+        self.app.db_manager.should_run_daily_release_sync = _no
+        self._run(lambda: self.app.ensure_new_releases_refresh())
+        self.assertFalse(self.main._RELEASES_STATE["pending"])
+        self.app.search_view.on_new_releases_refreshed.assert_not_called()
+
+    def test_landing_recheck_waits_for_boot_then_runs_hourly(self):
+        self.app.ensure_new_releases_refresh = MagicMock()
+        self.app.maybe_recheck_new_releases()  # boot hasn't checked yet
+        self.app.ensure_new_releases_refresh.assert_not_called()
+
+        self.main._RELEASES_STATE["gate_checked_at"] = time.monotonic()
+        self.app.maybe_recheck_new_releases()  # checked just now
+        self.app.ensure_new_releases_refresh.assert_not_called()
+
+        self.main._RELEASES_STATE["gate_checked_at"] = time.monotonic() - self.main._RELEASES_RECHECK_S - 1
+        self.app.maybe_recheck_new_releases()
+        self.app.ensure_new_releases_refresh.assert_called_once_with()
 
 
 if __name__ == "__main__":

@@ -46,9 +46,8 @@ Usage
     python tools/walk_probe.py --db .../library.db --seeds 5 --rng 0
     # per-mega-genre eye test: 5 seeds from EACH bucket, shipping walk each:
     python tools/walk_probe.py --db .../library.db --by-genre --per-genre 5 --rng 0
-    # auto-play station eye test (legs, genre hops, removal rebuild):
+    # auto-play station eye test (the drift across genres, removal rebuild):
     python tools/walk_probe.py --db .../library.db --station --seeds 3
-    python tools/walk_probe.py --db .../library.db --station --mode random --station-seed 83127
     python tools/walk_probe.py --db .../library.db --station --reject 2
 """
 
@@ -377,11 +376,6 @@ async def _run_with_db(db, args):
         await build_graph(db, args.no_enrich)
         r = await readiness(db)
         print_readiness(r)
-    if not args.no_build and await tg.journey_graph_stale(db):
-        # As the app does at startup (main._ensure_graph_built_async).
-        print("── journey graph is from an older builder: rebuilding it ──\n")
-        await tg.build_journey_graph(db)
-
     if r["coord_tracks"] == 0:
         print("No persisted Zr coordinates — nothing to walk. Re-run with --build.")
         return 1
@@ -403,27 +397,16 @@ async def _run_with_db(db, args):
         print(f"SEED: {title}  —  {artist}")
         print(f"      {path}")
         print("═" * 72)
-        # A/B the metadata contribution: the shipping walk (metadata pool on)
-        # vs the same walk with metadata off (== pure acoustic flow).
-        smooth_meta = await tg.walk(db, path, length=args.length)
-        smooth_aco = await tg.walk(db, path, length=args.length, veto_genre_floor=0.0)
+        # The shipping walk (artists ranked by genre, sound picks the track)
+        # against the plain nearest-in-sound list, to see what genre buys.
+        drift = await tg.walk(db, path, length=args.length)
+        graph = await tg._coord_graph_cached(db)
+        U, i = graph["X_unit"], graph["path_to_idx"][path]
+        sound = [graph["paths"][j] for j in (U @ U[i]).argsort()[::-1] if j != i][:args.length]
 
-        all_paths = list({path, *smooth_meta, *smooth_aco})
-        titles = await _titles(db, all_paths)
-
-        await print_walk(db, "smooth+meta   ", path, smooth_meta, titles)
-        await print_walk(db, "smooth-acoustic", path, smooth_aco, titles)
-
-        # Where does metadata change the smooth queue?
-        if smooth_meta != smooth_aco:
-            first_div = next(
-                (i for i, (a, b) in enumerate(zip(smooth_meta, smooth_aco)) if a != b),
-                min(len(smooth_meta), len(smooth_aco)),
-            )
-            print(f"  → metadata diverges from acoustic-only at step {first_div + 1}\n")
-        else:
-            print("  → metadata made NO difference to this queue "
-                  "(seed/neighbours lack usable enrichment, or acoustic dominates)\n")
+        titles = await _titles(db, list({path, *drift, *sound}))
+        await print_walk(db, "drift          ", path, drift, titles)
+        await print_walk(db, "nearest-in-sound", path, sound, titles)
     return 0
 
 
@@ -443,90 +426,75 @@ async def _run_by_genre(db, args, rng):
         print(f"#  MEGA-GENRE: {bucket}   ({len(seeds)} seed{'s' if len(seeds) != 1 else ''})")
         print("#" * 72)
         for path, title, artist in seeds:
-            walk = await tg.walk(db, path, length=args.length)  # shipping config
+            walk = await tg.walk(db, path, length=args.length)
             titles = await _titles(db, list({path, *walk}))
             seed_meta = await db.get_artist_meta_for_paths([path])
             sgenres = seed_meta.get(path, {}).get("genres") or frozenset()
             print("─" * 72)
             print(f"SEED: {title} — {artist}   "
                   f"[{','.join(sorted(sgenres))[:40]}]")
-            await print_walk(db, "smooth+meta", path, walk, titles)
+            await print_walk(db, "drift", path, walk, titles)
     return 0
 
 
 async def _run_station(db, args, rng):
     """Simulate auto-play stations exactly as the app opens them (same station
-    shape as utils/autoplay.py) and print each track with its genre node, so
-    legs and hops can be read. --reject K removes the first K recommendations
-    of the first buffer, as a listener would, and prints the rebuilt buffer."""
+    shape as utils/autoplay.py) and print each track with the genre the station
+    is in after it, so the drift between genres can be read. --reject K removes
+    the first K recommendations of the first buffer, as a listener would, and
+    prints the rebuilt buffer."""
     from utils import autoplay as ap_mod
 
     seeds = await pick_seeds(db, args.seeds, rng, args.seed)
     if not seeds:
         print("No seeds matched.")
         return 1
-    payload = await db.get_journey_graph() or {}
-    nodes = payload.get("nodes") or {}
-    via = payload.get("via") or {}
-    if not payload.get("adj"):
-        print("NB no genre-adjacency graph: stations use the radius (no legs/hops).\n")
     length = args.length
-    # The listener's learned hop penalties, as AutoPlay passes them.
-    hop_weights = {(r["src"], r["dst"]): ap_mod.hop_weight(r)
-                   for r in await db.get_hop_rejects()}
-    blocked = [pair for pair, w in hop_weights.items() if w == 0]
-    if blocked:
-        print("Blocked hops: " + ", ".join(f"{a} → {b}" for a, b in blocked) + "\n")
+
+    async def take(station, n):
+        out = []
+        for _ in range(n):
+            got = await station.take(1)
+            if not got:
+                break
+            out.append((got[0], station.flavour or "?"))
+        return out
 
     for path, title, artist in seeds:
-        station_seed = args.station_seed
-        if args.mode == "random" and station_seed is None:
-            station_seed = rng.randrange(1 << 31)
-        st_rng = random.Random(station_seed) if args.mode == "random" else None
         station = await tg.open_station(
-            db, path, rng=st_rng, leg_len=ap_mod.LEG_LEN,
+            db, path, focused=True,
             max_per_artist=ap_mod.ARTIST_CAP, max_per_album=ap_mod.ALBUM_CAP,
-            window=ap_mod.CAP_WINDOW, hop_weights=hop_weights,
+            window=ap_mod.CAP_WINDOW,
         )
         print("═" * 72)
-        print(f"STATION: {title} — {artist}   [{nodes.get(path, '?')}]   "
-              f"{args.mode}" + (f", seed {station_seed}" if station_seed is not None else ""))
+        print(f"STATION: {title} — {artist}   [{station.flavour or '?'}]")
         print("═" * 72)
         if args.reject:
-            first = await station.take(ap_mod.BUFFER_TARGET)
-            # As AutoPlay._negative: an act rejected twice is banned first.
-            removed = first[:args.reject]
-            removed_rows = await db.get_tracks_brief(removed)
-            per_act = Counter((removed_rows.get(p) or {}).get("artist") for p in removed)
+            first = await take(station, ap_mod.BUFFER_TARGET)
+            # As AutoPlay._negative: each rejection steers the station.
+            removed = [p for p, _ in first[:args.reject]]
             for p in removed:
-                act = (removed_rows.get(p) or {}).get("artist")
-                if act and per_act[act] >= ap_mod.ARTIST_NEGATIVES_TO_BAN:
-                    station.ban_artist_of(p)
-            station.end_leg(removed)
-            rebuilt = await station.take(ap_mod.BUFFER_TARGET)
-            await _print_station(db, "first buffer", first, nodes, via,
-                                 removed=set(first[:args.reject]))
-            await _print_station(db, f"after removing {args.reject}", rebuilt, nodes, via)
+                station.reject([p])
+            rebuilt = await take(station, ap_mod.BUFFER_TARGET)
+            await _print_station(db, "first buffer", first, removed=set(removed))
+            await _print_station(db, f"after removing {args.reject}", rebuilt)
         else:
-            await _print_station(db, f"{length} tracks", await station.take(length), nodes, via)
+            await _print_station(db, f"{length} tracks", await take(station, length))
     return 0
 
 
-async def _print_station(db, label, queue, nodes, via, removed=frozenset()):
-    rows = await db.get_tracks_brief(queue)
+async def _print_station(db, label, queue, removed=frozenset()):
+    rows = await db.get_tracks_brief([p for p, _ in queue])
     print(f"  [{label}]")
     prev = None
-    for i, p in enumerate(queue, 1):
-        node = nodes.get(p, "?")
+    for i, (p, flavour) in enumerate(queue, 1):
         r = rows.get(p) or {}
-        if prev is not None and node != prev:
-            bridges = via.get(f"{prev}\t{node}") or []
-            by = f" (via {r.get('artist')})" if r.get("artist") in bridges else ""
-            print(f"     {'·' * 20} hop → {node}{by}")
+        if prev is not None and flavour != prev:
+            print(f"     {'·' * 20} now in {flavour}")
         mark = " ✗" if p in removed else "  "
-        print(f"   {mark}{i:>2}. {node:<14} {(r.get('title') or os.path.basename(p))[:32]:<32} "
+        print(f"   {mark}{i:>2}. {flavour:<14} {(r.get('title') or os.path.basename(p))[:32]:<32} "
               f"— {(r.get('artist') or '?')[:20]:<20} [{(r.get('album') or '')[:20]}]")
-        prev = node
+        prev = flavour
     print()
 
 
@@ -545,11 +513,7 @@ def main():
     ap.add_argument("--per-genre", type=int, default=5,
                     help="seeds per mega-genre bucket in --by-genre mode (default 5)")
     ap.add_argument("--station", action="store_true",
-                    help="simulate auto-play stations (legs, hops); --length defaults to 24")
-    ap.add_argument("--mode", choices=("deterministic", "random"), default="deterministic",
-                    help="station variety, as the app's Deterministic / Random pills")
-    ap.add_argument("--station-seed", type=int, default=None,
-                    help="with --mode random: replay a station by its logged seed")
+                    help="simulate auto-play stations (the drift); --length defaults to 24")
     ap.add_argument("--reject", type=int, default=0,
                     help="with --station: remove the first K recommendations, show the rebuild")
     ap.add_argument("--build", action="store_true", help="(re)build the graph into --db")

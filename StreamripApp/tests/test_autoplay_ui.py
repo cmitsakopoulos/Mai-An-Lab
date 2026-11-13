@@ -11,9 +11,9 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 import flet as ft  # noqa: E402
 
 import main  # noqa: E402
-from ui.player.autoplay_sheet import AutoPlaySheet, MODE_COPY, anchor_label  # noqa: E402
+from ui.player.autoplay_sheet import AutoPlaySheet, anchor_label  # noqa: E402
 from ui.player.queue_sheet import QueueSheet  # noqa: E402
-from utils.autoplay import AutoPlay, DETERMINISTIC, RANDOM  # noqa: E402
+from utils.autoplay import AutoPlay  # noqa: E402
 
 audio_engine = main.audio_engine
 
@@ -40,10 +40,9 @@ class _Base(unittest.TestCase):
         self._saved = (audio_engine.queue, audio_engine.current_index)
         audio_engine.queue = [
             {"path": "/m/a", "track_title": "Alpha", "artist_name": "X"},
-            {"path": "/m/b", "track_title": "Beta", "artist_name": "Y"},
+            {"path": "/m/b", "track_title": "Beta", "artist_name": "Y", "_queued": True},
             {"path": "/r/1", "track_title": "Rec 1", "artist_name": "Z", "_autoplay": True},
             {"path": "/r/2", "track_title": "Rec 2", "artist_name": "Z", "_autoplay": True},
-            {"path": "/m/c", "track_title": "Gamma", "artist_name": "W"},
         ]
         audio_engine.current_index = 0
         self.app = MagicMock()
@@ -59,25 +58,22 @@ class _Base(unittest.TestCase):
 
 
 class AutoPlaySheetTests(_Base):
-    def test_sheet_shows_mode_copy_and_anchor(self):
+    def test_sheet_shows_anchor_and_no_mode_choice(self):
         sheet = AutoPlaySheet(self.app)
         bs = sheet._build()
         self.assertIsInstance(bs, ft.BottomSheet)
         self.assertTrue(bs.draggable)   # swipe-down to dismiss
         texts = _texts(bs)
-        self.assertIn(MODE_COPY[DETERMINISTIC], texts)
+        self.assertFalse({"Focused", "Cross-genre"} & set(texts))
         self.assertIn("Alpha — X", texts)
         self.assertIn("2 songs lined up", texts)
         self.assertEqual(anchor_label(self.app), "Alpha — X")
 
-    def test_toggle_and_mode_go_through_the_app_hooks(self):
+    def test_toggle_goes_through_the_app_hook(self):
         sheet = AutoPlaySheet(self.app)
         sheet._build()
         sheet._on_toggle(MagicMock(control=MagicMock(value=False)))
         self.app.set_play_similar_mode.assert_called_once_with(False)
-        sheet._on_mode(RANDOM)
-        self.app.set_autoplay_variety.assert_called_once_with(RANDOM)
-        self.assertEqual(sheet._mode_copy.value, MODE_COPY[RANDOM])
 
     def test_anchor_hidden_while_off(self):
         self.app.play_similar_mode = False
@@ -87,9 +83,8 @@ class AutoPlaySheetTests(_Base):
 
 
 class QueueHeaderTests(_Base):
-    """Queue (setUp): Alpha playing, Beta, Rec 1, Rec 2, then Gamma, which is
-    held: auto-play paused it. Controls: Alpha 0, Beta 1, AUTO-PLAY 2,
-    Rec 1 3, Rec 2 4, YOUR QUEUE 5, Gamma 6."""
+    """Queue (setUp): Alpha playing, Beta (the listener's pick), Rec 1, Rec 2.
+    Controls: Alpha 0, Beta 1, AUTO-PLAY 2, Rec 1 3, Rec 2 4."""
 
     def _sheet(self):
         qs = QueueSheet(self.app)
@@ -100,42 +95,26 @@ class QueueHeaderTests(_Base):
     def test_header_sits_above_first_recommendation(self):
         qs = self._sheet()
         ctrls = qs._queue_list.controls
-        self.assertEqual(qs._header_positions, [2, 5])
+        self.assertEqual(qs._header_positions, [2])
         self.assertEqual(ctrls[2].key, "q_autoplay_header")
         self.assertIn("from Alpha — X", _texts(ctrls[2]))
-
-    def test_held_queue_is_labelled_dimmed_and_inert(self):
-        qs = self._sheet()
-        ctrls = qs._queue_list.controls
-        self.assertEqual(ctrls[5].key, "q_held_header")
-        self.assertIn("1 on hold · resumes when auto-play is off", _texts(ctrls[5]))
-        self.assertIsNone(getattr(ctrls[5], "on_click", None))   # not a way back
-        gamma = ctrls[6].content                     # AnimatedEntry -> card
-        while not isinstance(gamma, ft.Container) or gamma.bgcolor is None:
-            gamma = gamma.content
-        self.assertTrue(gamma.disabled)
-        self.assertLess(gamma.opacity, 1.0)
-        actions = gamma.content.controls[-1].controls      # drag handle, remove
-        self.assertFalse(any(c.visible for c in actions))
-        self.assertEqual(qs._count_text.value, "3 up next · 1 on hold")
+        self.assertEqual(qs._count_text.value, "3 tracks remaining")
 
     def test_no_sections_when_autoplay_off(self):
         self.app.play_similar_mode = False
         qs = self._sheet()
         self.assertEqual(qs._header_positions, [])
         keys = {getattr(c, "key", None) for c in qs._queue_list.controls}
-        self.assertFalse({"q_autoplay_header", "q_held_header"} & keys)
-        self.assertEqual(qs._count_text.value, "4 tracks remaining")
+        self.assertNotIn("q_autoplay_header", keys)
 
-    def test_pending_station_header_sits_between_live_and_held(self):
+    def test_pending_header_sits_at_the_end_while_a_block_is_on_its_way(self):
         audio_engine.queue = [t for t in audio_engine.queue if not t.get("_autoplay")]
         qs = self._sheet()
         keys = [getattr(c, "key", None) for c in qs._queue_list.controls]
-        # Alpha, AUTO-PLAY (finding…), YOUR QUEUE, Beta, Gamma: with nothing
-        # pending, everything after the playing row is held.
-        self.assertEqual(keys[1:3], ["q_autoplay_header", "q_held_header"])
+        self.assertEqual(keys[-1], "q_autoplay_header")
+        self.assertIn("finding similar songs…", _texts(qs._queue_list.controls[-1]))
 
-    def test_reorder_skips_headers_and_never_crosses_into_the_held_queue(self):
+    def test_reorder_skips_the_header(self):
         qs = self._sheet()
         moved = MagicMock()
         orig = audio_engine.move_queue_item
@@ -147,12 +126,8 @@ class QueueHeaderTests(_Base):
                                                control=MagicMock(controls=list(qs._queue_list.controls))))
             moved.assert_called_once_with(3, 1)
             moved.reset_mock()
-            # Dragging a header is ignored.
+            # Dragging the header is ignored.
             qs._handle_queue_reorder(MagicMock(old_index=2, new_index=4, control=MagicMock(controls=[])))
-            # A held row can't move, and nothing can be dropped below the
-            # held header.
-            qs._handle_queue_reorder(MagicMock(old_index=6, new_index=1, control=MagicMock(controls=[])))
-            qs._handle_queue_reorder(MagicMock(old_index=1, new_index=7, control=MagicMock(controls=[])))
             moved.assert_not_called()
         finally:
             audio_engine.move_queue_item = orig
@@ -181,38 +156,23 @@ class QueueHeaderTests(_Base):
 
 
 class NowPlayingChainTests(_Base):
-    def test_tap_opens_sheet_and_long_press_toggles(self):
+    def test_tap_turns_on_then_opens_sheet(self):
         from ui.player import now_playing as np_mod
         np = np_mod.NowPlayingSheet(self.app)
         np._ensure_initialized()
-        opened = MagicMock()
-        np.open_autoplay_sheet = opened
-        np._play_similar_btn.on_click(MagicMock())
+        opened, toggled = MagicMock(), MagicMock()
+        np.open_autoplay_sheet, np._toggle_play_similar = opened, toggled
+        self.app.play_similar_mode = False
+        np._play_similar_btn.on_click(MagicMock())       # off: one tap turns it on
+        toggled.assert_called_once()
+        opened.assert_not_called()
+        self.app.play_similar_mode = True
+        np._play_similar_btn.on_click(MagicMock())       # on: tap opens the sheet
         opened.assert_called_once()
-        self.assertEqual(np._play_similar_btn.on_long_press, np._toggle_play_similar)
-        # No status pill any more: nothing extra in the vertical layout.
+        self.assertIsNotNone(np._play_similar_btn.on_long_press)
+        # The label rides above the icon in the same row; no status pill.
+        self.assertIn(np._autoplay_label, np._autoplay_cell.controls)
         self.assertFalse(hasattr(np, "_autoplay_pill"))
-
-
-class AutoPlaySettingsPaneTests(unittest.TestCase):
-    def test_lists_hidden_songs_and_blocked_hops_and_resets_a_hop(self):
-        from ui.views.autoplay_hidden import HiddenTracksPane
-        app = MagicMock()
-        app.safe_update = lambda fn, target=None: fn()
-        app.db_manager.get_autoplay_hidden = AsyncMock(return_value=[
-            {"path": "/m/x.flac", "title": "X", "artist": "Y", "album": "Z", "hidden_at": 0}])
-        blocked = [{"src": "Classical", "dst": "Pop", "rejects": 3, "artists": 2}]
-        app.autoplay.blocked_hops = MagicMock(return_value=blocked)
-        app.autoplay.unblock_hops = AsyncMock()
-        pane = HiddenTracksPane(app)
-        pane.build()
-        asyncio.run(pane._load())
-        texts = _texts(pane._hops)
-        self.assertIn("Classical → Pop", texts)
-        self.assertIn("Blocked after you turned down 3 songs by 2 artists", texts)
-        self.assertIn("X", _texts(pane._list))
-        asyncio.run(pane._unblock([("Classical", "Pop")]))
-        app.autoplay.unblock_hops.assert_awaited_once_with([("Classical", "Pop")])
 
 
 class StartRadioTests(unittest.TestCase):

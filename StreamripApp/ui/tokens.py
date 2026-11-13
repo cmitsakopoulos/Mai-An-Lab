@@ -42,6 +42,10 @@ ACCENT_GREEN    = "#30D158"  # Apple System Green
 ACCENT_AMBER    = AMBER
 ACCENT_RED      = "#FF453A"  # Apple System Red
 
+# Podium tints for the ranked lists on the Search landing page (Apple System
+# Yellow, Gray and Orange); ranks below third use DIM.
+RANK_COLORS     = {1: "#FFD60A", 2: "#AEAEB2", 3: "#FF9F0A"}
+
 RADIUS_CARD     = 14
 RADIUS_PILL     = 20
 RADIUS_THUMB    = 8

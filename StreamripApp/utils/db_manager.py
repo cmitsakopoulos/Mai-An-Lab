@@ -7,6 +7,8 @@ import json
 import logging
 import re
 import time
+import datetime
+from collections import defaultdict
 from typing import TYPE_CHECKING
 
 from utils import play_ledger
@@ -101,11 +103,11 @@ class DatabaseManager:
         # Caches to speed up indexing: (name) -> id or (artist_id, title) -> id
         self._artist_cache: dict[str, int] = {}
         self._album_cache: dict[tuple[int, str], int] = {}
+        # Merged artist names: casefolded alias -> canonical (artist_aliases).
+        self._aliases: dict[str, str] = {}
         # Load-once cache for the persisted NPMI genre-similarity model so the
         # walk reads it from memory after a single DB hit (rebuilt at graph gen).
         self._genre_affinity_cache: dict | None = None
-        # Load-once cache for the persisted genre-adjacency graph (journey walk).
-        self._genre_graph_cache: dict | None = None
 
     def clear_caches(self):
         """Clears the in-memory metadata caches. Call when DB state changes significantly."""
@@ -136,9 +138,10 @@ class DatabaseManager:
             await self._migrate_clusters(self._conn)
             await self._migrate_enrichment(self._conn)
             await self._migrate_ai_research(self._conn)
+            await self._migrate_artist_aliases(self._conn)
             await self._migrate_artist_releases(self._conn)
-            await self._migrate_autoplay_hidden(self._conn)
-            await self._migrate_autoplay_hop_rejects(self._conn)
+            await self._migrate_release_sync_log(self._conn)
+            await self._drop_retired_autoplay_tables(self._conn)
             await self._migrate_album_genre_bucket(self._conn)
             await self._migrate_features_v4_to_v5(self._conn)
         return self._conn
@@ -149,6 +152,21 @@ class DatabaseManager:
         async with conn.execute("SELECT COUNT(*) FROM tracks") as cursor:
             row = await cursor.fetchone()
             return row[0] if row else 0
+
+    async def get_library_counts(self) -> dict[str, int]:
+        """Lock-free read. Totals for the Search landing page's "Library at a
+        Glance", counted the way the Library tabs list them (an album is only
+        listed when its artist row exists)."""
+        conn = await self.get_connection()
+        async with conn.execute(
+            "SELECT (SELECT COUNT(*) FROM tracks), "
+            "(SELECT COUNT(*) FROM albums al JOIN artists ar ON ar.id = al.artist_id), "
+            "(SELECT COUNT(*) FROM artists), "
+            "(SELECT COUNT(*) FROM playlists)"
+        ) as cursor:
+            row = await cursor.fetchone()
+        tracks, albums, artists, playlists = row or (0, 0, 0, 0)
+        return {"tracks": tracks, "albums": albums, "artists": artists, "playlists": playlists}
 
     async def close(self):
         """Explicitly closes the shared connection to prevent resource leaks."""
@@ -210,6 +228,7 @@ class DatabaseManager:
                         bpm        REAL DEFAULT 0,
                         energy     REAL DEFAULT 0,
                         brightness REAL DEFAULT 0,
+                        artist_tag TEXT,   -- the file's artist tag when an alias redirected it
                         FOREIGN KEY (album_id) REFERENCES albums(id) ON DELETE CASCADE
                     )
                 ''')
@@ -490,6 +509,7 @@ class DatabaseManager:
 
     async def _get_or_create_artist(self, conn, name):
         name = name.strip() if name else "Unknown Artist"
+        name = self._aliases.get(name.casefold(), name)
         if name in self._artist_cache:
             return self._artist_cache[name]
             
@@ -530,13 +550,13 @@ class DatabaseManager:
                 )
                 await conn.execute(
                     '''INSERT OR REPLACE INTO tracks
-                       (album_id, title, track_num, duration, path, format, added_date, bitrate)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
+                       (album_id, title, track_num, duration, path, format, added_date, bitrate, artist_tag)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                     (
                         album_id, track_data.get('title', 'Unknown'), track_data.get('track_num'),
                         track_data.get('duration', 0.0), track_data.get('path'),
                         track_data.get('format', ''), track_data.get('added_date', 0.0),
-                        track_data.get('bitrate', 0)
+                        track_data.get('bitrate', 0), self._artist_tag(track_data.get('artist'))
                     )
                 )
                 await conn.commit()
@@ -622,13 +642,13 @@ class DatabaseManager:
                     )
                     await conn.execute(
                         '''INSERT OR REPLACE INTO tracks
-                           (album_id, title, track_num, duration, path, format, added_date, bitrate)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
+                           (album_id, title, track_num, duration, path, format, added_date, bitrate, artist_tag)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                         (
                             album_id, track_data.get('title', 'Unknown'), track_data.get('track_num'),
                             track_data.get('duration', 0.0), track_data.get('path'),
                             track_data.get('format', ''), track_data.get('added_date', 0.0),
-                            track_data.get('bitrate', 0)
+                            track_data.get('bitrate', 0), self._artist_tag(track_data.get('artist'))
                         )
                     )
                 await conn.commit()
@@ -662,7 +682,9 @@ class DatabaseManager:
                     new_album_id = await self._get_or_create_album(
                         conn, new_artist_id, new_album_title, new_year, new_genre
                     )
-                    await conn.execute("UPDATE tracks SET album_id = ? WHERE path = ?", (new_album_id, track_path))
+                    await conn.execute(
+                        "UPDATE tracks SET album_id = ?, artist_tag = ? WHERE path = ?",
+                        (new_album_id, self._artist_tag(new_artist_name), track_path))
 
                 if 'title' in tag_data:
                     await conn.execute("UPDATE tracks SET title = ? WHERE path = ?", (tag_data['title'], track_path))
@@ -2375,18 +2397,6 @@ class DatabaseManager:
                 updated_at REAL NOT NULL
             )
         ''')
-        # Genre-adjacency graph (PAGA nodes + adjacency) driving the journey
-        # walk, precomputed at graph generation. Single-row JSON blob:
-        # {"version", "nodes": {path: node}, "adj": {node: [[node, lift], ...]}}.
-        # Additive: harmless on a DB that predates it; absent -> walk falls back
-        # to the pure-radius ranking.
-        await conn.execute('''
-            CREATE TABLE IF NOT EXISTS genre_graph (
-                id         INTEGER PRIMARY KEY CHECK (id = 1),
-                model      TEXT NOT NULL,
-                updated_at REAL NOT NULL
-            )
-        ''')
         await conn.commit()
 
     async def _migrate_features_v4_to_v5(self, conn):
@@ -2547,6 +2557,140 @@ class DatabaseManager:
             tracks = [r[0] for r in await cursor.fetchall() if r[0]]
         return albums, tracks
 
+    async def get_all_owned_artist_titles(self) -> dict[str, set[str]]:
+        """Batched lock-free query of all owned (artist, title) pairs across the library.
+        Returns a dict mapping lower-cased artist_name -> set of owned album/track titles.
+        Replaces N+1 query loops with a single ~2ms query."""
+        conn = await self.get_connection()
+        query = """
+            SELECT ar.name, al.title
+            FROM albums al
+            JOIN artists ar ON ar.id = al.artist_id
+            WHERE ar.name IS NOT NULL AND al.title IS NOT NULL
+            UNION
+            SELECT ar.name, t.title
+            FROM tracks t
+            JOIN albums al ON al.id = t.album_id
+            JOIN artists ar ON ar.id = al.artist_id
+            WHERE ar.name IS NOT NULL AND t.title IS NOT NULL
+        """
+        async with conn.execute(query) as cursor:
+            rows = await cursor.fetchall()
+
+        out: dict[str, set[str]] = defaultdict(set)
+        for artist, title in rows:
+            if artist and title:
+                out[artist.lower()].add(title)
+        return out
+
+    async def _migrate_release_sync_log(self, conn):
+        """Idempotent: audit ledger of daily and manual new-release lookups."""
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS release_sync_log (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                sync_date        TEXT NOT NULL,
+                started_at       REAL NOT NULL,
+                finished_at      REAL,
+                artists_checked  INTEGER DEFAULT 0,
+                new_found        INTEGER DEFAULT 0,
+                trigger_type     TEXT NOT NULL,
+                status           TEXT NOT NULL
+            )
+        ''')
+        await conn.execute('''
+            CREATE INDEX IF NOT EXISTS idx_release_sync_log_date
+            ON release_sync_log (sync_date, status)
+        ''')
+        await conn.commit()
+
+    async def log_release_sync_start(self, trigger_type: str = "daily_auto") -> int:
+        """Records the initiation of a sync run, returning its log row ID."""
+        today_str = datetime.date.today().isoformat()
+        now = time.time()
+        async with self._write_lock:
+            conn = await self.get_connection()
+            async with conn.execute(
+                "INSERT INTO release_sync_log (sync_date, started_at, trigger_type, status) "
+                "VALUES (?, ?, ?, 'running')",
+                (today_str, now, trigger_type),
+            ) as cursor:
+                log_id = cursor.lastrowid
+            await conn.commit()
+            return log_id
+
+    async def log_release_sync_finish(
+        self,
+        log_id: int,
+        artists_checked: int = 0,
+        new_found: int = 0,
+        status: str = "completed",
+    ) -> None:
+        """Records the completion (or failure/interruption) of a sync run."""
+        now = time.time()
+        async with self._write_lock:
+            conn = await self.get_connection()
+            await conn.execute(
+                "UPDATE release_sync_log "
+                "SET finished_at = ?, artists_checked = ?, new_found = ?, status = ? "
+                "WHERE id = ?",
+                (now, artists_checked, new_found, status, log_id),
+            )
+            await conn.commit()
+
+    async def get_latest_release_sync(self) -> dict | None:
+        """Returns the most recent release sync log entry, or None."""
+        conn = await self.get_connection()
+        async with conn.execute(
+            "SELECT id, sync_date, started_at, finished_at, artists_checked, new_found, trigger_type, status "
+            "FROM release_sync_log ORDER BY id DESC LIMIT 1"
+        ) as cursor:
+            row = await cursor.fetchone()
+        if not row:
+            return None
+        return {
+            "id": row[0],
+            "sync_date": row[1],
+            "started_at": row[2],
+            "finished_at": row[3],
+            "artists_checked": row[4],
+            "new_found": row[5],
+            "trigger_type": row[6],
+            "status": row[7],
+        }
+
+    async def should_run_daily_release_sync(self) -> bool:
+        """Determines if a daily background check should execute.
+        Returns True if no successful daily sync has completed today (with 12h cooldown and clock-skew safety)."""
+        latest = await self.get_latest_release_sync()
+        if not latest:
+            return True
+
+        status = latest.get("status")
+        now = time.time()
+
+        # If a pass was left running > 1h ago, it was interrupted/killed by OS
+        if status == "running":
+            started_at = latest.get("started_at") or 0.0
+            if now - started_at < 3600.0:
+                return False  # Still actively running in current session
+            return True  # Stale interrupted pass, re-eligible
+
+        if status != "completed":
+            return True
+
+        today_str = datetime.date.today().isoformat()
+        last_date = latest.get("sync_date", "")
+        finished_at = latest.get("finished_at") or 0.0
+
+        # Handle system clock rolled backward (clock skew safety)
+        if now < (finished_at - 3600.0):
+            logger.warning("System clock skew detected (now < finished_at). Resetting sync gate.")
+            return True
+
+        elapsed = now - finished_at
+        # Run only if a new calendar day has arrived AND at least 12 hours have elapsed since last completed sync
+        return (last_date < today_str) and (elapsed >= 12 * 3600)
+
     async def _migrate_ai_research(self, conn):
         """Idempotent: the AI research cache (utils/metadata_ai.py).
 
@@ -2628,6 +2772,249 @@ class DatabaseManager:
             rows = await cursor.fetchall()
         return {r[0].lower() for r in rows if r[0]}
 
+    # ── artist aliases (one artist under two spellings) ──────────────────────
+    async def _migrate_artist_aliases(self, conn):
+        """Idempotent: merged artist names, rejected duplicate pairs, dismissed
+        audit flags, and `tracks.artist_tag`.
+
+        A merge is library-only — files keep their tags. The scanner resolves
+        an alias to its canonical artist (see _get_or_create_artist), and each
+        merged track remembers the tag it came with in `artist_tag`, so
+        separating the two again moves exactly those tracks back."""
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS artist_aliases (
+                alias       TEXT PRIMARY KEY COLLATE NOCASE,
+                canonical   TEXT NOT NULL COLLATE NOCASE,
+                enrichment  TEXT,   -- JSON snapshot of the alias's artist_enrichment row
+                created_at  REAL NOT NULL
+            )
+        ''')
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS artist_alias_rejections (
+                a TEXT NOT NULL, b TEXT NOT NULL,   -- casefolded, a < b
+                PRIMARY KEY (a, b)
+            )
+        ''')
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS metadata_audit_dismissed (
+                artist_name TEXT NOT NULL COLLATE NOCASE,
+                rule        TEXT NOT NULL,
+                value       TEXT,   -- the country the user said was right
+                PRIMARY KEY (artist_name, rule)
+            )
+        ''')
+        async with conn.execute("PRAGMA table_info(tracks)") as cur:
+            cols = {r[1] for r in await cur.fetchall()}
+        # Migrations run before initialize() creates the tables on a fresh DB;
+        # there the CREATE TABLE already has the column.
+        if cols and "artist_tag" not in cols:
+            await conn.execute("ALTER TABLE tracks ADD COLUMN artist_tag TEXT")
+        await conn.commit()
+        await self._load_aliases(conn)
+
+    async def _load_aliases(self, conn):
+        async with conn.execute("SELECT alias, canonical FROM artist_aliases") as cur:
+            rows = await cur.fetchall()
+        self._aliases = {r[0].casefold(): r[1] for r in rows}
+
+    def _artist_tag(self, raw) -> str | None:
+        """The file's own artist tag when an alias redirects it, else None."""
+        name = (raw or "").strip()
+        return name if name and name.casefold() in self._aliases else None
+
+    async def get_artist_aliases(self, canonical: str) -> list[str]:
+        conn = await self.get_connection()
+        async with conn.execute(
+            "SELECT alias FROM artist_aliases WHERE canonical = ? ORDER BY alias",
+            (canonical,),
+        ) as cur:
+            return [r[0] for r in await cur.fetchall()]
+
+    async def get_alias_rejections(self) -> set[tuple[str, str]]:
+        conn = await self.get_connection()
+        async with conn.execute("SELECT a, b FROM artist_alias_rejections") as cur:
+            return {(r[0], r[1]) for r in await cur.fetchall()}
+
+    async def reject_alias_pair(self, name_a: str, name_b: str) -> None:
+        """'Not the same artist': never suggest this pair again."""
+        a, b = sorted((name_a.casefold(), name_b.casefold()))
+        async with self._write_lock:
+            conn = await self.get_connection()
+            await conn.execute(
+                "INSERT OR IGNORE INTO artist_alias_rejections (a, b) VALUES (?, ?)", (a, b))
+            await conn.commit()
+
+    async def merge_artists(self, alias: str, canonical: str) -> None:
+        """Fold `alias` into `canonical`, library-only.
+
+        Albums move across (or merge into the canonical artist's album of the
+        same title), the alias's tracks remember their tag, enrichment fills
+        the canonical artist's blanks, and the alias's own artist-keyed caches
+        are dropped. Undone by separate_artist."""
+        if not alias or not canonical or alias.casefold() == canonical.casefold():
+            raise ValueError("Pick two different artists to merge.")
+        async with self._write_lock:
+            conn = await self.get_connection()
+            try:
+                await conn.execute("BEGIN")
+                ids = {}
+                for n in (alias, canonical):
+                    async with conn.execute("SELECT id, name FROM artists WHERE name = ?", (n,)) as cur:
+                        row = await cur.fetchone()
+                    if not row:
+                        raise ValueError(f"No artist named {n!r} in the library.")
+                    ids[n] = (row[0], row[1])
+                a_id, alias = ids[alias]
+                c_id, canonical = ids[canonical]
+
+                await conn.execute(
+                    "UPDATE tracks SET artist_tag = ? WHERE artist_tag IS NULL AND album_id IN "
+                    "(SELECT id FROM albums WHERE artist_id = ?)", (alias, a_id))
+                async with conn.execute(
+                    "SELECT id, title FROM albums WHERE artist_id = ?", (a_id,)) as cur:
+                    albums = await cur.fetchall()
+                for al_id, title in albums:
+                    async with conn.execute(
+                        "SELECT id FROM albums WHERE artist_id = ? AND title = ?",
+                        (c_id, title)) as cur:
+                        same = await cur.fetchone()
+                    if same:
+                        await conn.execute("UPDATE tracks SET album_id = ? WHERE album_id = ?",
+                                           (same[0], al_id))
+                        await conn.execute("DELETE FROM albums WHERE id = ?", (al_id,))
+                    else:
+                        await conn.execute("UPDATE albums SET artist_id = ? WHERE id = ?",
+                                           (c_id, al_id))
+                await conn.execute("DELETE FROM artists WHERE id = ?", (a_id,))
+
+                # Enrichment: snapshot the alias's row (for separate_artist),
+                # then let it fill the canonical artist's blanks.
+                async with conn.execute(
+                    "SELECT * FROM artist_enrichment WHERE artist_name = ?", (alias,)) as cur:
+                    a_row = await cur.fetchone()
+                snapshot = dict(a_row) if a_row else None
+                if a_row:
+                    async with conn.execute(
+                        "SELECT country, genres, provenance FROM artist_enrichment "
+                        "WHERE artist_name = ?", (canonical,)) as cur:
+                        c_row = await cur.fetchone()
+                    if not c_row:
+                        await conn.execute(
+                            "UPDATE artist_enrichment SET artist_name = ? WHERE artist_name = ?",
+                            (canonical, alias))
+                    else:
+                        prov = json.loads(c_row[2] or "{}") if c_row[2] else {}
+                        a_prov = json.loads(snapshot.get("provenance") or "{}") \
+                            if snapshot.get("provenance") else {}
+                        country, genres = c_row[0], c_row[1]
+                        if not country and snapshot.get("country"):
+                            country = snapshot["country"]
+                            prov["country"] = a_prov.get("country")
+                        if (not genres or genres == "[]") and snapshot.get("genres") not in (None, "", "[]"):
+                            genres = snapshot["genres"]
+                            prov["genres"] = a_prov.get("genres")
+                        await conn.execute(
+                            "UPDATE artist_enrichment SET country = ?, genres = ?, provenance = ? "
+                            "WHERE artist_name = ?",
+                            (country, genres, json.dumps(prov), canonical))
+                        await conn.execute(
+                            "DELETE FROM artist_enrichment WHERE artist_name = ?", (alias,))
+                for table, col in (("artist_ai_research", "artist_name"),
+                                   ("artist_releases", "artist_name"),
+                                   ("metadata_audit_dismissed", "artist_name")):
+                    await conn.execute(f"DELETE FROM {table} WHERE {col} = ?", (alias,))
+
+                # Anything already folded into the alias follows it.
+                await conn.execute(
+                    "UPDATE artist_aliases SET canonical = ? WHERE canonical = ?",
+                    (canonical, alias))
+                await conn.execute(
+                    "INSERT OR REPLACE INTO artist_aliases (alias, canonical, enrichment, created_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    (alias, canonical, json.dumps(snapshot) if snapshot else None, time.time()))
+                await conn.commit()
+            except Exception:
+                await conn.rollback()
+                raise
+            finally:
+                self.clear_caches()
+                await self._load_aliases(conn)
+
+    async def separate_artist(self, alias: str) -> None:
+        """Undo merge_artists: the tracks whose tag is `alias` go back to an
+        artist of that name, with the enrichment it had before the merge, and
+        the pair is never suggested again."""
+        async with self._write_lock:
+            conn = await self.get_connection()
+            try:
+                async with conn.execute(
+                    "SELECT alias, canonical, enrichment FROM artist_aliases WHERE alias = ?",
+                    (alias,)) as cur:
+                    row = await cur.fetchone()
+                if not row:
+                    raise ValueError(f"{alias!r} isn't merged into another artist.")
+                alias, canonical, snapshot = row[0], row[1], row[2]
+                await conn.execute("BEGIN")
+                await conn.execute("DELETE FROM artist_aliases WHERE alias = ?", (alias,))
+                # Resolve no more, or _get_or_create_artist sends it straight back.
+                self._aliases.pop(alias.casefold(), None)
+                self.clear_caches()
+
+                async with conn.execute(
+                    "SELECT t.id, t.artist_tag, al.title, al.year, al.genre FROM tracks t "
+                    "JOIN albums al ON al.id = t.album_id JOIN artists ar ON ar.id = al.artist_id "
+                    "WHERE ar.name = ? AND t.artist_tag IS NOT NULL", (canonical,)) as cur:
+                    tracks = [r for r in await cur.fetchall()
+                              if (r[1] or "").casefold() == alias.casefold()]
+                a_id = await self._get_or_create_artist(conn, alias)
+                for t_id, _tag, title, year, genre in tracks:
+                    al_id = await self._get_or_create_album(conn, a_id, title, year, genre)
+                    await conn.execute(
+                        "UPDATE tracks SET album_id = ?, artist_tag = NULL WHERE id = ?",
+                        (al_id, t_id))
+                await conn.execute("DELETE FROM albums WHERE track_count <= 0")
+                await conn.execute("DELETE FROM artists WHERE album_count <= 0")
+
+                snap = json.loads(snapshot) if snapshot else None
+                if snap:
+                    async with conn.execute(
+                        "SELECT 1 FROM artist_enrichment WHERE artist_name = ?", (alias,)) as cur:
+                        exists = await cur.fetchone()
+                    if not exists:
+                        snap["artist_name"] = alias
+                        cols = ", ".join(snap)
+                        marks = ", ".join("?" * len(snap))
+                        await conn.execute(
+                            f"INSERT INTO artist_enrichment ({cols}) VALUES ({marks})",
+                            list(snap.values()))
+                a, b = sorted((alias.casefold(), canonical.casefold()))
+                await conn.execute(
+                    "INSERT OR IGNORE INTO artist_alias_rejections (a, b) VALUES (?, ?)", (a, b))
+                await conn.commit()
+            except Exception:
+                await conn.rollback()
+                raise
+            finally:
+                self.clear_caches()
+                await self._load_aliases(conn)
+
+    async def get_audit_dismissals(self) -> dict[tuple[str, str], str]:
+        """{(artist casefolded, rule): country the user confirmed}."""
+        conn = await self.get_connection()
+        async with conn.execute(
+            "SELECT artist_name, rule, value FROM metadata_audit_dismissed") as cur:
+            return {(r[0].casefold(), r[1]): (r[2] or "") for r in await cur.fetchall()}
+
+    async def dismiss_audit_flag(self, artist_name: str, rule: str, value: str) -> None:
+        """'The current answer is right': hide this flag while the country
+        stays `value`."""
+        async with self._write_lock:
+            conn = await self.get_connection()
+            await conn.execute(
+                "INSERT OR REPLACE INTO metadata_audit_dismissed (artist_name, rule, value) "
+                "VALUES (?, ?, ?)", (artist_name, rule, value or ""))
+            await conn.commit()
+
     async def get_artist_research_evidence(self, artist_name: str) -> dict:
         """What the library knows about an artist, for the AI to identify WHICH
         artist of that name this is: album titles + years, a sample of track
@@ -2688,7 +3075,6 @@ class DatabaseManager:
             d["provenance"] = json.loads(d["provenance"]) if d.get("provenance") else {}
         except Exception:
             d["provenance"] = {}
-        from utils.metadata_enrich import _clean_source_tags
         d["source_genres"] = _clean_source_tags(
             (d.pop("raw_file_genres", None) or "").split("|")
         )
@@ -2800,13 +3186,12 @@ class DatabaseManager:
         [{'name', 'artists'}]. Powers tap-to-add suggestions when hand-tagging
         an artist the automatic enrichment could not resolve.
 
-        This is a correctness feature, not just a typing shortcut. The walk
-        compares tags through the NPMI model in `genre_similarity`, which is
-        learned from co-occurrence across THIS library's artists — a token that
-        appears on exactly one artist has no learned relation to anything, so a
-        freshly invented spelling ('greek trap' where the corpus says 'trap')
-        lands at the FAMILY_FLOOR at best and can be fenced apart from the very
-        scene it belongs to. Offering the established vocabulary keeps
+        This is a correctness feature, not just a typing shortcut. Auto-play
+        compares tags partly through the NPMI model in `genre_similarity`, which
+        is learned from co-occurrence across THIS library's artists — a token
+        that appears on exactly one artist has no learned relation to anything,
+        so a freshly invented spelling ('greek trap' where the corpus says
+        'trap') is only weakly tied to the very scene it belongs to. Offering the established vocabulary keeps
         hand-entered tags inside the model that has to interpret them."""
         conn = await self.get_connection()
         counts: dict[str, int] = {}
@@ -2881,8 +3266,10 @@ class DatabaseManager:
     GAP_BLOCKING = 0    # nothing can place or fence this artist
     GAP_SUGGESTED = 1   # a source proposes a value; one tap accepts it
     GAP_THIN = 2        # works today, could be better
+    GAP_NONE = 3        # has genres and a country (listed only with everything=True)
 
-    async def get_metadata_gap_artists(self, limit: int = 200) -> list[dict]:
+    async def get_metadata_gap_artists(self, limit: int = 200, *,
+                                       everything: bool = False) -> list[dict]:
         """Artists the metadata workbench should offer for curation, graded by
         whether a HUMAN is actually required.
 
@@ -2895,20 +3282,19 @@ class DatabaseManager:
             'Rock/Alt') that this query never looked at — they were shown as red
             'No Tags · No Country' while the answer sat one join away;
           • 27 more had a country (mostly GR) and no genres, shown as amber
-            'NO TAGS'. But an artist with a country is NOT dark to the walk:
-            `_pool_foreign`'s country boundary fires for a seed with no genre
-            tags at all, and `genre_graph` label-propagates a family from the
-            artist's acoustic neighbours, then splits the node by country for
-            regional scenes. These already work.
+            'NO TAGS'. But an artist with a country is NOT dark to auto-play:
+            the country fixes its culture, and its genre profile is borrowed
+            from its collaborators and the artists of that culture it sounds
+            like. These already work.
           • only 11 were genuinely unplaceable.
 
         So the grading now reflects what the walk can do with the row, and what
         it would take to fix it:
 
           GAP_BLOCKING  (0) no genres, no country, and no file tag to fall back
-                            on. `_pool_foreign` has no evidence on either
-                            boundary and `node_label` has no family — this is the
-                            case that put Greek laiko inside a Slipknot queue.
+                            on. Auto-play can only guess its genre from sound —
+                            this is the case that put Greek laiko inside a
+                            Slipknot queue.
           GAP_SUGGESTED (1) enrichment is thin, but the artist's own files carry
                             a usable tag. One tap, no typing.
           GAP_THIN      (2) has genres but no country, or similar. Functional;
@@ -2926,15 +3312,16 @@ class DatabaseManager:
         sql = (
             "SELECT a.name AS artist_name, a.track_count AS track_count, "
             "e.country AS country, e.genres AS genres, e.source AS source, "
-            "e.status AS status, e.provenance AS provenance, "
+            "e.status AS status, e.provenance AS provenance, e.score AS score, "
             "(SELECT group_concat(al.genre, '|') FROM albums al "
             "   WHERE al.artist_id = a.id AND al.genre IS NOT NULL AND al.genre <> '' "
             ") AS raw_file_genres "
             "FROM artists a LEFT JOIN artist_enrichment e ON e.artist_name = a.name "
-            "WHERE (e.artist_name IS NULL OR e.genres IS NULL OR e.genres = '' OR e.genres = '[]' "
-            "       OR e.country IS NULL OR e.country = '') "
-            "  AND (e.source IS NULL OR e.source <> 'manual') "
-            "ORDER BY a.track_count DESC"
+            + ("" if everything else
+               "WHERE (e.artist_name IS NULL OR e.genres IS NULL OR e.genres = '' OR e.genres = '[]' "
+               "       OR e.country IS NULL OR e.country = '') "
+               "  AND (e.source IS NULL OR e.source <> 'manual') ")
+            + "ORDER BY a.track_count DESC"
         )
         async with conn.execute(sql) as cursor:
             rows = await cursor.fetchall()
@@ -2958,7 +3345,9 @@ class DatabaseManager:
             has_country = bool((d.get("country") or "").strip())
             has_files = bool(d["source_genres"])
 
-            if has_genres or has_country:
+            if has_genres and has_country:
+                d["gap_severity"] = self.GAP_NONE
+            elif has_genres or has_country:
                 d["gap_severity"] = self.GAP_THIN
             elif has_files:
                 d["gap_severity"] = self.GAP_SUGGESTED
@@ -2972,11 +3361,12 @@ class DatabaseManager:
     async def get_metadata_coverage(self, gaps: list[dict] | None = None) -> dict:
         """Library-wide metadata health, for the workbench summary.
 
-        The headline is how many artists Auto-Play can PLACE — an artist with a
-        genre or a country can be positioned in the journey graph and fenced by
-        `_pool_foreign`; one with neither cannot. That is the fact the user acts
-        on, and unlike a raw tag percentage it doesn't nag about artists that
-        already work.
+        The headline is how many artists Auto-Play can PLACE — an artist with
+        genres has its own profile in the stations' artist graph, and one with a
+        country at least has its culture known; one with neither has only a
+        profile borrowed from collaborators and sound. That is the fact the user
+        acts on, and unlike a raw tag percentage it doesn't nag about artists
+        that already work.
 
         Pass `gaps` when the caller has already run `get_metadata_gap_artists`.
         Without it this method ran its own full-library gap scan and the pane
@@ -3058,8 +3448,37 @@ class DatabaseManager:
         if refresh_model and n:
             # Shared with every other enrichment write path, so a bulk override
             # and a single Save can never refresh different subsets of the
-            # derived models (they used to: only this path rebuilt the journey
-            # graph, which is the one the walk actually traverses).
+            # derived models (they used to, and auto-play kept the stale ones).
+            from utils.metadata_enrich import _do_refresh_walk_models
+            await _do_refresh_walk_models(self)
+        return n
+
+    async def set_artists_genres(
+        self, artist_names: list[str], genres: list[str], *,
+        country: str | None = None, refresh_model: bool = True,
+    ) -> int:
+        """REPLACE many artists' genres with one list, as the user's answer —
+        what "Set genres" on a selection calls. Unlike `bulk_tag_artists`
+        (which adds), this is a correction: 'these are Greek trap, not
+        shoegaze'. Each artist keeps its country unless `country` is given.
+        Returns the number of artists written."""
+        tags = []
+        for g in genres or []:
+            t = (g or "").strip().lower()
+            if t and t not in tags:
+                tags.append(t)
+        c = (country or "").strip().upper() or None
+        n = 0
+        for name in artist_names:
+            try:
+                cur = await self.get_artist_enrichment(name) or {}
+                await self.set_manual_artist_enrichment(
+                    name, country=c or (cur.get("country") or None), genres=tags,
+                )
+                n += 1
+            except Exception as exc:
+                logger.warning("set_artists_genres failed for %s: %s", name, exc)
+        if refresh_model and n:
             from utils.metadata_enrich import _do_refresh_walk_models
             await _do_refresh_walk_models(self)
         return n
@@ -3149,6 +3568,22 @@ class DatabaseManager:
             out.append(d)
         return out
 
+    async def accept_artist_matches(self, artist_names: list[str]) -> int:
+        """The user vouches for matches MusicBrainz wasn't sure of: status
+        'lowconfidence' becomes 'ok', everything else on the row stays.
+        Returns the number of rows changed."""
+        names = [n for n in artist_names if n]
+        if not names:
+            return 0
+        marks = ",".join("?" * len(names))
+        async with self._write_lock:
+            conn = await self.get_connection()
+            cur = await conn.execute(
+                "UPDATE artist_enrichment SET status='ok' "
+                f"WHERE status='lowconfidence' AND artist_name IN ({marks})", names)
+            await conn.commit()
+        return cur.rowcount or 0
+
     async def confirm_artist_match(
         self, artist_name: str, *, mbid: str | None = None,
         country: str | None = None, area: str | None = None,
@@ -3228,7 +3663,7 @@ class DatabaseManager:
             placeholders = ",".join("?" * len(chunk))
             sql = (
                 "SELECT t.path AS path, ar.name AS artist, "
-                "e.country AS country, e.genres AS genres "
+                "e.country AS country, e.genres AS genres, e.source AS source "
                 "FROM tracks t "
                 "JOIN albums al ON al.id = t.album_id "
                 "JOIN artists ar ON ar.id = al.artist_id "
@@ -3253,6 +3688,7 @@ class DatabaseManager:
                         "artist": row["artist"],
                         "country": row["country"],
                         "genres": frozenset(toks),
+                        "manual": row["source"] == "manual",
                     }
         return out
 
@@ -3299,7 +3735,8 @@ class DatabaseManager:
     async def get_genre_affinity(self) -> dict:
         """Lock-free read of the persisted NPMI genre model, memoised after the
         first hit (it's rebuilt — and the cache refreshed — only at graph gen).
-        Returns {} when unset, which makes soft_set_sim degrade to Dice."""
+        Returns {} when unset; tag similarity then rests on compound names and
+        families alone."""
         if self._genre_affinity_cache is not None:
             return self._genre_affinity_cache
         conn = await self.get_connection()
@@ -3316,151 +3753,16 @@ class DatabaseManager:
         self._genre_affinity_cache = model
         return model
 
-    async def save_journey_graph(self, payload: dict) -> None:
-        """Mutation: persist the genre-adjacency graph (single-row JSON) + refresh
-        the in-memory cache. Called at graph generation, right after the NPMI
-        model. An empty payload stores an empty object, which the walk reads as
-        'no graph' and falls back to the radius ranking."""
-        payload = payload or {}
-        async with self._write_lock:
-            conn = await self.get_connection()
-            await conn.execute(
-                "INSERT OR REPLACE INTO genre_graph (id, model, updated_at) "
-                "VALUES (1, ?, strftime('%s','now'))",
-                (json.dumps(payload),),
-            )
-            await conn.commit()
-        self._genre_graph_cache = payload
-        n_nodes = len(payload.get("nodes", {})) if payload else 0
-        logger.info("Genre-adjacency graph persisted (%d placed tracks).", n_nodes)
-
-    async def get_journey_graph(self) -> dict:
-        """Lock-free read of the persisted genre-adjacency graph, memoised after
-        the first hit (rebuilt — and the cache refreshed — only at graph gen).
-        Returns {} when unset, which makes the walk degrade to the radius."""
-        if self._genre_graph_cache is not None:
-            return self._genre_graph_cache
-        conn = await self.get_connection()
-        payload: dict = {}
-        async with conn.execute(
-            "SELECT model FROM genre_graph WHERE id = 1"
-        ) as cursor:
-            row = await cursor.fetchone()
-        if row and row[0]:
-            try:
-                payload = json.loads(row[0])
-            except Exception:
-                payload = {}
-        self._genre_graph_cache = payload
-        return payload
-
-    # ── Auto-play: tracks the listener removed from recommendations ──────────
-    # Removing an auto-play recommendation from the queue is an explicit "not
-    # this". It is remembered across sessions (auto-play never recommends the
-    # track again) and is visible and reversible in Settings → Auto-play. It
-    # never hides anything from the library. Additive table: harmless on an
-    # existing DB.
-    async def _migrate_autoplay_hidden(self, conn):
-        await conn.execute('''
-            CREATE TABLE IF NOT EXISTS autoplay_hidden (
-                path      TEXT PRIMARY KEY,
-                hidden_at REAL NOT NULL
-            )
-        ''')
+    async def _drop_retired_autoplay_tables(self, conn):
+        # Retired 2026-11-01 with the genre-node journey: the persisted genre
+        # graph (stations build an artist graph in memory instead) and the
+        # learned genre-hop vetoes (there are no hops, and auto-play keeps no
+        # model of the listener's taste). Retired 2026-11-02: the songs hidden
+        # from auto-play for good — a removal now only steers its station.
+        await conn.execute("DROP TABLE IF EXISTS genre_graph")
+        await conn.execute("DROP TABLE IF EXISTS autoplay_hop_rejects")
+        await conn.execute("DROP TABLE IF EXISTS autoplay_hidden")
         await conn.commit()
-
-    async def hide_from_autoplay(self, path: str) -> None:
-        async with self._write_lock:
-            conn = await self.get_connection()
-            await conn.execute(
-                "INSERT OR REPLACE INTO autoplay_hidden (path, hidden_at) "
-                "VALUES (?, strftime('%s','now'))",
-                (path,),
-            )
-            await conn.commit()
-
-    async def unhide_from_autoplay(self, paths: list[str] | None = None) -> None:
-        """Restore `paths` to auto-play; None restores every hidden track."""
-        async with self._write_lock:
-            conn = await self.get_connection()
-            if paths is None:
-                await conn.execute("DELETE FROM autoplay_hidden")
-            elif paths:
-                await conn.execute(
-                    f"DELETE FROM autoplay_hidden WHERE path IN ({','.join('?' * len(paths))})",
-                    list(paths),
-                )
-            await conn.commit()
-
-    async def get_autoplay_hidden(self) -> list[dict]:
-        """Hidden tracks, newest first: {path, hidden_at, title, artist, album}.
-        Tracks since deleted from the library still come back (title None) so
-        they can be restored or cleared."""
-        conn = await self.get_connection()
-        async with conn.execute('''
-            SELECT h.path, h.hidden_at, t.title,
-                   ar.name AS artist, al.title AS album
-            FROM autoplay_hidden h
-            LEFT JOIN tracks  t  ON t.path = h.path
-            LEFT JOIN albums  al ON al.id  = t.album_id
-            LEFT JOIN artists ar ON ar.id  = al.artist_id
-            ORDER BY h.hidden_at DESC
-        ''') as cursor:
-            return [dict(r) for r in await cursor.fetchall()]
-
-    async def _migrate_autoplay_hop_rejects(self, conn):
-        # One row per rejected track per genre hop (a skip and a later removal
-        # of the same track count once). utils/autoplay.py decides when a hop
-        # is blocked from these.
-        await conn.execute('''
-            CREATE TABLE IF NOT EXISTS autoplay_hop_rejects (
-                src         TEXT NOT NULL,
-                dst         TEXT NOT NULL,
-                path        TEXT NOT NULL,
-                artist      TEXT,
-                rejected_at REAL NOT NULL,
-                PRIMARY KEY (src, dst, path)
-            )
-        ''')
-        await conn.commit()
-
-    async def record_hop_reject(self, src: str, dst: str, path: str, artist: str) -> None:
-        async with self._write_lock:
-            conn = await self.get_connection()
-            await conn.execute(
-                "INSERT OR REPLACE INTO autoplay_hop_rejects "
-                "(src, dst, path, artist, rejected_at) "
-                "VALUES (?, ?, ?, ?, strftime('%s','now'))",
-                (src, dst, path, artist or ""),
-            )
-            await conn.commit()
-
-    async def get_hop_rejects(self) -> list[dict]:
-        """Per genre hop: {src, dst, rejects, artists (distinct), last_at},
-        most recent first."""
-        conn = await self.get_connection()
-        async with conn.execute('''
-            SELECT src, dst, COUNT(*) AS rejects,
-                   COUNT(DISTINCT NULLIF(artist, '')) AS artists,
-                   MAX(rejected_at) AS last_at
-            FROM autoplay_hop_rejects
-            GROUP BY src, dst
-            ORDER BY last_at DESC
-        ''') as cursor:
-            return [dict(r) for r in await cursor.fetchall()]
-
-    async def clear_hop_rejects(self, pairs: list[tuple[str, str]] | None = None) -> None:
-        """Forget the rejections of `pairs` [(src, dst), ...]; None forgets all."""
-        async with self._write_lock:
-            conn = await self.get_connection()
-            if pairs is None:
-                await conn.execute("DELETE FROM autoplay_hop_rejects")
-            else:
-                await conn.executemany(
-                    "DELETE FROM autoplay_hop_rejects WHERE src = ? AND dst = ?",
-                    [tuple(p) for p in pairs],
-                )
-            await conn.commit()
 
     async def get_track_clusters_bulk(
         self, paths: list[str]
@@ -3542,7 +3844,7 @@ class DatabaseManager:
         sql = (
             "SELECT al.id AS album_id, al.genre AS current_genre, "
             "al.genre_bucket AS current_bucket, ar.name AS artist_name, "
-            "e.genres AS api_genres, e.status AS api_status "
+            "e.genres AS api_genres, e.status AS api_status, e.source AS api_source "
             "FROM albums al "
             "JOIN artists ar ON ar.id = al.artist_id "
             "LEFT JOIN artist_enrichment e ON e.artist_name = ar.name"
@@ -3680,6 +3982,34 @@ class DatabaseManager:
                     # No family consensus and nothing to keep — surface the raw
                     # top tag rather than leave an empty/placeholder.
                     display = genre_display_label(tags_by_count[0])
+            # ── The user's answer REPLACES what the files and sources said ────
+            # Everything above merges, because a source omitting a tag is noise.
+            # A hand-set genre list is a correction ('Kasabian is Alt, not
+            # Rock'): merging it in would leave the wrong family in place and the
+            # Library would never show the edit.
+            manual_tags = []
+            if (row["api_source"] or "") == "manual" and api_genres_raw:
+                try:
+                    manual_tags = [g.get("name") for g in json.loads(api_genres_raw)
+                                   if isinstance(g, dict) and g.get("name")]
+                except Exception:
+                    manual_tags = []
+            if manual_tags:
+                fams = Counter(b for b in (genre_bucket(t) for t in manual_tags)
+                               if b not in ("Unknown", "Other"))
+                top = fams.most_common(1)[0][0] if fams else None
+                rep = next((t for t in manual_tags if genre_bucket(t) == top), manual_tags[0])
+                display = rep.strip().title()
+                final = set()
+                for t in manual_tags:
+                    final |= _real_tokens(t)
+                if display != curr_genre:
+                    genre_updates.append((display, album_id))
+                new_bucket = ",".join(sorted(final)) if final else None
+                if new_bucket != (curr_bucket or None):
+                    bucket_updates.append((new_bucket, album_id))
+                continue
+
             if display != curr_genre:
                 genre_updates.append((display, album_id))
 

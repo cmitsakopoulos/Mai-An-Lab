@@ -10,12 +10,21 @@ import unittest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from utils.genre_similarity import build_npmi_model, soft_set_sim, FAMILY_FLOOR
+from utils.artist_graph import FAMILY_SIM, ROOT_SIM, tag_similarity
+from utils.genre_similarity import build_npmi_model
 from utils.genre_taxonomy import (
     genre_families, genre_bucket, genre_tokens, is_regional_tag,
 )
 from utils.metadata_enrich import split_artist_credits, credit_keys, _name_close
-from utils.track_graph import _same_act
+
+
+def _sim(a, b, npmi=None):
+    """Stations' tag-to-tag similarity of two tokens."""
+    return float(tag_similarity([a, b], npmi)[0, 1])
+
+
+def _same_act(a, b):
+    return bool(credit_keys(a) & credit_keys(b))
 
 
 class TestNpmiEvidenceGating(unittest.TestCase):
@@ -50,29 +59,45 @@ class TestNpmiEvidenceGating(unittest.TestCase):
         self.assertTrue(all(v < 0.999 for v in m.values()))
 
 
-class TestFamilyBackstop(unittest.TestCase):
+class TestTagSimilarity(unittest.TestCase):
     """Evidence gating alone over-corrected: with 224 subgenre tokens across 182
     artists, genuinely-related pairs are single-support too, so 'electrohouse'
-    got fenced from 'deephouse' at 0.000. The curated taxonomy floors it."""
+    got fenced from 'deephouse' at 0.000. Compound heads and the curated
+    taxonomy give them a floor the learned model can only raise."""
+
+    def test_compound_genres_share_their_head(self):
+        self.assertAlmostEqual(_sim("deephouse", "house"), ROOT_SIM, places=5)
+        self.assertAlmostEqual(_sim("poprap", "rap"), ROOT_SIM, places=5)
+        self.assertAlmostEqual(_sim("southernhiphop", "hiphop"), ROOT_SIM, places=5)
+
+    def test_only_the_head_counts(self):
+        """English genre names put the head last: 'alternative hip hop' is
+        hip-hop, not 'alternative'; and 'garage' does not end in a genre called
+        'rage' (the qualifier must be ≥ 3 letters)."""
+        self.assertLess(_sim("alternativehiphop", "alternative"), ROOT_SIM)
+        self.assertLess(_sim("garage", "rage"), ROOT_SIM)
 
     def test_same_family_is_never_unrelated(self):
-        self.assertGreaterEqual(
-            soft_set_sim({"deephouse"}, {"electrohouse"}, {}), FAMILY_FLOOR)
-        self.assertGreaterEqual(
-            soft_set_sim({"eurohouse"}, {"italohouse"}, {}), FAMILY_FLOOR)
+        self.assertGreaterEqual(_sim("deephouse", "electrohouse"), FAMILY_SIM)
+        self.assertGreaterEqual(_sim("eurohouse", "italohouse"), FAMILY_SIM)
 
-    def test_backstop_clears_the_walk_veto_floor(self):
-        # track_graph.walk's default veto_genre_floor.
-        self.assertGreater(FAMILY_FLOOR, 0.06)
+    def test_learned_model_raises_never_lowers(self):
+        self.assertAlmostEqual(_sim("trap", "drill", {"drill|trap": 0.7}), 0.7, places=5)
+        self.assertAlmostEqual(
+            _sim("deephouse", "electrohouse", {"deephouse|electrohouse": 0.01}), FAMILY_SIM,
+            places=5)
 
-    def test_cross_family_gets_no_floor(self):
-        """The Carti -> laiko timbre bridge must still be fenced."""
-        self.assertEqual(soft_set_sim({"trap"}, {"laiko"}, {}), 0.0)
-        self.assertEqual(soft_set_sim({"hiphop"}, {"rebetiko"}, {}), 0.0)
+    def test_cross_family_is_unrelated(self):
+        """The Carti -> laiko timbre bridge."""
+        self.assertEqual(_sim("trap", "laiko"), 0.0)
+        self.assertEqual(_sim("hiphop", "rebetiko"), 0.0)
 
-    def test_backstop_is_opt_out(self):
-        self.assertEqual(
-            soft_set_sim({"deephouse"}, {"electrohouse"}, {}, family_floor=0.0), 0.0)
+    def test_no_family_kinship_across_the_regional_line(self):
+        """Folk/Cntry files laiko next to blues; that made a laiko station run
+        into Fleetwood Mac once the Greek scene was used up."""
+        self.assertEqual(genre_bucket("laiko"), genre_bucket("blues"))
+        self.assertEqual(_sim("laiko", "blues"), 0.0)
+        self.assertAlmostEqual(_sim("laiko", "rebetiko"), FAMILY_SIM, places=5)
 
     def test_families_use_primary_label_not_substring_matches(self):
         """'alternative hip hop' arrives separator-stripped, so the multi-label
@@ -83,7 +108,11 @@ class TestFamilyBackstop(unittest.TestCase):
         kendrick = {"hiphop", "conscioushiphop", "jazzrap", "westcoasthiphop"}
         slipknot = {"numetal", "alternativemetal", "metal", "heavymetal"}
         self.assertFalse(genre_families(kendrick) & genre_families(slipknot))
-        self.assertEqual(soft_set_sim(kendrick, slipknot, {}), 0.0)
+        S = tag_similarity(sorted(kendrick | slipknot))
+        tags = sorted(kendrick | slipknot)
+        for a in kendrick:
+            for b in slipknot:
+                self.assertEqual(S[tags.index(a), tags.index(b)], 0.0, (a, b))
 
 
 class TestCreditDecomposition(unittest.TestCase):
@@ -123,21 +152,14 @@ class TestCreditDecomposition(unittest.TestCase):
 
 
 class TestRegionalScenes(unittest.TestCase):
-    """`_is_regional` gates a HARD cross-country pool constraint. It used to ask
-    'is this the Folk/Cntry bucket?', but that bucket holds laiko AND blues, so
-    Fleetwood Mac was treated as a regional act and fenced from every non-GB
-    artist — 4.9% of all enriched pairs in the audit."""
+    """A scene is regional when it travels with a language, not when it is
+    folk-adjacent: the Folk/Cntry bucket holds laiko AND blues."""
 
     def test_western_roots_music_is_not_regional(self):
-        from utils.track_graph import _is_regional
-        self.assertFalse(_is_regional({"bluesrock", "folkrock", "poprock"}))
         for tag in ("blues", "country", "americana", "bluegrass", "folkrock"):
             self.assertFalse(is_regional_tag(tag), f"{tag} is borderless")
 
     def test_language_bound_scenes_are_regional(self):
-        from utils.track_graph import _is_regional
-        self.assertTrue(_is_regional({"folkpop", "laiko", "modernlaiko"}))
-        self.assertTrue(_is_regional({"rebetiko"}))
         for tag in ("laiko", "rebetiko", "entechno", "reggaeton", "dancehall"):
             self.assertTrue(is_regional_tag(tag), f"{tag} travels with a language")
 
@@ -153,43 +175,11 @@ class TestRegionalScenes(unittest.TestCase):
         self.assertEqual(genre_bucket("Hard Rock"), "Metal")
         self.assertEqual(genre_bucket("Rap"), "Hip-Hop")
 
-    def test_regional_requires_dominance_not_mere_presence(self):
-        """One regional-flavoured tag on a borderless artist must not trip the
-        hard country fence. Real profiles from the library, with their measured
-        regional fractions."""
-        from utils.track_graph import _is_regional
-        borderless = {
-            # AJ Tracey — a UK rapper; the lone 'dancehall' tag fenced him from
-            # other UK rappers (0.20).
-            "AJ Tracey": {"cloudrap", "dancehall", "grime", "hiphop", "ukdrill"},
-            # Santana (0.12) and Pitbull (0.12) — international acts.
-            "Santana": {"latinrock", "bluesrock", "classicrock", "jazzfusion",
-                        "jazzrock", "poprock", "rock", "latin rock"},
-            "Pitbull": {"latinpop", "dance", "dancepop", "electrohouse",
-                        "electropop", "pop", "poprap", "rap"},
-        }
-        for name, tags in borderless.items():
-            self.assertFalse(_is_regional(tags), f"{name} must not be regional")
-
-        regional = {
-            "Vasilis Karras": {"laiko", "rebetiko", "folkpop"},          # 0.67
-            "Giorgos Mazonakis": {"laiko", "modernlaiko", "folkpop", "pop"},  # 0.50
-            "Rina": {"jpop"},                                            # 1.00
-        }
-        for name, tags in regional.items():
-            self.assertTrue(_is_regional(tags), f"{name} must be regional")
-
     def test_regional_vocabulary_covers_non_greek_scenes(self):
         """Cesária Evora is as regional as an artist gets, but Cape Verde's own
-        genres were missing from the key list, so she scored 0.25 and read as
-        borderless. Vocabulary coverage and the dominance threshold are separate
-        fixes — this needs both."""
-        from utils.track_graph import _is_regional
-        evora = {"latin", "worldbeat", "morna", "coladeira",
-                 "afrohouse", "folk", "modinha", "cabo"}
+        genres were missing from the key list."""
         self.assertTrue(is_regional_tag("morna"))
         self.assertTrue(is_regional_tag("coladeira"))
-        self.assertTrue(_is_regional(evora))
 
     def test_added_regional_keys_have_no_substring_collisions(self):
         """Keys match as raw substrings against separator-stripped tags, so a

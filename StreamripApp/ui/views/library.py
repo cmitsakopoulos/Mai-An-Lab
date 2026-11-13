@@ -663,7 +663,22 @@ class LibraryView:
 
     def show_filtered(self, mode: str, query: str):
         """Open `mode` (e.g. 'artists', 'genres') with the search box pre-filled
-        with `query`. Used by the landing page's most-listened cards."""
+        with `query`. Used by the landing page's most-listened cards and
+        Search's "In your library" rows.
+
+        If that tab is hidden in Settings, _update_view_tabs would silently
+        swap in the first visible tab (Playlists) with the album/artist name
+        still in the filter, so it lands on Tracks instead: the track filter
+        matches title, album and artist, so the same name still finds them."""
+        visible = self._visible_view_modes(self._load_appearance())
+        if mode not in visible:
+            fallback = "tracks" if "tracks" in visible else visible[0]
+            if mode not in ("albums", "artists") or fallback != "tracks":
+                query = ""  # a genre/playlist name won't match anything here
+            self.app.show_snackbar(
+                f"The {mode.capitalize()} tab is hidden (Settings → Appearance). "
+                f"Showing {fallback} instead.")
+            mode = fallback
         self._search_field.value = query
         self.search_query = query
         self._lib_clear_btn.visible = bool(query)
@@ -1903,7 +1918,7 @@ class LibraryView:
             audio_engine.set_queue(tracks, start_index=0)
         else:
             # Add: the listener's picks, after any earlier ones (FIFO) and
-            # ahead of auto-play and the held queue (utils.queue_layout).
+            # ahead of auto-play's recommendations (utils.queue_layout).
             audio_engine.queue_last_many(tracks)
         return len(tracks)
 
@@ -2520,14 +2535,17 @@ class LibraryView:
             if token == self._net_pulse_token:
                 self._net_pulse_running = False
 
-    def _update_view_tabs(self):
+    @staticmethod
+    def _load_appearance() -> dict:
         from utils.streamrip_api import load_config
         try:
-            cfg = load_config()
-            appearance = cfg.get("appearance", {})
+            return load_config().get("appearance", {})
         except:
-            appearance = {}
+            return {}
 
+    @staticmethod
+    def _visible_view_modes(appearance: dict) -> list[str]:
+        """Library tabs the user has enabled (Settings → Appearance), in bar order."""
         def _to_bool(val, default):
             if val is None: return default
             if isinstance(val, bool): return val
@@ -2549,9 +2567,11 @@ class LibraryView:
         if show_albums: visible_modes.append("albums")
         if show_tracks: visible_modes.append("tracks")
 
-        if not visible_modes:
-            visible_modes = ["tracks"]
-            show_tracks = True
+        return visible_modes or ["tracks"]
+
+    def _update_view_tabs(self):
+        appearance = self._load_appearance()
+        visible_modes = self._visible_view_modes(appearance)
 
         if self.view_mode not in visible_modes:
             self.view_mode = visible_modes[0]
@@ -2574,20 +2594,11 @@ class LibraryView:
             "network":   CYAN,
         }
 
-        all_modes = [
-            ("network", "Network", show_network),
-            ("playlists", "Playlists", show_playlists),
-            ("genres", "Genres", show_genres),
-            ("artists", "Artists", show_artists),
-            ("albums", "Albums", show_albums),
-            ("tracks", "Tracks", show_tracks),
-        ]
-
-        segments = []
-        for mode, label, enabled in all_modes:
-            if not enabled:
-                continue
-            segments.append((mode, label, icons[mode], accents[mode]))
+        labels = {
+            "network": "Network", "playlists": "Playlists", "genres": "Genres",
+            "artists": "Artists", "albums": "Albums", "tracks": "Tracks",
+        }
+        segments = [(m, labels[m], icons[m], accents[m]) for m in visible_modes]
 
         if (
             self._view_tabs_row.controls

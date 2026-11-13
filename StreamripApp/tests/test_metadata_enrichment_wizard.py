@@ -310,14 +310,14 @@ async def test_retry_incomplete_is_its_own_scope():
 
 
 @pytest.mark.asyncio
-async def test_metadata_edit_rebuilds_the_journey_graph():
-    """THE regression this overhaul exists for.
-
-    `build_journey_graph` was called only from a full acoustic rebuild and the
-    bulk-override path, so a sync, a Save, an Accept and a Use-This-Match all
-    left the journey graph — the artefact `walk()` actually traverses, and which
-    is memory-cached — stale. Edits appeared to save and changed nothing."""
+async def test_metadata_edit_reaches_the_stations():
+    """THE regression the refresh exists for: a sync, a Save, an Accept and a
+    Use-This-Match used to leave auto-play's genre structure stale (it was
+    persisted and memory-cached), so edits appeared to save and changed
+    nothing. Every edit path now rebuilds the NPMI model, which drops the
+    stations' in-memory artist graph."""
     import utils.metadata_enrich as me
+    import utils.track_graph as tg
 
     calls = []
 
@@ -326,24 +326,12 @@ async def test_metadata_edit_rebuilds_the_journey_graph():
             calls.append("genres")
             return {}
 
-    async def fake_affinity(db):
-        calls.append("affinity")
-        return 7
+    tg._ARTIST_GRAPH_CACHE.update(key="stale", graph=object())
+    out = await me._do_refresh_walk_models(FakeDB())
 
-    async def fake_journey(db):
-        calls.append("journey")
-        return 11
-
-    import utils.track_graph as tg
-    orig_a, orig_j = tg.build_genre_affinity, tg.build_journey_graph
-    tg.build_genre_affinity, tg.build_journey_graph = fake_affinity, fake_journey
-    try:
-        out = await me._do_refresh_walk_models(FakeDB())
-    finally:
-        tg.build_genre_affinity, tg.build_journey_graph = orig_a, orig_j
-
-    assert calls == ["genres", "affinity", "journey"], calls
-    assert out["journey_nodes"] == 11
+    assert calls == ["genres"], calls
+    assert out["model_pairs"] == 0                  # fake has no enrichment
+    assert tg._ARTIST_GRAPH_CACHE == {"key": None, "graph": None}
 
 
 def test_composite_bucket_labels_are_not_split_into_orphans():

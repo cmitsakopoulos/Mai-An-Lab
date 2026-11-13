@@ -3,13 +3,15 @@ import re
 import sys
 import shutil
 import math
+import time
 import logging
 import asyncio
 import flet as ft
 from ui.tokens import (
     BG, SURFACE, SURFACE2, SURFACE_ELEVATED, CYAN, AMBER, TEXT, DIM, TEXT_TERTIARY, BORDER, BORDER_SUBTLE, 
     RADIUS_CARD, RADIUS_PILL, RADIUS_THUMB,
-    SOURCE_COLORS, LIB_ARTIST_COLOR, LIB_ALBUM_COLOR, LIB_TRACK_COLOR, 
+    SOURCE_COLORS, LIB_ARTIST_COLOR, LIB_ALBUM_COLOR, LIB_TRACK_COLOR, LIB_PLAYLIST_COLOR, LIB_GENRE_COLOR,
+    RANK_COLORS,
     apply_opacity
 )
 from ui.widgets import AnimatedEntry, SkeletonRow, src_color, strip_markup, build_page_ghost_top, build_page_ghost_bottom, CupertinoSegmentedBar
@@ -127,7 +129,7 @@ class SearchView:
         self._active_preview_stop_event: asyncio.Event | None = None
         self.expanded_nodes: set[str] = set() # Track IDs/Artist IDs of expanded items
         self.node_cache: dict[str, list[dict]] = {} # Cache for expanded node children
-        self.view_mode = "tracks" # artist, album, track (plural, matches tab labels)
+        self.view_mode = "all" # all, tracks, albums, artists
 
         # ── multi-select ───────────────────────────────────────────────────
         # Selection is keyed "source:media_type:id" and the RECORD is retained
@@ -147,8 +149,16 @@ class SearchView:
         # token shouldn't hide what is already on the phone).
         self._local_matches: dict[str, list[dict]] = {}
         self._local_task: asyncio.Task | None = None
+        self._local_library_expanded = False
         self._remote_pending = False
         self._remote_error: str | None = None
+        self._shelf_scroll_tasks: dict[int, asyncio.Task] = {}
+        self._shelf_deltas: dict[int, float] = {}
+        # While the remote half is pending, the results list is
+        # [progress spacer, "In your library" section?, skeletons...]; these
+        # let the library half and its expand toggle find their slots.
+        self._progress_spacer: ft.Control | None = None
+        self._pending_local_section: ft.Control | None = None
 
 
         # ── Search Bar & Sources ───────────────────────────────────────────
@@ -191,6 +201,9 @@ class SearchView:
         self._is_programmatic_scroll = False
         self._last_scroll_pixels = 0
         self._saved_scroll = 0.0
+        self._landing_stale = True
+        self._landing_built_at = 0.0
+        self._cached_releases: list[dict] | None = None
 
         # results list
         self._results_list = ft.ListView(
@@ -356,7 +369,7 @@ class SearchView:
                         ft.Button(
                             "Check Settings",
                             icon=ft.Icons.SETTINGS_ROUNDED,
-                            on_click=lambda _: self.app._switch_tab(3),
+                            on_click=lambda _: self._open_account_settings(),
                             style=ft.ButtonStyle(color=BG, bgcolor=CYAN),
                         ),
                         ft.TextButton(
@@ -365,6 +378,11 @@ class SearchView:
                             on_click=lambda _: self.page.run_task(self.start_search),
                         ),
                     ], alignment=ft.MainAxisAlignment.CENTER),
+                    ft.TextButton(
+                        "Show demo results instead",
+                        icon=ft.Icons.AUTO_AWESOME_ROUNDED,
+                        on_click=lambda _: self._enable_demo_and_retry(),
+                    ),
                 ],
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,
                 spacing=8,
@@ -405,8 +423,8 @@ class SearchView:
             bgcolor=SURFACE,
             border=ft.Border.all(1, apply_opacity(0.35, CYAN)),
             border_radius=12,
-            padding=12,
-            margin=ft.Margin.only(left=12, right=12, bottom=8),
+            padding=ft.Padding.symmetric(horizontal=12, vertical=8),
+            margin=ft.Margin.only(left=12, right=12, bottom=6),
             shadow=ft.BoxShadow(blur_radius=16, spread_radius=-4, color="#66000000"),
             visible=False,
             # Slides down from above the list rather than up from below it:
@@ -449,8 +467,8 @@ class SearchView:
             bgcolor=SURFACE,
             border=ft.Border.all(1, apply_opacity(0.35, CYAN)),
             border_radius=12,
-            padding=12,
-            margin=ft.Margin.only(left=12, right=12, bottom=8),
+            padding=ft.Padding.symmetric(horizontal=12, vertical=8),
+            margin=ft.Margin.only(left=12, right=12, bottom=6),
             shadow=ft.BoxShadow(blur_radius=16, spread_radius=-4, color="#66000000"),
             visible=False,
             # Slides down from above the list rather than up from below it:
@@ -665,7 +683,7 @@ class SearchView:
         self._prev_page_btn.disabled = self.current_page <= 0
         self._prev_page_btn.icon_color = DIM if self.current_page <= 0 else CYAN
         self._next_page_btn.disabled = self.current_page >= self.total_pages - 1
-        self._pagination_bar.visible = self.total_pages > 1
+        self._pagination_bar.visible = self.total_pages > 1 and self.view_mode != "all"
         self.try_update(self._pagination_bar)
 
     def _on_list_scroll(self, e: ft.OnScrollEvent):
@@ -795,7 +813,16 @@ class SearchView:
         self.refresh_setup_state(update=False)
         return self._root
 
-    def refresh_setup_state(self, update=True):
+    # How long the landing cards may be reused across tab switches before the
+    # play counts and library totals are re-queried.
+    _LANDING_TTL_S = 60.0
+
+    def mark_landing_stale(self):
+        """Flags the landing page cards for re-query on next view."""
+        self._landing_stale = True
+        self._cached_releases = None
+
+    def refresh_setup_state(self, update=True, force=False):
         from utils.streamrip_api import load_config
         cfg = load_config()
         # The lock screen used to read ONLY the Qobuz section, so a user who had
@@ -804,7 +831,7 @@ class SearchView:
         # usable; which one is selected is _credentials_missing's job, and that
         # is checked per-search with an actionable, source-named message.
         configured = self._configured_sources(cfg)
-        has_creds = bool(configured)
+        has_creds = bool(configured) or self._demo_mode(cfg)
         if configured and self.selected_source not in configured:
             # Don't strand the user on a source they can't search when another
             # one is ready. Assignment only — no re-query, no cache invalidation,
@@ -821,7 +848,6 @@ class SearchView:
         # "show_search_history" is the historical key of the most-listened
         # tracks card, kept so existing configs still apply.
         sections = {
-            "recent_searches": bool(landing_cfg.get("show_recent_searches", True)),
             "new_releases": bool(landing_cfg.get("show_new_releases", True)),
             "most_listened": bool(landing_cfg.get("show_search_history", True)),
             "top_artists": bool(landing_cfg.get("show_top_artists", True)),
@@ -852,7 +878,15 @@ class SearchView:
                 is_empty = not bool(self._search_field.value)
                 self._landing_container.visible = is_empty
                 if is_empty:
-                    self.page.run_task(self._refresh_landing_page, sections)
+                    if sections["new_releases"]:
+                        self.app.maybe_recheck_new_releases()
+                    # Skip the re-query on quick tab flips, but not for long:
+                    # play counts and library totals change as the user listens
+                    # and downloads, and nothing else marks the landing stale.
+                    has_cards = bool(getattr(self._landing_container, "controls", None))
+                    aged = time.monotonic() - getattr(self, "_landing_built_at", 0.0) > self._LANDING_TTL_S
+                    if force or not has_cards or getattr(self, "_landing_stale", True) or aged:
+                        self.page.run_task(self._refresh_landing_page, sections)
         
         if update:
             self.app.safe_update(_apply)
@@ -860,95 +894,101 @@ class SearchView:
             _apply()
 
     async def _refresh_landing_page(self, sections: dict):
-        """Rebuild the landing cards, top to bottom: what you were looking
-        for, what's new from your artists, what you play, then the stats."""
+        """Rebuild the landing cards, top to bottom: what's new from your artists,
+        what you play, then the stats. Queries run concurrently to eliminate
+        frame drops and loading hiccups."""
         if getattr(self.app, "_is_restarting", False):
             return
 
+        db = self.app.db_manager
+
+        async def _fetch_new_releases():
+            if not sections.get("new_releases"):
+                return None
+            return await self._build_new_releases_card()
+
+        async def _fetch_most_played():
+            if not sections.get("most_listened"):
+                return []
+            return await db.get_most_played(limit=5)
+
+        async def _fetch_top_artists():
+            if not sections.get("top_artists"):
+                return []
+            return await db.get_most_played_artists(limit=5)
+
+        async def _fetch_top_genres():
+            if not sections.get("top_genres"):
+                return []
+            return await db.get_most_played_genres(limit=5)
+
+        async def _fetch_stats():
+            if not sections.get("stats"):
+                return None
+            return await self._get_library_stats_content()
+
         cards: list[ft.Control] = []
         try:
-            db = self.app.db_manager
-            if sections.get("recent_searches"):
-                from utils.search_history import load_searches
-                recent = [q for q in await asyncio.to_thread(load_searches) if isinstance(q, str) and q.strip()]
-                if recent:
-                    cards.append(self._build_recent_searches(recent[:8]))
+            new_releases_card, most_played_res, top_artists_res, top_genres_res, stats_res = await asyncio.gather(
+                _fetch_new_releases(),
+                _fetch_most_played(),
+                _fetch_top_artists(),
+                _fetch_top_genres(),
+                _fetch_stats(),
+                return_exceptions=True
+            )
+            for res in (new_releases_card, most_played_res, top_artists_res, top_genres_res, stats_res):
+                if isinstance(res, Exception):
+                    logger.warning("Landing card query failed", exc_info=res)
 
-            if sections.get("new_releases"):
-                card = await self._build_new_releases_card()
-                if card is not None:
-                    cards.append(card)
+            if isinstance(new_releases_card, ft.Control):
+                cards.append(new_releases_card)
 
-            if sections.get("most_listened"):
-                most_played_tracks = await db.get_most_played(limit=5)
-                if most_played_tracks:
-                    cards.append(self._build_landing_card(
-                        "Most Listened Tracks", ft.Icons.REPLAY_ROUNDED,
-                        self._build_most_played_content(most_played_tracks)))
+            if isinstance(most_played_res, list) and most_played_res:
+                cards.append(self._build_landing_card(
+                    "Most Listened Tracks", ft.Icons.REPLAY_ROUNDED,
+                    self._build_most_played_content(most_played_res)))
 
-            if sections.get("top_artists"):
-                top_artists = await db.get_most_played_artists(limit=5)
-                if top_artists:
-                    cards.append(self._build_landing_card(
-                        "Most Listened Artists", ft.Icons.PERSON_ROUNDED,
-                        self._build_top_list_content(
-                            top_artists, ft.Icons.PERSON_OUTLINE_ROUNDED, "artists",
-                            lambda r: f"{r['plays']} plays • {r['tracks_played']} tracks",
-                        ),
-                    ))
+            if isinstance(top_artists_res, list) and top_artists_res:
+                cards.append(self._build_landing_card(
+                    "Most Listened Artists", ft.Icons.PERSON_ROUNDED,
+                    self._build_top_list_content(
+                        top_artists_res, ft.Icons.PERSON_OUTLINE_ROUNDED, "artists",
+                        lambda r: f"{r.get('plays', 0)} plays • {r.get('tracks_played', 0)} tracks",
+                    ),
+                ))
 
-            if sections.get("top_genres"):
-                top_genres = await db.get_most_played_genres(limit=5)
-                if top_genres:
-                    cards.append(self._build_landing_card(
-                        "Most Listened Genres", ft.Icons.CATEGORY_ROUNDED,
-                        self._build_top_list_content(
-                            top_genres, ft.Icons.LABEL_OUTLINE_ROUNDED, "genres",
-                            lambda r: f"{r['plays']} plays • {r['albums_played']} albums",
-                        ),
-                    ))
+            if isinstance(top_genres_res, list) and top_genres_res:
+                cards.append(self._build_landing_card(
+                    "Most Listened Genres", ft.Icons.CATEGORY_ROUNDED,
+                    self._build_top_list_content(
+                        top_genres_res, ft.Icons.LABEL_OUTLINE_ROUNDED, "genres",
+                        lambda r: f"{r.get('plays', 0)} plays • {r.get('albums_played', 0)} albums",
+                    ),
+                ))
 
-            if sections.get("stats"):
+            if isinstance(stats_res, ft.Control):
                 cards.append(self._build_landing_card(
                     "Library at a Glance", ft.Icons.INSERT_CHART_OUTLINED_ROUNDED,
-                    await self._get_library_stats_content()))
+                    stats_res))
 
         except Exception as e:
-            logger.warning(f"Failed to refresh landing page during transition: {e}")
+            logger.warning(f"Failed to refresh landing page: {e}")
             return
 
-        # Swapped in one go, so a refresh never flashes an empty landing page.
         self._landing_container.controls = cards
+        self._landing_stale = False
+        self._landing_built_at = time.monotonic()
         self.app.safe_update(lambda: None)
 
-    # ── landing: recent searches + new releases ─────────────────────────────
-    def _build_recent_searches(self, queries: list[str]) -> ft.Control:
-        chips = [
-            ft.Container(
-                content=ft.Row([
-                    ft.Icon(ft.Icons.HISTORY_ROUNDED, color=DIM, size=14),
-                    ft.Text(q, color=TEXT, size=12, max_lines=1,
-                            overflow=ft.TextOverflow.ELLIPSIS),
-                ], spacing=6, tight=True),
-                bgcolor=SURFACE,
-                border=ft.Border.all(1, BORDER_SUBTLE),
-                border_radius=RADIUS_PILL,
-                padding=ft.Padding.symmetric(horizontal=12, vertical=7),
-                on_click=lambda e, q=q: self._do_recent(q),
-            )
-            for q in queries
-        ]
-        return ft.Container(
-            content=ft.Column([
-                ft.Text("Recent searches", color=DIM, size=12, weight=ft.FontWeight.W_600),
-                ft.Row(chips, wrap=True, spacing=8, run_spacing=8),
-            ], spacing=8),
-            margin=ft.Margin.only(bottom=16),
-        )
-
     async def _build_new_releases_card(self) -> ft.Control | None:
-        from utils.new_releases import get_new_releases
-        releases = await get_new_releases(self.app.db_manager, limit=30)
+        if getattr(self, "_cached_releases", None) is None or getattr(self.app, "new_releases_refreshing", False):
+            from utils.new_releases import get_new_releases
+            releases = await get_new_releases(self.app.db_manager, limit=30)
+            self._cached_releases = releases
+        else:
+            releases = self._cached_releases
+
         if not releases:
             if getattr(self.app, "new_releases_refreshing", False):
                 return self._build_landing_card(
@@ -966,17 +1006,89 @@ class SearchView:
         for label, items in (("Albums & EPs", albums), ("Singles", singles)):
             if not items:
                 continue
-            rows.append(ft.Text(label, color=DIM, size=11, weight=ft.FontWeight.W_600))
-            rows.append(ft.ListView(
+            shelf_lv = ft.ListView(
                 controls=[self._release_tile(r) for r in items],
-                horizontal=True, spacing=12, height=172,
-            ))
-        rows.append(ft.Text("From Deezer and MusicBrainz, checked weekly. Tap one to search for it.",
+                horizontal=True,
+                spacing=12,
+                height=196,
+                build_controls_on_demand=False,
+            )
+            rows.append(self._build_shelf_header(label, shelf_lv, len(items)))
+            rows.append(shelf_lv)
+        rows.append(ft.Text("From Deezer and MusicBrainz, checked daily. Tap one to search for it.",
                             color=DIM, size=10))
+        refresh_btn = await self._build_releases_refresh_button()
         return self._build_landing_card(
             "New From Your Artists", ft.Icons.NEW_RELEASES_ROUNDED,
             ft.Column(rows, spacing=8),
+            action=refresh_btn,
         )
+
+    def _handle_shelf_scroll(self, lv: ft.ListView, delta: float, duration: int = 180):
+        """Smoothly shifts the horizontal release shelf forward or backward.
+        Coalesces rapid wheel/trackpad ticks into a single fluid glide."""
+        lv_id = id(lv)
+        if not hasattr(self, "_shelf_deltas"):
+            self._shelf_deltas = {}
+        if not hasattr(self, "_shelf_scroll_tasks"):
+            self._shelf_scroll_tasks = {}
+
+        self._shelf_deltas[lv_id] = self._shelf_deltas.get(lv_id, 0.0) + delta
+
+        task = self._shelf_scroll_tasks.get(lv_id)
+        if task and not task.done():
+            return
+
+        page = getattr(self.app, "page", None) or getattr(self, "page", None)
+        if page and hasattr(page, "run_task"):
+            async def _scroll_loop():
+                try:
+                    while lv_id in self._shelf_deltas and abs(self._shelf_deltas[lv_id]) > 0.5:
+                        d = self._shelf_deltas.pop(lv_id, 0.0)
+                        await lv.scroll_to(delta=d, duration=duration, curve=ft.AnimationCurve.EASE_OUT)
+                        await asyncio.sleep(0.04)
+                except Exception as ex:
+                    logger.debug(f"Shelf scroll_to ignored: {ex}")
+                finally:
+                    self._shelf_deltas.pop(lv_id, None)
+                    self._shelf_scroll_tasks.pop(lv_id, None)
+
+            try:
+                self._shelf_scroll_tasks[lv_id] = page.run_task(_scroll_loop)
+            except Exception:
+                pass
+
+    def _shelf_nav(self, shelf_lv: ft.ListView, item_count: int) -> ft.Control:
+        """Prev/next chevrons for a horizontal shelf. Touch swipes and trackpads
+        scroll shelves natively, and Shift+wheel does on desktop; a plain
+        vertical wheel belongs to the page, so these are the mouse affordance.
+        (Translating the wheel ourselves scrolled the page AND the shelf: a
+        GestureDetector's on_scroll doesn't claim the pointer signal.)"""
+        def _btn(icon, tooltip, delta):
+            return ft.IconButton(
+                icon=icon,
+                icon_color=DIM,
+                icon_size=18,
+                width=28,
+                height=28,
+                tooltip=tooltip,
+                style=ft.ButtonStyle(
+                    padding=0,
+                    shape=ft.RoundedRectangleBorder(radius=6),
+                ),
+                on_click=lambda e: self._handle_shelf_scroll(shelf_lv, delta),
+            )
+        return ft.Row([
+            _btn(ft.Icons.CHEVRON_LEFT_ROUNDED, "Scroll left", -260),
+            _btn(ft.Icons.CHEVRON_RIGHT_ROUNDED, "Scroll right", 260),
+        ], spacing=2, tight=True, visible=item_count > 3)
+
+    def _build_shelf_header(self, label: str, shelf_lv: ft.ListView, item_count: int) -> ft.Control:
+        return ft.Row([
+            ft.Text(label, color=DIM, size=11, weight=ft.FontWeight.W_600),
+            ft.Container(expand=True),
+            self._shelf_nav(shelf_lv, item_count),
+        ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN, vertical_alignment=ft.CrossAxisAlignment.CENTER)
 
     _RELEASE_TYPE_LABELS = {"album": "Album", "ep": "EP", "single": "Single"}
 
@@ -1000,9 +1112,14 @@ class SearchView:
                         max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
                 ft.Text(rel.get("artist") or "", color=DIM, size=11,
                         max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
-                ft.Text(f"{kind} · {_release_date_label(rel.get('date'))}", color=DIM, size=10),
+                ft.Text(f"{kind} · {_release_date_label(rel.get('date'))}", color=TEXT_TERTIARY, size=10,
+                        max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
             ], spacing=2, tight=True),
             width=size,
+            border_radius=10,
+            padding=ft.Padding.only(bottom=4),
+            ink=True,
+            tooltip=f"{rel.get('title', '')} · {rel.get('artist', '')}",
             on_click=lambda e, r=rel: self._search_release(r),
         )
 
@@ -1018,58 +1135,111 @@ class SearchView:
 
     def _build_most_played_content(self, tracks):
         items = []
-        for t in tracks:
+        for rank, t in enumerate(tracks, start=1):
+            rank_color = RANK_COLORS.get(rank, DIM)
+            rank_badge = ft.Container(
+                content=ft.Text(str(rank), color=rank_color, size=11, weight=ft.FontWeight.BOLD),
+                width=22, height=22,
+                bgcolor=apply_opacity(0.12, rank_color) if rank <= 3 else "transparent",
+                border_radius=6,
+                alignment=ft.Alignment(0, 0),
+            )
             items.append(
                 ft.Container(
                     content=ft.Row([
-                        ft.Icon(ft.Icons.MUSIC_NOTE_ROUNDED, color=CYAN, size=16),
+                        rank_badge,
+                        ft.Icon(ft.Icons.PLAY_CIRCLE_FILLED_ROUNDED, color=CYAN, size=18),
                         ft.Column([
-                            ft.Text(t['title'], color=TEXT, size=13, weight="bold", no_wrap=True),
-                            ft.Text(f"{t['artist']} • {t['count']} plays", color=DIM, size=11),
+                            ft.Text(t.get('title') or "Untitled", color=TEXT, size=13, weight=ft.FontWeight.W_600,
+                                    max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+                            ft.Text(t.get('artist') or "Unknown Artist", color=DIM, size=11,
+                                    max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
                         ], spacing=1, expand=True),
-                    ], spacing=12),
-                    padding=ft.Padding.symmetric(vertical=8),
-                    on_click=lambda e, p=t['path']: self.app.page.run_task(self.app.play_track, p),
+                        ft.Container(
+                            content=ft.Text(f"{t.get('count', 0)} plays", color=CYAN, size=10, weight=ft.FontWeight.W_600),
+                            bgcolor=apply_opacity(0.12, CYAN),
+                            border_radius=RADIUS_PILL,
+                            padding=ft.Padding.symmetric(horizontal=8, vertical=4),
+                        ),
+                    ], spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                    padding=ft.Padding.symmetric(horizontal=8, vertical=6),
+                    border_radius=8,
+                    ink=True,
+                    tooltip=f"Play {t.get('title', '')}",
+                    on_click=lambda e, p=t.get('path', ''): self.app.page.run_task(self.app.play_track, p),
                 )
             )
-        return ft.Column(items, spacing=0)
+        return ft.Column(items, spacing=3)
 
     def _build_top_list_content(self, rows, icon, library_mode: str, subtitle):
         """Ranked name + play-count rows. Tapping one opens that artist/genre
         in the Library, filtered to it."""
         items = []
+        accent_color = LIB_ARTIST_COLOR if library_mode == "artists" else LIB_GENRE_COLOR
         for rank, r in enumerate(rows, start=1):
+            rank_color = RANK_COLORS.get(rank, DIM)
+            rank_badge = ft.Container(
+                content=ft.Text(str(rank), color=rank_color, size=11, weight=ft.FontWeight.BOLD),
+                width=22, height=22,
+                bgcolor=apply_opacity(0.12, rank_color) if rank <= 3 else "transparent",
+                border_radius=6,
+                alignment=ft.Alignment(0, 0),
+            )
             items.append(
                 ft.Container(
                     content=ft.Row([
-                        ft.Text(str(rank), color=DIM, size=12, width=14,
-                                text_align=ft.TextAlign.CENTER),
-                        ft.Icon(icon, color=CYAN, size=16),
+                        rank_badge,
+                        ft.Icon(icon, color=accent_color, size=18),
                         ft.Column([
-                            ft.Text(r['name'], color=TEXT, size=13, weight="bold", no_wrap=True),
-                            ft.Text(subtitle(r), color=DIM, size=11),
+                            ft.Text(r.get('name') or "", color=TEXT, size=13, weight=ft.FontWeight.W_600,
+                                    max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+                            ft.Text(subtitle(r), color=DIM, size=11,
+                                    max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
                         ], spacing=1, expand=True),
-                    ], spacing=12),
-                    padding=ft.Padding.symmetric(vertical=8),
-                    on_click=lambda e, n=r['name']: self._open_in_library(library_mode, n),
+                        ft.Icon(ft.Icons.ARROW_FORWARD_IOS_ROUNDED, color=apply_opacity(0.3, DIM), size=11),
+                    ], spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                    padding=ft.Padding.symmetric(horizontal=8, vertical=6),
+                    border_radius=8,
+                    ink=True,
+                    tooltip=f"View {r.get('name', '')} in Library",
+                    on_click=lambda e, n=r.get('name', ''): self._open_in_library(library_mode, n),
                 )
             )
-        return ft.Column(items, spacing=0)
+        return ft.Column(items, spacing=3)
 
     def _open_in_library(self, mode: str, name: str):
+        """Open the Library on `mode` filtered to `name`. Search's own modes
+        ("all", or a singular media type) are mapped to the Library's tabs."""
+        target_mode = (mode or "").lower().strip()
+        if target_mode in ("", "all", "track"):
+            target_mode = "tracks"
+        elif target_mode in ("album", "artist", "playlist"):
+            target_mode += "s"
         self.app.switch_tab(2)
         lib = getattr(self.app, "library_view", None)
         if lib is not None and hasattr(lib, "show_filtered"):
-            lib.show_filtered(mode, name)
+            lib.show_filtered(target_mode, name)
 
-    def _build_landing_card(self, title: str, icon: str, content: ft.Control):
+    def _build_landing_card(self, title: str, icon: str, content: ft.Control, action: ft.Control | None = None):
+        icon_badge = ft.Container(
+            content=ft.Icon(icon, color=CYAN, size=15),
+            bgcolor=apply_opacity(0.12, CYAN),
+            width=28,
+            height=28,
+            border_radius=7,
+            alignment=ft.Alignment(0, 0),
+        )
+        header_controls: list[ft.Control] = [
+            icon_badge,
+            ft.Text(title, color=TEXT, size=14, weight=ft.FontWeight.W_700),
+        ]
+        if action is not None:
+            header_controls.extend([ft.Container(expand=True), action])
+
         return ft.Container(
             content=ft.Column([
-                ft.Row([
-                    ft.Icon(icon, color=CYAN, size=18),
-                    ft.Text(title, color=TEXT, size=14, weight=ft.FontWeight.W_600),
-                ], spacing=8),
-                ft.Divider(color=BORDER_SUBTLE, height=16),
+                ft.Row(header_controls, spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                ft.Divider(color=BORDER_SUBTLE, height=18),
                 content
             ], spacing=0),
             bgcolor=SURFACE,
@@ -1079,24 +1249,144 @@ class SearchView:
             margin=ft.Margin.only(bottom=16),
         )
 
-    async def _get_library_stats_content(self):
-        total_tracks = await self.app.db_manager.get_total_tracks()
-        artists = await self.app.db_manager.get_all_artists()
-        albums = await self.app.db_manager.get_all_albums()
-        playlists = await self.app.db_manager.get_all_playlists()
-        
-        return ft.Row([
-            self._build_stat_item("Tracks", str(total_tracks)),
-            self._build_stat_item("Albums", str(len(albums))),
-            self._build_stat_item("Artists", str(len(artists))),
-            self._build_stat_item("Playlists", str(len(playlists))),
-        ], alignment=ft.MainAxisAlignment.SPACE_AROUND)
+    async def _build_releases_refresh_button(self) -> ft.Control:
+        is_refreshing = getattr(self.app, "new_releases_refreshing", False)
+        if is_refreshing:
+            return ft.Container(
+                content=ft.ProgressRing(width=14, height=14, stroke_width=2, color=CYAN),
+                width=28, height=28, alignment=ft.Alignment(0, 0),
+            )
 
-    def _build_stat_item(self, label, value):
+        tooltip = "Check for new releases now"
+        db = getattr(self.app, "db_manager", None)
+        if db and hasattr(db, "get_latest_release_sync"):
+            try:
+                latest = await db.get_latest_release_sync()
+                if latest and latest.get("finished_at"):
+                    import datetime
+                    ts = latest["finished_at"]
+                    dt_obj = datetime.datetime.fromtimestamp(ts)
+                    today = datetime.date.today()
+                    if dt_obj.date() == today:
+                        time_str = f"Today {dt_obj.strftime('%H:%M')}"
+                    elif dt_obj.date() == today - datetime.timedelta(days=1):
+                        time_str = f"Yesterday {dt_obj.strftime('%H:%M')}"
+                    else:
+                        time_str = dt_obj.strftime('%b %d, %H:%M')
+                    tooltip = f"Check for new releases (Last checked: {time_str})"
+            except Exception as e:
+                logger.debug(f"Tooltip sync time lookup failed: {e}")
+
+        return ft.IconButton(
+            icon=ft.Icons.REFRESH_ROUNDED,
+            icon_color=DIM,
+            icon_size=18,
+            width=28,
+            height=28,
+            tooltip=tooltip,
+            style=ft.ButtonStyle(
+                padding=0,
+                shape=ft.RoundedRectangleBorder(radius=6),
+            ),
+            on_click=lambda e: self._on_manual_releases_refresh(),
+        )
+
+    def _on_manual_releases_refresh(self):
+        if getattr(self.app, "new_releases_refreshing", False):
+            return
+        if hasattr(self.app, "trigger_manual_new_releases_refresh"):
+            self.app.trigger_manual_new_releases_refresh()
+        self.mark_landing_stale()
+        self.refresh_setup_state(force=True)
+
+    def on_new_releases_refreshed(self, written: int):
+        self.mark_landing_stale()
+        self.refresh_setup_state(force=True)
+
+    async def _get_library_stats_content(self):
+        counts = await self.app.db_manager.get_library_counts()
+        total_tracks = counts["tracks"]
+        total_albums = counts["albums"]
+        total_artists = counts["artists"]
+        total_playlists = counts["playlists"]
+
+        card_tracks = self._build_stat_card(
+            label="Tracks",
+            count=total_tracks,
+            subtitle="Audio tracks in library",
+            icon=ft.Icons.MUSIC_NOTE_ROUNDED,
+            color=CYAN,
+            mode="tracks",
+        )
+        card_albums = self._build_stat_card(
+            label="Albums",
+            count=total_albums,
+            subtitle="Full-length releases",
+            icon=ft.Icons.ALBUM_ROUNDED,
+            color=LIB_ALBUM_COLOR,
+            mode="albums",
+        )
+        card_artists = self._build_stat_card(
+            label="Artists",
+            count=total_artists,
+            subtitle="Catalogued creators",
+            icon=ft.Icons.PERSON_ROUNDED,
+            color=LIB_ARTIST_COLOR,
+            mode="artists",
+        )
+        card_playlists = self._build_stat_card(
+            label="Playlists",
+            count=total_playlists,
+            subtitle="Curated mixes & sets",
+            icon=ft.Icons.QUEUE_MUSIC_ROUNDED,
+            color=LIB_PLAYLIST_COLOR,
+            mode="playlists",
+        )
+
         return ft.Column([
-            ft.Text(value, color=TEXT, size=18, weight=ft.FontWeight.BOLD),
-            ft.Text(label.upper(), color=DIM, size=9, weight=ft.FontWeight.W_600),
-        ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=2)
+            ft.Row([card_tracks, card_albums], spacing=10),
+            ft.Row([card_artists, card_playlists], spacing=10),
+        ], spacing=10)
+
+    def _build_stat_card(
+        self,
+        label: str,
+        count: int,
+        subtitle: str,
+        icon: str,
+        color: str,
+        mode: str,
+    ) -> ft.Control:
+        """Interactive glassmorphic stat card linking directly to that library tab."""
+        val_str = f"{count:,}" if isinstance(count, int) else str(count)
+        return ft.Container(
+            content=ft.Column([
+                ft.Row([
+                    ft.Container(
+                        content=ft.Icon(icon, color=color, size=15),
+                        bgcolor=apply_opacity(0.14, color),
+                        width=28,
+                        height=28,
+                        border_radius=7,
+                        alignment=ft.Alignment(0, 0),
+                    ),
+                    ft.Text(label.upper(), color=DIM, size=11, weight=ft.FontWeight.W_700),
+                    ft.Container(expand=True),
+                    ft.Icon(ft.Icons.ARROW_FORWARD_IOS_ROUNDED, color=apply_opacity(0.35, DIM), size=11),
+                ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                ft.Container(height=4),
+                ft.Text(val_str, color=TEXT, size=20, weight=ft.FontWeight.BOLD),
+                ft.Text(subtitle, color=TEXT_TERTIARY, size=10, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+            ], spacing=1, tight=True),
+            expand=True,
+            bgcolor=SURFACE2,
+            border=ft.Border.all(1, BORDER_SUBTLE),
+            border_radius=RADIUS_CARD,
+            padding=ft.Padding.symmetric(horizontal=12, vertical=10),
+            ink=True,
+            tooltip=f"View {label} in Library",
+            on_click=lambda e, m=mode: self._open_in_library(m, ""),
+        )
 
     def _on_input_change(self, e):
         def _mutate():
@@ -1237,7 +1527,7 @@ class SearchView:
 
     def _credentials_missing(self, source: str) -> str | None:
         """Human-readable reason this source can't be searched yet, or None."""
-        if source in self._configured_sources():
+        if source in self._configured_sources() or self._demo_mode():
             return None
         return self._MISSING_CREDS_HINT.get(source, f"{source.title()} is not configured.")
 
@@ -1303,6 +1593,7 @@ class SearchView:
         self._active_preview_data = None
         self.expanded_nodes.clear()
         self.node_cache.clear()
+        self._local_library_expanded = False
         self._setup_prompt.visible = False
         self._empty_label.visible = False
         self._error_label.visible = False
@@ -1312,10 +1603,7 @@ class SearchView:
         missing = self._credentials_missing(self.selected_source)
         if missing:
             self.app.show_snackbar(missing, icon=ft.Icons.LOCK_OUTLINE_ROUNDED, color=src_color(self.selected_source))
-            if hasattr(self.app, "switch_to_settings"):
-                self.app.switch_to_settings("Account")
-            else:
-                self.app._switch_tab(3)
+            self._open_account_settings()
             return
 
         self._search_indicator.visible = True
@@ -1324,8 +1612,13 @@ class SearchView:
         # Show connection stages progress card
         self.show_search_progress(PROGRESS_SEARCHING, PROGRESS_CONNECTING)
 
-        # Skeleton rows
-        cards = [SkeletonRow(delay=i * 0.08) for i in range(8)]
+        # Skeleton rows, below a spacer the size of the progress card that
+        # overlays the top of the list, so no skeleton renders behind it. The
+        # library half inserts its section after the spacer (see
+        # _show_local_matches), pushing the skeletons down when it expands.
+        self._progress_spacer = ft.Container(height=self._PROGRESS_CARD_SPACE)
+        self._pending_local_section = None
+        cards = [self._progress_spacer, *(SkeletonRow(delay=i * 0.08) for i in range(8))]
         def _mutate_start():
             self._results_list.controls = cards
             self._results_list.opacity = 1.0
@@ -1347,6 +1640,10 @@ class SearchView:
                 self.hide_search_progress(success=success)
                 self._on_results(results)
 
+        if self._demo_mode():
+            asyncio.create_task(self._deliver_demo_results(
+                query, results_callback, search_progress_callback))
+            return
         asyncio.create_task(asyncio.to_thread(
             self.searcher.search,
             query, self.selected_source, results_callback,
@@ -1355,7 +1652,58 @@ class SearchView:
             progress_callback=search_progress_callback
         ))
 
+    # Long enough to see the progress card and skeleton phase.
+    _DEMO_LATENCY_S = 1.2
+
+    async def _deliver_demo_results(self, query: str, callback, progress_callback):
+        """Demo mode's stand-in for the network search: the same callbacks,
+        progress card and skeleton phase, with sample data at the end."""
+        from utils.mock_search import get_mock_search_results
+        progress_callback(PROGRESS_SEARCHING, PROGRESS_CONTACTING)
+        await asyncio.sleep(self._DEMO_LATENCY_S)
+        self.app.show_snackbar("Demo mode: sample results, nothing was searched.",
+                               icon=ft.Icons.AUTO_AWESOME_ROUNDED, color=CYAN)
+        callback(get_mock_search_results(query, source=self.selected_source))
+
+    def _demo_mode(self, cfg=None) -> bool:
+        """Settings → Advanced → Demo Search Results. Opt-in only: a failed
+        or unconfigured real search never falls back to sample data."""
+        if cfg is None:
+            from utils.streamrip_api import load_config
+            cfg = load_config()
+        val = (cfg.get("appearance") or {}).get("demo_search")
+        if isinstance(val, str):
+            return val.strip().lower() in ("true", "1", "yes")
+        return bool(val)
+
+    def _demo_blocked(self, *records: dict) -> bool:
+        """True (with a toast) when any record is demo data, which has nothing
+        behind it to download, preview or open."""
+        if any(r.get("demo") for r in records):
+            self.app.show_snackbar("Demo result: there's nothing to download or play.",
+                                   icon=ft.Icons.AUTO_AWESOME_ROUNDED, color=CYAN)
+            return True
+        return False
+
+    def _download(self, record: dict):
+        if not self._demo_blocked(record):
+            self.app.quality_selector_sheet.show(record)
+
     def _on_results(self, results, *args, **kwargs):
+        if not hasattr(self, "page") or not self.page:
+            return
+
+        try:
+            session = getattr(self.page, "session", None)
+            if session is None:
+                return
+            conn = getattr(session, "connection", None)
+            if conn is not None and getattr(conn, "loop", None) is not None:
+                if getattr(conn.loop, "is_closed", lambda: False)() is True:
+                    return
+        except Exception:
+            return
+
         async def _update_ui():
             self._search_indicator.visible = False
             self._remote_pending = False
@@ -1375,7 +1723,7 @@ class SearchView:
                 return
 
             if isinstance(results, dict) and "error" in results:
-                self._show_search_error(results.get("error", "Unknown error"))
+                self._show_search_error(str(results.get("error") or "Unknown error"))
                 self.page.update()
                 return
 
@@ -1402,7 +1750,33 @@ class SearchView:
             self.current_page = 0
             self._rebuild_results()
 
-        self.page.run_task(_update_ui)
+        try:
+            self.page.run_task(_update_ui)
+        except Exception as ex:
+            logger.debug(f"Could not dispatch _update_ui: {ex}")
+
+    def _open_account_settings(self):
+        """Where a search error is fixed: the source credentials page."""
+        if hasattr(self.app, "switch_to_settings"):
+            self.app.switch_to_settings("Account")
+        else:
+            self.app._switch_tab(3)
+
+    def _enable_demo_and_retry(self):
+        """The error states' explicit way into demo mode: the user asked for
+        sample data, so it is switched on (persistently, like the Settings
+        switch) and the same query re-run against it."""
+        from utils.streamrip_api import update_config_params
+        if not update_config_params({"appearance": {"demo_search": True}}):
+            self.app.show_snackbar("Couldn't turn on demo search results.")
+            return
+        settings = getattr(self.app, "settings_view", None)
+        switch = getattr(settings, "_demo_search_switch", None)
+        if switch is not None:
+            switch.value = True
+        self.app.show_snackbar("Demo mode on. Turn it off in Settings → Advanced.",
+                               icon=ft.Icons.AUTO_AWESOME_ROUNDED, color=CYAN)
+        self.page.run_task(self.start_search)
 
     def _show_search_error(self, message: str):
         """Surface a search connection/auth failure inline in the results area
@@ -1429,6 +1803,9 @@ class SearchView:
     def _page_controls(self) -> list[ft.Control]:
         """Rows for the current page of the active type, with the library
         section on top of page one."""
+        if self.view_mode == "all":
+            return self._build_unified_controls()
+
         active_type = self.view_mode[:-1]  # "tracks" -> "track"
         source = self.cached_results.get(active_type, [])
         self.total_pages = math.ceil(len(source) / self.items_per_page)
@@ -1456,6 +1833,405 @@ class SearchView:
             controls.append(self._build_bottom_ghost())
         return controls
 
+    def _build_unified_controls(self) -> list[ft.Control]:
+        self.total_pages = 1
+        controls: list[ft.Control] = []
+        query = (self._search_field.value or "").strip()
+
+        if self._remote_error:
+            controls.append(self._build_error_banner(self._remote_error))
+
+        local = self._build_local_section()
+        if local is not None:
+            controls.append(local)
+
+        tracks = self.cached_results.get("track", [])
+        albums = self.cached_results.get("album", [])
+        artists = self.cached_results.get("artist", [])
+
+        if not (tracks or albums or artists):
+            if not self._remote_error and not local:
+                controls.append(ft.Container(
+                    content=ft.Column([
+                        ft.Icon(ft.Icons.SEARCH_OFF_ROUNDED, color=DIM, size=40),
+                        ft.Text(f'No results found for "{query}"', color=TEXT, size=14, weight=ft.FontWeight.W_600),
+                        ft.Text("Try checking the spelling or searching for another artist, album, or track.", color=DIM, size=12),
+                    ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=6),
+                    alignment=ft.Alignment(0, 0),
+                    padding=ft.Padding.symmetric(vertical=32),
+                ))
+            return controls
+
+        hero = self._pick_hero_result(query)
+        if hero:
+            controls.append(self._build_hero_result_card(hero))
+
+        if tracks:
+            controls.append(self._build_section_header("Top Songs", len(tracks), "tracks", ft.Icons.MUSIC_NOTE_ROUNDED))
+            for i, trk in enumerate(tracks[:4]):
+                controls.append(self._result_card(i, trk, depth=0, stagger_index=i))
+
+        if albums:
+            album_cards = [self._build_unified_album_card(alb) for alb in albums[:12]]
+            album_lv = ft.ListView(
+                controls=album_cards,
+                horizontal=True,
+                spacing=12,
+                height=235,
+                build_controls_on_demand=False,
+            )
+            controls.append(self._build_section_header(
+                "Albums & EPs", len(albums), "albums", ft.Icons.ALBUM_ROUNDED,
+                shelf=album_lv, shelf_count=len(album_cards)))
+            controls.append(album_lv)
+
+        other_artists = [a for a in artists if a != hero] if hero and hero.get("media_type") == "artist" else artists
+        if other_artists:
+            artist_cards = [self._build_unified_artist_card(art) for art in other_artists[:8]]
+            artist_lv = ft.ListView(
+                controls=artist_cards,
+                horizontal=True,
+                spacing=14,
+                height=148,
+                build_controls_on_demand=False,
+            )
+            controls.append(self._build_section_header(
+                "Artists", len(artists), "artists", ft.Icons.PERSON_ROUNDED,
+                shelf=artist_lv, shelf_count=len(artist_cards)))
+            controls.append(artist_lv)
+
+        controls.append(ft.Container(height=16))
+        return controls
+
+    def _pick_hero_result(self, query: str) -> dict | None:
+        q = (query or "").strip().lower()
+        if not q:
+            return None
+        artists = self.cached_results.get("artist", [])
+        albums = self.cached_results.get("album", [])
+        tracks = self.cached_results.get("track", [])
+
+        candidates: list[tuple[float, dict]] = []
+
+        def get_name(item: dict) -> str:
+            return (item.get("ui_title") or item.get("name") or item.get("title") or "").strip().lower()
+
+        # 1. Exact matches (score 100)
+        # Check artist first if user searched artist name, but track wins if query is a song title
+        for art in artists:
+            name = (art.get("name") or "").strip().lower()
+            if name and name == q:
+                candidates.append((100.5, art))
+        for trk in tracks:
+            name = get_name(trk)
+            if name and name == q:
+                candidates.append((100.2, trk))
+        for alb in albums:
+            name = get_name(alb)
+            if name and name == q:
+                candidates.append((100.1, alb))
+
+        # 2. Prefix & token matches
+        for trk in tracks:
+            name = get_name(trk)
+            if not name or name == q:
+                continue
+            if name.startswith(q):
+                candidates.append((75.0 + max(0.0, 15.0 * (len(q) / len(name))), trk))
+            elif f" {q} " in f" {name} ":
+                candidates.append((60.0, trk))
+            elif q in name:
+                candidates.append((45.0, trk))
+
+        for alb in albums:
+            name = get_name(alb)
+            if not name or name == q:
+                continue
+            if name.startswith(q):
+                candidates.append((74.0 + max(0.0, 15.0 * (len(q) / len(name))), alb))
+            elif f" {q} " in f" {name} ":
+                candidates.append((59.0, alb))
+            elif q in name:
+                candidates.append((44.0, alb))
+
+        for art in artists:
+            name = (art.get("name") or "").strip().lower()
+            if not name or name == q:
+                continue
+            if name.startswith(q):
+                candidates.append((74.5 + max(0.0, 15.0 * (len(q) / len(name))), art))
+            elif f" {q} " in f" {name} ":
+                candidates.append((58.0, art))
+            elif q in name:
+                candidates.append((43.0, art))
+
+        if candidates:
+            candidates.sort(key=lambda c: c[0], reverse=True)
+            return candidates[0][1]
+
+        # Balanced fallbacks when no direct substring match
+        if tracks:
+            return tracks[0]
+        if albums:
+            return albums[0]
+        if artists:
+            return artists[0]
+        return None
+
+    def _build_section_header(self, title: str, count: int, target_mode: str, icon: str,
+                              shelf: ft.ListView | None = None, shelf_count: int = 0) -> ft.Control:
+        nav = [self._shelf_nav(shelf, shelf_count)] if shelf is not None else []
+        return ft.Container(
+            content=ft.Row([
+                ft.Row([
+                    ft.Icon(icon, color=CYAN, size=16),
+                    ft.Text(title, size=14, weight=ft.FontWeight.W_700, color=TEXT),
+                    ft.Container(
+                        content=ft.Text(str(count), size=10, weight=ft.FontWeight.W_600, color=DIM),
+                        bgcolor=SURFACE2,
+                        padding=ft.Padding.symmetric(horizontal=6, vertical=2),
+                        border_radius=RADIUS_PILL,
+                    ),
+                ], spacing=6, tight=True),
+                ft.Container(expand=True),
+                *nav,
+                ft.Container(
+                    content=ft.Row([
+                        ft.Text(f"See all ({count})", size=11, weight=ft.FontWeight.W_600, color=CYAN),
+                        ft.Icon(ft.Icons.CHEVRON_RIGHT_ROUNDED, size=15, color=CYAN),
+                    ], spacing=2, tight=True),
+                    on_click=lambda e: self._set_view_mode(target_mode),
+                    padding=ft.Padding.symmetric(horizontal=6, vertical=4),
+                ),
+            ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            padding=ft.Padding.only(top=14, bottom=4, left=2, right=2),
+        )
+
+    def _build_hero_result_card(self, hero: dict) -> ft.Control:
+        m_type = hero.get("media_type", "track")
+        accent = self._row_accent(m_type)
+        title = strip_markup(hero.get("ui_title", hero.get("name", hero.get("title", "Unknown"))))
+        subtitle = strip_markup(hero.get("ui_subtitle", hero.get("artist", "")))
+        detail = strip_markup(hero.get("ui_detail", ""))
+        cover_url = hero.get("cover")
+        is_in_library = hero.get("is_in_library", False)
+
+        if m_type == "artist":
+            placeholder = ft.Container(
+                content=ft.Icon(ft.Icons.PERSON_ROUNDED, color=accent, size=44),
+                width=88, height=88, bgcolor=apply_opacity(0.18, accent),
+                border_radius=44, alignment=ft.Alignment(0, 0),
+            )
+            art_image = ft.Image(
+                src=cover_url, width=88, height=88, fit=ft.BoxFit.COVER,
+                border_radius=ft.BorderRadius.all(44),
+                error_content=placeholder,
+            ) if cover_url else placeholder
+            image_ctrl = ft.Container(
+                content=art_image,
+                border_radius=44,
+                border=ft.Border.all(2, apply_opacity(0.35, accent)),
+            )
+        else:
+            icon = ft.Icons.ALBUM_ROUNDED if m_type == "album" else ft.Icons.MUSIC_NOTE_ROUNDED
+            placeholder = ft.Container(
+                content=ft.Icon(icon, color=accent, size=44),
+                width=88, height=88, bgcolor=apply_opacity(0.18, accent),
+                border_radius=12, alignment=ft.Alignment(0, 0),
+            )
+            art_image = ft.Image(
+                src=cover_url, width=88, height=88, fit=ft.BoxFit.COVER,
+                border_radius=ft.BorderRadius.all(12),
+                error_content=placeholder,
+            ) if cover_url else placeholder
+            image_ctrl = ft.Container(
+                content=art_image,
+                border_radius=12,
+                border=ft.Border.all(1, apply_opacity(0.2, accent)),
+            )
+
+        type_pill = ft.Container(
+            content=ft.Text(f"TOP RESULT · {m_type.upper()}", size=9, weight=ft.FontWeight.W_700, color=accent),
+            bgcolor=apply_opacity(0.16, accent),
+            border=ft.Border.all(1, apply_opacity(0.3, accent)),
+            border_radius=RADIUS_PILL,
+            padding=ft.Padding.symmetric(horizontal=8, vertical=2),
+        )
+
+        badge_row = [type_pill]
+        own_badge = self._ownership_badge(hero)
+        if own_badge is not None:
+            badge_row.append(own_badge)
+
+        if m_type == "artist":
+            action_btn = ft.Container(
+                content=ft.Row([
+                    ft.Text("All artists", size=12, weight=ft.FontWeight.W_600, color=CYAN),
+                    ft.Icon(ft.Icons.ARROW_FORWARD_ROUNDED, size=15, color=CYAN),
+                ], spacing=4, tight=True),
+                bgcolor=apply_opacity(0.12, CYAN),
+                border=ft.Border.all(1, apply_opacity(0.3, CYAN)),
+                border_radius=RADIUS_PILL,
+                padding=ft.Padding.symmetric(horizontal=12, vertical=7),
+                on_click=lambda e: self._set_view_mode("artists"),
+            )
+        elif m_type == "album":
+            action_btn = ft.Container(
+                content=ft.Row([
+                    ft.Icon(
+                        ft.Icons.CHECK_CIRCLE_ROUNDED if is_in_library else ft.Icons.ARROW_CIRCLE_DOWN_ROUNDED,
+                        size=16, color=CYAN if is_in_library else TEXT
+                    ),
+                    ft.Text(
+                        "In Library" if is_in_library else "Download",
+                        size=12, weight=ft.FontWeight.W_600, color=CYAN if is_in_library else TEXT
+                    ),
+                ], spacing=5, tight=True),
+                bgcolor=apply_opacity(0.15, CYAN if is_in_library else TEXT),
+                border=ft.Border.all(1, apply_opacity(0.35, CYAN if is_in_library else TEXT)),
+                border_radius=RADIUS_PILL,
+                padding=ft.Padding.symmetric(horizontal=12, vertical=7),
+                on_click=lambda e: self._download(hero),
+            )
+        else:
+            action_btn = ft.IconButton(
+                icon=ft.Icons.CHECK_CIRCLE_ROUNDED if is_in_library else ft.Icons.ARROW_CIRCLE_DOWN_ROUNDED,
+                icon_color=CYAN if is_in_library else TEXT,
+                icon_size=22,
+                tooltip="Redownload" if is_in_library else "Download",
+                on_click=lambda e: self._download(hero),
+            )
+
+        def on_hero_click(e):
+            if m_type == "artist":
+                self._set_view_mode("artists")
+            elif m_type == "album":
+                self._set_view_mode("albums")
+            else:
+                self._set_view_mode("tracks")
+
+        sub_text = subtitle if subtitle and subtitle.strip().lower() != title.strip().lower() else ""
+
+        return ft.Container(
+            content=ft.Row([
+                image_ctrl,
+                ft.Column([
+                    ft.Row(badge_row, spacing=6, tight=True),
+                    ft.Text(title, size=18, weight=ft.FontWeight.BOLD, color=TEXT, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+                    ft.Text(sub_text, size=12, color=DIM, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS) if sub_text else ft.Container(),
+                    ft.Text(detail, size=11, color=TEXT_TERTIARY, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS) if detail else ft.Container(),
+                ], spacing=3, expand=True),
+                action_btn,
+            ], spacing=14, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            bgcolor=SURFACE,
+            gradient=ft.LinearGradient(
+                begin=ft.Alignment(-1, -1),
+                end=ft.Alignment(1, 1),
+                colors=[
+                    apply_opacity(0.18, accent),
+                    SURFACE,
+                ],
+            ),
+            border=ft.Border.all(1, apply_opacity(0.28, accent)),
+            border_radius=RADIUS_CARD + 4,
+            padding=ft.Padding.all(14),
+            margin=ft.Margin.only(bottom=8),
+            on_click=on_hero_click,
+        )
+
+    def _build_unified_album_card(self, alb: dict) -> ft.Control:
+        size = 136
+        title = strip_markup(alb.get("ui_title", alb.get("title", alb.get("name", "Unknown"))))
+        artist = strip_markup(alb.get("ui_subtitle", alb.get("artist", "")))
+        detail = strip_markup(alb.get("ui_detail", ""))
+        year = str(alb.get("year") or "")
+        cover_url = alb.get("cover")
+        is_in_library = alb.get("is_in_library", False)
+
+        placeholder = ft.Container(
+            content=ft.Icon(ft.Icons.ALBUM_ROUNDED, color=DIM, size=38),
+            width=size, height=size, bgcolor=SURFACE2,
+            border_radius=10, alignment=ft.Alignment(0, 0),
+        )
+        cover_img = ft.Image(
+            src=cover_url, width=size, height=size, fit=ft.BoxFit.COVER,
+            border_radius=ft.BorderRadius.all(10), cache_width=size * 2,
+            error_content=placeholder,
+        ) if cover_url else placeholder
+
+        cover_stack_items = [cover_img]
+        if is_in_library:
+            cover_stack_items.append(
+                ft.Container(
+                    content=ft.Icon(ft.Icons.CHECK_CIRCLE_ROUNDED, color=CYAN, size=16),
+                    bgcolor=apply_opacity(0.85, SURFACE),
+                    border_radius=RADIUS_PILL,
+                    padding=ft.Padding.all(3),
+                    top=6, right=6,
+                )
+            )
+
+        sub_text = " · ".join(p for p in (year, alb.get("type", "").upper() or "ALBUM") if p)
+
+        return ft.Container(
+            content=ft.Column([
+                ft.Stack(cover_stack_items, width=size, height=size),
+                ft.Text(title, size=12, weight=ft.FontWeight.W_600, color=TEXT, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+                ft.Text(artist or sub_text, size=11, color=DIM, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+                ft.Row([
+                    ft.Text(detail or sub_text, size=10, color=TEXT_TERTIARY, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS, expand=True),
+                    ft.IconButton(
+                        icon=ft.Icons.CHECK_CIRCLE_ROUNDED if is_in_library else ft.Icons.ARROW_CIRCLE_DOWN_ROUNDED,
+                        icon_color=CYAN if is_in_library else DIM,
+                        icon_size=18,
+                        tooltip="In library — download again" if is_in_library else "Download album",
+                        style=ft.ButtonStyle(padding=0),
+                        width=24, height=24,
+                        on_click=lambda e: self._download(alb),
+                    ),
+                ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            ], spacing=3, tight=True),
+            width=size + 14,
+            bgcolor=SURFACE,
+            border=ft.Border.all(1, BORDER_SUBTLE),
+            border_radius=RADIUS_CARD,
+            padding=ft.Padding.all(7),
+            on_click=lambda e: self._set_view_mode("albums"),
+        )
+
+    def _build_unified_artist_card(self, art: dict) -> ft.Control:
+        size = 76
+        name = strip_markup(art.get("ui_title", art.get("name", "Unknown")))
+        subtitle = strip_markup(art.get("ui_subtitle", "Artist"))
+        cover_url = art.get("cover")
+
+        placeholder = ft.Container(
+            content=ft.Icon(ft.Icons.PERSON_ROUNDED, color=CYAN, size=32),
+            width=size, height=size, bgcolor=apply_opacity(0.15, CYAN),
+            border_radius=size // 2, alignment=ft.Alignment(0, 0),
+        )
+        avatar_img = ft.Image(
+            src=cover_url, width=size, height=size, fit=ft.BoxFit.COVER,
+            border_radius=ft.BorderRadius.all(size // 2), cache_width=size * 2,
+            error_content=placeholder,
+        ) if cover_url else placeholder
+
+        return ft.Container(
+            content=ft.Column([
+                ft.Container(
+                    content=avatar_img,
+                    border_radius=size // 2,
+                    border=ft.Border.all(2, apply_opacity(0.25, CYAN)),
+                    alignment=ft.Alignment(0, 0),
+                ),
+                ft.Text(name, size=11, weight=ft.FontWeight.W_600, color=TEXT, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS, text_align=ft.TextAlign.CENTER),
+                ft.Text(subtitle, size=10, color=DIM, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS, text_align=ft.TextAlign.CENTER),
+            ], spacing=4, horizontal_alignment=ft.CrossAxisAlignment.CENTER, tight=True),
+            width=100,
+            padding=ft.Padding.symmetric(horizontal=4, vertical=6),
+            on_click=lambda e: self._set_view_mode("artists"),
+        )
+
     def _rebuild_results(self):
         controls = self._page_controls()
         self._results_list.controls.clear()
@@ -1469,6 +2245,10 @@ class SearchView:
 
     # ── library-aware search ────────────────────────────────────────────────
     LOCAL_PREVIEW_ROWS = 3
+    # Height reserved at the top of the skeleton list for the overlaid
+    # progress card: its two text lines + padding + bottom margin, with the
+    # detail line wrapped (it's max_lines=2).
+    _PROGRESS_CARD_SPACE = 76
 
     async def _annotate_ownership(self, r: dict) -> None:
         """Stamp what the library already holds for a remote result:
@@ -1547,54 +2327,156 @@ class SearchView:
             return
 
         def _insert():
-            # Only above the skeleton rows: once the remote answer has landed,
-            # its render already includes this section.
+            # Only into the skeleton phase: once the remote answer has landed,
+            # its render already includes this section. It goes in the list
+            # flow (below the progress card's spacer, above the skeletons)
+            # rather than floating over them, so expanding it pushes them down.
             if self._remote_pending and self.current_search_id == search_id:
-                self._results_list.controls.insert(0, section)
+                controls = self._results_list.controls
+                at = next((i + 1 for i, c in enumerate(controls) if c is self._progress_spacer), 0)
+                controls.insert(at, section)
+                self._pending_local_section = section
         self.app.safe_update(_insert)
 
-    def _build_local_section(self) -> ft.Control | None:
-        """The "In your library" card for the active type, or None."""
-        m_type = self.view_mode[:-1]
-        rows = self._local_matches.get(m_type) or []
-        if not rows:
-            return None
-        query = (self._search_field.value or "").strip()
+    def _toggle_local_library(self, e=None):
+        self._local_library_expanded = not self._local_library_expanded
+        def _apply():
+            if not self._remote_pending:
+                self._rebuild_results()
+                return
+            # Skeleton phase: swap the section in place, leave the skeletons.
+            controls = self._results_list.controls
+            for i, c in enumerate(controls):
+                if c is self._pending_local_section:
+                    section = self._build_local_section()
+                    if section is not None:
+                        controls[i] = self._pending_local_section = section
+                    break
+        self.app.safe_update(_apply)
 
-        items = [self._local_row(m_type, row) for row in rows[:self.LOCAL_PREVIEW_ROWS]]
-        if len(rows) > self.LOCAL_PREVIEW_ROWS:
-            items.append(ft.Container(
-                content=ft.Row([
-                    ft.Text(f"See all {len(rows)} in Library", color=CYAN, size=12,
-                            weight=ft.FontWeight.W_600),
-                    ft.Icon(ft.Icons.CHEVRON_RIGHT_ROUNDED, color=CYAN, size=16),
-                ], spacing=2, tight=True),
-                padding=ft.Padding.only(top=6),
-                on_click=lambda e: self._open_in_library(self.view_mode, query),
-            ))
+    def _build_local_section(self) -> ft.Control | None:
+        """The expandable "In your library" card for the active type, or None."""
+        query = (self._search_field.value or "").strip()
+        is_expanded = getattr(self, "_local_library_expanded", False)
+
+        if self.view_mode == "all":
+            total_matches = sum(len(v) for v in self._local_matches.values())
+            if not total_matches:
+                return None
+            items = []
+            for t in ("track", "album", "artist"):
+                for row in (self._local_matches.get(t) or [])[:1]:
+                    items.append(self._local_row(t, row))
+                    if len(items) >= self.LOCAL_PREVIEW_ROWS:
+                        break
+                if len(items) >= self.LOCAL_PREVIEW_ROWS:
+                    break
+            if len(items) < self.LOCAL_PREVIEW_ROWS:
+                for t in ("track", "album", "artist"):
+                    for row in (self._local_matches.get(t) or [])[1:]:
+                        items.append(self._local_row(t, row))
+                        if len(items) >= self.LOCAL_PREVIEW_ROWS:
+                            break
+                    if len(items) >= self.LOCAL_PREVIEW_ROWS:
+                        break
+            if total_matches > len(items):
+                items.append(ft.Container(
+                    content=ft.Row([
+                        ft.Text(f"See all {total_matches} in Library", color=CYAN, size=12,
+                                weight=ft.FontWeight.W_600),
+                        ft.Icon(ft.Icons.CHEVRON_RIGHT_ROUNDED, color=CYAN, size=16),
+                    ], spacing=2, tight=True),
+                    padding=ft.Padding.only(top=6),
+                    on_click=lambda e: self._open_in_library("tracks", query),
+                ))
+            match_count = total_matches
+        else:
+            m_type = self.view_mode[:-1]
+            rows = self._local_matches.get(m_type) or []
+            if not rows:
+                return None
+            items = [self._local_row(m_type, row) for row in rows[:self.LOCAL_PREVIEW_ROWS]]
+            if len(rows) > self.LOCAL_PREVIEW_ROWS:
+                items.append(ft.Container(
+                    content=ft.Row([
+                        ft.Text(f"See all {len(rows)} in Library", color=CYAN, size=12,
+                                weight=ft.FontWeight.W_600),
+                        ft.Icon(ft.Icons.CHEVRON_RIGHT_ROUNDED, color=CYAN, size=16),
+                    ], spacing=2, tight=True),
+                    padding=ft.Padding.only(top=6),
+                    on_click=lambda e: self._open_in_library(self.view_mode, query),
+                ))
+            match_count = len(rows)
+
+        toggle_label = "Hide" if is_expanded else f"Show ({match_count})"
+        toggle_icon = ft.Icons.KEYBOARD_ARROW_UP_ROUNDED if is_expanded else ft.Icons.KEYBOARD_ARROW_DOWN_ROUNDED
+        toggle_color = DIM if is_expanded else CYAN
+
+        header = ft.Container(
+            content=ft.Row([
+                ft.Row([
+                    ft.Icon(ft.Icons.LIBRARY_MUSIC_ROUNDED, color=CYAN, size=15),
+                    ft.Text("In your library", color=TEXT, size=12, weight=ft.FontWeight.W_600),
+                    ft.Container(
+                        content=ft.Text(str(match_count), color=CYAN, size=10, weight=ft.FontWeight.W_700),
+                        bgcolor=apply_opacity(0.15, CYAN),
+                        border_radius=8,
+                        padding=ft.Padding.symmetric(horizontal=6, vertical=1),
+                    ),
+                ], spacing=7, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                ft.Row([
+                    ft.Text(toggle_label, color=toggle_color, size=11, weight=ft.FontWeight.W_600),
+                    ft.Icon(toggle_icon, color=toggle_color, size=15),
+                ], spacing=2, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            on_click=self._toggle_local_library,
+            ink=True,
+            border_radius=RADIUS_CARD,
+            padding=ft.Padding.symmetric(horizontal=12, vertical=8) if not is_expanded else ft.Padding.only(left=12, right=12, top=10, bottom=6),
+        )
+
+        items_container = ft.Container(
+            content=ft.Column(items, spacing=2, tight=True),
+            visible=is_expanded,
+            padding=ft.Padding.only(left=12, right=12, bottom=10),
+        )
+
+        divider = ft.Container(
+            height=1,
+            bgcolor=BORDER_SUBTLE,
+            margin=ft.Margin.symmetric(horizontal=12),
+            visible=is_expanded,
+        )
 
         return ft.Container(
             content=ft.Column([
-                ft.Row([
-                    ft.Icon(ft.Icons.LIBRARY_MUSIC_ROUNDED, color=CYAN, size=16),
-                    ft.Text("In your library", color=TEXT, size=13, weight=ft.FontWeight.W_600),
-                    ft.Text(str(len(rows)), color=DIM, size=12),
-                ], spacing=8),
-                *items,
-            ], spacing=2, tight=True),
+                header,
+                divider,
+                items_container,
+            ], spacing=0, tight=True),
             bgcolor=SURFACE,
             border=ft.Border.all(1, BORDER_SUBTLE),
             border_radius=RADIUS_CARD,
-            padding=ft.Padding.only(left=14, right=14, top=12, bottom=10),
             margin=ft.Margin.only(bottom=6),
         )
 
     def _local_row(self, m_type: str, row: dict) -> ft.Control:
+        path = row.get("path")
+        trailing_ctrl = None
+
         if m_type == "track":
             title = row.get("title") or "Unknown"
             sub = " · ".join(p for p in (row.get("artist"), row.get("album")) if p)
-            icon = ft.Icons.PLAY_CIRCLE_OUTLINE_ROUNDED
-            on_click = lambda e, p=row.get("path"): self.page.run_task(self.app.play_track, p)
+            icon = ft.Icons.MUSIC_NOTE_ROUNDED
+            on_click = lambda e, t=title: self._open_in_library("tracks", t)
+            if path:
+                trailing_ctrl = ft.IconButton(
+                    icon=ft.Icons.PLAY_CIRCLE_OUTLINE_ROUNDED,
+                    icon_color=CYAN,
+                    icon_size=20,
+                    tooltip="Play Track",
+                    on_click=lambda e, p=path: self.page.run_task(self.app.play_track, p),
+                )
         elif m_type == "album":
             title = row.get("album") or "Unknown"
             n = row.get("track_count") or 0
@@ -1609,18 +2491,25 @@ class SearchView:
             sub = f"{albums} album{'s' if albums != 1 else ''} · {tracks} track{'s' if tracks != 1 else ''}"
             icon = ft.Icons.PERSON_ROUNDED
             on_click = lambda e, t=title: self._open_in_library("artists", t)
+
+        row_content = [
+            ft.Icon(icon, color=self._row_accent(m_type), size=18),
+            ft.Column([
+                ft.Text(title, color=TEXT, size=13, weight=ft.FontWeight.W_600,
+                        max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+                ft.Text(sub, color=DIM, size=11, max_lines=1,
+                        overflow=ft.TextOverflow.ELLIPSIS),
+            ], spacing=1, expand=True),
+        ]
+        if trailing_ctrl is not None:
+            row_content.append(trailing_ctrl)
+
         return ft.Container(
-            content=ft.Row([
-                ft.Icon(icon, color=self._row_accent(m_type), size=18),
-                ft.Column([
-                    ft.Text(title, color=TEXT, size=13, weight=ft.FontWeight.W_600,
-                            max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
-                    ft.Text(sub, color=DIM, size=11, max_lines=1,
-                            overflow=ft.TextOverflow.ELLIPSIS),
-                ], spacing=1, expand=True),
-            ], spacing=12),
-            padding=ft.Padding.symmetric(vertical=7),
+            content=ft.Row(row_content, spacing=12, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            padding=ft.Padding.symmetric(vertical=6),
             on_click=on_click,
+            ink=True,
+            border_radius=8,
         )
 
     def _build_error_banner(self, message: str) -> ft.Control:
@@ -1633,6 +2522,8 @@ class SearchView:
                     ft.Text(message, color=DIM, size=11, max_lines=3,
                             overflow=ft.TextOverflow.ELLIPSIS),
                 ], spacing=1, expand=True),
+                ft.TextButton("Settings", on_click=lambda _: self._open_account_settings()),
+                ft.TextButton("Demo", on_click=lambda _: self._enable_demo_and_retry()),
                 ft.TextButton("Retry", on_click=lambda _: self.page.run_task(self.start_search)),
             ], spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER),
             bgcolor=apply_opacity(0.08, "#FF6B6B"),
@@ -1666,18 +2557,20 @@ class SearchView:
             appearance = {}
         pill_style = str(appearance.get("pill_style", "category")).lower()
         icons = {
+            "all": ft.Icons.AUTO_AWESOME_ROUNDED,
             "artists": ft.Icons.PERSON_ROUNDED,
             "albums": ft.Icons.ALBUM_ROUNDED,
             "tracks": ft.Icons.MUSIC_NOTE_ROUNDED,
         }
         accents = {
+            "all": CYAN,
             "artists": CYAN if pill_style == "unified" else LIB_ARTIST_COLOR,
             "albums":  CYAN if pill_style == "unified" else LIB_ALBUM_COLOR,
             "tracks":  CYAN if pill_style == "unified" else LIB_TRACK_COLOR,
         }
         segments = [
             (mode, mode.capitalize(), icons[mode], accents[mode])
-            for mode in ["artists", "albums", "tracks"]
+            for mode in ["all", "artists", "albums", "tracks"]
         ]
         if (
             self._view_tabs_row.controls
@@ -1779,7 +2672,7 @@ class SearchView:
 
     def _download_selection(self):
         records = list(self._selected_records.values())
-        if not records:
+        if not records or self._demo_blocked(*records):
             return
         self.app.quality_selector_sheet.show_batch(
             records, on_done=lambda: self.exit_selection()
@@ -1953,9 +2846,11 @@ class SearchView:
         )
         
         def on_download(_e, data=r):
-            self.app.quality_selector_sheet.show(data)
+            self._download(data)
 
         async def preview_click(e):
+            if self._demo_blocked(r):
+                return
             if self._active_preview_data and self._active_preview_data != r:
                 self._active_preview_data["preview_state"] = "idle"
             
@@ -2158,6 +3053,11 @@ class SearchView:
 
             if node_id in self.node_cache:
                 children_callback(self.node_cache[node_id])
+                return
+
+            if node_data.get("demo"):
+                from utils.mock_search import get_mock_children
+                children_callback(get_mock_children(node_data))
                 return
 
             node_source = node_data.get("source") or self.selected_source

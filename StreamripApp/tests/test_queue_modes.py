@@ -312,15 +312,15 @@ class TestQueueModes(unittest.TestCase):
 
         class _Station:
             node = None
+            flavour = None
             def __init__(self, paths):
                 self.paths = list(paths)
             async def take(self, n):
                 out, self.paths = self.paths[:n], self.paths[n:]
                 return out
-            def end_leg(self, *_a): pass
             def exclude(self, *_a): pass
             def accept(self, *_a): pass
-            def ban_artist_of(self, *_a): pass
+            def reject(self, *_a): pass
 
         async def _open(_db, _seed, **kw):
             avoid = kw.get("avoid") or set()
@@ -379,24 +379,27 @@ class TestQueueModes(unittest.TestCase):
         self.assertEqual(len(audio_engine.queue), 3)
         self.assertEqual(audio_engine.current_index, 0)
 
-        # 2. Toggle Play Similar ON — NON-DESTRUCTIVE: the queue is neither saved
-        # nor replaced. Similars get inserted after the current song; the library
-        # stays queued below, so there is nothing to restore on toggle-off.
+        # 2. Toggle Play Similar ON: the rest of the queue is SET ASIDE (out of
+        # the player, so it can't play next) and comes back on toggle-off.
         self.app.set_play_similar_mode(True)
         self.assertTrue(self.app.play_similar_mode)
-        self.assertEqual(len(audio_engine.queue), 3)          # untouched
+        self.assertEqual(len(audio_engine.queue), 1)
+        self.assertEqual([t["path"] for t in self.app.autoplay.held],
+                         ["/music/song2.mp3", "/music/song3.mp3"])
 
         # 3. Simulate the walk inserting a buffer track after current
         audio_engine.queue = list(audio_engine.queue) + [{"path": "/music/walk1.mp3", "title": "Walk 1", "artist": "Artist W", "album": "Walk Album", "_autoplay": True}]
-        audio_engine.current_index = 3 # advanced into the buffer
+        audio_engine.current_index = 1 # advanced into the buffer
 
-        # 4. Save queue state (session termination simulation) — the REAL queue
-        # (buffer + library) is the single source of truth for recovery now.
+        # 4. Save queue state (session termination simulation): the queue plus
+        # the set-aside queue, which lives outside the player.
         self.app._save_queue_state()
         with open(os.path.join(main.DATA_DIR, "queue_state.json")) as f:
             saved_state = json.load(f)
-        self.assertEqual(len(saved_state["queue"]), 4)
-        self.assertEqual(saved_state["current_index"], 3)
+        self.assertEqual(len(saved_state["queue"]), 2)
+        self.assertEqual(saved_state["current_index"], 1)
+        self.assertEqual(len(saved_state["autoplay_held"]), 2)
+        self.app.autoplay.held = []                    # process death
 
         # 5. Simulate full session restoration from that snapshot
         self.app.is_restoring_session = False
@@ -404,20 +407,19 @@ class TestQueueModes(unittest.TestCase):
         self.app._restore_queue_state_async = main.StreamripFletApp._restore_queue_state_async.__get__(self.app, main.StreamripFletApp)
         run_async(self.app._restore_queue_state_async())
 
-        # Recovery restores the real queue directly — no separate saved-queue.
-        self.assertEqual(len(audio_engine.queue), 4)
-        self.assertEqual(audio_engine.current_index, 3)
+        self.assertEqual(len(audio_engine.queue), 2)
+        self.assertEqual(audio_engine.current_index, 1)
+        self.assertEqual(len(self.app.autoplay.held), 2)
         self.assertTrue(self.app.play_similar_mode)
 
-        # 6. Toggle Play Similar OFF — nothing to restore, and nothing to drop
-        # either: the only _autoplay track here is the one PLAYING. Toggle-off
-        # clears the buffer queued AHEAD of current, never the live track (that
-        # would cut playback) and never the library tail.
+        # 6. Toggle Play Similar OFF: the playing recommendation keeps playing
+        # (never cut) and the set-aside queue comes back right after it.
         self.app.set_play_similar_mode(False)
         self.assertFalse(self.app.play_similar_mode)
-        self.assertEqual(len(audio_engine.queue), 4)
-        self.assertEqual(audio_engine.current_index, 3)
-        self.assertEqual(audio_engine.queue[3]["path"], "/music/walk1.mp3")
+        self.assertEqual([t["path"] for t in audio_engine.queue],
+                         ["/music/song1.mp3", "/music/walk1.mp3",
+                          "/music/song2.mp3", "/music/song3.mp3"])
+        self.assertEqual(audio_engine.current_index, 1)
         self.app.now_playing.update_play_similar.assert_called_with(False)
 
     def test_toggle_off_drops_pending_autoplay_buffer(self):
@@ -426,8 +428,8 @@ class TestQueueModes(unittest.TestCase):
         Leaving them queued made the toggle look dead — the same up-next list
         kept playing — and made the NEXT toggle-on look dead too, because the
         walk is deterministic by default and re-inserted the very block still
-        sitting there. The playing track and the library tail below the buffer
-        are never touched.
+        sitting there. The playing track is never touched, and the queue set
+        aside when auto-play started comes back after it.
         """
         run_async(self.app._play_track_core("/music/song1.mp3"))
         self.app.set_play_similar_mode(True)
@@ -439,13 +441,12 @@ class TestQueueModes(unittest.TestCase):
         ])
         self.assertEqual(
             [t["path"] for t in audio_engine.queue],
-            ["/music/song1.mp3", "/music/walk1.mp3", "/music/walk2.mp3",
-             "/music/song2.mp3", "/music/song3.mp3"],
+            ["/music/song1.mp3", "/music/walk1.mp3", "/music/walk2.mp3"],
         )
 
         self.app.set_play_similar_mode(False)
 
-        # Buffer gone; the playing track, the library tail and the index survive.
+        # Buffer gone; the playing track and index survive, the queue is back.
         self.assertEqual(
             [t["path"] for t in audio_engine.queue],
             ["/music/song1.mp3", "/music/song2.mp3", "/music/song3.mp3"],
@@ -489,14 +490,15 @@ class TestQueueModes(unittest.TestCase):
         # Trigger play for the first track of the new album
         run_async(self.app._play_track_core("/music/album1.mp3"))
 
-        # 4. Play Similar stays active; the FULL clicked context becomes the queue
-        # (non-destructive — no truncation to just the clicked track, no backup).
+        # 4. Play Similar stays active and starts from the chosen track; the rest
+        # of the clicked context is set aside (it replaces the earlier one).
         self.assertTrue(self.app.play_similar_mode)
-        self.assertEqual(len(audio_engine.queue), 2)
+        self.assertEqual(len(audio_engine.queue), 1)
         self.assertEqual(audio_engine.queue[0]["path"], "/music/album1.mp3")
         self.assertEqual(audio_engine.current_index, 0)
+        self.assertEqual([t["path"] for t in self.app.autoplay.held], ["/music/album2.mp3"])
 
-        # 5. Toggle Play Similar OFF — nothing to restore; the queue is untouched.
+        # 5. Toggle Play Similar OFF: the clicked context comes back.
         self.app.set_play_similar_mode(False)
         self.assertFalse(self.app.play_similar_mode)
         self.assertEqual(len(audio_engine.queue), 2)
@@ -676,23 +678,25 @@ class TestQueueModes(unittest.TestCase):
         self.assertEqual(audio_engine.current_index, 1)
         self.assertFalse(self.app.play_similar_mode)
 
-        # Operation 2: Toggle Play Similar Mode ON (non-destructive — no backup)
+        # Operation 2: Toggle Play Similar Mode ON: song3 is set aside.
         self.app.set_play_similar_mode(True)
         self.assertTrue(self.app.play_similar_mode)
+        self.assertEqual(len(audio_engine.queue), 2)
 
         # CRASH 2
         crash_and_restart()
         self.assertTrue(self.app.play_similar_mode)
 
         # Operation 3: Skip to next song while in Similar Mode (simulating walk continuation)
-        audio_engine.queue = list(audio_engine.queue) + [{"path": "/music/walk1.mp3", "title": "Walk 1", "artist": "Artist W", "album": "Walk Album"}]
-        audio_engine.current_index = 3
+        audio_engine.queue = list(audio_engine.queue) + [{"path": "/music/walk1.mp3", "title": "Walk 1", "artist": "Artist W", "album": "Walk Album", "_autoplay": True}]
+        audio_engine.current_index = 2
 
         # CRASH 3
         crash_and_restart()
         self.assertTrue(self.app.play_similar_mode)
-        self.assertEqual(audio_engine.current_index, 3)
-        self.assertEqual(audio_engine.queue[3]["path"], "/music/walk1.mp3")
+        self.assertEqual(audio_engine.current_index, 2)
+        self.assertEqual(audio_engine.queue[2]["path"], "/music/walk1.mp3")
+        self.assertEqual([t["path"] for t in self.app.autoplay.held], ["/music/song3.mp3"])
 
         # Operation 4: Toggle Shuffle ON (should disable Play Similar)
         self.app.toggle_shuffle = main.StreamripFletApp.toggle_shuffle.__get__(self.app, main.StreamripFletApp)
@@ -847,11 +851,11 @@ class TestQueueModes(unittest.TestCase):
         # OS KILL & RESTORE
         crash_and_restart()
         self.assertFalse(audio_engine.is_shuffle)
-        # Regular queue saved at shuffle-on was [song2, walk1]: turning shuffle
-        # on switched auto-play off, which dropped the still-pending walk2 (a
-        # continuation track is a tagged recommendation like any other). The
-        # shuffled-to track is re-inserted -> 3.
-        self.assertEqual(len(audio_engine.queue), 3)
+        # Regular queue saved at shuffle-on was [song2, walk1, song3]: turning
+        # shuffle on switched auto-play off, which dropped the still-pending
+        # walk2 and put back song3 (set aside when auto-play started, and
+        # carried through every kill). The shuffled-to track is re-inserted -> 4.
+        self.assertEqual(len(audio_engine.queue), 4)
 
     def test_jarvis_init_caching_and_concurrency(self):
         # Stress-test Jarvis (AssistantView) cache-gating, edge rebuilds, and concurrency controls

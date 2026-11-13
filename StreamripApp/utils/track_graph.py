@@ -12,33 +12,17 @@ Two things live here:
   • metadata  — same-artist co-occurrence (edge_kind 'artist'). Weight is fixed
                 at 1.0; ordering falls back to library order.
 
-The graph is the navigation backbone for the assistant: it routes 'play
-something similar' to a seed-ranked queue over the acoustic geometry (see
-`walk`), and 'more by this artist' to artist neighbours. Provides the continuous
-proximity the assistant needs instead of discrete buckets.
+The graph is the navigation backbone for the assistant: 'play something
+similar' and auto-play open a station (`open_station`, `walk`), 'more by this
+artist' reads artist neighbours.
 
-The walk (`walk`, "Seed-Anchored Similarity Queue"):
-  • METADATA DEFINES THE POOL, ACOUSTICS ORDER IT. `_pool_foreign` decides
-    membership from the tags (genre boundary, plus a country boundary for
-    regional seeds and for seeds with no tags at all); everything inside the
-    pool is then ranked by proximity to the SEED;
-  • it RANKS, it does not chain. A greedy trajectory (step to the best
-    neighbour of the current track, repeat) measured strictly worse than plain
-    seed-ranking on purity, artist diversity AND closeness to the seed, because
-    each wrong step became the next step's anchor;
-  • NO metadata term in the score, at all. Membership is the whole of its job;
-    the additive genre-continuity and shared-country bonuses that used to sit
-    here were measured to add +0.4 points of on-family purity over the gate
-    alone while costing diversity, seed anchoring, and biasing hard toward
-    artists MusicBrainz happens to have tagged;
-  • per-artist / per-album repeat caps bound how much of a queue one act or
-    release may take (this replaced an MMR term that moved 2.5% of picks);
-  • graceful degradation — with no enrichment nothing is foreign, so the queue
-    is pure DSP proximity. That is the intended behaviour for an untagged
-    library, not a fallback: with no metadata, proximity is the whole signal.
-
-(Two earlier walkers lived here and were removed: a stochastic
-Personalised-PageRank sampler, then the greedy seed-anchored trajectory above.)
+Stations rank ARTISTS by human genre knowledge and let the acoustics choose only
+which track plays — see `artist_graph`. The geometry used to carry far more:
+first as the ranking itself, gated by tags (`_pool_foreign`, removed), then
+ordering the legs of a genre-node journey (`genre_graph`, removed 2026-11-01).
+Both leaned on sound to keep genres apart, and sound doesn't: most music shares
+harmony and modern production, so the nearest tracks of a house song include
+grime, and those of a laiko song include blues-rock.
 
 All builders are async (DB-bound) but the numpy work runs synchronously —
 no off-thread call is necessary for libraries up to ~20K tracks; the SVD and the
@@ -50,7 +34,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Optional
+from typing import Optional, Sequence
 
 import numpy as np
 
@@ -78,6 +62,7 @@ def invalidate_coord_graph_cache() -> None:
     the persisted Zr coords / clusters, so the next walk reloads fresh."""
     _COORD_GRAPH_CACHE["key"] = None
     _COORD_GRAPH_CACHE["graph"] = None
+    invalidate_artist_graph_cache()
 
 
 async def _coord_graph_cached(db_manager):
@@ -304,21 +289,13 @@ async def build_acoustic_edges(
             logger.warning("track_graph: persisting Zr geometry failed: %s", exc)
 
     # ── Genre-similarity model (NPMI 'genre-BLOSUM') ───────────────────────
-    # Precompute + persist from the artist enrichment cache so the walk's
-    # metadata gate loads it instead of rebuilding it each session. Non-fatal:
-    # no enrichment → empty model → the walk's genre term degrades to Dice.
+    # Precompute + persist from the artist enrichment cache so stations load it
+    # instead of rebuilding it each session. Non-fatal: no enrichment → empty
+    # model → tag similarity falls back to compound names and families.
     try:
         await build_genre_affinity(db_manager)
     except Exception as gerr:
         logger.warning("track_graph: genre affinity build skipped (%s)", gerr)
-
-    # Genre-adjacency graph for the journey walk. Rides here because the Zr
-    # coords it reads are now current. Non-fatal: on failure the walk falls back
-    # to the pure-radius ranking.
-    try:
-        await build_journey_graph(db_manager)
-    except Exception as jerr:
-        logger.warning("track_graph: journey graph build skipped (%s)", jerr)
 
     # The persisted Zr coords / clusters just changed, so any cached coordinate
     # graph the walk is holding is stale — force the next walk to reload it.
@@ -329,10 +306,12 @@ async def build_acoustic_edges(
 
 async def build_genre_affinity(db_manager) -> int:
     """(Re)build + persist the NPMI genre-similarity model from the artist
-    enrichment cache, so the walk's metadata gate loads a precomputed model
-    rather than recomputing it per session. Returns the number of genre pairs
+    enrichment cache, and drop the stations' artist graph built from the old
+    metadata. The one hook every metadata change already runs through (an edit,
+    an enrichment pass, an acoustic rebuild). Returns the number of genre pairs
     stored — a graceful 0 when the backend lacks the enrichment accessors (test
     fakes) or there's no enrichment yet."""
+    invalidate_artist_graph_cache()
     if not (
         hasattr(db_manager, "get_all_artist_genre_sets")
         and hasattr(db_manager, "save_genre_affinity")
@@ -347,76 +326,6 @@ async def build_genre_affinity(db_manager) -> int:
         len(model), len(token_sets),
     )
     return len(model)
-
-
-# Bump when the persisted journey graph's shape or meaning changes; a stale
-# graph is rebuilt at startup (`journey_graph_stale`). v2 (2026-09-28): culture
-# split + bridge-artist adjacency + `via`.
-JOURNEY_GRAPH_VERSION = 2
-
-
-async def journey_graph_stale(db_manager) -> bool:
-    """True when a journey graph is persisted but was built by an older
-    version (no graph at all is the readiness check's business)."""
-    if not hasattr(db_manager, "get_journey_graph"):
-        return False
-    try:
-        payload = await db_manager.get_journey_graph() or {}
-    except Exception:
-        return False
-    return bool(payload.get("nodes")) and payload.get("version") != JOURNEY_GRAPH_VERSION
-
-
-async def build_journey_graph(db_manager) -> int:
-    """(Re)build + persist the genre-adjacency graph the journey walk traverses:
-    culture-aware nodes (coarse family + regional culture, untagged tracks
-    placed by label-propagation) joined by their bridge artists.
-
-    Rides the same rebuild path as `build_genre_affinity` — the Zr coords it
-    reads are already current — and is cheap (block-chunked kNN + one
-    connectivity pass). Returns the placed-track count; a graceful 0 when the
-    backend lacks the accessors (test fakes) or there are no coordinates yet, in
-    which case the walk falls back to the pure-radius ranking."""
-    if not (
-        hasattr(db_manager, "save_journey_graph")
-        and hasattr(db_manager, "get_artist_meta_for_paths")
-    ):
-        return 0
-    from utils import genre_graph as gg
-
-    graph = await load_live_coordinate_graph(db_manager)
-    if not graph or not graph.get("paths"):
-        await db_manager.save_journey_graph({})
-        return 0
-
-    paths = graph["paths"]
-    meta_map = await db_manager.get_artist_meta_for_paths(paths)
-    display = graph["meta_map"]
-    meta = []
-    for p in paths:
-        m = meta_map.get(p) or {}
-        d = display.get(p) or {}
-        meta.append({
-            "genres": m.get("genres"),
-            "country": m.get("country"),
-            "artist": m.get("artist") or d.get("artist"),
-            "names": (d.get("artist"), d.get("album"), d.get("title")),
-        })
-    g = gg.build_genre_graph(graph["X_unit"], meta)
-    payload = {
-        "version": JOURNEY_GRAPH_VERSION,
-        "nodes": {paths[i]: g["nodes"][i] for i in range(len(paths))},
-        "adj": {n: [[b, float(l)] for b, l in v] for n, v in g["adj"].items()},
-        # (a, b) -> bridge artist names; JSON keys can't be tuples.
-        "via": {f"{a}\t{b}": names for (a, b), names in g["via"].items()},
-    }
-    await db_manager.save_journey_graph(payload)
-    logger.info(
-        "track_graph: journey graph built (%d tracks, %d nodes, %d edges, %d inferred)",
-        len(paths), len(g["sizes"]),
-        sum(len(v) for v in g["adj"].values()), sum(g["inferred"]),
-    )
-    return len(paths)
 
 
 async def build_metadata_edges(
@@ -488,81 +397,6 @@ async def neighbors(
     """
     return await db_manager.get_neighbors(track_path, k=k, edge_kind=edge_kind)
 
-# ── Regional scenes (the ONE genre-taxonomy fact the walk still needs) ────────
-# A regional scene travels with a country/language, so for such a seed a foreign
-# country IS foreign — even a moderate cross-country genre overlap (laiko↔
-# dance-pop via NPMI) is the wrong continuation, and the right one (another
-# same-country track) is often *untagged*, so genre-set similarity can't rank it.
-# `_pool_foreign` therefore treats country as a HARD pool constraint for regional
-# seeds. Everything else (Hip-Hop, Rock, Pop, Metal, Electronic, Jazz, …) is a
-# borderless/international scene where nationality says little, so country there
-# is simply not consulted.
-#
-# The membership test is per-TAG (`genre_taxonomy.is_regional_tag`), not per
-# coarse bucket: Folk/Cntry holds laiko/rebetiko (regional) AND blues, country,
-# americana, folk-rock (borderless), so gating on the whole bucket fenced Western
-# roots artists apart by nationality — Fleetwood Mac against essentially the
-# whole library, 4.9% of all enriched pairs in the audit.
-
-# ── Why metadata NEVER enters the ordering score ─────────────────────────────
-# Two additive metadata terms used to sit alongside the acoustic score: a
-# seed-anchored shared-country bonus (`_meta_score`, λ=0.35) and a
-# current-anchored NPMI genre-continuity term (`_genre_flow`, λ=0.30). Both are
-# deleted. Measured over 80 seeds on the real library, against the pool gate
-# that was already running:
-#
-#     greedy, acoustic only            on-family 84.5%  artists 8.0  seed-aff .275
-#     greedy + `_pool_foreign` only    on-family 99.6%  artists 7.8  seed-aff .270
-#     + both metadata score terms      on-family 100.0% artists 7.6  seed-aff .246
-#
-# The gate does the genre work (84.5% → 99.6%). The score terms bought +0.4
-# points for a measurable loss of diversity and seed anchoring, while deciding
-# 43% (genre) and 16% (country) of all picks.
-#
-# They were also actively biased. `_genre_flow` returned 0.0 when either side
-# lacked tags — intended as graceful degradation, but under an arg-max 0.0 is
-# not neutral, it is last place. 27% of candidate evaluations scored 0 and 66%
-# of those zeros were an UNTAGGED candidate rather than a different genre, so
-# the tagged share of picks ran at 93% against an 80% tagged pool. With 60% of
-# the GR catalogue untagged, the term fenced out the very scene the country
-# rule in `_pool_foreign` exists to protect.
-#
-# The deeper reason no λ could have worked: the acoustic term is
-# exp(-d²/(σᵢσⱼ)), self-tuning, so its spread across a candidate pool scales
-# with local density, while λ·gx is fixed on [0,1]. In the dense hip-hop
-# majority the acoustic spread compresses and the fixed term wins; in sparse
-# regions it is noise. Metadata now does exactly one job: pool membership.
-
-
-def _is_regional(genres) -> bool:
-    """True iff a seed's genre profile is DOMINATED by a scene tied to a
-    language/country — i.e. at least half its tags are regional.
-
-    Dominance, not presence. Presence alone over-fires on borderless artists who
-    happen to carry one regional-flavoured tag, and because this gates a HARD
-    cross-country pool constraint, one stray tag was enough to fence an artist
-    from the entire rest of the library by nationality: AJ Tracey (a UK rapper
-    tagged cloud rap / grime / hip hop / UK drill / *dancehall*) was fenced from
-    other UK rappers on the strength of that single dancehall tag.
-
-    The threshold is calibrated on the real enrichment, where the split is
-    unusually clean — genuinely regional acts sit at 0.50-1.00 (Vasilis Karras
-    laiko+rebetiko 0.67, Giorgos Mazonakis 0.50) and borderless ones at 0.12-0.25
-    (Santana latinrock 0.12, Pitbull latinpop 0.12, AJ Tracey dancehall 0.20).
-    A majority rule lands in the gap.
-
-    Note the two failure directions are NOT symmetric, which is why a majority
-    (rather than a lower bar) is right: a false positive fences a track out of
-    the queue on nationality alone, while a false negative merely falls back to
-    the genre test, which still catches a genuine scene jump (Carti -> laiko is
-    fenced on genre similarity 0.000, never needing this rule)."""
-    if not genres:
-        return False
-    from utils.genre_taxonomy import is_regional_tag
-    regional = sum(1 for g in genres if is_regional_tag(g))
-    return regional * 2 >= len(genres)
-
-
 # Cache of credit-string → member-key frozenset. The walk asks the same-act
 # question once per candidate, and decomposition is pure string work.
 _CREDIT_KEY_CACHE: dict[str, frozenset] = {}
@@ -580,93 +414,6 @@ def _credit_key_set(name) -> frozenset:
         keys = credit_keys(name)
         _CREDIT_KEY_CACHE[name] = keys
     return keys
-
-
-def _same_act(a_name, b_name) -> bool:
-    """True iff two artist CREDIT STRINGS name (at least partly) the same
-    performer.
-
-    Raw string equality is not enough: streaming sources credit the same artist
-    as '21 Savage', '21 Savage & Metro Boomin' and
-    'Travis Scott/Metro Boomin/21 Savage', each of which becomes its own
-    `artists` row with its own enrichment. Under string equality the walk's
-    same-artist guards silently never fired for those rows, so an artist's own
-    collab track could be scored as a stranger — and, when its enrichment
-    resolved to the wrong entity, vetoed out of that artist's own queue.
-
-    Membership overlap fixes it in the safe direction: the guard it feeds (the
-    `_pool_foreign` exemption) only ever ADMITS a track, so a false positive
-    costs one loosely-related track while a false negative fences out a genuine
-    one."""
-    if not a_name or not b_name:
-        return False
-    if a_name == b_name:
-        return True
-    return bool(_credit_key_set(a_name) & _credit_key_set(b_name))
-
-
-def _pool_foreign(
-    seed_path: str, cand_path: str, meta_map: dict, genre_model: dict, floor: float,
-) -> bool:
-    """Pool membership test: True iff `cand` is *known* to be foreign to the
-    seed and must be excluded from the walk's candidate pool outright — a strong
-    timbre bridge must never carry the queue across this boundary.
-
-    Two evidence-gated boundaries, either one foreign-marks the candidate:
-      • GENRE — both carry genre tokens and their NPMI soft-set similarity is
-        below `floor` (the Carti→laiko timbre-bridge across an obvious genre gap).
-      • COUNTRY — both tracks carry a country, the countries differ, and the
-        SEED is either a regional scene (`_is_regional`) or has NO GENRE TAGS
-        AT ALL. For laiko/Latin/Reggae/Asian-Pop, cross-country IS the genre
-        jump, and it catches the case genre can't: the right same-country
-        continuation is frequently untagged, so only country separates it from
-        an acoustically-near foreign-pop track.
-
-        The untagged-seed clause closes a hole that made the whole gate vacuous
-        for a sixth of this library. Both boundaries demand evidence on the SEED
-        side, so a seed with no tags used to pass BOTH tests trivially and walk
-        with no pool constraint whatsoever — the opposite of the intended
-        conservatism, because "we know nothing about this seed" was read as
-        "nothing is foreign to it" rather than "we cannot tell what is". Measured
-        on the real library: 25% of enriched artists come back status='ok',
-        score=100 with an EMPTY genre list (MusicBrainz simply has no tags for
-        them), and 60% of the GR-country catalogue is in that set — so the
-        untagged seeds are not a random sample, they are one scene. A Negros Tou
-        Moria seed walked straight out of Greek rap into Don Toliver, Metro
-        Boomin, 21 Savage and Nipsey Hussle; with this clause it holds the scene
-        (Mad Clip, RACK, Snik, Toquel, Dani Gambino).
-
-        Country is the right fallback specifically BECAUSE the tags are missing:
-        it is the one provenance field these artists do carry, and an untagged
-        artist in a tagged library is overwhelmingly a local-scene act that
-        MusicBrainz has not catalogued. Note this is strictly narrower than it
-        looks — it needs a country on BOTH sides, so it never fires for the
-        7% of tracks with no country at all.
-
-    Conservative: fires only on positive evidence (both sides tagged on the
-    relevant field, same artist exempt). Missing enrichment → not foreign, so an
-    unenriched library degrades to the pure acoustic flow rather than an empty
-    queue."""
-    if floor <= 0.0:
-        return False
-    from utils.genre_similarity import soft_set_sim
-    ms = meta_map.get(seed_path)
-    mc = meta_map.get(cand_path)
-    if not ms or not mc:
-        return False
-    if _same_act(ms.get("artist"), mc.get("artist")):
-        return False  # same artist is never foreign
-    gs = ms.get("genres") or frozenset()
-    gc = mc.get("genres") or frozenset()
-    # Genre boundary (needs tags on both sides).
-    if gs and gc and soft_set_sim(gs, gc, genre_model) < floor:
-        return True
-    # Country boundary. Fires for a regional-scene seed, and ALSO for a seed
-    # with no genre tags at all — see below.
-    cs, cc = ms.get("country"), mc.get("country")
-    if cs and cc and cs != cc and (_is_regional(gs) or not gs):
-        return True
-    return False
 
 
 async def load_live_coordinate_graph(db_manager):
@@ -717,189 +464,116 @@ async def load_live_coordinate_graph(db_manager):
     return {
         "X_zr": X_zr,
         "X_unit": X_unit,
+        # Per-track tempo and energy, for the stations' segue (0 = unknown).
+        "bpm": np.array([float(meta_map[p].get("bpm") or 0.0) for p in paths]),
+        "energy": np.array([float(meta_map[p].get("energy") or 0.0) for p in paths]),
         "paths": paths,
         "path_to_idx": path_to_idx,
         "meta_map": meta_map,
     }
 
 
+# ── Artist graph cache ───────────────────────────────────────────────────────
+# The stations' genre knowledge (`artist_graph.ArtistGraph`): artist tag
+# profiles and the affinity between them, built from the enrichment and the
+# coordinate graph on first use and held for the process. It is never persisted,
+# so it cannot go stale behind an edit the way the persisted journey graph did:
+# a new coordinate graph changes the cache key, and `build_genre_affinity` —
+# which runs after every metadata edit, enrichment pass and acoustic rebuild —
+# drops it.
+_ARTIST_GRAPH_CACHE: dict = {"key": None, "graph": None}
+
+
+def invalidate_artist_graph_cache() -> None:
+    _ARTIST_GRAPH_CACHE["key"] = None
+    _ARTIST_GRAPH_CACHE["graph"] = None
+
+
+async def _artist_graph_cached(db_manager, coord_graph):
+    key = (id(db_manager), id(coord_graph))
+    if _ARTIST_GRAPH_CACHE["key"] == key:
+        return _ARTIST_GRAPH_CACHE["graph"]
+    from utils.artist_graph import ArtistGraph
+    paths = coord_graph["paths"]
+    display = coord_graph["meta_map"]
+    enrich: dict = {}
+    if hasattr(db_manager, "get_artist_meta_for_paths"):
+        try:
+            enrich = await db_manager.get_artist_meta_for_paths(paths)
+        except Exception as exc:
+            logger.warning("track_graph: stations have no artist metadata: %s", exc)
+    npmi: dict = {}
+    if hasattr(db_manager, "get_genre_affinity"):
+        try:
+            npmi = await db_manager.get_genre_affinity() or {}
+        except Exception:
+            npmi = {}
+    meta = []
+    for p in paths:
+        e = enrich.get(p) or {}
+        d = display.get(p) or {}
+        meta.append({
+            "artist": e.get("artist") or d.get("artist"),
+            "credit": d.get("artist"),
+            "genres": e.get("genres"),
+            "country": e.get("country"),
+            "manual": bool(e.get("manual")),
+            "names": (d.get("artist"), d.get("album"), d.get("title")),
+        })
+    # Off the loop: the tag-similarity pass is pure Python over the library's
+    # tag vocabulary, long enough on a phone to stall the UI.
+    graph = await asyncio.to_thread(
+        ArtistGraph, coord_graph["X_unit"], meta, npmi, _credit_key_set,
+    )
+    _ARTIST_GRAPH_CACHE["key"] = key
+    _ARTIST_GRAPH_CACHE["graph"] = graph
+    logger.info(
+        "track_graph: artist graph built (%d artists, %d tags, %d profiles inferred)",
+        len(graph), len(graph.tags), int(graph.inferred.sum()),
+    )
+    return graph
+
+
 class Station:
-    """A resumable similarity station from one seed track: every `take(n)`
-    continues where the last one stopped and never emits a track twice. Auto-play
-    keeps one per station; `walk()` is a one-shot `take`.
+    """A resumable similarity station from one seed track — an
+    `artist_graph.Drift` over the library's paths. Every `take(n)` continues
+    where the last stopped and never emits a track twice. Auto-play keeps one
+    per station; `walk()` is a one-shot `take`. A seed outside the coordinate
+    graph (not analysed yet, or no geometry built) gives an empty station."""
 
-    Two implementations, chosen by `open_station`: the genre JOURNEY when a
-    genre-adjacency graph is built (legs inside a genre, hops through interface
-    tracks — see `genre_graph.Journey`), and the seed-affinity RADIUS when it is
-    not (fresh library, unbuilt on-device geometry, test fakes)."""
-
-    #: Genre node of the current leg, for display; None for a radius station.
-    node: Optional[str] = None
-
-    async def take(self, n: int) -> list[str]:
-        raise NotImplementedError
-
-    def end_leg(self, reject_paths=()) -> None:
-        """Negative feedback: never emit `reject_paths`, and (journey) start a
-        new leg steered away from them."""
-
-    def exclude(self, paths) -> None:
-        """Never emit these (e.g. tracks played from elsewhere meanwhile)."""
-
-    def accept(self, path: str) -> None:
-        """A track listened through; the journey re-anchors its leg on it."""
-
-    def ban_artist_of(self, path: str) -> None:
-        """Never emit this track's act again on this station."""
-
-    def hop_of(self, path: str) -> Optional[tuple[str, str]]:
-        """The genre hop (from, to) that `path` came in on, when it was one of
-        the first tracks after it; None otherwise (and for a radius)."""
-        return None
-
-    def weight_hop(self, src: str, dst: str, weight: float) -> None:
-        """Scale the src → dst hop for the rest of this station (0 blocks it)."""
-
-
-class _JourneyStation(Station):
-    def __init__(self, journey, paths: list[str], path_to_idx: dict, artist_keys: list):
-        self._j = journey
+    def __init__(self, drift=None, paths: Sequence[str] = (), path_to_idx: Optional[dict] = None):
+        self._d = drift
         self._paths = paths
-        self._p2i = path_to_idx
-        self._artist_keys = artist_keys
+        self._p2i = path_to_idx or {}
 
     @property
-    def node(self) -> Optional[str]:
-        return self._j.node
+    def flavour(self) -> Optional[str]:
+        """Display name of the genre the station is playing now, or None."""
+        return self._d.flavour() if self._d is not None else None
 
     async def take(self, n: int) -> list[str]:
-        return [self._paths[i] for i in self._j.take(n)]
+        if self._d is None:
+            return []
+        return [self._paths[i] for i in self._d.take(n)]
 
     def _idx(self, paths) -> list[int]:
         return [self._p2i[p] for p in paths if p in self._p2i]
 
-    def end_leg(self, reject_paths=()) -> None:
-        self._j.end_leg(self._idx(reject_paths))
-
     def exclude(self, paths) -> None:
-        self._j.exclude(self._idx(paths))
+        """Never emit these (e.g. tracks played from elsewhere meanwhile)."""
+        if self._d is not None:
+            self._d.exclude(self._idx(paths))
 
     def accept(self, path: str) -> None:
-        if path in self._p2i:
-            self._j.accept(self._p2i[path])
+        """A track listened through: its artist pulls the drift."""
+        if self._d is not None and path in self._p2i:
+            self._d.accept(self._p2i[path])
 
-    def ban_artist_of(self, path: str) -> None:
-        if path in self._p2i:
-            self._j.caps.banned.update(self._artist_keys[self._p2i[path]])
-
-    def hop_of(self, path: str) -> Optional[tuple[str, str]]:
-        i = self._p2i.get(path)
-        return self._j.hop_of.get(i) if i is not None else None
-
-    def weight_hop(self, src: str, dst: str, weight: float) -> None:
-        self._j.weight_hop(src, dst, weight)
-
-
-class _RadiusStation(Station):
-    """Seed-affinity ranking, consumed lazily: the metadata pool gate runs per
-    scanned block (so a 20K-track library costs the same few enrichment queries
-    as a 1K one), repeat caps and rank sampling per pick. No legs, so negative
-    feedback only excludes."""
-
-    def __init__(self, db_manager, seed_path: str, ranked: list[str], display: dict,
-                 caps, rng, veto_genre_floor: float):
-        self._db = db_manager
-        self._seed = seed_path
-        self._ranked = ranked
-        self._display = display
-        self._caps = caps
-        self._rng = rng
-        self._veto = veto_genre_floor
-        self._scan = 0
-        self._pool: list[str] = []     # gate-passed, rank order, not yet emitted
-        self._used: set[str] = set()
-        self._meta_map: dict[str, dict] = {}
-        self._genre_model: dict = {}
-        self._meta_active = hasattr(db_manager, "get_artist_meta_for_paths")
-        self._gate_on = self._meta_active and veto_genre_floor > 0.0
-        self._model_loaded = False
-
-    def _row(self, path: str) -> dict:
-        return self._display.get(path) or {}
-
-    def _keys(self, path: str):
-        return _credit_key_set(self._row(path).get("artist"))
-
-    async def _ensure_meta(self, paths: list[str]) -> None:
-        # NB: filled ONLY from get_artist_meta_for_paths (the {artist, country,
-        # genres} shape `_pool_foreign` needs), never from the coordinate graph's
-        # display rows: pre-seeding those once made this skip the real
-        # enrichment fetch and silently killed the gate in coordinate mode.
-        if not self._meta_active:
-            return
-        missing = [p for p in paths if p not in self._meta_map]
-        if not missing:
-            return
-        try:
-            self._meta_map.update(await self._db.get_artist_meta_for_paths(missing))
-        except Exception:
-            self._meta_active = False
-            self._gate_on = False
-
-    async def _grow(self) -> bool:
-        """Gate the next block of the ranking into the pool; False when done."""
-        if self._scan >= len(self._ranked):
-            return False
-        if self._gate_on and not self._model_loaded:
-            self._model_loaded = True
-            if hasattr(self._db, "get_genre_affinity"):
-                try:
-                    self._genre_model = await self._db.get_genre_affinity()
-                except Exception:
-                    self._genre_model = {}
-        chunk = self._ranked[self._scan:self._scan + 200]
-        self._scan += len(chunk)
-        if self._gate_on:
-            await self._ensure_meta([self._seed, *chunk])
-        for path in chunk:
-            if self._gate_on and _pool_foreign(
-                self._seed, path, self._meta_map, self._genre_model, self._veto,
-            ):
-                continue
-            self._pool.append(path)
-        return True
-
-    async def take(self, n: int) -> list[str]:
-        from utils.genre_graph import _LOOKAHEAD, rank_pick
-        limit = 1 if self._rng is None else _LOOKAHEAD
-        out: list[str] = []
-        while len(out) < n:
-            cands: list[str] = []
-            while True:
-                cands = [
-                    p for p in self._pool
-                    if p not in self._used
-                    and self._caps.ok(self._keys(p), self._row(p).get("album"))
-                ][:limit]
-                if len(cands) >= limit or not await self._grow():
-                    break
-            if not cands:
-                break
-            path = cands[rank_pick(len(cands), self._rng)]
-            self._used.add(path)
-            self._pool.remove(path)
-            self._caps.add(self._keys(path), self._row(path).get("album"))
-            out.append(path)
-        return out
-
-    def end_leg(self, reject_paths=()) -> None:
-        self._used.update(reject_paths)
-
-    def exclude(self, paths) -> None:
-        self._used.update(paths)
-
-    def ban_artist_of(self, path: str) -> None:
-        self._caps.banned.update(self._keys(path))
+    def reject(self, paths) -> None:
+        """Negative feedback: never emit `paths`, and steer away from their
+        artists' neighbourhood for the rest of this station."""
+        if self._d is not None:
+            self._d.reject(self._idx(paths))
 
 
 async def open_station(
@@ -907,120 +581,39 @@ async def open_station(
     seed_path: str,
     *,
     avoid: Optional[set[str]] = None,
-    rng=None,
-    leg_len: int = 8,
+    focused: bool = False,
     max_per_artist: int = 2,
     max_per_album: int = 1,
     window: int = 0,
-    veto_genre_floor: float = 0.06,
-    hop_weights: Optional[dict] = None,
 ) -> Station:
-    """Open a station from `seed_path`. `rng` (a random.Random) makes it vary
-    between openings; None is deterministic. Repeat caps count over the last
-    `window` emitted tracks (0 = the whole station). `avoid` is never emitted.
-    `hop_weights[(from, to)]` scales a genre hop (0 blocks it) — the listener's
-    learned penalties, see `autoplay`.
+    """Open a station from `seed_path`. `focused` keeps it under the seed's
+    genre umbrella (`artist_graph.UMBRELLA`); otherwise it may drift across
+    genres. Repeat caps count over the last `window` emitted tracks (0 = the
+    whole station). `avoid` is never emitted."""
+    from utils import artist_graph as ag
 
-    Journey when the genre-adjacency graph exists and places the seed; otherwise
-    the radius, fenced to the seed's node ∪ its adjacencies when a partition
-    exists, and gated by metadata (genre boundary, or country boundary for
-    regional scenes and untagged seeds) — see `_pool_foreign`."""
-    from utils import genre_graph as gg
-
-    exclude: set[str] = set(avoid or set())
-    exclude.add(seed_path)
-    caps = gg.RollingCaps(max_per_artist, max_per_album, window)
-
-    # The coordinate graph is the similarity oracle (persisted Zr, cached across
-    # stations; a rebuild invalidates it). A backend without coordinates (the
-    # test fakes, or an unbuilt library) returns None → the edge table.
     coord_graph = None
     try:
         coord_graph = await _coord_graph_cached(db_manager)
     except Exception as exc:
-        logger.warning("track_graph.open_station: no coordinate graph, using edge table: %s", exc)
+        logger.warning("track_graph.open_station: no coordinate graph: %s", exc)
+    if coord_graph is None or seed_path not in coord_graph["path_to_idx"]:
+        return Station()
 
-    payload: dict = {}
-    if hasattr(db_manager, "get_journey_graph"):
-        try:
-            payload = await db_manager.get_journey_graph() or {}
-        except Exception:
-            payload = {}
-    nodes_by_path = payload.get("nodes") or {}
-    adj_raw = payload.get("adj") or {}
-
-    seed_idx = coord_graph["path_to_idx"].get(seed_path) if coord_graph else None
-
-    # ── Journey: the primary builder ─────────────────────────────────────────
-    if coord_graph is not None and seed_idx is not None and nodes_by_path and adj_raw:
-        paths = coord_graph["paths"]
-        display = coord_graph["meta_map"]
-        p2i = coord_graph["path_to_idx"]
-        artist_keys = [_credit_key_set((display.get(p) or {}).get("artist")) for p in paths]
-        via: dict[tuple[str, str], frozenset] = {}
-        for pair, names in (payload.get("via") or {}).items():
-            a, _, b = pair.partition("\t")
-            via[(a, b)] = frozenset().union(*(_credit_key_set(n) for n in names))
-        journey = gg.Journey(
-            seed_idx,
-            coord_graph["X_unit"],
-            [nodes_by_path.get(p, gg.UNKNOWN_NODE) for p in paths],
-            {n: [(b, float(l)) for b, l in v] for n, v in adj_raw.items()},
-            exclude={p2i[p] for p in exclude if p in p2i},
-            artist_keys=artist_keys,
-            album_keys=[(display.get(p) or {}).get("album") for p in paths],
-            caps=caps,
-            rng=rng,
-            leg_len=leg_len,
-            via=via,
-            hop_weights=hop_weights,
-        )
-        return _JourneyStation(journey, paths, p2i, artist_keys)
-
-    # ── Radius: rank every candidate by seed affinity ────────────────────────
-    ranked: list[str] = []
-    display: dict[str, dict] = {}
-    if coord_graph is not None and seed_idx is not None:
-        X_unit = coord_graph["X_unit"]
-        all_paths = coord_graph["paths"]
-        sim = X_unit @ X_unit[seed_idx]        # cosine to the seed, one matvec
-        sim[seed_idx] = -np.inf
-        display = coord_graph["meta_map"]
-        ranked = [all_paths[j] for j in np.argsort(-sim) if all_paths[j] not in exclude]
-    else:
-        # Test-support / unbuilt-library fallback: the seed's stored acoustic
-        # edges, already weight-ordered by the accessor.
-        rows: list[dict] = []
-        if hasattr(db_manager, "get_neighbors_multi"):
-            rows = await db_manager.get_neighbors_multi(seed_path, (KIND_ACOUSTIC,), k=200)
-        elif hasattr(db_manager, "get_neighbors"):
-            rows = await db_manager.get_neighbors(seed_path, k=200, edge_kind=KIND_ACOUSTIC)
-        for r in rows:
-            p = r.get("path")
-            if not p or p in exclude:
-                continue
-            ranked.append(p)
-            display[p] = r
-
-    # Node fence: float the seed's genre-node + its adjacencies to the front.
-    # The radius ranks by pure cosine, and the acoustic geometry places foreign
-    # genres right next to a seed (production-timbre bridges: Electronic, Metal
-    # and Rock all sit inside Hip-Hop seeds' nearest neighbours). The tag gate
-    # CANNOT fence an untagged candidate (it needs genres on both sides), so
-    # ~22% of tagged and ~48% of untagged Hip-Hop seeds leaked a foreign node.
-    # The partition places EVERY track (untagged ones by label-propagation), so
-    # a stable sort floats in-fence candidates ahead and foreign ones only pad.
-    # Inactive when no partition is built — the tag gate is then the only fence.
-    # A foreign CULTURE is not padding but out: that boundary is hard.
-    seed_node = nodes_by_path.get(seed_path)
-    if seed_node:
-        culture = gg.node_culture(seed_node)
-        ranked = [p for p in ranked
-                  if p not in nodes_by_path or gg.node_culture(nodes_by_path[p]) == culture]
-        allowed = {seed_node} | {b for b, _ in adj_raw.get(seed_node, [])}
-        ranked.sort(key=lambda p: nodes_by_path.get(p) not in allowed)
-
-    return _RadiusStation(db_manager, seed_path, ranked, display, caps, rng, veto_genre_floor)
+    graph = await _artist_graph_cached(db_manager, coord_graph)
+    paths = coord_graph["paths"]
+    p2i = coord_graph["path_to_idx"]
+    display = coord_graph["meta_map"]
+    drift = ag.Drift(
+        graph, coord_graph["X_unit"], p2i[seed_path],
+        exclude=[p2i[p] for p in (avoid or ()) if p in p2i],
+        artist_keys=[_credit_key_set((display.get(p) or {}).get("artist")) for p in paths],
+        album_keys=[(display.get(p) or {}).get("album") for p in paths],
+        caps=ag.RollingCaps(max_per_artist, max_per_album, window),
+        focused=focused,
+        bpm=coord_graph.get("bpm"), energy=coord_graph.get("energy"),
+    )
+    return Station(drift, paths, p2i)
 
 
 async def walk(
@@ -1028,45 +621,17 @@ async def walk(
     seed_path: str,
     length: int = 10,
     avoid: Optional[set[str]] = None,
-    veto_genre_floor: float = 0.06,
     max_per_artist: int = 2,
     max_per_album: int = 1,
-    rng=None,
+    focused: bool = False,
 ) -> list[str]:
     """One-shot similarity queue from `seed_path`: a station's first `length`
-    tracks, legged so a journey visits the seed's genre and then one adjacent
-    genre (the network view's Walk overlay and Jarvis' "play similar").
-    Deterministic unless `rng` is given.
-
-    ── Why legs are seed-RANKED, not chained ────────────────────────────────
-    This used to be a greedy trajectory: step to the best neighbour of the
-    CURRENT track under 0.7·Sim(current) + 0.3·Sim(seed), repeat. That was
-    measured to be strictly worse than not chaining at all. Over 80 seeds on the
-    real library, 10-track queues:
-
-        greedy chain (acoustic only)   on-family 84.5%  artists 8.0  seed-aff .275
-        beam-8       (acoustic only)   on-family 86.6%  artists 7.6  seed-aff .292
-        seed-ranked  (this)            on-family 87.1%  artists 8.3  seed-aff .380
-
-    The top acoustic neighbour shares a coarse genre family 86% of the time, so
-    a 10-step chain holds the genre only 0.86¹⁰ ≈ 23% of the time, and each
-    wrong step became the new anchor. Ranking has nothing to compound.
-
-    ── Repeat capping (replaces MMR) ────────────────────────────────────────
-    `max_per_artist` / `max_per_album` bound how much of the queue one act or one
-    release may occupy (MMR's timbre cosine measured a 2.5% effect on picks).
-    Artist counting goes through `credit_keys`, so '21 Savage' and
-    '21 Savage & Metro Boomin' count as one act. Pass 0 to disable either cap.
-
-    Degrades gracefully at every layer: no coordinate graph → rank the seed's
-    stored acoustic edges instead; no enrichment → nothing is foreign and the
-    queue is pure DSP proximity; no display metadata → no caps."""
+    tracks (the network view's Walk overlay and Jarvis' "play similar").
+    Deterministic. Empty when the seed has no coordinates."""
     station = await open_station(
         db_manager, seed_path,
-        avoid=avoid, rng=rng,
-        leg_len=max(1, (length + 1) // 2),
+        avoid=avoid, focused=focused,
         max_per_artist=max_per_artist, max_per_album=max_per_album,
-        veto_genre_floor=veto_genre_floor,
     )
     return await station.take(length)
 

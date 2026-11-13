@@ -1,9 +1,9 @@
 """Artist metadata enrichment — a cascade of sources, feeding Auto-Play.
 
-The walk reads exactly two fields per artist: `country` and `genres`.
-`_pool_foreign` gates the candidate pool on them and `genre_graph.node_label`
-places the artist in the journey graph. This module fills them in, and
-`refresh_walk_models` is what makes an edit actually reach the walk.
+Auto-play reads exactly two fields per artist: `country` and `genres`. Its
+stations rank artists by their genre profiles and discount pairs across a
+culture, which the country decides (`artist_graph`). This module fills them in,
+and `refresh_walk_models` is what makes an edit actually reach auto-play.
 
 Why MusicBrainz first: it's open (CC0), free, and — crucially for the Greek-vs-US
 hip-hop problem — exposes artist *area/country*, an objective provenance signal
@@ -687,23 +687,18 @@ async def musicbrainz_artist_details(
 
 
 # ── Propagating metadata edits into Auto-Play ────────────────────────────────
-# Every write to artist_enrichment has to reach THREE derived artefacts before
-# the walk sees it, and until now only some callers rebuilt some of them:
+# Every write to artist_enrichment has to reach the derived artefacts before
+# auto-play sees it:
 #
 #   1. albums.genre / genre_bucket  — display + grouping only.
-#   2. genre_affinity (NPMI)        — the walk's genre-similarity metric.
-#   3. the JOURNEY GRAPH            — the scaffolding `walk()` actually traverses
-#                                     first, and the node fence the radius
-#                                     fallback uses when it doesn't.
+#   2. genre_affinity (NPMI)        — co-tagging similarity between genres.
+#   3. the stations' artist graph   — never persisted; `build_genre_affinity`
+#                                     drops it, and the next station rebuilds
+#                                     it from the edited metadata.
 #
-# (3) was the gap. `build_journey_graph` was called only from
-# `build_acoustic_edges` (a full library rebuild) and from the bulk override
-# path — so a sync, a single-artist Save, an Accept and a Use-This-Match all
-# rebuilt the NPMI model and left the journey graph stale. Worse, the payload is
-# memory-cached in `db_manager._genre_graph_cache`, so the staleness persisted
-# for the whole process: you could tag an artist, see "Saved", and get a queue
-# built from the pre-edit nodes until the next app restart. That is precisely
-# the "metadata doesn't sync to auto-play" symptom.
+# A persisted genre graph used to be (3), and it went stale: a sync, a
+# single-artist Save, an Accept and a Use-This-Match rebuilt the NPMI model but
+# not the graph, so a tagged artist kept its old place until the app restarted.
 #
 # Rebuilds are COALESCED rather than run per save: tagging six artists in a row
 # should cost one rebuild, not six full-library passes on the UI's event loop.
@@ -719,11 +714,10 @@ async def _do_refresh_walk_models(db_manager) -> dict:
     except Exception as exc:
         logger.warning("track genre normalization failed: %s", exc)
     try:
-        from utils.track_graph import build_genre_affinity, build_journey_graph
+        from utils.track_graph import build_genre_affinity
+        # Also drops the stations' artist graph, so a country-only edit (which
+        # leaves the NPMI model unchanged) still reaches auto-play.
         out["model_pairs"] = await build_genre_affinity(db_manager)
-        # The journey graph splits nodes by family AND country, so a country
-        # edit moves the artist even when its genres are unchanged.
-        out["journey_nodes"] = await build_journey_graph(db_manager)
     except Exception as exc:
         logger.warning("walk model refresh failed: %s", exc)
     logger.info("refresh_walk_models: %s", out)

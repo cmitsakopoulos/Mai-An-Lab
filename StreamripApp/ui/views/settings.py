@@ -521,8 +521,11 @@ class SettingsView:
         self._show_library_stats_switch  = ft.Switch(value=True, active_color=CYAN, on_change=self._on_appearance_change)
         self._show_top_artists_switch    = ft.Switch(value=True, active_color=CYAN, on_change=self._on_appearance_change)
         self._show_top_genres_switch     = ft.Switch(value=True, active_color=CYAN, on_change=self._on_appearance_change)
-        self._show_recent_searches_switch = ft.Switch(value=True, active_color=CYAN, on_change=self._on_appearance_change)
         self._show_new_releases_switch   = ft.Switch(value=True, active_color=CYAN, on_change=self._on_appearance_change)
+        # Search answers with built-in sample data instead of contacting a
+        # service: for previewing the results layout without (working) accounts.
+        # Applies on toggle: a dev switch shouldn't need Save + a UI restart.
+        self._demo_search_switch = ft.Switch(value=False, active_color=CYAN, on_change=self._on_demo_search_toggle)
 
         # Library Pane Customization & Jarvis
         self._show_jarvis_switch = ft.Switch(value=True, active_color=CYAN, on_change=self._on_appearance_change)
@@ -824,7 +827,6 @@ class SettingsView:
                 "library_stats": bool(getattr(self, "_show_library_stats_switch", None) and self._show_library_stats_switch.value),
                 "top_artists": bool(getattr(self, "_show_top_artists_switch", None) and self._show_top_artists_switch.value),
                 "top_genres": bool(getattr(self, "_show_top_genres_switch", None) and self._show_top_genres_switch.value),
-                "recent_searches": bool(getattr(self, "_show_recent_searches_switch", None) and self._show_recent_searches_switch.value),
                 "new_releases": bool(getattr(self, "_show_new_releases_switch", None) and self._show_new_releases_switch.value),
                 "jarvis": bool(getattr(self, "_show_jarvis_switch", None) and self._show_jarvis_switch.value),
                 "network": bool(getattr(self, "_show_network_switch", None) and self._show_network_switch.value),
@@ -897,7 +899,6 @@ class SettingsView:
             "Appearance": self._build_appearance_group,
             "Audio & DSP": self._build_audio_dsp_group,
             "Haptic Feedback": self._build_haptics_group,
-            "Auto-play": self._build_autoplay_group,
             "Permissions": self._build_permissions_group,
             "Database Management": self._build_database_management_group,
             "Advanced": self._build_advanced_group,
@@ -1027,19 +1028,6 @@ class SettingsView:
                 ]
             ),
             SettingSearchEntry(
-                title="Auto-play",
-                subtitle="Hidden songs and blocked genre jumps",
-                category="LIBRARY INTELLIGENCE",
-                subpage_name="Auto-play",
-                icon=ft.Icons.ALL_INCLUSIVE_ROUNDED,
-                on_select=lambda: self._show_sub_page("Auto-play", self._build_autoplay_group()),
-                keywords=[
-                    "auto-play", "autoplay", "radio", "station", "hidden", "removed",
-                    "recommendations", "similar", "restore", "not for me", "dislike",
-                    "genre", "jump", "hop", "blocked", "reset",
-                ]
-            ),
-            SettingSearchEntry(
                 title="Permissions",
                 subtitle="Notifications, audio, and file access",
                 category="DEVELOPER TOOLS",
@@ -1076,7 +1064,7 @@ class SettingsView:
                     "toml", "config", "advanced", "raw", "editor", "maintenance",
                     "configuration", "config.toml", "file", "text editor", "export",
                     "backup", "import", "developer", "lobotomize", "fresh install",
-                    "reset", "onboarding test"
+                    "reset", "onboarding test", "demo", "sample results", "mock search"
                 ]
             ),
             SettingSearchEntry(
@@ -1204,9 +1192,6 @@ class SettingsView:
                 HubSettingItem(ft.Icons.LABEL_IMPORTANT_ROUNDED, "Metadata",
                                "Fix artist tags that power Auto-Play recommendations",
                                on_tap=self._on_open_metadata_workbench_click),
-                HubSettingItem(ft.Icons.ALL_INCLUSIVE_ROUNDED, "Auto-play",
-                               "Hidden songs and blocked genre jumps",
-                               on_tap=lambda _: self._show_sub_page("Auto-play", self._build_autoplay_group())),
                 
                 ft.Divider(color=BORDER, height=30),
                 
@@ -1570,7 +1555,6 @@ class SettingsView:
         self._show_library_stats_switch.on_change = save_cb
         self._show_top_artists_switch.on_change = save_cb
         self._show_top_genres_switch.on_change = save_cb
-        self._show_recent_searches_switch.on_change = save_cb
         self._show_new_releases_switch.on_change = save_cb
         self._show_jarvis_switch.on_change = save_cb
         self._show_network_switch.on_change = save_cb
@@ -1587,7 +1571,6 @@ class SettingsView:
             self._pill_style_dropdown,
             ft.Divider(color=BORDER, height=20),
             ft.Text("Landing Page Sections", color=CYAN, size=12, weight=ft.FontWeight.BOLD),
-            ft.Row([self._show_recent_searches_switch, ft.Text("Show Recent Searches", color=TEXT, size=12)], spacing=10),
             ft.Row([self._show_new_releases_switch, ft.Text("Show New From Your Artists", color=TEXT, size=12)], spacing=10),
             ft.Row([self._show_most_listened_switch, ft.Text("Show Most Listened Tracks", color=TEXT, size=12)], spacing=10),
             ft.Row([self._show_top_artists_switch, ft.Text("Show Most Listened Artists", color=TEXT, size=12)], spacing=10),
@@ -1847,6 +1830,14 @@ class SettingsView:
             OnyxButton("SAVE CONFIG FILE", ft.Icons.TERMINAL, on_tap=lambda _: self._save_config()),
             ft.Container(height=10),
             ft.TextButton("Debug: Populate Play Counts", icon=ft.Icons.BUG_REPORT_ROUNDED, on_click=self._on_debug_populate_click),
+            ft.Divider(color=BORDER, height=40),
+            ft.Text("Demo Search Results", weight=ft.FontWeight.BOLD, color=DIM),
+            ft.Row([
+                self._demo_search_switch,
+                ft.Text("Searches return sample data instead of contacting Qobuz or Deezer. "
+                        "For previewing the layout; nothing can be downloaded. Applies immediately.",
+                        color=DIM, size=12, expand=True),
+            ], spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER),
             ft.Divider(color=BORDER, height=40),
             ft.Text("Developer & Onboarding Testing", weight=ft.FontWeight.BOLD, color="#FF4444"),
             ft.Container(
@@ -2458,7 +2449,6 @@ class SettingsView:
             self._show_library_stats_switch.value  = bool(landing.get("show_library_stats", True))
             self._show_top_artists_switch.value    = bool(landing.get("show_top_artists", True))
             self._show_top_genres_switch.value     = bool(landing.get("show_top_genres", True))
-            self._show_recent_searches_switch.value = bool(landing.get("show_recent_searches", True))
             self._show_new_releases_switch.value   = bool(landing.get("show_new_releases", True))
 
             appearance = cfg.get("appearance", {})
@@ -2473,6 +2463,7 @@ class SettingsView:
 
             self._show_jarvis_switch.value = _to_bool(appearance.get("show_jarvis"), True)
             self._show_network_switch.value = _to_bool(appearance.get("show_network"), False)
+            self._demo_search_switch.value = _to_bool(appearance.get("demo_search"), False)
             self._show_playlists_switch.value = _to_bool(appearance.get("show_playlists"), True)
             self._show_genres_switch.value = _to_bool(appearance.get("show_genres"), True)
             self._show_artists_switch.value = _to_bool(appearance.get("show_artists"), True)
@@ -2533,7 +2524,6 @@ class SettingsView:
                 "show_library_stats": show_stats,
                 "show_top_artists": bool(show_artists),
                 "show_top_genres": bool(show_genres),
-                "show_recent_searches": bool(self._show_recent_searches_switch.value),
                 "show_new_releases": bool(self._show_new_releases_switch.value),
             }
         })
@@ -2584,6 +2574,16 @@ class SettingsView:
         self.app.safe_update(lambda: None)
         self._check_dirty("Appearance", self._save_appearance_settings, label="SAVE APPEARANCE SETTINGS", icon=ft.Icons.PALETTE_ROUNDED)
 
+    def _on_demo_search_toggle(self, e=None):
+        from utils.streamrip_api import update_config_params
+        on = bool(self._demo_search_switch.value)
+        if not update_config_params({"appearance": {"demo_search": on}}):
+            self.app.show_snackbar("Couldn't save the demo search setting.")
+            return
+        self.app.show_snackbar("Demo search results on." if on else "Demo search results off.")
+        if hasattr(self.app, "search_view"):
+            self.app.search_view.refresh_setup_state()
+
     def _on_appearance_change(self, e=None):
         self._check_dirty("Appearance", self._save_appearance_settings, label="SAVE APPEARANCE SETTINGS", icon=ft.Icons.PALETTE_ROUNDED, event=e)
 
@@ -2606,7 +2606,6 @@ class SettingsView:
                 "show_library_stats": bool(self._show_library_stats_switch.value),
                 "show_top_artists": bool(self._show_top_artists_switch.value),
                 "show_top_genres": bool(self._show_top_genres_switch.value),
-                "show_recent_searches": bool(self._show_recent_searches_switch.value),
                 "show_new_releases": bool(self._show_new_releases_switch.value),
             },
             "general": {
@@ -3432,10 +3431,6 @@ class SettingsView:
         if e.control.value and e.control.value != "none":
             self.app.trigger_haptic(e.control.value)
         self.app.safe_update(lambda: None)
-
-    def _build_autoplay_group(self):
-        from ui.views.autoplay_hidden import HiddenTracksPane
-        return HiddenTracksPane(self.app).build()
 
     def _build_haptics_group(self):
         return ft.Column([

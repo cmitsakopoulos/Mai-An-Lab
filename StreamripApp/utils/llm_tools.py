@@ -232,6 +232,58 @@ def get_agent_tools() -> List[Dict[str, Any]]:
                 "required": ["query"],
             },
         },
+        # ── The web (Google when enabled, else DuckDuckGo/Wikipedia) ─────────
+        {
+            "name": "web_search",
+            "description": (
+                "Look anything up on the web that the library can't answer: an artist's story, "
+                "what a song is about, release dates, who produced or sampled what, band members, "
+                "new or upcoming releases, tours, what genre or scene something belongs to, "
+                "translations of titles. Returns a written answer (Google) or search snippets, "
+                "each with its source. Answer from what it returns, briefly naming the source; "
+                "never guess facts you could look up."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "The question or search terms, with the artist name for context."},
+                },
+                "required": ["query"],
+            },
+        },
+        {
+            "name": "learn_about",
+            "description": (
+                "Background on the CURRENT track, its artist or its album (or a named one): "
+                "what the library knows (album, year, genre, country, plays) plus the web's story. "
+                "Use for 'tell me about this song', 'who is this', 'what's this album'."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "subject": {"type": "string", "enum": ["track", "artist", "album"],
+                                "description": "What to describe (default: track)."},
+                    "name": {"type": "string", "description": "Optional: a named track/artist/album instead of what's playing."},
+                },
+                "required": [],
+            },
+        },
+        {
+            "name": "find_related_artists",
+            "description": (
+                "Artists the web calls similar to an artist (default: the one playing), split "
+                "into those already in the user's library (playable now with play_music / "
+                "enqueue_music) and the sources naming others (findable with search_online). "
+                "Use for 'who else sounds like this', 'artists like X', 'build me a mix around X'."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "artist": {"type": "string", "description": "Artist name; omit for the current artist."},
+                },
+                "required": [],
+            },
+        },
         {
             "name": "get_library_overview",
             "description": "Summary stats of the local library: total tracks, artist/album/playlist counts, and the top genres. Use for 'how big is my library' / 'what genres do I have'.",
@@ -364,15 +416,16 @@ def get_agent_tools() -> List[Dict[str, Any]]:
         },
         {
             "name": "apply_artist_metadata",
-            "description": "Save genres and/or a country for a library artist (this changes what Auto-Play does). Omit both to accept the artist's pending AI suggestion. Always confirms with the user first.",
+            "description": "Save genres and/or a country for one or MANY library artists in one call (this changes what Auto-Play does). By default the genres REPLACE what the artists had — use this to correct a wrong genre; mode='add' keeps existing tags. Omit genres and country to accept a single artist's pending AI suggestion. Always confirms with the user first.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "artist": {"type": "string", "description": "Artist name."},
-                    "genres": {"type": "array", "items": {"type": "string"}, "description": "Lower-case genre tags to add."},
+                    "artist": {"type": "string", "description": "Artist name (or use 'artists')."},
+                    "artists": {"type": "array", "items": {"type": "string"}, "description": "Several artist names to set at once."},
+                    "genres": {"type": "array", "items": {"type": "string"}, "description": "Lower-case genre tags. Prefer genres the library already uses."},
                     "country": {"type": "string", "description": "ISO 3166-1 alpha-2 country code."},
+                    "mode": {"type": "string", "enum": ["replace", "add"], "description": "replace (default) or add to existing genres."},
                 },
-                "required": ["artist"],
             },
         },
     ]
@@ -397,10 +450,12 @@ async def execute_tool(tool_name: str, args: Dict[str, Any], runner: "AssistantR
             genre = (args.get("genre") or "").strip().lower()
             limit = int(args.get("limit") or 10)
 
-            if query:
+            if query and not genre:
                 rows = await runner.db.search_tracks_simple(query, limit=max(limit, 10))
             else:
-                rows = await runner.db.get_all_tracks()
+                # search_tracks_simple rows carry no genre, so a genre filter on
+                # them dropped every match; the full-row search carries it.
+                rows = await runner.db.get_all_tracks(search_query=query)
 
             out = []
             for r in (rows or []):
@@ -478,17 +533,17 @@ async def execute_tool(tool_name: str, args: Dict[str, Any], runner: "AssistantR
                 g = (d.get("genre") or "").lower()
                 if genre and genre not in g:
                     continue
-                bpm = float(d.get("bpm") or d.get("tempo") or 0.0)
+                bpm = _num(d.get("bpm") if d.get("bpm") is not None else d.get("tempo"), 0.0)
                 if min_bpm is not None and bpm > 0 and bpm < min_bpm:
                     continue
                 if max_bpm is not None and bpm > 0 and bpm > max_bpm:
                     continue
-                energy = float(d.get("energy", 0.5) or 0.5)
+                energy = _num(d.get("energy"), 0.5)
                 if min_e is not None and energy < min_e:
                     continue
                 if max_e is not None and energy > max_e:
                     continue
-                bright = float(d.get("brightness", 0.5) or 0.5)
+                bright = _num(d.get("brightness"), 0.5)
                 if min_b is not None and bright < min_b:
                     continue
                 if max_b is not None and bright > max_b:
@@ -686,6 +741,9 @@ async def execute_tool(tool_name: str, args: Dict[str, Any], runner: "AssistantR
         if tool_name in _METADATA_TOOLS:
             return await _metadata_tool(tool_name, args, runner)
 
+        if tool_name in _WEB_TOOLS:
+            return await _web_tool(tool_name, args, runner)
+
         return {"success": False, "error": f"Unknown tool: {tool_name}"}
 
     except Exception as e:
@@ -694,6 +752,105 @@ async def execute_tool(tool_name: str, args: Dict[str, Any], runner: "AssistantR
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
+
+def _num(v, default: float) -> float:
+    """A stored number, or `default` when it's missing/unparseable. A real 0.0
+    stays 0.0 — `float(x or 0.5)` turned every silent-quiet track into 0.5."""
+    if v is None or v == "":
+        return default
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
+
+
+# ── Web tools ────────────────────────────────────────────────────────────────
+
+_WEB_TOOLS = {"web_search", "learn_about", "find_related_artists"}
+
+
+async def _now_playing(runner: "AssistantRunner") -> Dict[str, Any]:
+    path = getattr(runner.engine, "current_path", "") or "" if getattr(runner, "engine", None) else ""
+    if not path or runner.db is None:
+        return {}
+    try:
+        return dict(await runner.db.get_track_full(path) or {})
+    except Exception:
+        return {}
+
+
+async def _web_tool(tool_name: str, args: Dict[str, Any], runner: "AssistantRunner") -> Dict[str, Any]:
+    from utils import web_research as web
+
+    if tool_name == "web_search":
+        q = (args.get("query") or "").strip()
+        if not q:
+            return {"success": False, "error": "Empty query."}
+        return await web.ask(q)
+
+    if tool_name == "learn_about":
+        subject = (args.get("subject") or "track").strip().lower()
+        name = (args.get("name") or "").strip()
+        cur = await _now_playing(runner)
+        title, artist, album = cur.get("title") or "", cur.get("artist") or "", cur.get("album") or ""
+        if name:
+            if subject == "artist":
+                artist, title, album = name, "", ""
+            elif subject == "album":
+                album, title = name, ""
+                artist = artist if album.lower() == (cur.get("album") or "").lower() else ""
+            else:
+                title, album = name, ""
+                artist = artist if title.lower() == (cur.get("title") or "").lower() else ""
+        if not (title or artist or album):
+            return {"success": False, "error": "Nothing is playing — name what to look up."}
+
+        library: Dict[str, Any] = {}
+        if artist and runner.db is not None:
+            try:
+                e = await runner.db.get_artist_enrichment(artist) or {}
+                library["artist_genres"] = _genre_list(e.get("genres"))
+                if e.get("country"):
+                    library["artist_country"] = e["country"]
+            except Exception:
+                pass
+        if subject == "track" and cur and not name:
+            library.update({k: cur.get(k) for k in ("album", "year", "genre") if cur.get(k)})
+        if subject == "album" and album and runner.db is not None and artist:
+            try:
+                rows = await runner.db.get_albums_by_artist(artist)
+                hit = next((dict(r) for r in rows or []
+                            if (dict(r).get("album") or "").lower() == album.lower()), None)
+                if hit:
+                    library.update({k: hit.get(k) for k in ("year", "genre", "track_count") if hit.get(k)})
+            except Exception:
+                pass
+
+        by = f" by {artist}" if artist else ""
+        if subject == "artist":
+            question = f"Who is the music artist {artist}? Origin, style, notable work."
+            sq = f"{artist} musician biography"
+        elif subject == "album":
+            question = f"Tell me about the album '{album}'{by}: release, reception, story."
+            sq = f'"{album}"{by} album'
+        else:
+            question = f"What is the song '{title}'{by} about, and its story or release?"
+            sq = f'"{title}"{by} song meaning'
+        res = await web.ask(question, search_query=sq,
+                            context=", ".join(f"{k}: {v}" for k, v in library.items() if v))
+        return {**res, "subject": subject, "title": title or None, "artist": artist or None,
+                "album": album or None, "library": library}
+
+    if tool_name == "find_related_artists":
+        artist = (args.get("artist") or "").strip()
+        if not artist:
+            artist = (await _now_playing(runner)).get("artist") or ""
+        if not artist:
+            return {"success": False, "error": "Nothing is playing — name an artist."}
+        lib = [dict(r) for r in (await runner.db.get_all_artists() or [])] if runner.db else []
+        return await web.related_artists(artist, lib)
+
+    return {"success": False, "error": f"Unknown tool: {tool_name}"}
 
 async def _resolved_extras(runner: "AssistantRunner", path: str) -> Dict[str, Any]:
     """If the model passed an exact library path, pre-resolve the track dict so
@@ -843,6 +1000,85 @@ def _genre_list(items) -> List[str]:
     return [(g.get("name") if isinstance(g, dict) else str(g)) for g in (items or []) if g]
 
 
+async def _apply_metadata(args: Dict[str, Any], runner: "AssistantRunner") -> Dict[str, Any]:
+    """Set genres/country on one or many artists, gated on confirmation.
+
+    REPLACES genres by default: a user asking to change an artist's genre
+    wants the wrong one gone, and the old add-only path left it in place. One
+    call covers a whole scene ('these twelve are Greek trap'), so nobody has to
+    go artist by artist."""
+    from utils import metadata_ai
+
+    db = runner.db
+    requested = [str(a) for a in (args.get("artists") or []) if str(a).strip()]
+    if not requested and args.get("artist"):
+        requested = [str(args["artist"])]
+    artists, missing = [], []
+    for n in requested[:50]:
+        a = await _resolve_artist(runner, n)
+        if a and a not in artists:
+            artists.append(a)
+        elif not a:
+            missing.append(n)
+    if not artists:
+        return {"success": False,
+                "message": f"No library artist matching {', '.join(map(repr, requested)) or 'that'}."}
+
+    genres = []
+    for g in args.get("genres") or []:
+        t = str(g).strip().lower()
+        if t and t not in genres:
+            genres.append(t)
+    country = (args.get("country") or "").strip().upper()
+    if country and not metadata_ai._clean_country(country):
+        return {"success": False, "error": f"'{country}' isn't an ISO country code."}
+    country = metadata_ai._clean_country(country)
+    replace = (args.get("mode") or "replace") != "add"
+    use_ai = False
+    if not genres and not country:
+        if len(artists) != 1:
+            return {"success": False, "message": "Give the genres and/or country to set."}
+        cached = await db.get_ai_research(artists[0])
+        p = (cached or {}).get("payload") or {}
+        if not cached or p.get("status") != "ok":
+            return {"success": False, "message": f"No suggestion on file for {artists[0]}; research it first or give genres/country."}
+        genres, country = list(p.get("genres") or []), p.get("country") or ""
+        use_ai = True
+
+    what = ", ".join(genres) if genres else ""
+    if country:
+        what = f"{what}{' · ' if what else ''}{country}"
+    who = artists[0] if len(artists) == 1 else f"{len(artists)} artists"
+    verb = "set" if (replace and genres) else "tag"
+
+    async def _do():
+        from utils.assistant_runner import AssistantResponse
+        from utils.metadata_enrich import refresh_walk_models
+        if use_ai:
+            await metadata_ai.accept_suggestion(db, artists[0], genres=genres, country=country or None)
+        elif replace and genres:
+            await db.set_artists_genres(artists, genres, country=country or None,
+                                        refresh_model=False)
+        else:
+            await db.bulk_tag_artists(artists, genre=",".join(genres) or None,
+                                      country=country or None, refresh_model=False)
+        refresh_walk_models(db)
+        return AssistantResponse(
+            spoken=f"Done, sir. {who} {'is' if len(artists) == 1 else 'are'} now {what}.",
+            displayed=f"Saved **{who}** → {what}. Auto-Play will use it from now on.",
+        )
+
+    listed = ", ".join(artists[:8]) + ("…" if len(artists) > 8 else "")
+    note = f" (couldn't find: {', '.join(missing)})" if missing else ""
+    return runner.agent_request_confirmation(
+        spoken=f"Shall I {verb} {who} as {what}, sir? Auto-Play will use it.",
+        displayed=(f"{'Set' if verb == 'set' else 'Tag'} **{listed}** as **{what}**"
+                   f"{' (replacing their genres)' if verb == 'set' else ''}?{note} "
+                   f"This changes what Auto-Play queues around them."),
+        on_yes=_do,
+    )
+
+
 async def _metadata_tool(tool_name: str, args: Dict[str, Any], runner: "AssistantRunner") -> Dict[str, Any]:
     from utils import metadata_ai
 
@@ -865,6 +1101,9 @@ async def _metadata_tool(tool_name: str, args: Dict[str, Any], runner: "Assistan
             "research_available": metadata_ai.research_available(),
             "where_to_review": "Settings → Metadata",
         }
+
+    if tool_name == "apply_artist_metadata":
+        return await _apply_metadata(args, runner)
 
     artist = await _resolve_artist(runner, args.get("artist") or "")
     if not artist:
@@ -901,44 +1140,5 @@ async def _metadata_tool(tool_name: str, args: Dict[str, Any], runner: "Assistan
             "sources": [s.get("title") for s in (res.get("sources") or [])],
             "saved_as": "suggestion — not applied; the user can accept it in Settings → Metadata or ask you to apply it",
         }
-
-    if tool_name == "apply_artist_metadata":
-        genres = [str(g).strip().lower() for g in (args.get("genres") or []) if str(g).strip()]
-        country = (args.get("country") or "").strip().upper()
-        if country and not metadata_ai._clean_country(country):
-            return {"success": False, "error": f"'{country}' isn't an ISO country code."}
-        country = metadata_ai._clean_country(country)
-        if not genres and not country:
-            cached = await db.get_ai_research(artist)
-            p = (cached or {}).get("payload") or {}
-            if not cached or p.get("status") != "ok":
-                return {"success": False, "message": f"No suggestion on file for {artist}; research it first or give genres/country."}
-            genres, country = list(p.get("genres") or []), p.get("country") or ""
-            use_ai = True
-        else:
-            use_ai = False
-        what = ", ".join(genres) if genres else ""
-        if country:
-            what = f"{what}{' · ' if what else ''}{country}"
-
-        async def _do():
-            from utils.assistant_runner import AssistantResponse
-            from utils.metadata_enrich import refresh_walk_models
-            if use_ai:
-                await metadata_ai.accept_suggestion(db, artist, genres=genres, country=country or None)
-            else:
-                await db.bulk_tag_artists([artist], genre=",".join(genres) or None,
-                                          country=country or None, refresh_model=False)
-            refresh_walk_models(db)
-            return AssistantResponse(
-                spoken=f"Done, sir. {artist} is now tagged {what}.",
-                displayed=f"Saved **{artist}** → {what}. Auto-Play will use it from now on.",
-            )
-
-        return runner.agent_request_confirmation(
-            spoken=f"Shall I tag {artist} as {what}, sir? Auto-Play will use it.",
-            displayed=f"Tag **{artist}** as **{what}**? This changes what Auto-Play queues around them.",
-            on_yes=_do,
-        )
 
     return {"success": False, "error": f"Unknown tool: {tool_name}"}

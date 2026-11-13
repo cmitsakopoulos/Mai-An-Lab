@@ -3,13 +3,13 @@
 Flat Jaccard treats 'soft rock' vs 'hard rock' as zero overlap — identical to
 'soft rock' vs 'techno'. This module learns, from how often two genre tokens
 co-tag the same artist, a bounded similarity (NPMI ∈ [0,1], self = 1) that gives
-partial credit for *related* genres. The eval (tools/eval_metadata_fusion.py)
-showed it strictly beats Jaccard in the walk's metadata gate.
+partial credit for *related* genres. Stations read it as one of the human
+sources of tag-to-tag similarity (`artist_graph.tag_similarity`).
 
 Pure stdlib (math only), so it imports cheaply on the walk's hot path and
 compiles for Android like the rest of the metadata layer. The model is a small
 sparse dict — built once during graph generation, persisted, and loaded by the
-walk (never rebuilt at query time).
+stations (never rebuilt at query time).
 """
 
 from __future__ import annotations
@@ -85,48 +85,3 @@ def build_npmi_model(
         if npmi > 0:
             model[f"{a}|{b}"] = round(npmi, 4)  # a < b by construction
     return model
-
-
-# Similarity guaranteed to two token sets that share a coarse taxonomy family
-# (both Electronic, both Metal, …) regardless of what the learned model knows.
-#
-# The NPMI model is estimated from ONE personal library, where the tag
-# vocabulary is far finer than the corpus can support: 224 distinct MusicBrainz
-# subgenre tokens across 182 artists means most genuinely-related pairs are
-# attested by a single artist and are indistinguishable, statistically, from a
-# coincidence. Support gating then throws the real ones out with the phantoms —
-# measured, it fenced 'electrohouse' from 'deephouse' and 'eurodance' from
-# 'eurohouse' at similarity 0.000.
-#
-# So the hand-curated taxonomy acts as a FLOOR under the learned model: data may
-# raise a pair's similarity, never push two members of the same family to
-# "unrelated". Comfortably above track_graph's veto_genre_floor (0.06) so a
-# shared family can never be vetoed apart. Cross-family pairs are untouched —
-# Hip-Hop vs Folk/Cntry (the Carti→laiko jump) still gets no floor at all.
-FAMILY_FLOOR = 0.12
-
-
-def _pair(a: str, b: str, model: dict) -> float:
-    if a == b:
-        return 1.0
-    return model.get(f"{a}|{b}" if a < b else f"{b}|{a}", 0.0)
-
-
-def soft_set_sim(A, B, model: dict, family_floor: float = FAMILY_FLOOR) -> float:
-    """Symmetric soft similarity of two genre token sets in [0,1].
-
-    Each token takes its best match in the other set (self = 1, related = NPMI,
-    unrelated = 0), averaged both ways, then floored at `family_floor` when the
-    two sets share a coarse taxonomy family (see FAMILY_FLOOR). With an empty
-    model this reduces to the Dice coefficient — i.e. exact-overlap behaviour —
-    so it is always safe. Pass family_floor=0.0 for the pure learned score."""
-    if not A or not B:
-        return 0.0
-    s1 = sum(max(_pair(a, b, model) for b in B) for a in A)
-    s2 = sum(max(_pair(a, b, model) for a in A) for b in B)
-    sim = (s1 + s2) / (len(A) + len(B))
-    if family_floor > 0.0 and sim < family_floor:
-        from utils.genre_taxonomy import genre_families
-        if genre_families(A) & genre_families(B):
-            return family_floor
-    return sim

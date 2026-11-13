@@ -1,6 +1,5 @@
-"""Queue layout while auto-play is on: [playing][up next][station][held].
-The listener's picks play before recommendations, and the held queue is
-untouched until auto-play is off."""
+"""Queue layout while auto-play is on: [playing][up next][auto-play].
+The listener's picks play before recommendations."""
 import os
 import sys
 import unittest
@@ -33,18 +32,6 @@ class LayoutTests(unittest.TestCase):
 
     def test_up_next_block_ends_at_the_first_unqueued_row(self):
         self.assertEqual(queue_layout.up_next_end(self.q, 0), 3)
-
-    def test_held_queue_starts_after_the_last_recommendation(self):
-        self.assertEqual(queue_layout.held_start(self.q, 0), 5)
-
-    def test_without_recommendations_held_starts_after_up_next(self):
-        q = [r for r in self.q if not r.get("_autoplay")]
-        self.assertEqual(queue_layout.held_start(q, 0), 3)
-
-    def test_once_past_the_station_everything_after_the_playing_row_is_held(self):
-        # The station ran dry (e.g. no UI session to refill) and playback fell
-        # into the held queue.
-        self.assertEqual(queue_layout.held_start(self.q, 5), 6)
 
     def test_as_queued_copies_and_drops_the_recommendation_tag(self):
         src = _row("/x", _autoplay=True)

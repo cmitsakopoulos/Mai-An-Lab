@@ -1,5 +1,4 @@
-"""Auto-play settings sheet: on/off, Deterministic / Random, and what the
-station is playing from. Opened by tapping the chain icon in Now Playing (long-press there
+"""Auto-play sheet: on/off and what the station is playing from. Opened by tapping the chain icon in Now Playing (long-press there
 is the instant on/off shortcut) and from the queue sheet's Auto-play header.
 
 All behaviour lives in utils/autoplay.py; this only presents it.
@@ -12,21 +11,11 @@ import flet as ft
 from ui.tokens import (
     BORDER, BORDER_SUBTLE, CYAN, DIM, RADIUS_CARD, SURFACE, SURFACE2, TEXT, apply_opacity,
 )
-from ui.widgets import CupertinoSegmentedBar
-from utils.autoplay import DETERMINISTIC, RANDOM
 
 if sys.platform == "darwin":
     from utils.audio_engine_macos import audio_engine
 else:
     from utils.audio_engine import audio_engine
-
-MODE_COPY = {
-    DETERMINISTIC: "The same song always starts the same mix: its closest "
-                   "matches first.",
-    RANDOM:        "A fresh mix every time: still close to the song, in a "
-                   "different order with different picks.",
-}
-
 
 def anchor_label(app) -> str:
     """"Title — Artist" of the track the station is playing from, or ""."""
@@ -59,7 +48,6 @@ class AutoPlaySheet:
         self.page.show_dialog(self._sheet)
 
     def _build(self) -> ft.BottomSheet:
-        ap = self.app.autoplay
         enabled = bool(self.app.play_similar_mode)
 
         self._switch = ft.CupertinoSwitch(
@@ -67,16 +55,6 @@ class AutoPlaySheet:
             active_track_color=CYAN,
             on_change=self._on_toggle,
         )
-        self._mode_bar = CupertinoSegmentedBar(
-            segments=[
-                (DETERMINISTIC, "Deterministic", ft.Icons.PUSH_PIN_ROUNDED, None),
-                (RANDOM,        "Random",        ft.Icons.SHUFFLE_ROUNDED, None),
-            ],
-            selected_key=ap.variety,
-            on_change=self._on_mode,
-            height=38,
-        )
-        self._mode_copy = ft.Text(MODE_COPY[ap.variety], color=DIM, size=12)
         self._anchor_text = ft.Text(
             "", color=TEXT, size=14, weight=ft.FontWeight.W_500,
             max_lines=1, overflow=ft.TextOverflow.ELLIPSIS,
@@ -114,7 +92,8 @@ class AutoPlaySheet:
                 ft.Column(
                     [
                         ft.Text("Auto-play", color=TEXT, size=17, weight=ft.FontWeight.W_600),
-                        ft.Text("Similar songs keep playing after your queue.",
+                        ft.Text("After the songs you queued, similar songs from "
+                                "the same genre keep playing.",
                                 color=DIM, size=12),
                     ],
                     spacing=2, expand=True, tight=True,
@@ -137,11 +116,6 @@ class AutoPlaySheet:
                     [
                         grab,
                         header,
-                        ft.Container(height=18),
-                        _caption("MODE"),
-                        ft.Container(height=8),
-                        self._mode_bar,
-                        ft.Container(content=self._mode_copy, padding=ft.Padding.only(top=8, left=4)),
                         ft.Container(height=18),
                         self._anchor_section,
                     ],
@@ -173,11 +147,6 @@ class AutoPlaySheet:
         self.app.set_play_similar_mode(bool(e.control.value))
         self._fill_anchor()
         self._safe_update(self._anchor_section)
-
-    def _on_mode(self, key: str):
-        self.app.set_autoplay_variety(key)
-        self._mode_copy.value = MODE_COPY[key]
-        self._safe_update(self._mode_copy)
 
     @staticmethod
     def _safe_update(ctrl):

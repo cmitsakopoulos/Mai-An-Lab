@@ -23,11 +23,8 @@ from __future__ import annotations
 #      so they surface with their own colour instead of being swallowed by the
 #      Rock/Pop majority co-tags ("Pop, Rock, Metal" → Metal).
 #   2. Electronic / Classical / Folk-Cntry are kept at their ORIGINAL top
-#      priority: the walk's regional-scene test (`track_graph._is_regional`)
-#      special-cases the regional buckets (Folk/Cntry, Latin, Reggae, Asian-Pop),
-#      so a bucket that preceded them could silently change which seeds get the
-#      country pool constraint. The niche buckets below (Jazz…Asian-Pop) all sit
-#      *after* the majority families, so they only add resolution to display,
+#      priority, and the niche buckets below (Jazz…Asian-Pop) all sit *after*
+#      the majority families, so they only add resolution to display,
 #      normalization and the genre diagnostic. Substring collisions are avoided
 #      by ordering: Latin before Reggae ('reggaeton' ⊃ 'reggae'), the niche
 #      block after Soul ('jazz funk' stays Soul via 'funk'), Asian-Pop before
@@ -39,13 +36,11 @@ from __future__ import annotations
 # Electronic. Matching them first fixes that class of collision.
 #
 # Second, and the reason the set exists separately from the Folk/Cntry bucket:
-# `track_graph._is_regional` gates a HARD cross-country pool constraint, and it
-# used to ask "is this the Folk/Cntry bucket?". But that bucket holds both
-# genuinely regional scenes (laiko, rebetiko) and borderless Western roots music
-# (blues, country, americana, folk-rock). So a GB blues-rock band was treated as
-# a regional act and fenced from every non-GB artist — measured at 4.9% of all
-# enriched pairs, Fleetwood Mac against essentially the whole library. A scene
-# is regional when it travels with a language, not when it is folk-adjacent.
+# that bucket holds both genuinely regional scenes (laiko, rebetiko) and
+# borderless Western roots music (blues, country, americana, folk-rock). A scene
+# is regional when it travels with a language, not when it is folk-adjacent, so
+# auto-play's tag similarity gives no family kinship across that line
+# (`artist_graph.tag_similarity`: it ran a laiko station into Fleetwood Mac).
 _REGIONAL_KEYS = (
     "laiko", "laika", "laïko", "laïka", "laiki", "λαϊκό", "λαϊκά",
     "rebetiko", "ρεμπέτικο", "entechno", "entehno", "έντεχνο", "greek folk",
@@ -81,8 +76,7 @@ _GENRE_RULES = [
     # Alt, while bare 'rock' / 'classic rock' → Rock. Together they cover exactly
     # what the old single 'Rock/Alt' bucket did (Metal still precedes both, so
     # 'hard rock' / 'grunge' stay Metal); the split only refines which side a
-    # track lands on so the journey graph can separate a 70s-classic-rock node
-    # from an indie/post-punk one instead of conflating them.
+    # track lands on, separating 70s classic rock from indie / post-punk.
     ("Alt",        ("alternatif", "alternative", "indé", "indie", "punk", "new wave", "post-punk", "new romantic", "darkwave", "shoegaze", "post-hardcore")),
     ("Rock",       ("rock", "рок")),
     # Keys are matched as raw substrings against tags that have had separators
@@ -235,9 +229,9 @@ def genre_display_label(genre: str | None) -> str:
 
 
 # ── Culture ───────────────────────────────────────────────────────────────────
-# A culture boundary is the one hard boundary the auto-play journey keeps: laiko
-# and Western folk share a family name, Greek rap and US rap share a family, and
-# neither acoustics nor the family says the listener crossed a language. Country
+# Culture is the one boundary auto-play weighs beyond genre: laiko and Western
+# folk share a family name, Greek rap and US rap share a family, and neither
+# acoustics nor the family says the listener crossed a language. Country
 # from enrichment is the first signal, but it is missing or wrong exactly where
 # it matters (an artist with no MusicBrainz entity, a short name matched to the
 # wrong one), so two more signals back it up — scene tags and the script of the

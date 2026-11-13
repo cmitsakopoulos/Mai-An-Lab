@@ -116,6 +116,11 @@ def _track_summary(t: dict) -> str:
 # ── Main entry point ─────────────────────────────────────────────────────────
 
 
+
+# Tool round-trips per request. Web lookups chain (find related → play), so
+# four left multi-step requests without a final answer.
+_AGENT_MAX_STEPS = 6
+
 class AssistantRunner:
     """Dispatches Intent objects against the live engine + DB.
 
@@ -1043,7 +1048,12 @@ class AssistantRunner:
             "play-next, play whole albums or playlists, the DSP similarity walk, mood steering (steer_mood), "
             "transport control, saving playlists, and Qobuz online search), plus metadata curation (metadata status, "
             "an artist's stored genre/country, web research of an artist with sources, and applying genres/country — "
-            "research only ever creates a suggestion; applying always asks the user first). "
+            "research only ever creates a suggestion; applying always asks the user first), and the web: "
+            "web_search for any fact beyond the library (artist stories, song meanings, release dates, "
+            "credits, new releases, tours), learn_about for 'tell me about this song/artist/album', and "
+            "find_related_artists for 'who sounds like this' — it says which of those artists the user "
+            "already owns, so you can play or enqueue them. Never guess a fact you can look up; name the "
+            "source briefly. "
             "When users ask for specific acoustic properties (energy, brightness, tempo) or vibe requests, "
             "use search_by_acoustic_profile or steer_mood. Answer library questions by calling the read tools and "
             "reasoning over the results — e.g. counts, 'most played', 'how many by X', 'what's on this album'. "
@@ -1073,7 +1083,8 @@ class AssistantRunner:
         tools = get_agent_tools()
         import json
         res = None
-        for _ in range(4):
+        used_tools = False
+        for _ in range(_AGENT_MAX_STEPS):
             res = await engine.chat_completion(messages, tools=tools)
             if not res.success:
                 logger.warning("Agent LLM call failed: %s", res.error_message)
@@ -1110,12 +1121,15 @@ class AssistantRunner:
                 }
             messages.append(assistant_msg)
 
+            used_tools = True
             for tc in res.tool_calls:
                 tool_res = await execute_tool(tc["name"], tc["args"], self)
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc["id"],
-                    "content": json.dumps(tool_res),
+                    # default=str: a stray date/Row/bytes in a result must not
+                    # kill the whole turn with a TypeError.
+                    "content": json.dumps(tool_res, default=str, ensure_ascii=False),
                 })
 
             # A tool asked for confirmation or disambiguation: surface it now,
@@ -1123,6 +1137,15 @@ class AssistantRunner:
             if self._agent_interrupt is not None:
                 return self._finalize_agent_interrupt()
 
+        # Out of steps while the model was still calling tools: its last
+        # message has no prose. Ask once, without tools, for the answer to
+        # what it found — rather than "Task executed" over real results.
+        if used_tools and not (res and res.content):
+            messages.append({"role": "user", "content":
+                             "Answer my request now from the tool results above, briefly."})
+            final = await engine.chat_completion(messages, tools=None)
+            if final.success and final.content:
+                return self._finalize_agent(final.content)
         return self._finalize_agent(res.content if (res and res.content) else "Task executed successfully, sir.")
 
 
@@ -1924,8 +1947,8 @@ class AssistantRunner:
         seed_name = f"'{seed_row.get('title')}' by {seed_row.get('artist')}" if seed_row else "the active track"
 
         if is_queue and self.engine.queue:
-            # Add to Queue semantics (ahead of auto-play's recommendations and
-            # the held queue); one mutation, one native op.
+            # Add to Queue semantics (ahead of auto-play's recommendations);
+            # one mutation, one native op.
             self.engine.queue_last_many(engine_tracks)
             for t in engine_tracks:
                 self._remember(t["path"], seed_path=seed_path)

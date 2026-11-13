@@ -8,10 +8,16 @@ this asks Gemini to search and answer from what it finds.
 ── Rules that make it safe to put next to the walk ───────────────────────────
   • Suggestions only. Answers land in `artist_ai_research`, never in
     `artist_enrichment`; nothing reaches Auto-Play until the user accepts.
-  • Grounded or nothing. One native `generateContent` call with the
-    `googleSearch` tool (the OpenAI-compatible endpoint the chat agent uses
-    can't ground). An answer with no search sources keeps no country, because
-    country is the field `_pool_foreign` fences on.
+  • Country needs backing. Country decides an artist's culture in auto-play,
+    so the model's own confidence isn't enough: the web snippets it was shown
+    must name that country, or the user's titles must be in a script only
+    that country writes (Greek → GR/CY). Snippets naming only OTHER countries
+    veto it. Memory alone keeps a country only in memory modes at high
+    confidence. Google-grounded answers (paid tier) are trusted as before.
+  • Search is ours, not Gemini's. The free tier can't use the googleSearch
+    tool, so DuckDuckGo Lite (then Wikipedia) is queried here and the
+    snippets go into the prompt. A snippet only counts as grounding when it
+    names one of the user's album or track titles.
   • Constrained. Genres are steered to the library's own vocabulary (the NPMI
     model only understands tokens it has seen); country must be a real ISO
     3166 code; "not identified" is always a valid answer and the prompt says
@@ -19,10 +25,8 @@ this asks Gemini to search and answer from what it finds.
   • The library tells the model WHICH artist this is. Several acts share most
     names, so album and track titles go in with the question.
   • Researched once. The cache is consulted before every call; a re-run is an
-    explicit choice.
-
-Gemini only for now: a local model has no web access, which makes it weakest
-exactly where this is needed.
+    explicit choice. The exception: an empty answer given while search was
+    unreachable is retried, since it never saw the web.
 """
 
 from __future__ import annotations
@@ -67,6 +71,75 @@ _COUNTRY_ALIASES = {"UK": "GB", "EL": "GR", "EN": "GB"}
 
 _CONFIDENCE = ("high", "medium", "low")
 
+# DuckDuckGo Lite answers 403 to aiohttp's default User-Agent, so every request
+# names a browser — including on a session the caller passed in.
+_BROWSER_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+# Wikimedia asks API clients to identify themselves.
+_WIKI_UA = "StreamripApp/2.0 (personal music library metadata)"
+_MAX_SNIPPETS = 4
+
+# Titles too generic to prove a web page is about THIS artist.
+_GENERIC_TITLES = frozenset({
+    "intro", "outro", "interlude", "skit", "live", "remix", "remixes", "untitled",
+    "greatest hits", "best of", "the best of", "singles", "demo", "acoustic",
+})
+
+# Country names and demonyms as they appear in English bios, normalised the same
+# way as snippet text (see _norm). Language words that name many countries'
+# artists ("english", "spanish", "arabic") and genre prefixes ("uk drill") are
+# left out: they'd contradict correct answers.
+_COUNTRY_WORDS = {
+    "GR": ("greek", "greece", "hellenic", "ελληνας", "ελληνιδα", "ελληνικ", "ελλαδα"),
+    "CY": ("cypriot", "cyprus", "κυπρ"),
+    "US": ("american", "united states", "usa"),
+    "GB": ("british", "united kingdom", "england", "scottish", "scotland", "welsh", "wales"),
+    "IE": ("irish", "ireland"), "CA": ("canadian", "canada"),
+    "AU": ("australian", "australia"), "NZ": ("new zealand",),
+    "FR": ("france",), "DE": ("german", "germany"), "IT": ("italian", "italy"),
+    "ES": ("spain", "spaniard"), "PT": ("portugal",), "NL": ("dutch", "netherlands"),
+    "BE": ("belgian", "belgium"), "AT": ("austrian", "austria"), "CH": ("swiss", "switzerland"),
+    "SE": ("swedish", "sweden"), "NO": ("norwegian", "norway"), "DK": ("danish", "denmark"),
+    "FI": ("finnish", "finland"), "IS": ("icelandic", "iceland"), "PL": ("polish", "poland"),
+    "CZ": ("czech",), "HU": ("hungarian", "hungary"), "RO": ("romanian", "romania"),
+    "BG": ("bulgarian", "bulgaria"), "RS": ("serbian", "serbia"), "HR": ("croatian", "croatia"),
+    "AL": ("albanian", "albania"), "MK": ("north macedonia",), "TR": ("turkish", "turkey"),
+    "RU": ("russian", "russia"), "UA": ("ukrainian", "ukraine"), "IL": ("israeli", "israel"),
+    "LB": ("lebanese", "lebanon"), "EG": ("egyptian", "egypt"), "MA": ("moroccan", "morocco"),
+    "DZ": ("algerian", "algeria"), "NG": ("nigerian", "nigeria"), "GH": ("ghanaian", "ghana"),
+    "ZA": ("south african",), "JM": ("jamaican", "jamaica"), "BR": ("brazilian", "brazil"),
+    "AR": ("argentine", "argentinian", "argentina"), "MX": ("mexican", "mexico"),
+    "CO": ("colombian", "colombia"), "PR": ("puerto rican", "puerto rico"),
+    "CU": ("cuban", "cuba"), "JP": ("japanese", "japan"), "KR": ("korean", "korea"),
+    "CN": ("chinese", "china"), "IN": ("india",),
+}
+# Language words: they back a claim only when no country above is named, since
+# "Spanish-language Mexican singer" is Mexican.
+_COUNTRY_LANGUAGE_WORDS = {
+    "ES": ("spanish", "espanol", "espanola"), "GB": ("english",),
+    "FR": ("french", "francais", "francaise"), "PT": ("portuguese",),
+}
+# A title match only counts on a page that's about music — an album called
+# "Αθήνα" also matches every Athens hotel listing.
+_MUSIC_CUES = ("album", "song", "single", "track", "singer", "rapper", "band", "music",
+               "musician", "record", "lyrics", "discography", "ep", "mixtape", "spotify",
+               "τραγουδ", "αλμπουμ", "δισκ", "ραπερ", "μουσικ", "cancion", "chanson")
+_MUSIC_CUE_RE = re.compile(r"(?<!\w)(" + "|".join(_MUSIC_CUES) + ")")
+
+# Phrases that contain a demonym without naming the artist's country.
+_COUNTRY_NOISE = ("latin american", "african american", "north american", "south american",
+                  "greek mythology", "greek god")
+
+# A script in the user's own titles that only a few countries write in.
+_SCRIPT_COUNTRIES = (
+    (re.compile(r"[Ͱ-Ͽἀ-῿]"), {"GR", "CY"}),
+    (re.compile(r"[가-힯]"), {"KR"}),
+    (re.compile(r"[぀-ヿ]"), {"JP"}),
+    (re.compile(r"[֐-׿]"), {"IL"}),
+    (re.compile(r"[฀-๿]"), {"TH"}),
+    (re.compile(r"[Ⴀ-ჿ]"), {"GE"}),
+    (re.compile(r"[԰-֏]"), {"AM"}),
+)
+
 
 class ResearchUnavailable(RuntimeError):
     """Research can't run at all (no key, bad key, quota). Distinct from an
@@ -110,83 +183,225 @@ def research_available() -> bool:
 
 # ── web snippet searcher (free tier open grounding) ───────────────────────────
 
+def _search_queries(artist: str, evidence: Optional[dict]) -> List[str]:
+    """The artist plus their biggest album first — a bare name finds whichever
+    act of that name is most famous — then the bare name as a fallback."""
+    queries = []
+    own = _norm(artist)
+    for a in (evidence or {}).get("albums") or []:
+        title = str(a.get("title") or "").strip()
+        t = _norm(title)
+        if len(t) >= 3 and t != own and t not in _GENERIC_TITLES:
+            queries.append(f"{artist} {title} album")
+            break
+    queries.append(f"{artist} music artist")
+    return queries
+
+
+def _parse_ddg_lite(html: str) -> List[Dict[str, str]]:
+    """Results from a DuckDuckGo Lite page: each `result-link` anchor paired
+    with the `result-snippet` cell that follows it. Ads are skipped. Standard
+    library only — bs4 isn't bundled in the phone build."""
+    import urllib.parse
+    from html.parser import HTMLParser
+
+    class _Lite(HTMLParser):
+        def __init__(self):
+            super().__init__(convert_charrefs=True)
+            self.out: List[Dict[str, str]] = []
+            self.current: Optional[Dict[str, str]] = None
+            self.capture: Optional[str] = None   # "title" | "snippet"
+            self.buf: List[str] = []
+
+        def handle_starttag(self, tag, attrs):
+            a = dict(attrs)
+            classes = (a.get("class") or "").split()
+            if tag == "a" and "result-link" in classes:
+                href = a.get("href") or ""
+                if href.startswith("//"):
+                    href = "https:" + href
+                parsed = urllib.parse.urlparse(href)
+                if "duckduckgo.com" in parsed.netloc:
+                    target = urllib.parse.parse_qs(parsed.query).get("uddg")
+                    href = target[0] if target else ""   # /y.js etc. are ads
+                self.current = {"uri": href} if href else None
+                self.capture, self.buf = "title", []
+            elif tag == "td" and "result-snippet" in classes and self.current:
+                self.capture, self.buf = "snippet", []
+
+        def handle_endtag(self, tag):
+            if (self.capture == "title" and tag == "a") or (self.capture == "snippet" and tag == "td"):
+                text = " ".join("".join(self.buf).split())
+                if self.current is not None:
+                    self.current[self.capture] = text
+                    if self.capture == "snippet":
+                        if text:
+                            self.out.append(self.current)
+                        self.current = None
+                self.capture = None
+
+        def handle_data(self, data):
+            if self.capture:
+                self.buf.append(data)
+
+    parser = _Lite()
+    try:
+        parser.feed(html or "")
+    except Exception as exc:
+        logger.debug("DuckDuckGo page didn't parse: %s", exc)
+    return [{"title": r.get("title", ""), "uri": r["uri"], "snippet": r["snippet"]}
+            for r in parser.out]
+
+
 async def _fetch_web_snippets(
     artist: str,
     evidence: Optional[dict] = None,
     session=None,
     timeout: float = 3.5,
-) -> List[Dict[str, str]]:
-    """Fetch real-time web search snippets for an artist using DuckDuckGo Lite,
-    falling back to the Wikipedia Search API. Returns a list of dicts:
-    [{'title': ..., 'uri': ..., 'snippet': ...}]. Fails gracefully to an empty
-    list on timeouts, network errors, or bot blocks."""
+) -> Optional[List[Dict[str, str]]]:
+    """Web search snippets for an artist from DuckDuckGo Lite, falling back to
+    Wikipedia search. Returns [{'title', 'uri', 'snippet'}] — [] when the
+    searches ran and found nothing, None when no search could be reached
+    (blocked, offline), so the caller can tell "nobody knows them" from
+    "we never looked"."""
     import aiohttp
     import urllib.parse
-    from bs4 import BeautifulSoup
 
     snippets: List[Dict[str, str]] = []
+    reached = False
     own = session is None
     if own:
-        session = aiohttp.ClientSession(
-            headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
-        )
-
-    # 1. Primary: DuckDuckGo Lite search
+        session = aiohttp.ClientSession()
     try:
-        q = f"{artist} music artist"
-        async with session.post(
-            "https://lite.duckduckgo.com/lite/",
-            data={"q": q},
-            timeout=aiohttp.ClientTimeout(total=timeout),
-        ) as resp:
-            if resp.status == 200:
-                html = await resp.text()
-                soup = BeautifulSoup(html, "html.parser")
-                for td in soup.find_all("td", class_="result-snippet")[:4]:
-                    text = td.get_text(" ", strip=True)
-                    if text:
-                        snippets.append({
-                            "title": f"DuckDuckGo: {artist}",
-                            "uri": "https://duckduckgo.com",
-                            "snippet": text,
-                        })
-    except Exception as exc:
-        logger.debug("DuckDuckGo snippet lookup failed for %s: %s", artist, exc)
+        for q in _search_queries(artist, evidence):
+            try:
+                async with session.post(
+                    "https://lite.duckduckgo.com/lite/", data={"q": q},
+                    headers={"User-Agent": _BROWSER_UA},
+                    timeout=aiohttp.ClientTimeout(total=timeout),
+                ) as resp:
+                    if resp.status != 200:
+                        logger.debug("DuckDuckGo HTTP %d for %r", resp.status, q)
+                        break   # blocked: a second query only digs deeper
+                    reached = True
+                    snippets = _parse_ddg_lite(await resp.text())[:_MAX_SNIPPETS]
+            except Exception as exc:
+                logger.debug("DuckDuckGo snippet lookup failed for %s: %s", artist, exc)
+                break
+            if snippets:
+                break
 
-    # 2. Secondary fallback: Wikipedia Search API
-    if not snippets:
-        try:
-            wiki_url = f"https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch={urllib.parse.quote(artist + ' music')}&format=json"
-            async with session.get(wiki_url, timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    for item in (data.get("query", {}).get("search") or [])[:3]:
-                        raw_s = item.get("snippet", "")
-                        clean_s = re.sub(r"<[^<]+?>", "", raw_s).strip()
-                        title = item.get("title", "")
-                        if clean_s:
-                            snippets.append({
-                                "title": f"Wikipedia: {title}",
-                                "uri": f"https://en.wikipedia.org/wiki/{urllib.parse.quote(title)}",
-                                "snippet": clean_s,
-                            })
-        except Exception as exc:
-            logger.debug("Wikipedia snippet fallback failed for %s: %s", artist, exc)
+        if not snippets:
+            try:
+                wiki_url = ("https://en.wikipedia.org/w/api.php?action=query&list=search"
+                            f"&srsearch={urllib.parse.quote(artist + ' music')}&format=json")
+                async with session.get(wiki_url, headers={"User-Agent": _WIKI_UA},
+                                       timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
+                    if resp.status == 200:
+                        reached = True
+                        data = await resp.json()
+                        for item in (data.get("query", {}).get("search") or [])[:3]:
+                            clean_s = re.sub(r"<[^<]+?>", "", item.get("snippet", "")).strip()
+                            title = item.get("title", "")
+                            if clean_s:
+                                snippets.append({
+                                    "title": f"{title} - Wikipedia",
+                                    "uri": f"https://en.wikipedia.org/wiki/{urllib.parse.quote(title)}",
+                                    "snippet": clean_s,
+                                })
+            except Exception as exc:
+                logger.debug("Wikipedia snippet fallback failed for %s: %s", artist, exc)
+    finally:
+        if own:
+            await session.close()
 
-    if own:
-        await session.close()
+    return snippets if reached else None
 
-    return snippets
+
+# ── corroboration ─────────────────────────────────────────────────────────────
+# The model's own confidence is a poor gate for country — the field Auto-Play's
+# regional fence acts on. These checks ask whether the text the model was shown,
+# or the user's own titles, actually back its answer.
+
+def _norm(s: Any) -> str:
+    """Lower-case, accent-free, punctuation-free: 'Έλληνας' → 'ελληνας'."""
+    import unicodedata
+    s = unicodedata.normalize("NFKD", str(s or "")).casefold()
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    return " ".join(re.sub(r"[^\w]+", " ", s).split())
+
+
+def _domain(uri: str) -> str:
+    import urllib.parse
+    host = urllib.parse.urlparse(uri or "").netloc.lower()
+    return host[4:] if host.startswith("www.") else host
+
+
+def on_target_snippets(snippets: List[Dict[str, str]], evidence: dict) -> List[Dict[str, str]]:
+    """Snippets that name one of the user's album or track titles on a page
+    about music — evidence it's THIS artist, not another act (or a hotel)
+    with the same name."""
+    own = _norm(evidence.get("artist"))
+    titles = set()
+    for t in [a.get("title") for a in evidence.get("albums") or []] + list(evidence.get("tracks") or []):
+        n = _norm(t)
+        if len(n) >= 4 and n != own and n not in _GENERIC_TITLES:
+            titles.add(n)
+    hits = []
+    for s in snippets:
+        text = f" {_norm(s.get('title', '') + ' ' + s.get('snippet', ''))} "
+        if any(f" {t} " in text for t in titles) and _MUSIC_CUE_RE.search(text):
+            hits.append(s)
+    return hits
+
+
+def _words_found(text: str, table: Dict[str, tuple]) -> set[str]:
+    found = set()
+    for cc, words in table.items():
+        for w in words:
+            # Normalised like the text: casefold turns a final ς into σ.
+            pat = r"(?<!\w)" + re.escape(_norm(w)) + (r"(?!\w)" if w == "usa" else "")
+            if re.search(pat, text):
+                found.add(cc)
+                break
+    return found
+
+
+def _countries_named(text: str) -> set[str]:
+    """Countries a text names outright; failing those, the ones its language
+    words point to."""
+    text = _norm(text)
+    for phrase in _COUNTRY_NOISE:
+        text = text.replace(phrase, " ")
+    return _words_found(text, _COUNTRY_WORDS) or _words_found(text, _COUNTRY_LANGUAGE_WORDS)
+
+
+def country_basis(country: str, snippets: List[Dict[str, str]], evidence: dict) -> str:
+    """Why a claimed country can be trusted: 'web' (the snippets name it),
+    'script' (the user's titles are in a script only that country writes),
+    'contradicted' (the snippets name other countries and not this one), or ''
+    (nothing either way)."""
+    if not country:
+        return ""
+    on_target = on_target_snippets(snippets, evidence)
+    pool = on_target or snippets
+    named = set()
+    for s in pool:
+        named |= _countries_named(f"{s.get('title', '')} {s.get('snippet', '')}")
+    if country in named:
+        return "web"
+    titles = " ".join([str(a.get("title") or "") for a in evidence.get("albums") or []]
+                      + [str(t) for t in evidence.get("tracks") or []])
+    for pattern, ccs in _SCRIPT_COUNTRIES:
+        if country in ccs and pattern.search(titles):
+            return "script"
+    return "contradicted" if named else ""
 
 
 # ── prompt ────────────────────────────────────────────────────────────────────
 
-def build_prompt(
-    evidence: dict,
-    vocabulary: List[str],
-    snippets: Optional[List[Dict[str, str]]] = None,
-    mode: str = "hybrid",
-) -> str:
+def _artist_block(i: int, evidence: dict, snippets: List[Dict[str, str]],
+                  show_snippets: bool) -> str:
     albums = "; ".join(
         f"{a['title']} ({a['year']})" if a.get("year") else a["title"]
         for a in evidence.get("albums") or []
@@ -200,51 +415,121 @@ def build_prompt(
         known.append(f"area {evidence['known_area']}")
     if evidence.get("known_genres"):
         known.append("genres " + ", ".join(evidence["known_genres"]))
+    lines = [
+        f"ARTIST {i}: {evidence.get('artist')}",
+        f"- Albums: {albums}",
+        f"- Track titles: {tracks}",
+        f"- Genre tags in the files: {tags}",
+        f"- Already known: {'; '.join(known) or 'nothing'}",
+    ]
+    if evidence.get("disputed"):
+        lines.append(f"- The library's current answer may be wrong: {evidence['disputed']}. "
+                     "Check it rather than repeating it.")
+    if show_snippets:
+        if snippets:
+            lines.append("- Live web search snippets:")
+            lines += [f"  - [{_domain(s.get('uri', '')) or 'web'}] {s.get('title', '')}: "
+                      f"{s.get('snippet', '')}" for s in snippets]
+        else:
+            lines.append("- Live web search snippets: none found")
+    return "\n".join(lines)
+
+
+def build_prompt(items: List[tuple], vocabulary: List[str], mode: str = "hybrid") -> str:
+    """One prompt for one or more artists. `items` is [(evidence, snippets)];
+    artists are numbered from 1 and answered by that number."""
     vocab = ", ".join(vocabulary[:_VOCAB_IN_PROMPT]) or "(empty library vocabulary)"
-
-    snippet_block = ""
-    if snippets:
-        formatted = "\n".join(f"- {s.get('title', '')}: {s.get('snippet', '')}" for s in snippets)
-        snippet_block = f"\nLIVE WEB SEARCH SNIPPETS:\n{formatted}\n"
-
+    any_snippets = any(sn for _ev, sn in items)
     if mode == "google_grounding":
         instruction = "Search the web."
-    elif snippets:
-        instruction = "Use the live web search snippets and your music knowledge to identify the artist."
+    elif any_snippets:
+        instruction = ("Use the live web search snippets given with each artist and your "
+                       "music knowledge to identify them.")
     else:
-        instruction = "Use your internal training knowledge (global/regional music scenes, forums, and discographies) to identify this artist. Match strictly against the user's files."
-
+        instruction = ("Use your internal training knowledge (global/regional music scenes, "
+                       "forums, and discographies) to identify each artist. Match strictly "
+                       "against the user's files.")
+    show_snippets = mode in ("hybrid", "web_snippets")
+    blocks = "\n\n".join(_artist_block(i, ev, sn, show_snippets)
+                         for i, (ev, sn) in enumerate(items, 1))
     return f"""You identify music artists for a personal music library. {instruction}
 
-ARTIST: {evidence.get('artist')}
-The user's files by this artist (use them to make sure you have the RIGHT artist — many acts share a name):
-- Albums: {albums}
-- Track titles: {tracks}
-- Genre tags in the files: {tags}
-- Already known: {'; '.join(known) or 'nothing'}
-{snippet_block}
-Find the artist's main genres and country of origin.
+Each artist comes with the user's own files. Use them to make sure you have the RIGHT artist — many acts share a name.
+
+{blocks}
+
+For each artist, find their main genres and country of origin.
 - genres: up to {_MAX_GENRES}, lower-case, most specific first. Prefer these words the library already uses: {vocab}. Use a different word only if none of those fit.
 - country: ISO 3166-1 alpha-2 code of where the artist is from (e.g. GR, US, GB). For a group, where it formed.
-- If the artist cannot be identified or does not match the user's tracks/albums, set identified to false. A blank answer is far better than a guess: wrong tags corrupt the user's auto-play.
+- If an artist cannot be identified or does not match the user's tracks/albums, set identified to false for them. A blank answer is far better than a guess: wrong tags corrupt the user's auto-play.
 
-Reply with ONLY this JSON object, no other text:
-{{"identified": true, "matched_as": "the artist as the sources describe them", "summary": "one short sentence, e.g. Greek rapper from Athens, active since 2015", "genres": [], "country": "", "confidence": "high|medium|low"}}"""
+Reply with ONLY this JSON object, one entry per artist, "id" being the artist's number:
+{{"artists": [{{"id": 1, "identified": true, "matched_as": "the artist as the sources describe them", "summary": "one short sentence, e.g. Greek rapper from Athens, active since 2015", "genres": [], "country": "", "confidence": "high|medium|low"}}]}}"""
+
+
+# Structured output: the model must return exactly this shape, so nothing is
+# lost to stray prose. Not sent with the googleSearch tool (not every model
+# accepts both). propertyOrdering puts the identification before the answer.
+_ANSWER_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "artists": {
+            "type": "ARRAY",
+            "items": {
+                "type": "OBJECT",
+                "properties": {
+                    "id": {"type": "INTEGER"},
+                    "identified": {"type": "BOOLEAN"},
+                    "matched_as": {"type": "STRING"},
+                    "summary": {"type": "STRING"},
+                    "genres": {"type": "ARRAY", "items": {"type": "STRING"}},
+                    "country": {"type": "STRING"},
+                    "confidence": {"type": "STRING", "enum": list(_CONFIDENCE)},
+                },
+                "required": ["id", "identified", "genres", "country", "confidence"],
+                "propertyOrdering": ["id", "identified", "matched_as", "summary",
+                                     "genres", "country", "confidence"],
+            },
+        },
+    },
+    "required": ["artists"],
+}
 
 
 # ── call ──────────────────────────────────────────────────────────────────────
 
+_MAX_RETRY_DELAY_S = 60.0
+
+
+def _retry_delay(text: str) -> Optional[float]:
+    """Seconds a 429 asks us to wait (RetryInfo 'retryDelay': '23s'), if any."""
+    m = re.search(r'"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"', text or "")
+    return float(m.group(1)) if m else None
+
+
+def _schema_rejected(text: str) -> bool:
+    low = (text or "").lower()
+    return any(k in low for k in ("schema", "propertyordering", "response_mime_type",
+                                  "responsemimetype"))
+
+
 async def _generate(api_key: str, model: str, prompt: str, *, session=None,
-                    timeout: int = 60, use_grounding: bool = False) -> dict:
+                    timeout: int = 90, use_grounding: bool = False,
+                    structured: bool = False) -> dict:
     """One generateContent call → raw response JSON. When use_grounding is True,
-    attaches the googleSearch tool (paid tier). Otherwise sends a clean text prompt
-    (compatible with the 100% free Gemini API tier). Raises ResearchUnavailable
-    for key/quota/model problems, RuntimeError otherwise."""
+    attaches the googleSearch tool (paid tier). `structured` asks for JSON in
+    _ANSWER_SCHEMA's shape. One wait-and-retry each for a per-minute 429 that
+    names its delay, a structured-output request the model rejects (sent again
+    as plain text) and a dropped connection. Raises ResearchUnavailable for
+    key/quota/model problems, RuntimeError otherwise."""
     import aiohttp
 
+    gen_cfg: Dict[str, Any] = {"temperature": 0.2}
+    if structured and not use_grounding:
+        gen_cfg.update(responseMimeType="application/json", responseSchema=_ANSWER_SCHEMA)
     payload: Dict[str, Any] = {
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.2},
+        "generationConfig": gen_cfg,
     }
     if use_grounding:
         payload["tools"] = [{"googleSearch": {}}]
@@ -252,23 +537,40 @@ async def _generate(api_key: str, model: str, prompt: str, *, session=None,
     own = session is None
     if own:
         session = aiohttp.ClientSession()
+    retried = set()
     try:
-        for attempt in (1, 2):
+        while True:
             try:
                 async with session.post(
                     _GENERATE_URL.format(model=model), json=payload,
                     headers={"x-goog-api-key": api_key, "Content-Type": "application/json"},
                     timeout=aiohttp.ClientTimeout(total=timeout, connect=10),
                 ) as resp:
-                    if resp.status != 200:
-                        text = (await resp.text())[:300]
-                        logger.error("AI research HTTP %d for model %s: %s", resp.status, model, text)
-                        if resp.status in (400, 401, 403, 404, 429):
-                            raise ResearchUnavailable(_http_reason(resp.status, text, model))
-                        raise RuntimeError(f"HTTP {resp.status}: {text}")
-                    return await resp.json()
+                    if resp.status == 200:
+                        return await resp.json()
+                    full = await resp.text()
+                    text = full[:300]
+                    logger.error("AI research HTTP %d for model %s: %s", resp.status, model, text)
+                    if resp.status == 429 and "quota" not in retried:
+                        delay = _retry_delay(full)
+                        if delay is not None and delay <= _MAX_RETRY_DELAY_S:
+                            retried.add("quota")
+                            logger.warning("Gemini asked to wait %.0fs; waiting once.", delay)
+                            await asyncio.sleep(delay + 1)
+                            continue
+                    if (resp.status == 400 and "responseSchema" in gen_cfg
+                            and _schema_rejected(full)):
+                        logger.warning("Model %s rejected structured output; asking for "
+                                       "plain JSON instead.", model)
+                        gen_cfg.pop("responseMimeType", None)
+                        gen_cfg.pop("responseSchema", None)
+                        continue
+                    if resp.status in (400, 401, 403, 404, 429):
+                        raise ResearchUnavailable(_http_reason(resp.status, text, model))
+                    raise RuntimeError(f"HTTP {resp.status}: {text}")
             except aiohttp.ClientConnectorError as exc:
-                if attempt == 1:
+                if "network" not in retried:
+                    retried.add("network")
                     logger.warning("DNS/Connection hiccup during AI generation (%s), retrying in 1.5s...", exc)
                     await asyncio.sleep(1.5)
                     continue
@@ -332,6 +634,43 @@ def parse_answer(text: str) -> Optional[dict]:
     return obj if isinstance(obj, dict) else None
 
 
+def parse_answers(text: str, n: int) -> Dict[int, dict]:
+    """{artist number: answer} from a reply to an n-artist prompt. Takes the
+    {"artists": [...]} object, a bare list, or — for a single artist — the
+    one answer object an older prompt shape returned. Entries without a
+    usable id are numbered by position."""
+    if not text:
+        return {}
+    entries: Any = None
+    stripped = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip())
+    if stripped.startswith("["):
+        try:
+            entries = json.loads(stripped)
+        except Exception:
+            entries = None
+    if entries is None:
+        obj = parse_answer(text)
+        if obj is None:
+            return {}
+        if isinstance(obj.get("artists"), list):
+            entries = obj["artists"]
+        elif n == 1 and "identified" in obj:
+            entries = [obj]
+        else:
+            return {}
+    out: Dict[int, dict] = {}
+    for pos, a in enumerate(entries if isinstance(entries, list) else [], 1):
+        if not isinstance(a, dict):
+            continue
+        try:
+            i = int(a.get("id"))
+        except (TypeError, ValueError):
+            i = pos
+        if 1 <= i <= n and i not in out:
+            out[i] = a
+    return out
+
+
 def _clean_country(raw: Any) -> str:
     cc = str(raw or "").strip().upper()
     cc = _COUNTRY_ALIASES.get(cc, cc)
@@ -359,25 +698,40 @@ def _clean_genres(raw: Any, vocabulary: List[str]) -> tuple[List[str], List[str]
 
 
 def validate(answer: Optional[dict], sources: List[Dict[str, str]],
-             vocabulary: List[str], allow_memory_country: bool = False) -> dict:
-    """Reduce a raw model answer to what the workbench may offer."""
+             vocabulary: List[str], allow_memory_country: bool = False,
+             basis: Optional[str] = None) -> dict:
+    """Reduce a raw model answer to what the workbench may offer.
+
+    `basis` is why the claimed country can be trusted (see country_basis).
+    Left as None, any source counts as backing — right only for answers
+    Google Search grounded. Without backing, a country survives only from
+    memory mode at high confidence."""
     if not answer:
         return {"status": "unparsed", "identified": False, "genres": [],
                 "new_genres": [], "country": "", "confidence": "low",
-                "summary": "", "matched_as": ""}
+                "summary": "", "matched_as": "", "country_basis": "",
+                "country_withheld": ""}
     identified = bool(answer.get("identified"))
     genres, new = _clean_genres(answer.get("genres"), vocabulary) if identified else ([], [])
     country = _clean_country(answer.get("country")) if identified else ""
     conf = str(answer.get("confidence") or "").lower()
     conf = conf if conf in _CONFIDENCE else "low"
-    grounded = bool(sources)
-    if not grounded and not allow_memory_country:
-        country, conf = "", "low"
-    elif not grounded and allow_memory_country:
-        # In memory/training weights mode, keep country if identified with medium or high confidence.
-        # If confidence is low, drop country to avoid misclassifying regional Auto-Play.
-        if conf == "low":
+    if basis is None:
+        basis = "grounding" if sources else ""
+    withheld = ""
+    if country:
+        if basis == "contradicted":
+            withheld = "contradicted"
+        elif basis in ("grounding", "web", "script"):
+            pass
+        elif allow_memory_country and conf == "high":
+            basis = "memory"
+        else:
+            withheld = "unsupported"
+        if withheld:
             country = ""
+    if not sources and not allow_memory_country:
+        conf = "low"
     status = "ok" if (genres or country) else "unknown"
     return {
         "status": status,
@@ -388,26 +742,146 @@ def validate(answer: Optional[dict], sources: List[Dict[str, str]],
         "confidence": conf,
         "summary": str(answer.get("summary") or "").strip()[:240],
         "matched_as": str(answer.get("matched_as") or "").strip()[:120],
+        "country_basis": basis if country else "",
+        "country_withheld": withheld,
     }
 
 
 # ── public API ────────────────────────────────────────────────────────────────
 
+# Artists per Gemini call. The free tier's binding limit is requests per day,
+# not tokens, so one call for a dozen artists stretches it about twelvefold.
+# Twelve keeps the prompt (evidence + snippets) well under 10k tokens.
+_BATCH_SIZE = 12
+# Between artists' web searches inside a batch: DuckDuckGo blocks bursts.
+_SEARCH_SPACING_S = 1.0
+
+
+def _worth_retrying(payload: dict) -> bool:
+    """An answer worth asking for again: the reply didn't parse, or it came
+    back empty while web search was unreachable (the model answered from
+    memory alone, so a later run with search may do better)."""
+    status = payload.get("status")
+    return status == "unparsed" or (status != "ok" and bool(payload.get("search_failed")))
+
+
+def _finish(evidence: dict, answer: Optional[dict], snippets: List[Dict[str, str]],
+            search_failed: bool, vocabulary: List[str], mode: str, model: str,
+            grounding: tuple = ((), ())) -> dict:
+    """Corroborate and validate one artist's answer."""
+    artist = str(evidence.get("artist") or "")
+    g_sources, g_queries = grounding
+    if g_sources:
+        sources, queries, basis, grounded = list(g_sources), list(g_queries), None, True
+    else:
+        sources = [{"title": s.get("title") or artist, "uri": s["uri"]}
+                   for s in snippets if s.get("uri")]
+        queries = _search_queries(artist, evidence)[:1] if snippets else []
+        claimed = _clean_country((answer or {}).get("country"))
+        basis = country_basis(claimed, snippets, evidence)
+        grounded = bool(on_target_snippets(snippets, evidence))
+    if mode == "google_grounding":
+        origin_mode = "google_grounding"
+    else:
+        origin_mode = "web_snippets" if snippets else "weights"
+    result = validate(answer, sources, vocabulary,
+                      allow_memory_country=mode in ("hybrid", "weights"), basis=basis)
+    result.update({
+        "artist": artist, "sources": sources, "queries": queries,
+        "grounded": grounded, "model": model, "researched_at": time.time(),
+        "origin_mode": origin_mode, "search_failed": search_failed,
+    })
+    return result
+
+
+async def research_evidence_batch(
+    evidences: List[dict], vocabulary: List[str], *, api_key: str, model: str,
+    mode: str = "hybrid", session=None, search_spacing_s: float = _SEARCH_SPACING_S,
+    on_search: Optional[Callable[[str], None]] = None,
+) -> List[dict]:
+    """Research several artists from prepared evidence: web-search each, then
+    ONE model call for all of them, then corroborate and validate each answer.
+    Results come back in input order. No cache and no DB, so the blind eval
+    runs exactly what ships.
+
+    Google grounding can't be batched — its sources aren't attributed per
+    artist — so that mode makes one call per artist."""
+    if mode == "google_grounding" and len(evidences) > 1:
+        out: List[dict] = []
+        for ev in evidences:
+            out += await research_evidence_batch([ev], vocabulary, api_key=api_key,
+                                                 model=model, mode=mode, session=session)
+        return out
+
+    gathered: List[tuple] = []
+    for i, ev in enumerate(evidences):
+        artist = str(ev.get("artist") or "")
+        snippets: List[Dict[str, str]] = []
+        failed = False
+        if mode in ("hybrid", "web_snippets"):
+            if on_search:
+                on_search(artist)
+            if i and search_spacing_s:
+                await asyncio.sleep(search_spacing_s)
+            found = await _fetch_web_snippets(artist, evidence=ev, session=session)
+            failed = found is None
+            snippets = found or []
+            if not snippets:
+                logger.info("No web snippets for %s (%s); answering from model memory.",
+                            artist, "search unreachable" if failed else "no results")
+        gathered.append((ev, snippets, failed))
+
+    prompt = build_prompt([(ev, sn) for ev, sn, _f in gathered], vocabulary, mode=mode)
+    grounding = mode == "google_grounding"
+    data = await _generate(api_key, model, prompt, session=session,
+                           use_grounding=grounding, structured=not grounding)
+    answers = parse_answers(_response_text(data), len(gathered))
+    g = _grounding(data) if len(gathered) == 1 else ((), ())
+    return [_finish(ev, answers.get(i), sn, failed, vocabulary, mode, model, grounding=g)
+            for i, (ev, sn, failed) in enumerate(gathered, 1)]
+
+
+async def research_evidence(evidence: dict, vocabulary: List[str], *, api_key: str,
+                            model: str, mode: str = "hybrid", session=None) -> dict:
+    """One artist through research_evidence_batch."""
+    return (await research_evidence_batch([evidence], vocabulary, api_key=api_key,
+                                          model=model, mode=mode, session=session))[0]
+
+
+def _log_result(res: dict) -> None:
+    logger.warning(
+        "AI research %s (%s) → %s genres=%s country=%s (%s) conf=%s sources=%d",
+        res.get("artist"), res.get("origin_mode"), res.get("status"), res.get("genres"),
+        res.get("country") or "-", res.get("country_basis") or res.get("country_withheld") or "-",
+        res.get("confidence"), len(res.get("sources") or []),
+    )
+
+
+async def _save(db, artist_name: str, result: dict) -> None:
+    # Unknown answers are cached too (as dismissed): asking again costs a
+    # call and will almost always say the same thing — unless the reply was
+    # garbled or search was down, which _worth_retrying lets through next time.
+    await db.save_ai_research(artist_name, result,
+                              state="pending" if result["status"] == "ok" else "dismissed")
+
+
 async def research_artist(db, artist_name: str, *, api_key: str = "", model: str = "",
                           session=None, force: bool = False,
                           vocabulary: Optional[List[str]] = None,
-                          mode: str = "") -> dict:
+                          mode: str = "", dispute: str = "") -> dict:
     """Research one artist and cache the answer as a PENDING suggestion.
 
     Returns the payload: {'artist', 'status' ('ok'|'unknown'|'unparsed'),
-    'genres', 'new_genres', 'country', 'confidence', 'summary', 'matched_as',
-    'sources' [{title, uri}], 'queries', 'grounded', 'model', 'researched_at',
-    'origin_mode'}.
-    A cached answer is returned without a call unless `force`. Raises
-    ResearchUnavailable when research can't run at all."""
+    'genres', 'new_genres', 'country', 'country_basis', 'country_withheld',
+    'confidence', 'summary', 'matched_as', 'sources' [{title, uri}], 'queries',
+    'grounded', 'model', 'researched_at', 'origin_mode', 'search_failed'}.
+    `dispute` tells the model the library's current answer looks wrong and
+    why (from the metadata audit). A cached answer is returned without a call
+    unless `force` (or _worth_retrying). Raises ResearchUnavailable when
+    research can't run at all."""
     if not force:
         cached = await db.get_ai_research(artist_name)
-        if cached:
+        if cached and not _worth_retrying(cached["payload"]):
             return cached["payload"]
     if not api_key:
         api_key, cfg_model = load_research_settings()
@@ -422,58 +896,13 @@ async def research_artist(db, artist_name: str, *, api_key: str = "", model: str
 
     effective_mode = (mode or load_research_mode() or "hybrid").lower()
     evidence = await db.get_artist_research_evidence(artist_name)
-
-    snippets: List[Dict[str, str]] = []
-    sources: List[Dict[str, str]] = []
-    queries: List[str] = []
-    use_grounding = (effective_mode == "google_grounding")
-    origin_mode = effective_mode
-
-    if effective_mode in ("hybrid", "web_snippets"):
-        snippets = await _fetch_web_snippets(artist_name, evidence=evidence, session=session)
-        if snippets:
-            sources = [{"title": s.get("title", artist_name), "uri": s.get("uri", "")} for s in snippets]
-            queries = [f"{artist_name} music artist"]
-            origin_mode = "web_snippets"
-        elif effective_mode == "hybrid":
-            # Silent graceful fallback to training weights
-            origin_mode = "weights"
-            logger.info("Web snippets unavailable for %s; falling back to training weights.", artist_name)
-    elif effective_mode == "weights":
-        origin_mode = "weights"
-
-    prompt = build_prompt(evidence, vocabulary, snippets=snippets, mode=effective_mode)
-    try:
-        data = await _generate(api_key, model, prompt, session=session, use_grounding=use_grounding)
-    except TypeError:
-        # Backward compatibility if _generate was monkeypatched with (api_key, model, prompt, session=session)
-        data = await _generate(api_key, model, prompt, session=session)
-
-    # If the response contains native grounding metadata (from Google grounding or test fixtures), use it
-    g_sources, g_queries = _grounding(data)
-    if g_sources:
-        sources = g_sources
-        queries = g_queries
-    elif snippets:
-        sources = [{"title": s.get("title", artist_name), "uri": s.get("uri", "")} for s in snippets]
-        queries = [f"{artist_name} music artist"]
-
-    allow_mem_country = (effective_mode in ("hybrid", "weights"))
-    result = validate(parse_answer(_response_text(data)), sources, vocabulary, allow_memory_country=allow_mem_country)
-    result.update({
-        "artist": artist_name, "sources": sources, "queries": queries,
-        "grounded": bool(sources), "model": model, "researched_at": time.time(),
-        "origin_mode": origin_mode,
-    })
-    logger.warning(
-        "AI research %s (%s) → %s genres=%s country=%s conf=%s sources=%d",
-        artist_name, origin_mode, result["status"], result["genres"], result["country"] or "-",
-        result["confidence"], len(sources),
-    )
-    # Unknown answers are cached too (as dismissed): asking again costs a
-    # search and will almost always say the same thing.
-    await db.save_ai_research(artist_name, result,
-                              state="pending" if result["status"] == "ok" else "dismissed")
+    if dispute:
+        evidence["disputed"] = dispute
+    result = await research_evidence(evidence, vocabulary, api_key=api_key, model=model,
+                                     mode=effective_mode, session=session)
+    result["artist"] = artist_name
+    _log_result(result)
+    await _save(db, artist_name, result)
     return result
 
 
@@ -483,11 +912,16 @@ async def research_artists(
     cancel_event: Optional[asyncio.Event] = None,
     spacing_s: float = _BATCH_SPACING_S,
     mode: str = "",
+    batch_size: int = _BATCH_SIZE,
 ) -> dict:
-    """Research several artists in turn. Returns a summary:
+    """Research several artists, `batch_size` per model call. Returns a summary:
     {'status': 'ok'|'cancelled'|'error: …', 'total', 'found', 'unknown',
     'skipped', 'failed'}. Stops at the first ResearchUnavailable — a bad key or
-    an exhausted quota fails every artist the same way."""
+    an exhausted quota fails every artist the same way.
+
+    `progress(i, total, name, result)` fires once per artist when its answer is
+    in (result {'status': 'skipped'} for a cached one), and with
+    {'status': 'searching'} — i unchanged — while each artist's web search runs."""
     import aiohttp
 
     api_key, model = load_research_settings()
@@ -496,37 +930,59 @@ async def research_artists(
     if not api_key:
         summary["status"] = "error: Add a Gemini API key in Settings → AI Assistant."
         return summary
+    effective_mode = (mode or load_research_mode() or "hybrid").lower()
     done_before = set() if force else await db.get_researched_artist_names()
     vocab = [v["name"] for v in await db.get_genre_vocabulary(limit=_VOCAB_IN_PROMPT)]
-    called = False
+
+    done = 0
+    todo: List[str] = []
+    for name in names:
+        if name.lower() in done_before and not _worth_retrying(
+                ((await db.get_ai_research(name)) or {}).get("payload") or {}):
+            summary["skipped"] += 1
+            done += 1
+            if progress:
+                progress(done, len(names), name, {"status": "skipped"})
+        else:
+            todo.append(name)
+
     async with aiohttp.ClientSession() as session:
-        for i, name in enumerate(names, 1):
+        for start in range(0, len(todo), max(1, batch_size)):
             if cancel_event is not None and cancel_event.is_set():
                 summary["status"] = "cancelled"
                 break
-            if name.lower() in done_before:
-                summary["skipped"] += 1
-                if progress:
-                    progress(i, len(names), name, {"status": "skipped"})
-                continue
-            if called and spacing_s:
+            if start and spacing_s:
                 await asyncio.sleep(spacing_s)
-            called = True
+            chunk = todo[start:start + max(1, batch_size)]
+            evidences = [await db.get_artist_research_evidence(n) for n in chunk]
+
+            def _searching(artist, _done=done):
+                if progress:
+                    progress(_done, len(names), artist, {"status": "searching"})
             try:
-                res = await research_artist(db, name, api_key=api_key, model=model,
-                                            session=session, force=True,
-                                            vocabulary=vocab, mode=mode)
+                results = await research_evidence_batch(
+                    evidences, vocab, api_key=api_key, model=model, mode=effective_mode,
+                    session=session, search_spacing_s=min(spacing_s, _SEARCH_SPACING_S),
+                    on_search=_searching)
             except ResearchUnavailable as exc:
                 summary["status"] = f"error: {exc}"
                 break
             except Exception as exc:
-                logger.error("AI research failed for %s: %s", name, exc)
-                summary["failed"] += 1
-                res = {"status": "error"}
-            else:
+                logger.error("AI research batch failed (%s…): %s", chunk[0], exc)
+                summary["failed"] += len(chunk)
+                for name in chunk:
+                    done += 1
+                    if progress:
+                        progress(done, len(names), name, {"status": "error"})
+                continue
+            for name, res in zip(chunk, results):
+                res["artist"] = name
+                _log_result(res)
+                await _save(db, name, res)
                 summary["found" if res.get("status") == "ok" else "unknown"] += 1
-            if progress:
-                progress(i, len(names), name, res)
+                done += 1
+                if progress:
+                    progress(done, len(names), name, res)
     return summary
 
 

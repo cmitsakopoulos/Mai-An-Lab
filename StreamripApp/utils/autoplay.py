@@ -1,41 +1,36 @@
-"""Auto-play: a station that keeps a short buffer of similar tracks queued after
-the playing one.
+"""Auto-play: after the songs you queued yourself, similar songs from your
+library keep playing.
 
-A station is opened from one track (the anchor) and is RESUMABLE
-(`track_graph.Station`): each refill continues the same journey — legs of
-LEG_LEN tracks inside a genre, then a hop into an adjacent one — and nothing the
-station has queued is ever queued again, even after being dropped. That is what
-stops a rebuild from re-serving songs the listener just removed (measured on the
-device image: a fresh walk re-queued 85% of the old buffer, 46% by the artist
-just removed).
+While auto-play is on, the player holds exactly this after the playing song:
 
-Variety (the Deterministic / Random pills):
+    [your picks]  Play Next / Add to Queue (utils.queue_layout.QUEUED)
+    [auto-play]   a short buffer of recommendations (tagged `_autoplay`)
 
-  DETERMINISTIC  the same start track on the same library, in a fresh session,
-                 always gives the same station: nearest first, strongest genre
-                 hop. Songs played or rejected this session are still excluded,
-                 so a replay later in a session differs.
-  RANDOM         every station draws a seed: rank-sampled picks inside legs
-                 (`genre_graph.rank_pick`), a lift-weighted hop, a shuffled
-                 entry track. The seed is logged, so a station can be replayed.
+and nothing else, so nothing else can play next. The queue you were in when
+auto-play took over (the rest of an album, a library list) is SET ASIDE in
+`held`, out of the player, and put back after the playing song when auto-play
+is turned off. That replaces the old "held queue" that stayed in the player
+below the buffer: whenever the buffer was empty (a refill in flight, a fast
+skip, a station played out, an unanalysed song) the player fell straight into
+it and played it.
 
-Choosing a track: a pending auto-play row just plays (the station carries on);
-anything else starts a new station from it.
+The station (`track_graph.Station`) is opened from one track, the anchor, and
+stays inside that track's genre umbrella (`artist_graph.UMBRELLA`). Each refill
+continues it; nothing it has queued comes back. When the umbrella is played out
+the station starts the genre over (with a notice) rather than leaving it.
 
-Negative feedback: removing a recommendation hides it from auto-play (kept in the
-DB, reversible in Settings → Auto-play); an early skip of a recommendation (see
-play_ledger.is_listen) counts too. NEGATIVES_TO_END_LEG of them in one leg end
-the leg: the unheard buffer is replaced, in one op, by a leg that hops on — or,
-in a genre with no exit, is steered away from the rejected tracks. An act
-rejected ARTIST_NEGATIVES_TO_BAN times is banned for the station.
+Starting a station: turning auto-play on, choosing a track (a tap, Start radio,
+or any new queue set elsewhere) starts one from that track. Playing on through
+your picks or the recommendations carries the station on.
 
-Learned genre hops: a rejection among the first tracks after a genre hop
-(`genre_graph.HOP_WINDOW`) is also blamed on that hop, persistently. Each one
-halves the hop's weight in every later station; HOP_VETO_REJECTS of them, by at
-least HOP_VETO_ARTISTS different artists (one disliked act must not condemn a
-genre), block the hop for good — the A → B hop only: B stays reachable from
-elsewhere and as a station start. Blocked hops are listed and resettable in
-Settings → Auto-play.
+If no station can start from a song (not analysed yet, or nothing similar), the
+set-aside queue is put back with a notice, and the next song that plays from it
+gets a fresh try.
+
+Negative feedback: removing a recommendation, or skipping one early (see
+play_ledger.is_listen), steers the CURRENT station away from that artist;
+NEGATIVES_TO_REPLAN of them replace the unheard buffer. It is forgotten when
+the next station starts: auto-play keeps no model of the listener's taste.
 
 Cost: nothing runs on a timer. A track change may top the buffer up (one
 resumable take + one batched DB read); a station opens once.
@@ -44,17 +39,12 @@ from __future__ import annotations
 
 import logging
 import os
-import random
 import time
-from collections import Counter, deque
+from collections import deque
 
-from utils import genre_graph, play_ledger, queue_layout, track_graph
+from utils import play_ledger, queue_layout, track_graph
 
 logger = logging.getLogger(__name__)
-
-DETERMINISTIC = "deterministic"
-RANDOM = "random"
-VARIETY_MODES = (DETERMINISTIC, RANDOM)
 
 BUFFER_TARGET = 4        # tracks kept queued ahead while in the foreground
 BUFFER_LOW = 3           # top up when fewer than this remain
@@ -63,39 +53,25 @@ HISTORY_LEN = 150        # tracks started this session, never re-recommended
 SKIP_SIGNAL_MAX_AGE_S = 180  # older ledger entries are history, not feedback
 # A fill is one take plus one batched DB read: seconds at most. One still marked
 # running after this long never ran: it was scheduled on a UI session the OS
-# tore down, so its `finally` never cleared the flag, and every later refill
-# (track change, queue end, a removal) bailed on it for the life of the process.
+# tore down, so its `finally` never cleared the flag.
 FILL_STALE_S = 60.0
+# Starting the genre over: the last few songs heard are kept out of the restart
+# so the end of the station isn't replayed straight away.
+RESTART_GAP = 5
 
 # Station shape. Measured on the device image (2026-09-28): 5 per act / 1 per
 # album keeps a same-artist run to ~4 across different albums (never inside one
-# release) and cut stations that ran dry from 69/150 to 12/150 vs 2/1. The caps
-# count over the last CAP_WINDOW tracks so a long station doesn't lock an act out.
-LEG_LEN = 8
+# release). The caps count over the last CAP_WINDOW tracks.
 ARTIST_CAP = 5
 ALBUM_CAP = 1
 CAP_WINDOW = 24
-NEGATIVES_TO_END_LEG = 2
-ARTIST_NEGATIVES_TO_BAN = 2
-HOP_REJECT_WEIGHT = 0.5
-HOP_VETO_REJECTS = 3
-HOP_VETO_ARTISTS = 2
-
-
-def hop_blocked(rec: dict) -> bool:
-    """A hop's rejection summary ({rejects, artists}) has earned a block."""
-    return (rec.get("rejects", 0) >= HOP_VETO_REJECTS
-            and rec.get("artists", 0) >= HOP_VETO_ARTISTS)
-
-
-def hop_weight(rec: dict) -> float:
-    return 0.0 if hop_blocked(rec) else HOP_REJECT_WEIGHT ** rec.get("rejects", 0)
+NEGATIVES_TO_REPLAN = 2
 
 
 class AutoPlay:
     """Owns auto-play state and every queue edit it makes. `run_task(fn, *args)`
     schedules a coroutine function on the UI loop; `notify(message)` surfaces a
-    user-facing hint (e.g. the seed has no DSP features yet)."""
+    user-facing hint."""
 
     def __init__(self, engine, db, run_task, notify=None):
         self.engine = engine
@@ -104,24 +80,21 @@ class AutoPlay:
         self._notify = notify or (lambda _msg: None)
 
         self._enabled = False
-        self.variety = DETERMINISTIC
         self.anchor = ""                 # the track the station started from
         self.station: track_graph.Station | None = None
-        self.station_seed: int | None = None   # RANDOM only; replays the station
+        self.held: list[dict] = []       # the queue auto-play set aside
         self.history: deque[str] = deque(maxlen=HISTORY_LEN)
-        self.hidden: set[str] = set()    # removed by the listener (persisted)
-        # (from, to) genre hop -> {rejects, artists}, persisted (see module doc).
-        self.hop_rejects: dict[tuple[str, str], dict] = {}
-        self._leg_negatives: list[str] = []
-        self._artist_negatives: Counter = Counter()
-        # Artist of every track this station queued: a rejection often arrives
-        # after its row is gone (removed from the queue, or a ledger skip).
-        self._artist_by_path: dict[str, str] = {}
-        # The anchor had no DSP features, so it can't seed anything: the next
-        # track that starts takes over as the anchor.
-        self._anchor_dead = False
-        # Generation: bumped whenever the plan changes (toggle, new station, leg
-        # end) so a fill that was awaiting the station bails instead of
+        self._negatives: list[str] = []
+        # Tracks the station has queued since it (re)opened: a station that
+        # runs out after queuing nothing is empty, not played out.
+        self._taken = 0
+        self._started_over = False       # the notice is said once per station
+        # A start just failed: don't repeat the same notice on every track
+        # while the set-aside queue plays through unanalysed songs.
+        self._quiet = False
+        self._dead = ""                  # the last anchor no station could start from
+        # Generation: bumped whenever the plan changes (toggle, new station, a
+        # replan) so a fill that was awaiting the station bails instead of
         # inserting a stale block.
         self._gen = 0
         self._filling = False
@@ -129,10 +102,8 @@ class AutoPlay:
 
     def bind_ui(self, run_task, notify=None) -> None:
         """Re-point the UI hooks at a new Flet session. The controller is kept
-        per process (its station, history and rejections outlive a session),
-        but the session it schedules work on and notifies through does not.
-        A fill scheduled on the old session may never run, so it is superseded
-        rather than waited for."""
+        per process, but the session it schedules work on does not. A fill
+        scheduled on the old session may never run, so it is superseded."""
         self._run_task = run_task
         self._notify = notify or (lambda _msg: None)
         self._gen += 1
@@ -157,33 +128,27 @@ class AutoPlay:
             self.start(seed or self.engine.current_path)
         else:
             self._reset("")
+            self._quiet, self._dead = False, ""
             self.drop_buffer()
-
-    def set_variety(self, mode: str) -> None:
-        """Switch Deterministic / Random. Takes effect at once: the pending
-        buffer is rebuilt as a new station from the playing track."""
-        if mode not in VARIETY_MODES or mode == self.variety:
-            return
-        self.variety = mode
-        if self.enabled and self.engine.current_path:
-            self.start(self.engine.current_path)
+            self._restore_held()
 
     def start(self, path: str) -> None:
-        """Start a new station from `path`, replacing the pending buffer (a
-        chosen track, "Start radio", or a variety switch)."""
+        """Start a new station from `path` (playing now): set the rest of the
+        queue aside and replace the pending buffer."""
         if not self.enabled or not path:
             return
         self._reset(path)
+        self._set_aside()
         self._schedule_fill(BUFFER_TARGET, replace=True)
 
     def resume(self, path: str) -> None:
         """A session (re)started on `path`: give an enabled station its anchor
-        back and top the buffer up, without touching what is queued. The saved
-        queue carries the buffer it had, but the native player can play past it
-        while the app is away (its resume record moves the index on), and then
-        nothing was pending and nothing refilled until the next track change.
-        The station itself reopens on that fill (its state isn't persisted)."""
+        back and top the buffer up. (The station reopens on that fill; its
+        state isn't persisted.)"""
         if not self.enabled or not path:
+            return
+        if self._foreign_rows():
+            self.start(path)
             return
         if not self.anchor:
             self.anchor = path
@@ -194,40 +159,47 @@ class AutoPlay:
         self._filling = False
         self.anchor = anchor or ""
         self.station = None
-        self.station_seed = None
-        self._leg_negatives = []
-        self._artist_negatives.clear()
-        self._artist_by_path.clear()
-        self._anchor_dead = False
+        self._negatives = []
+        self._taken = 0
+        self._started_over = False
 
     @property
     def current_genre(self) -> str | None:
-        """Genre of the station's current leg, for display (None for a radius
-        station)."""
-        node = self.station.node if self.station is not None else None
-        return genre_graph.node_display(node) or None
+        """The genre the station is playing now, for display."""
+        return self.station.flavour if self.station is not None else None
 
     # ── events from the app ─────────────────────────────────────────────────
     def on_track_changed(self, path: str) -> None:
-        """The playing track changed (skip, auto-advance or a tap)."""
+        """The playing track changed (skip, auto-advance, a tap, a new queue)."""
         if path:
             self.history.append(path)
             if self.station is not None:
                 self.station.exclude([path])
-        if self.enabled and self._anchor_dead and path and path != self.anchor:
+        if not self.enabled or not path:
+            return
+        row = self._current_row()
+        if row.get("path") != path or path == self._dead:
+            # The engine has moved on again (a later change is on its way), or
+            # no station can start from this song (already said so).
+            self.ensure_buffer()
+            return
+        carries_on = (path == self.anchor or bool(row.get(queue_layout.AUTOPLAY))
+                      or bool(row.get(queue_layout.QUEUED)))
+        if not carries_on or self._foreign_rows():
+            # Not a pick or a recommendation: a new queue was set (from any
+            # view, Jarvis, a restore) or the listener went back into history.
             self.start(path)
             return
         self.ensure_buffer()
 
     def on_user_chose(self, path: str) -> None:
         """The user explicitly chose `path`; the engine is already on it. A
-        pending recommendation just plays — the station carries on; anything
+        pending recommendation just plays (the station carries on); anything
         else starts a new station from it."""
         if not self.enabled or not path:
             return
-        q, ci = self.engine.queue, self.engine.current_index
-        if (self.station is not None and 0 <= ci < len(q)
-                and q[ci].get("_autoplay") and q[ci].get("path") == path):
+        row = self._current_row()
+        if self.station is not None and row.get("_autoplay") and row.get("path") == path:
             self.ensure_buffer()
             return
         self.start(path)
@@ -236,20 +208,19 @@ class AutoPlay:
         """Ledger batch (play order): {path, listened_s, duration_s, ended_at}."""
         now = time.time()
         for e in entries:
-            # Heard while the UI was away (no track-change event reached us):
-            # still history, so a station doesn't serve it again.
+            # Heard while the UI was away: still history.
             path = e.get("path") or ""
             if path and path not in self.history:
                 self.history.append(path)
             ended = e.get("ended_at") or now
-            self.on_listen(e.get("path") or "", float(e.get("listened_s") or 0.0),
+            self.on_listen(path, float(e.get("listened_s") or 0.0),
                            float(e.get("duration_s") or 0.0),
                            fresh=(now - ended) <= SKIP_SIGNAL_MAX_AGE_S)
 
     def on_listen(self, path: str, listened_s: float, duration_s: float,
                   fresh: bool = True) -> None:
-        """One finished listen. A track listened through becomes the leg's
-        reference; an early skip of a recommendation is a negative."""
+        """One finished listen. A track listened through pulls the station
+        toward its artist; an early skip of a recommendation is a negative."""
         if not path:
             return
         if play_ledger.is_listen(listened_s, duration_s):
@@ -261,12 +232,9 @@ class AutoPlay:
 
     def reject(self, path: str) -> None:
         """The listener removed a recommendation (call AFTER the row is gone):
-        hide it from auto-play for good (reversible in Settings), count it
-        against the current leg, and top the buffer back up."""
+        steer this station away from it and top the buffer back up."""
         if not path:
             return
-        self.hidden.add(path)
-        self._run_task(self._persist_hidden, path)
         if self.station is not None:
             self.station.exclude([path])
         if self.enabled and not self._negative(path):
@@ -281,27 +249,16 @@ class AutoPlay:
         self._schedule_fill(BUFFER_TARGET, append_and_play=True)
 
     def prefill_for_background(self) -> None:
-        """Top the buffer up before the UI session may be torn down — with the
-        session gone nothing refills, and playback would fall through to the
-        rest of the queue."""
+        """Top the buffer up before the UI session may be torn down: with the
+        session gone nothing refills, and playback stops at the end."""
         self.ensure_buffer(BACKGROUND_TARGET)
 
-    # ── listener feedback (Settings → Auto-play) ────────────────────────────
-    async def load_feedback(self) -> None:
-        """Hidden tracks, learned genre-hop penalties and (on a cold start)
-        recent plays, from the DB."""
-        try:
-            self.hidden = {r["path"] for r in await self.db.get_autoplay_hidden()}
-        except Exception:
-            logger.warning("Auto-play: could not load hidden tracks", exc_info=True)
-        await self._load_hop_rejects()
-        if not self.history:
-            await self._seed_history()
-
-    async def _seed_history(self) -> None:
-        """History is in-memory, so a process the OS killed came back with
-        none and a resumed station re-served what was just heard. Recent plays
-        stand in for it, oldest first like live history."""
+    # ── history ─────────────────────────────────────────────────────────────
+    async def load_history(self) -> None:
+        """History is in-memory; on a cold start recent plays stand in for it,
+        oldest first like live history."""
+        if self.history:
+            return
         try:
             rows = await self.db.get_recent_tracks(HISTORY_LEN)
         except Exception:
@@ -312,66 +269,38 @@ class AutoPlay:
             if path and path not in self.history:
                 self.history.append(path)
 
-    async def _load_hop_rejects(self) -> None:
-        try:
-            rows = await self.db.get_hop_rejects()
-        except Exception:
-            logger.warning("Auto-play: could not load genre-hop feedback", exc_info=True)
+    # ── queue ───────────────────────────────────────────────────────────────
+    def _current_row(self) -> dict:
+        q, ci = self.engine.queue, self.engine.current_index
+        return q[ci] if 0 <= ci < len(q) else {}
+
+    def _foreign_rows(self) -> list[int]:
+        """Rows ahead that are neither the listener's picks nor auto-play's:
+        while auto-play is on these get set aside."""
+        q = self.engine.queue
+        start = queue_layout.up_next_end(q, self.engine.current_index)
+        return [i for i in range(start, len(q)) if not q[i].get(queue_layout.AUTOPLAY)]
+
+    def _set_aside(self) -> None:
+        rows = self._foreign_rows()
+        if not rows:
             return
-        self.hop_rejects = {(r["src"], r["dst"]): r for r in rows}
+        q = self.engine.queue
+        self.held = [q[i] for i in rows]
+        self.engine.remove_indices(rows)
 
-    def hop_weights(self) -> dict[tuple[str, str], float]:
-        return {pair: hop_weight(rec) for pair, rec in self.hop_rejects.items()}
-
-    def blocked_hops(self) -> list[dict]:
-        """Blocked hops, most recently rejected first."""
-        return [rec for rec in self.hop_rejects.values() if hop_blocked(rec)]
-
-    async def unblock_hops(self, pairs: list[tuple[str, str]] | None = None) -> None:
-        """Forget the rejections of `pairs` (None = every hop): they are taken
-        at full weight again, including by the running station."""
-        await self.db.clear_hop_rejects(pairs)
-        cleared = list(self.hop_rejects) if pairs is None else [tuple(p) for p in pairs]
-        for pair in cleared:
-            self.hop_rejects.pop(pair, None)
-            if self.station is not None:
-                self.station.weight_hop(*pair, 1.0)
-
-    async def _record_hop_reject(self, hop: tuple[str, str], path: str, artist: str) -> None:
-        try:
-            await self.db.record_hop_reject(hop[0], hop[1], path, artist)
-        except Exception:
-            logger.warning("Auto-play: could not persist genre-hop feedback", exc_info=True)
+    def _restore_held(self) -> None:
+        """Put the set-aside queue back after the listener's picks."""
+        held, self.held = self.held, []
+        if not held or not self.engine.queue:
             return
-        await self._load_hop_rejects()
-        rec = self.hop_rejects.get(hop)
-        if rec is None:
-            return
-        if self.station is not None:
-            self.station.weight_hop(*hop, hop_weight(rec))
-        if hop_blocked(rec):
-            logger.info("Auto-play: genre hop %s → %s blocked (%d rejections, %d artists)",
-                        hop[0], hop[1], rec["rejects"], rec["artists"])
+        at = queue_layout.up_next_end(self.engine.queue, self.engine.current_index)
+        self.engine.queue_after_current(held, after_index=at - 1)
 
-    async def unhide(self, paths: list[str] | None = None) -> None:
-        """Let `paths` (None = every hidden track) be recommended again."""
-        await self.db.unhide_from_autoplay(paths)
-        if paths is None:
-            self.hidden.clear()
-        else:
-            self.hidden.difference_update(paths)
-
-    async def _persist_hidden(self, path: str) -> None:
-        try:
-            await self.db.hide_from_autoplay(path)
-        except Exception:
-            logger.warning("Auto-play: could not persist hidden track", exc_info=True)
-
-    # ── buffer ──────────────────────────────────────────────────────────────
     def _pending_rows(self) -> list[int]:
         q = self.engine.queue
         return [i for i in range(self.engine.current_index + 1, len(q))
-                if q[i].get("_autoplay")]
+                if q[i].get(queue_layout.AUTOPLAY)]
 
     def buffer_paths(self) -> list[str]:
         """The pending auto-play tracks ahead of the playing row, in order."""
@@ -395,56 +324,38 @@ class AutoPlay:
 
     # ── internals ───────────────────────────────────────────────────────────
     def _negative(self, path: str) -> bool:
-        """Count a rejection; True when it ended the leg (the buffer is being
-        replaced)."""
-        self._leg_negatives.append(path)
-        artist = self._artist_of(path)
-        hop = self.station.hop_of(path) if self.station is not None else None
-        if hop is not None:
-            self._run_task(self._record_hop_reject, hop, path, artist)
-        if artist:
-            self._artist_negatives[artist] += 1
-            if (self._artist_negatives[artist] >= ARTIST_NEGATIVES_TO_BAN
-                    and self.station is not None):
-                self.station.ban_artist_of(path)
-        if len(self._leg_negatives) >= NEGATIVES_TO_END_LEG:
-            self._end_leg()
+        """Count a rejection and steer the station away from it; True when it
+        replanned (the buffer is being replaced)."""
+        self._negatives.append(path)
+        if self.station is not None:
+            self.station.reject([path])
+        if len(self._negatives) >= NEGATIVES_TO_REPLAN:
+            self._negatives = []
+            if self.station is not None:
+                self._gen += 1            # supersede a fill already in flight
+                self._filling = False
+                self._schedule_fill(BUFFER_TARGET, replace=True)
             return True
         return False
 
-    def _end_leg(self) -> None:
-        """The leg is heading the wrong way: move the station on and replace the
-        unheard buffer (it came from the same leg) in one op."""
-        rejected, self._leg_negatives = self._leg_negatives, []
-        if self.station is None:
-            return
-        self.station.end_leg(rejected)
-        self._gen += 1            # supersede a fill already in flight
-        self._filling = False
-        self._schedule_fill(BUFFER_TARGET, replace=True)
-
     def _is_autoplay(self, path: str) -> bool:
-        return any(t.get("_autoplay") and t.get("path") == path for t in self.engine.queue)
+        return any(t.get(queue_layout.AUTOPLAY) and t.get("path") == path
+                   for t in self.engine.queue)
 
-    def _artist_of(self, path: str) -> str:
-        return self._artist_by_path.get(path) or next(
-            (t.get("artist_name") or "" for t in self.engine.queue if t.get("path") == path), "")
-
-    def _avoid(self) -> set[str]:
-        """Everything a new station must not pick: queued recommendations,
-        this session's history, hidden tracks, and the playing track. The
-        library tail stays eligible — that is what gets promoted."""
-        avoid = {t["path"] for t in self.engine.queue if t.get("_autoplay") and t.get("path")}
-        avoid.update(self.history)
-        avoid.update(self.hidden)
+    def _avoid(self, recent: int | None = None) -> set[str]:
+        """What a station must not pick: queued recommendations, the playing
+        track and this session's history (only the last `recent` of it when
+        the genre starts over)."""
+        avoid = set(self.buffer_paths())
+        hist = list(self.history)
+        avoid.update(hist if recent is None else hist[-recent:])
         if self.engine.current_path:
             avoid.add(self.engine.current_path)
         return avoid
 
     def _insert_after(self) -> int:
-        """Below the last pending recommendation (keeps the buffer's order and
-        stays ahead of the held queue), or below the listener's up-next picks,
-        which always play first (utils.queue_layout)."""
+        """Below the last pending recommendation, or below the listener's
+        up-next picks, which always play first."""
         rows = self._pending_rows()
         if rows:
             return rows[-1]
@@ -469,45 +380,58 @@ class AutoPlay:
             self._filling = False
             logger.error("Auto-play: could not schedule a fill", exc_info=True)
 
-    async def _open(self, gen: int) -> tuple[track_graph.Station | None, bool]:
-        """The current station, opening it on first use. (station, just_opened)."""
-        if self.station is not None:
-            return self.station, False
+    async def _open(self, recent: int | None = None) -> track_graph.Station | None:
         seed = self.anchor or self.engine.current_path
         if not seed:
-            return None, False
+            return None
         self.anchor = seed
-        rng = None
-        if self.variety == RANDOM:
-            self.station_seed = random.randrange(1 << 31)
-            rng = random.Random(self.station_seed)
-        station = await track_graph.open_station(
-            self.db, seed, avoid=self._avoid(), rng=rng, leg_len=LEG_LEN,
+        return await track_graph.open_station(
+            self.db, seed, avoid=self._avoid(recent), focused=True,
             max_per_artist=ARTIST_CAP, max_per_album=ALBUM_CAP, window=CAP_WINDOW,
-            hop_weights=self.hop_weights(),
         )
-        if gen != self._gen:
-            return None, False
-        self.station = station
-        logger.info("Auto-play: station from %s (%s%s)", os.path.basename(seed),
-                    self.variety,
-                    f", seed {self.station_seed}" if self.station_seed is not None else "")
-        return station, True
+
+    async def _take(self, n: int, gen: int) -> tuple[list[str], bool]:
+        """Up to `n` paths from the station, opening it on first use and
+        starting the genre over when it is played out. (paths, just_opened)."""
+        opened = self.station is None
+        if opened:
+            station = await self._open()
+            if station is None or gen != self._gen:
+                return [], opened
+            self.station = station
+            logger.info("Auto-play: station from %s", os.path.basename(self.anchor))
+        paths = await self.station.take(n)
+        self._taken += len(paths)
+        if len(paths) < n and self._taken > 0:
+            # Played out: start the genre over from the anchor.
+            genre = self.station.flavour or "similar songs"
+            station = await self._open(recent=RESTART_GAP)
+            if station is None or gen != self._gen:
+                return paths, opened
+            station.exclude(paths)
+            more = [p for p in await station.take(n - len(paths)) if p not in paths]
+            self.station = station
+            self._taken = len(more)   # 0: nothing left even starting over
+            if more and not self._started_over:
+                self._started_over = True
+                self._notify(f"Played all the {genre} in your library. Starting over.")
+            paths += more
+        return paths, opened
 
     async def _fill(self, n: int, gen: int, replace: bool = False,
                     append_and_play: bool = False) -> None:
         try:
-            station, opened = await self._open(gen)
-            if station is None:
-                return
-            paths = await station.take(n)
+            paths, opened = await self._take(n, gen)
             if gen != self._gen or not self.enabled:
                 return
             batch = await self._tracks(paths)
             if gen != self._gen or not self.enabled:
                 return
             if not batch and opened:
-                await self._explain_empty(self.anchor)
+                await self._cannot_start()
+                return
+            if batch:
+                self._quiet, self._dead = False, ""
             if append_and_play:
                 if not batch:
                     self.engine.stop()
@@ -516,10 +440,6 @@ class AutoPlay:
                 self.engine.queue_extend(batch)
                 self.engine.play_track_at(first_new)
             elif replace:
-                # Even an empty batch drops the old buffer: it belonged to the
-                # previous station or to the leg just rejected. With nothing
-                # pending, replace_rows would land the block right after the
-                # playing row, i.e. ahead of the listener's up-next picks.
                 victims = self._pending_rows()
                 if victims:
                     self.engine.replace_rows(victims, batch)
@@ -536,6 +456,26 @@ class AutoPlay:
             if gen == self._gen:
                 self._filling = False
 
+    async def _cannot_start(self) -> None:
+        """No station from the anchor: drop the old station's buffer and give
+        back the set-aside queue. The next song that plays from it is a fresh
+        start (see on_track_changed)."""
+        self._dead = self.anchor
+        self.drop_buffer()
+        self._restore_held()
+        if self._quiet:
+            return
+        self._quiet = True
+        try:
+            analysed = await self.db.has_current_features(self.anchor, track_graph.FEATURES_VERSION)
+        except Exception:
+            analysed = True
+        if not analysed:
+            self._notify("This song isn't analysed yet, so auto-play can't start "
+                         "from it. Your queue continues.")
+        else:
+            self._notify("No similar songs found for this one. Your queue continues.")
+
     async def _tracks(self, paths: list[str]) -> list[dict]:
         """Engine track dicts for `paths`, tagged as recommendations."""
         if not paths:
@@ -544,27 +484,14 @@ class AutoPlay:
         batch = []
         for p in paths:
             row = rows.get(p)
-            if row is None or p in self.hidden:
+            if row is None:
                 continue
-            self._artist_by_path[p] = row.get("artist") or ""
             batch.append({
                 "path":        p,
                 "track_title": row.get("title") or os.path.basename(p),
                 "artist_name": row.get("artist") or "Unknown Artist",
                 "album_title": row.get("album") or "Unknown Album",
                 "duration":    row.get("duration") or 0.0,
-                "_autoplay":   True,
+                queue_layout.AUTOPLAY: True,
             })
         return batch
-
-    async def _explain_empty(self, seed: str) -> None:
-        try:
-            analysed = await self.db.has_current_features(seed, track_graph.FEATURES_VERSION)
-        except Exception:
-            analysed = True
-        if not analysed:
-            self._anchor_dead = True
-            self._notify("This track isn't analysed yet — auto-play will pick up "
-                         "from the next track that is.")
-        else:
-            self._notify("No similar tracks found for this one.")

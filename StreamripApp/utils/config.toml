@@ -68,9 +68,11 @@ lower_quality_if_not_available = true
 arl = ""
 # This allows for free 320kbps MP3 downloads from Deezer
 # If an arl is provided, deezloader is never used
+# Not implemented in this app: an arl is always required, and this is ignored.
 use_deezloader = true
 # This warns you when the paid deezer account is not logged in and rip falls
 # back to deezloader, which is unreliable
+# Ignored, like use_deezloader.
 deezloader_warnings = true
 
 [soundcloud]
@@ -213,9 +215,41 @@ haptic_feedback_enabled = true
 # Vibration intensities for specific gestures: "none", "light", "medium", "heavy", "selection", "vibrate"
 eq_drag_intensity = "light"
 swipe_queue_intensity = "medium"
-swipe_dismiss_intensity = "medium"
 long_press_intensity = "heavy"
 network_tap_intensity = "selection"
 network_reseed_intensity = "medium"
 network_walk_intensity = "light"
+
+[assistant]
+# Enable LLM intelligence for Jarvis
+llm_enabled = true
+# Provider: "gemini" or "ollama"
+llm_provider = "gemini"
+# User-provided Google Gemini API key (kept local and private)
+gemini_api_key = ""
+# Gemini model name
+gemini_model = "gemini-3.5-flash-lite"
+# Artist research paradigm: "hybrid", "weights", "web_snippets", or "google_grounding"
+research_mode = "hybrid"
+# Local Ollama or LM Studio endpoint URL
+ollama_endpoint = "http://localhost:11434/v1"
+# Ollama model name
+ollama_model = "llama3.2"
+# Custom personality system prompt (leave empty for default Jarvis persona)
+personality_prompt = ""
+
+[appearance]
+# Accent color hex
+accent_color = "#FFD60A"
+# Segmented pill styling: "category" or "unified"
+pill_style = "category"
+# Show Jarvis in the navigation bar
+show_jarvis = true
+# Library view visibility toggles
+show_network = false
+show_playlists = true
+show_artists = true
+show_albums = false
+show_tracks = true
+
 

@@ -1,9 +1,8 @@
 """Metadata Workbench — the sorting board for artist provenance.
 
-Auto-Play reads two fields per artist: `country` and `genres`. `_pool_foreign`
-uses them to decide what belongs in a queue, and `genre_graph.node_label` uses
-them to place the artist in the journey graph. This is the surface that fills
-them in.
+Auto-Play reads two fields per artist: `country` and `genres`. The genres are
+the artist's profile — what auto-play ranks artists by — and the country decides
+its culture (`utils/artist_graph.py`). This is the surface that fills them in.
 
 ── Why it is a board and not a list of problems ──────────────────────────────
 The previous design asked "which columns are empty?" and presented the answer as
@@ -17,8 +16,9 @@ wrong with that:
     whole list under your finger.
 
 So the unit of work here is not "an artist with a problem", it is "a pile of
-artists that belong to one scene". You select several and tap a genre, because that is what the user actually knows: not this artist's tag list, but
-that these twenty are all Greek rap. The bins are the library's own vocabulary,
+artists that belong to one scene". You select several and pick their genres,
+because that is what the user actually knows: not this artist's tag list, but
+that these twenty are all Greek rap. The picker lists the library's own vocabulary,
 which matters for correctness and not just typing — the NPMI model in
 `genre_similarity` is learned from co-occurrence across THIS library's tags, so
 a freshly invented spelling has no learned relation to anything.
@@ -28,7 +28,9 @@ a freshly invented spelling has no learned relation to anything.
     expand Container, and the pane is mounted with `_show_sub_page_full` so it
     is not nested inside the settings hub's scrolling Column. Both were
     violated before, which is what made scrolling fight back.
-  • Select-then-tap is the ONLY tagging route. Drag-and-drop was removed: a
+  • Select-then-"Edit genres…" is the ONLY bulk route; the picker is a sheet
+    with search, not a sideways-scrolling strip of pills (which reached 10 of
+    ~300 genres, and fought the back swipe). Drag-and-drop was removed: a
     horizontal drag inside a settings sub-page already means "back"
     (docs/FLET_FACTS.md §4), and touch gesture arbitration is unkind to
     drag-inside-scroll.
@@ -55,9 +57,12 @@ from utils.metadata_enrich import (
     search_musicbrainz_artists_candidates,
     musicbrainz_artist_details,
 )
-from utils import metadata_ai
+from utils import metadata_ai, metadata_audit
 
 logger = logging.getLogger(__name__)
+
+# DatabaseManager.GAP_NONE: a row with genres and a country, listed only in "All".
+_GAP_NONE = 3
 
 
 def _input_border(color=BORDER, focused_color=CYAN, radius=10):
@@ -148,8 +153,15 @@ class MetadataWorkbenchPane(ft.Column):
 
         # ── data ──
         self.coverage: dict = {}
+        # Every artist in the library (a tagged one can be tagged WRONG — the
+        # Library's edit button and search must reach it), and the subset that
+        # still needs attention.
+        self.everyone: list[dict] = []
         self.all_gaps: list[dict] = []
         self.low_conf: list[dict] = []
+        # Every doubtful artist, one row each with the reasons it's doubtful
+        # (they lead All under 'Least sure first'; see _build_review_rows).
+        self.review_rows: list[dict] = []
         self.vocab: list[dict] = []
         self.countries: list[dict] = []
         # AI research: pending suggestions by artist, names already researched
@@ -159,7 +171,12 @@ class MetadataWorkbenchPane(ft.Column):
         self.ai_ready = False
 
         # ── view state ──
-        self.filter = "needs"      # needs | suggested | all | uncertain
+        self.filter = "needs"      # needs | suggested | all
+        # How All is ordered: "least" sure first (doubtful matches, then the
+        # unplaceable, … hand-set last) or "most" sure first. This replaced a
+        # separate Review tab: the doubtful rows are the top of All.
+        self.sort = "least"
+        self.review_by_name: dict[str, list[dict]] = {}
         self.search = ""
         self.selected: set[str] = set()
         self._pending_focus: str | None = None
@@ -227,47 +244,72 @@ class MetadataWorkbenchPane(ft.Column):
         try:
             # One gap scan, shared with coverage. Previously coverage ran its
             # own full-library scan and the pane ran a second.
-            self.all_gaps = await self.db.get_metadata_gap_artists(limit=2000)
+            self.everyone = await self.db.get_metadata_gap_artists(
+                limit=100_000, everything=True)
+            # The gaps are the subset the default query returns: incomplete
+            # and not settled by hand. One scan serves both.
+            self.all_gaps = [g for g in self.everyone
+                             if g.get("gap_severity", 0) < _GAP_NONE
+                             and g.get("source") != "manual"]
             self.coverage = await self.db.get_metadata_coverage(gaps=self.all_gaps)
             self.low_conf = await self.db.get_low_confidence_artists(limit=500)
-            self.vocab = await self.db.get_genre_vocabulary(limit=40)
+            self.review_rows = await self._build_review_rows()
+            self.review_by_name = {r["artist_name"]: r["review"] for r in self.review_rows}
+            self.vocab = await self.db.get_genre_vocabulary(limit=300)
             self.countries = await self.db.get_library_countries()
             self.ai_pending = await self.db.get_pending_ai_research()
             self.researched = await self.db.get_researched_artist_names()
             self.ai_ready = metadata_ai.research_available()
         except Exception as exc:
             logger.exception("Metadata workbench load failed: %s", exc)
-        if self.search:
-            try:
-                if not any(g["artist_name"].lower() == self.search.lower() for g in self.all_gaps):
-                    item = await self.db.get_artist_workbench_item(self.search)
-                    if item:
-                        self.all_gaps.append(item)
-                genre_artists = await self.db.get_artists_by_genre(self.search)
-                existing_names = {g["artist_name"] for g in self.all_gaps}
-                for ga in genre_artists[:30]:
-                    ganame = ga["name"]
-                    if ganame not in existing_names:
-                        item = await self.db.get_artist_workbench_item(ganame)
-                        if item:
-                            self.all_gaps.append(item)
-                            existing_names.add(ganame)
-            except Exception as e:
-                logger.debug("Failed populating additional workbench items for search: %s", e)
         self._render()
         if self._pending_focus:
             name, self._pending_focus = self._pending_focus, None
-            row = next((g for g in self.all_gaps if g["artist_name"] == name), None)
+            row = next((g for g in self.everyone if g["artist_name"] == name), None)
             if not row:
                 row = await self.db.get_artist_workbench_item(name)
-                if row:
-                    self.all_gaps.append(row)
-                    self._render()
             if row:
                 self._open_editor(row)
 
     def _reload(self):
         self.app.page.run_task(self._reload_async)
+
+    async def _build_review_rows(self) -> list[dict]:
+        """Review's rows: matches MusicBrainz wasn't sure of, plus what the
+        metadata audit finds — a country that contradicts the artist's own
+        titles, tags or a web-backed AI answer, and second spellings of
+        another artist. One row per artist; `review` lists its reasons."""
+        rows: dict[str, dict] = {}
+
+        def _add(item: dict, reason: dict):
+            rows.setdefault(item["artist_name"], {**item, "review": []})["review"].append(reason)
+
+        for item in self.low_conf:
+            _add(item, {"kind": "mb", "text": "MusicBrainz wasn't sure about this match."})
+        try:
+            flags = await metadata_audit.audit_flags(self.db)
+            dups = await metadata_audit.duplicate_artists(self.db)
+        except Exception as exc:
+            logger.exception("Metadata audit failed: %s", exc)
+            flags, dups = {}, []
+        async def _item(name):
+            if name in rows:
+                return rows[name]
+            try:
+                return await self.db.get_artist_workbench_item(name)
+            except Exception as exc:
+                logger.warning("Review: couldn't load %s: %s", name, exc)
+                return None
+
+        for name, fl in flags.items():
+            item = await _item(name)
+            for f in fl if item else ():
+                _add(item, {"kind": "audit", "text": f["reason"], **f})
+        for dup in dups:
+            item = await _item(dup["alias"])
+            if item:
+                _add(item, {"kind": "dup", "text": f"Same artist as {dup['canonical']}?", **dup})
+        return sorted(rows.values(), key=lambda r: -(r.get("track_count") or 0))
 
     def _safe_update(self):
         try:
@@ -322,6 +364,9 @@ class MetadataWorkbenchPane(ft.Column):
                 tone = ACCENT_AMBER
             if n_sugg:
                 sub += f" {n_sugg} suggestion{'s' if n_sugg != 1 else ''} ready to review."
+            n_doubt = len(self.review_rows)
+            if n_doubt:
+                sub += f" {n_doubt} look{'s' if n_doubt == 1 else ''} doubtful (top of All)."
 
             actions: list[ft.Control] = [self._sync_button(disabled=(artists == 0))]
             if targets and self.ai_ready:
@@ -373,8 +418,8 @@ class MetadataWorkbenchPane(ft.Column):
             if self.sync_provider == p:
                 return
             self.sync_provider = p
-            if hasattr(self.app, "set_pref"):
-                self.app.set_pref("sync_provider", p)
+            if callable(getattr(self.app, "_save_pref", None)):
+                self.app._save_pref("sync_provider", p)
             elif hasattr(self.app, "_prefs") and isinstance(self.app._prefs, dict):
                 self.app._prefs["sync_provider"] = p
             self._render_hero()
@@ -578,7 +623,7 @@ class MetadataWorkbenchPane(ft.Column):
         ], spacing=9)
 
     def _start_research(self, names: list[str]):
-        """Research artists on the web, one grounded Gemini call each. Answers
+        """Research artists on the web, a dozen per Gemini call. Answers
         land as suggestions under the Suggestions filter; nothing is saved to
         an artist until the user accepts it."""
         if self.syncing or self.researching or not names:
@@ -600,6 +645,12 @@ class MetadataWorkbenchPane(ft.Column):
         def cb(i, total, name, res):
             self.r_cur, self.r_total, self.r_name = i, total, name
             st = res.get("status")
+            if st == "searching":
+                # Each artist's web search, before the batch's one model call.
+                if getattr(self, "_r_label", None) is not None:
+                    self._r_label.value = f"Searching the web · {name}"[:64]
+                    self._safe_update()
+                return
             if st == "ok":
                 self.r_found += 1
             elif st != "skipped":
@@ -707,7 +758,6 @@ class MetadataWorkbenchPane(ft.Column):
         segs = [
             ("needs", "Needs you", None, ACCENT_RED),
             ("suggested", "Suggestions", None, ACCENT_GREEN),
-            ("uncertain", "Review", None, ACCENT_AMBER),
             ("all", "All", None, CYAN),
         ]
         self._seg = CupertinoSegmentedBar(segs, self.filter, self._set_filter, height=36)
@@ -737,8 +787,11 @@ class MetadataWorkbenchPane(ft.Column):
     # ── LIST ─────────────────────────────────────────────────────────────────
     def _visible(self) -> list[dict]:
         q = self.search.strip().lower()
-        if self.filter == "uncertain":
-            pool = self.low_conf
+        if self.filter == "all" or (q and self.filter == "needs"):
+            # Search looks up ANY artist: the one you need to correct is
+            # usually one that already has (wrong) tags, which no gap list
+            # would ever show.
+            pool = self.everyone
         else:
             pool = self.all_gaps
             if self.filter == "needs":
@@ -759,7 +812,36 @@ class MetadataWorkbenchPane(ft.Column):
                         return True
                 return False
             pool = [g for g in pool if _matches_q(g)]
+        if self.filter == "all":
+            pool = sorted(pool, key=self._sort_key)
         return pool
+
+    def _sure_tier(self, g: dict) -> int:
+        """How sure we are of a row, 0 (least) … 7 (most):
+        flagged by the audit or a duplicate name → MusicBrainz unsure →
+        nothing known → only the files' tag → genres or country but not both
+        → complete, AI-sourced → complete from a source → set by hand."""
+        kinds = {r["kind"] for r in self.review_by_name.get(g["artist_name"], ())}
+        if kinds & {"audit", "dup"}:
+            return 0
+        if "mb" in kinds:
+            return 1
+        if g.get("source") == "manual":
+            return 7
+        sev = g.get("gap_severity", 2)
+        if sev < _GAP_NONE:
+            return 2 + sev
+        return 5 if (g.get("provenance") or {}).get("genres") == "ai" else 6
+
+    def _sort_key(self, g: dict):
+        tier, score = self._sure_tier(g), g.get("score") or 0
+        tracks = -(g.get("track_count") or 0)
+        return (tier, score, tracks) if self.sort == "least" else (-tier, -score, tracks)
+
+    def _toggle_sort(self):
+        self.sort = "most" if self.sort == "least" else "least"
+        self._render_list()
+        self._safe_update()
 
     def _render_list(self):
         rows = self._visible()
@@ -777,15 +859,20 @@ class MetadataWorkbenchPane(ft.Column):
         caption = {
             "needs": f"{n} artist{plural} Auto-Play can't place yet",
             "suggested": f"{n} suggestion{plural} — tick ✓ to accept, or tap to adjust",
-            "uncertain": f"{n} match{'es' if n != 1 else ''} MusicBrainz wasn't sure about",
-            "all": f"{n} artist{plural} with incomplete metadata",
+            "all": f"{n} artist{plural} — tap one to edit, tick several to edit together",
         }[self.filter]
+        if self.search.strip() and self.filter == "needs":
+            caption = f"{n} artist{plural} matching “{self.search.strip()}”"
         # One inset group with hairline rules between rows, Apple-style, rather
         # than a stack of separate cards.
+        head: ft.Control = ft.Text(caption, size=10.5, color=TEXT_TERTIARY,
+                                   max_lines=2, expand=True)
+        if self.filter == "all":
+            head = ft.Row([head, self._sort_pill()], spacing=8,
+                          vertical_alignment=ft.CrossAxisAlignment.CENTER)
         self._list.controls = [
             ft.Container(
-                content=ft.Text(caption, size=10.5,
-                                color=TEXT_TERTIARY, max_lines=2),
+                content=head,
                 padding=ft.Padding.only(left=4, bottom=6),
             ),
             ft.Container(
@@ -795,6 +882,20 @@ class MetadataWorkbenchPane(ft.Column):
                 clip_behavior=ft.ClipBehavior.HARD_EDGE,
             ),
         ]
+
+    def _sort_pill(self) -> ft.Control:
+        label = "Least sure first" if self.sort == "least" else "Most sure first"
+        return ft.Container(
+            content=ft.Row([
+                ft.Icon(ft.Icons.SWAP_VERT_ROUNDED, size=13, color=CYAN),
+                ft.Text(label, size=11, weight=ft.FontWeight.W_600, color=CYAN),
+            ], spacing=4, tight=True),
+            bgcolor=apply_opacity(0.10, CYAN), border_radius=RADIUS_PILL,
+            border=ft.Border.all(1, apply_opacity(0.3, CYAN)),
+            padding=ft.Padding.symmetric(horizontal=10, vertical=5),
+            on_click=lambda _e: self._toggle_sort(), ink=True,
+            tooltip="Sort by how sure the metadata is",
+        )
 
     def _column_header(self) -> ft.Control:
         """Three columns, not four.
@@ -870,6 +971,8 @@ class MetadataWorkbenchPane(ft.Column):
         # Severity reads as a coloured left edge on the row rather than a
         # separate dot column — one less fixed width competing for the name.
         edge = ACCENT_RED if sev == 0 else (ACCENT_GREEN if sev == 1 else "transparent")
+        if g.get("review") or self.review_by_name.get(name):
+            edge = ACCENT_AMBER
 
         # Names and genres WRAP to a second line instead of ellipsising away.
         # 'Vasilis Karras, Pantelis Pantelidis' has no useful one-line form at
@@ -884,6 +987,15 @@ class MetadataWorkbenchPane(ft.Column):
             ft.Text(name, size=13, weight=ft.FontWeight.W_600, color=TEXT,
                     max_lines=2, overflow=ft.TextOverflow.ELLIPSIS, expand=True),
         ], spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER, tight=True)
+        # Why the row looks doubtful: one line, in amber, on every filter.
+        reasons = g.get("review") or self.review_by_name.get(name) or []
+        if reasons:
+            more = len(reasons) - 1
+            name_cell = ft.Column([
+                name_cell,
+                ft.Text(reasons[0]["text"] + (f"  +{more}" if more else ""), size=10.5,
+                        color=ACCENT_AMBER, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS),
+            ], spacing=2, tight=True)
 
         genre_cell = ft.Column([
             ft.Text(gtext, size=11.5, color=gcolor,
@@ -966,9 +1078,6 @@ class MetadataWorkbenchPane(ft.Column):
         elif self.filter == "suggested":
             icon, title, sub = (ft.Icons.CHECK_CIRCLE_ROUNDED, "No suggestions waiting.",
                                 "Research artists under Needs you, or Sync.")
-        elif self.filter == "uncertain":
-            icon, title, sub = (ft.Icons.CHECK_CIRCLE_ROUNDED, "Nothing to review.",
-                                "Every match MusicBrainz returned is resolved.")
         else:
             icon, title, sub = (ft.Icons.CHECK_CIRCLE_ROUNDED, "Nothing to fix here.",
                                 "This view is clear.")
@@ -985,57 +1094,72 @@ class MetadataWorkbenchPane(ft.Column):
 
     # ── BINS ─────────────────────────────────────────────────────────────────
     def _render_bins(self):
-        """The pinned tray: tap targets for the library's own vocabulary.
+        """The bottom bar: shown only once something is selected.
 
-        Hidden on the Uncertain filter and on an empty list — a tray with
-        nothing to apply it to is just chrome."""
-        if self.filter == "uncertain" or not self.all_gaps:
+        It used to be a sideways-scrolling strip of every action at once — the
+        top ten genres, four countries, New…, Research, Set genres — which
+        reached 10 of ~300 genres and mixed "replace" with "add" in one row of
+        look-alike pills. Now it is one main button that opens the genre
+        picker (search, scroll, replace-or-add in one visible choice), plus
+        the answers for doubtful rows when the selection holds any."""
+        n = len(self.selected)
+        if self.filter == "suggested" and self.everyone:
+            self._h_bins.visible = True
+            self._render_accept_tray(n)
+            return
+        if not n or not self.everyone:
             self._h_bins.content = None
             self._h_bins.visible = False
             return
         self._h_bins.visible = True
-        n = len(self.selected)
-        if self.filter == "suggested":
-            self._render_accept_tray(n)
-            return
+        names = sorted(self.selected)
+        flagged = [x for x in names if self.review_by_name.get(x)]
+        fixable = [x for x in flagged if self._fix_of(x)]
 
-        bins: list[ft.Control] = []
+        top: list[ft.Control] = [
+            ft.Text(f"{n} selected", size=12, color=CYAN, weight=ft.FontWeight.W_700,
+                    expand=True),
+            ft.TextButton("Clear", on_click=lambda _e: self._clear_selection(),
+                          style=ft.ButtonStyle(color=DIM)),
+        ]
         if self.ai_ready:
-            bins.append(self._bin("Research", kind="research", count=0))
-        for v in self.vocab[:10]:
-            bins.append(self._bin(v["name"], kind="genre", count=v.get("artists", 0)))
-        for c in self.countries[:4]:
-            bins.append(self._bin(c["code"], kind="country", count=c.get("artists", 0)))
-        bins.append(self._bin("New…", kind="new", count=0))
+            top.append(ft.PopupMenuButton(
+                icon=ft.Icons.MORE_HORIZ_ROUNDED, icon_color=DIM, tooltip="More",
+                items=[ft.PopupMenuItem(
+                    content=ft.Row([
+                        ft.Icon(ft.Icons.AUTO_AWESOME_ROUNDED, size=15, color=_AI),
+                        ft.Text("Research on the web", size=12.5, color=TEXT),
+                    ], spacing=8, tight=True),
+                    on_click=lambda _e: self._research_selected(),
+                )],
+            ))
+        actions: list[ft.Control] = []
+        if fixable:
+            actions.append(self._ghost_btn(
+                f"Apply fix · {len(fixable)}", lambda _e: self._apply_fixes(fixable),
+                fg=ACCENT_AMBER, icon=ft.Icons.AUTO_FIX_HIGH_ROUNDED))
+        if flagged:
+            actions.append(self._ghost_btn(
+                f"Looks right · {len(flagged)}", lambda _e: self._looks_right(flagged),
+                fg=CYAN, icon=ft.Icons.CHECK_ROUNDED))
+        actions.append(self._filled_btn(
+            "Edit genres…", lambda _e: self._open_genre_picker(names),
+            icon=ft.Icons.EDIT_ROUNDED))
 
-        hint = (f"{n} selected — tap a tag to apply"
-                if n else "Select artists, then tap a tag")
-        # ONE fixed-height row that scrolls sideways, NOT a wrapping row.
-        # Wrapping put twelve pills on five lines (~600pt) in a tray that does
-        # not expand, so the ListView — which does — was left roughly 110pt and
-        # showed a single clipped artist. A tray must cost a fixed, small slice
-        # of the screen no matter how much vocabulary the library has.
         self._h_bins.content = ft.Container(
             content=ft.Column([
-                ft.Row([
-                    ft.Text(hint, size=10.5,
-                            color=CYAN if n else TEXT_TERTIARY,
-                            weight=ft.FontWeight.W_700 if n else ft.FontWeight.W_600,
-                            max_lines=1, overflow=ft.TextOverflow.ELLIPSIS, expand=True),
-                    (ft.TextButton("Clear", on_click=lambda _e: self._clear_selection(),
-                                   style=ft.ButtonStyle(color=DIM)) if n else ft.Container()),
-                ], vertical_alignment=ft.CrossAxisAlignment.CENTER),
-                ft.Container(
-                    content=ft.Row(bins, spacing=7, scroll=ft.ScrollMode.AUTO,
-                                   vertical_alignment=ft.CrossAxisAlignment.CENTER),
-                    # Pill (~31) + the horizontal scrollbar Flet draws UNDER the
-                    # row; at 40 the pills were clipped along their bottom edge.
-                    height=54,
-                ),
-            ], spacing=4, tight=True),
-            padding=ft.Padding.only(left=2, right=2, top=8, bottom=2),
+                ft.Row(top, spacing=4, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                ft.Row(actions, spacing=8, run_spacing=8, wrap=True,
+                       alignment=ft.MainAxisAlignment.END),
+            ], spacing=2, tight=True),
+            padding=ft.Padding.only(left=4, right=2, top=6, bottom=6),
             border=ft.Border.only(top=ft.BorderSide(1, BORDER_SUBTLE)),
         )
+
+    def _research_selected(self):
+        names = sorted(self.selected)
+        self.selected.clear()
+        self._start_research(names)
 
     def _render_accept_tray(self, n: int):
         rows = self._visible()
@@ -1056,67 +1180,65 @@ class MetadataWorkbenchPane(ft.Column):
             border=ft.Border.only(top=ft.BorderSide(1, BORDER_SUBTLE)),
         )
 
-    def _bin(self, label: str, *, kind: str, count: int) -> ft.Control:
-        accent = {"genre": CYAN, "country": "#BF5AF2", "new": DIM, "research": _AI}[kind]
-        armed = bool(self.selected)
-        text = label
+    def _fix_of(self, name: str) -> dict | None:
+        """The audit's own answer for a flagged row, if it has one: a namesake
+        takes the collaborators' country and genres, a contradicted country
+        takes the evidence's. Duplicates and unsure matches need the editor."""
+        for r in self.review_by_name.get(name, ()):
+            if r["kind"] == "audit" and r.get("suggest_country"):
+                return r
+        return None
 
-        inner = ft.Container(
-            content=ft.Row([
-                (ft.Icon(ft.Icons.AUTO_AWESOME_ROUNDED, size=13,
-                         color=accent if armed else DIM)
-                 if kind == "research" else ft.Container(width=0)),
-                ft.Text(text, size=12, weight=ft.FontWeight.W_600,
-                        color=accent if armed else DIM),
-                (ft.Text(str(count), size=9.5, color=TEXT_TERTIARY,
-                         font_family="monospace") if count else ft.Container()),
-            ], spacing=6, tight=True, vertical_alignment=ft.CrossAxisAlignment.CENTER),
-            bgcolor=apply_opacity(0.12, accent) if armed else SURFACE2,
-            border=ft.Border.all(1, apply_opacity(0.45 if armed else 0.25, accent)),
-            border_radius=RADIUS_PILL,
-            padding=ft.Padding.symmetric(horizontal=12, vertical=7),
-            on_click=lambda _e: self._apply_bin(label, kind),
-            ink=True,
-            alignment=ft.Alignment(0, 0),
-            animate=ft.Animation(120, ft.AnimationCurve.EASE_OUT),
-        )
-        return inner
-
-    def _apply_bin(self, label: str, kind: str):
-        names = sorted(self.selected)
-        if not names:
-            self.app.show_snackbar("Select one or more artists first.", color=ACCENT_AMBER)
-            return
-        if kind == "new":
-            self._prompt_new_genre(names)
-            return
-        if kind == "research":
-            self.selected.clear()
-            self._start_research(names)
-            return
-        genre = label if kind == "genre" else None
-        country = label if kind == "country" else None
-        self._commit_tag(names, genre=genre, country=country)
-
-    def _commit_tag(self, names: list[str], *, genre=None, country=None):
+    def _apply_fixes(self, names: list[str]):
         async def _do():
-            try:
-                # Merge, never overwrite: tagging artists with a genre must not
-                # erase a country MusicBrainz already found for some of them.
-                n = await self.db.bulk_tag_artists(
-                    names, genre=genre, country=country, refresh_model=False,
-                )
-            except Exception as exc:
-                logger.exception("bulk tag failed: %s", exc)
-                self.app.show_snackbar(f"Couldn't save: {exc}", color=ACCENT_RED)
-                return
-            what = genre or _country_label(country)
+            n = 0
+            for name in names:
+                r = self._fix_of(name)
+                try:
+                    if r.get("rule") == "collab":
+                        await self.db.set_artists_genres(
+                            [name], list(r.get("suggest_genres") or []),
+                            country=r["suggest_country"], refresh_model=False)
+                    else:
+                        await self.db.bulk_tag_artists(
+                            [name], country=r["suggest_country"], refresh_model=False)
+                    n += 1
+                except Exception as exc:
+                    logger.exception("fix failed for %s: %s", name, exc)
             self.selected.clear()
             await self._reload_async()
-            self.app.show_snackbar(
-                f"{n} artist{'s' if n != 1 else ''} → {what}",
-                icon=ft.Icons.CHECK_CIRCLE, color=CYAN)
-            self._schedule_walk_refresh()
+            if n:
+                self.app.show_snackbar(f"Fixed {n} artist{'s' if n != 1 else ''}",
+                                       icon=ft.Icons.CHECK_CIRCLE, color=CYAN)
+                self._schedule_walk_refresh()
+        self.app.page.run_task(_do)
+
+    def _looks_right(self, names: list[str]):
+        """Answer every doubt on these rows with "it's right": dismiss the
+        audit's flags, vouch for MusicBrainz's match, and record that a
+        look-alike name is a different artist."""
+        rows = {g["artist_name"]: g for g in self.everyone}
+
+        async def _do():
+            n = 0
+            for name in names:
+                cc = ((rows.get(name) or {}).get("country") or "").upper()
+                try:
+                    for r in self.review_by_name.get(name, ()):
+                        if r["kind"] == "audit":
+                            await self.db.dismiss_audit_flag(name, r["rule"], cc)
+                        elif r["kind"] == "mb":
+                            await self.db.accept_artist_matches([name])
+                        elif r["kind"] == "dup":
+                            await self.db.reject_alias_pair(r["alias"], r["canonical"])
+                    n += 1
+                except Exception as exc:
+                    logger.exception("looks-right failed for %s: %s", name, exc)
+            self.selected.clear()
+            await self._reload_async()
+            if n:
+                self.app.show_snackbar(f"Kept {n} artist{'s' if n != 1 else ''} as they are",
+                                       icon=ft.Icons.CHECK_CIRCLE, color=CYAN)
         self.app.page.run_task(_do)
 
     def _schedule_walk_refresh(self):
@@ -1140,40 +1262,287 @@ class MetadataWorkbenchPane(ft.Column):
         self._render_bins()
         self._safe_update()
 
-    def _prompt_new_genre(self, names: list[str]):
-        dlg = None
-        _on_dismiss, _close = dialog_handoff(self.app, lambda: dlg)
+    def _unknown_genres(self, tags) -> list[str]:
+        """Tags Auto-Play has nothing to relate to: not in this library's
+        vocabulary and in no genre family. An artist tagged ONLY with one is an
+        island (`artist_graph.tag_similarity` gives it 0 to every other tag), so
+        the UI asks for an existing genre alongside it."""
+        from utils.genre_taxonomy import genre_bucket, NON_FAMILIES
+        canon = lambda t: "".join(ch for ch in str(t).lower() if ch.isalnum())
+        known = {canon(v["name"]) for v in self.vocab}
+        return [t for t in tags
+                if canon(t) not in known and genre_bucket(t) in NON_FAMILIES]
+
+    def _genre_hint(self, tags) -> str:
+        unknown = self._unknown_genres(tags)
+        if not unknown:
+            return ""
+        if len(unknown) == len(list(tags)):
+            return (f"Auto-Play doesn't know “{unknown[0]}” yet. Add an existing genre "
+                    f"it's close to as well, so it can find related artists.")
+        return f"“{unknown[0]}” is new; the other genres tell Auto-Play where it belongs."
+
+    def _recent_genres(self) -> list[str]:
+        prefs = getattr(self.app, "_prefs", None)
+        recent = prefs.get("recent_genres") if isinstance(prefs, dict) else None
+        return [str(t) for t in recent if t][:6] if isinstance(recent, list) else []
+
+    def _remember_genres(self, tags: list[str]):
+        recent = list(dict.fromkeys(list(tags) + self._recent_genres()))[:6]
+        if callable(getattr(self.app, "_save_pref", None)):
+            self.app._save_pref("recent_genres", recent)
+        elif isinstance(getattr(self.app, "_prefs", None), dict):
+            self.app._prefs["recent_genres"] = recent
+
+    def _open_genre_picker(self, names: list[str]):
+        """Genres for one or many artists: search or scroll the library's whole
+        vocabulary, pick several, create a new one, and choose — visibly —
+        whether they REPLACE what the artists have or are ADDED to it.
+
+        A near-full-height sheet: ✕ top right, or swipe it down (back gesture
+        on Android). The search field sits outside everything `_rebuild`
+        replaces, so typing never loses focus."""
+        sheet = None
+        _on_dismiss, _close = dialog_handoff(self.app, lambda: sheet)
+        rows = {g["artist_name"]: g for g in self.everyone}
+        sets = [{x.lower() for x in _genre_names((rows.get(n) or {}).get("genres"))}
+                for n in names]
+        # What every selected artist already has. Shown (and removable) when
+        # replacing; irrelevant when adding.
+        prefill = sorted(set.intersection(*sets)) if sets else []
+        chosen: list[str] = list(prefill)
+        st = {"mode": "replace", "country": "", "q": ""}
+        counts = {v["name"].lower(): v.get("artists", 0) for v in self.vocab}
+
+        picked_row = ft.Row(wrap=True, spacing=6, run_spacing=6)
+        hint = ft.Text("", size=11, color=ACCENT_AMBER, visible=False)
+        country_row = ft.Row(wrap=True, spacing=6, run_spacing=6)
+        listing = ft.ListView(spacing=0, expand=True, scroll=ft.ScrollMode.AUTO)
+        save_btn = ft.Container()
+
+        def _shown() -> list[str]:
+            return chosen if st["mode"] == "replace" else [t for t in chosen if t not in prefill]
+
+        def _pill(label, *, on, accent):
+            return ft.Container(
+                content=ft.Text(label + ("  ✕" if on else ""), size=12,
+                                color=BG if on else accent,
+                                weight=ft.FontWeight.W_600 if on else None),
+                bgcolor=accent if on else "transparent",
+                border=ft.Border.all(1, accent if on else apply_opacity(0.4, accent)),
+                border_radius=RADIUS_PILL,
+                padding=ft.Padding.symmetric(horizontal=11, vertical=6), ink=True,
+            )
+
+        def _toggle(t):
+            t = t.strip().lower()
+            if not t:
+                return
+            if t in chosen:
+                chosen.remove(t)
+            else:
+                chosen.append(t)
+            _rebuild()
+
+        def _section(label):
+            return ft.Container(
+                content=ft.Text(label, size=10, color=TEXT_TERTIARY, weight=ft.FontWeight.W_800),
+                padding=ft.Padding.only(left=4, top=12, bottom=4))
+
+        def _genre_row(t, *, create=False):
+            on = t in _shown()
+            n = counts.get(t, 0)
+            return ft.Container(
+                content=ft.Row([
+                    ft.Icon(ft.Icons.ADD_ROUNDED if create else (
+                        ft.Icons.CHECK_CIRCLE_ROUNDED if on else ft.Icons.CIRCLE_OUTLINED),
+                        size=18, color=ACCENT_GREEN if create else (CYAN if on else DIM)),
+                    ft.Text(f"Create “{t}”" if create else t, size=13.5,
+                            color=ACCENT_GREEN if create else TEXT,
+                            weight=ft.FontWeight.W_600 if on else None, expand=True),
+                    (ft.Text(f"{n}", size=11, color=TEXT_TERTIARY, font_family="monospace")
+                     if n and not create else ft.Container()),
+                ], spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                padding=ft.Padding.symmetric(horizontal=8, vertical=10),
+                border=ft.Border.only(bottom=ft.BorderSide(1, BORDER_SUBTLE)),
+                on_click=lambda _e, t=t, c=create: (_clear_field() if c else None, _toggle(t)),
+                ink=True, data=t,
+            )
+
+        def _rebuild():
+            shown = _shown()
+            picked_row.controls = []
+            for t in shown:
+                c = _pill(t, on=True, accent=CYAN)
+                c.on_click = lambda _e, t=t: _toggle(t)
+                picked_row.controls.append(c)
+            if not shown:
+                picked_row.controls = [ft.Text(
+                    "Nothing picked yet." if st["mode"] == "add"
+                    else "No genres — pick below or type one.",
+                    size=11.5, color=TEXT_TERTIARY)]
+            hint.value = self._genre_hint(shown) if shown else ""
+            hint.visible = bool(hint.value)
+
+            needle = st["q"].strip().lower()
+            items: list[ft.Control] = []
+            if needle:
+                hits = [v["name"].lower() for v in self.vocab if needle in v["name"].lower()]
+                # Whole-word and prefix matches first: typing 'rap' wants 'rap'
+                # and 'greek rap' before 'trap'.
+                hits.sort(key=lambda t: (t != needle, not t.startswith(needle),
+                                         not any(w.startswith(needle) for w in t.split()),
+                                         -counts.get(t, 0)))
+                items += [_genre_row(t) for t in hits]
+                if needle not in counts:
+                    items.append(_genre_row(needle, create=True))
+            else:
+                recent = [t for t in self._recent_genres()]
+                if recent:
+                    items.append(_section("RECENT"))
+                    items += [_genre_row(t) for t in recent]
+                items.append(_section("ALL GENRES IN YOUR LIBRARY"))
+                items += [_genre_row(v["name"].lower()) for v in self.vocab]
+            listing.controls = items
+
+            country_row.controls = []
+            for code in [c["code"] for c in self.countries[:8]]:
+                ch = _pill(code, on=st["country"] == code, accent="#BF5AF2")
+                ch.on_click = lambda _e, code=code: (
+                    st.__setitem__("country", "" if st["country"] == code else code), _rebuild())
+                country_row.controls.append(ch)
+
+            k = len(names)
+            who = names[0] if k == 1 else f"{k} artists"
+            label = (f"Replace genres for {who}" if st["mode"] == "replace"
+                     else f"Add to {who}")
+            ok = st["mode"] == "replace" or bool(shown) or bool(st["country"])
+            save_btn.content = self._filled_btn(label, _save, icon=ft.Icons.CHECK_ROUNDED,
+                                                disabled=not ok)
+            try:
+                sheet.update()
+            except Exception:
+                self._safe_update()
 
         field = ft.TextField(
-            label="Genre", autofocus=True, bgcolor=SURFACE2,
+            hint_text="Search or create a genre…", prefix_icon=ft.Icons.SEARCH_ROUNDED,
+            autofocus=True, dense=True, bgcolor=SURFACE2,
             border=_input_border(BORDER, CYAN, 10),
             text_style=ft.TextStyle(color=TEXT, size=14),
+            content_padding=ft.Padding.symmetric(horizontal=12, vertical=10),
         )
 
-        def _ok(_e=None):
-            val = (field.value or "").strip().lower()
-            if val:
-                _close(lambda: self._commit_tag(names, genre=val))
-            else:
-                _close()
+        def _clear_field():
+            field.value = ""
+            st["q"] = ""
 
-        field.on_submit = _ok
-        dlg = ft.AlertDialog(
-            bgcolor=SURFACE,
-            title=ft.Text(f"Tag {len(names)} artist{'s' if len(names) != 1 else ''}",
-                          color=TEXT, size=16, weight=ft.FontWeight.W_700),
-            content=ft.Column([
-                ft.Text("A tag your library already uses will be understood better "
-                        "than a new one.", size=11.5, color=DIM),
-                field,
-            ], tight=True, spacing=12, width=320),
-            actions=[
-                ft.TextButton("Cancel", on_click=lambda _e: _close()),
-                self._filled_btn("Apply", _ok),
-            ],
+        def _on_change(e):
+            st["q"] = e.control.value or ""
+            _rebuild()
+
+        def _on_submit(e):
+            # Enter picks the best match, or creates what was typed.
+            needle = (e.control.value or "").strip().lower()
+            hit = next((c.data for c in listing.controls
+                        if isinstance(c.data, str)), None) if needle else None
+            for part in ([hit] if hit else needle.split(",")):
+                part = (part or "").strip().lower()
+                if part and part not in chosen:
+                    chosen.append(part)
+            _clear_field()
+            _rebuild()
+
+        field.on_change = _on_change
+        field.on_submit = _on_submit
+
+        def _set_mode(m):
+            st["mode"] = m
+            _rebuild()
+
+        mode_bar = CupertinoSegmentedBar(
+            [("replace", "Replace their genres", None, CYAN),
+             ("add", "Add to them", None, ACCENT_GREEN)],
+            "replace", _set_mode, height=34)
+
+        def _save(_e=None):
+            tags = list(_shown())
+            cc = st["country"] or None
+            mode = st["mode"]
+
+            async def _do():
+                try:
+                    if mode == "replace":
+                        n = await self.db.set_artists_genres(names, tags, country=cc,
+                                                             refresh_model=False)
+                    else:
+                        n = await self.db.bulk_tag_artists(
+                            names, genre=",".join(tags) or None, country=cc,
+                            refresh_model=False)
+                except Exception as exc:
+                    logger.exception("genre picker save failed: %s", exc)
+                    self.app.show_snackbar(f"Couldn't save: {exc}", color=ACCENT_RED)
+                    return
+                if tags:
+                    self._remember_genres(tags)
+                self.selected.difference_update(names)
+                await self._reload_async()
+                what = ", ".join(tags) or _country_label(cc) or "no genres"
+                verb = "→" if mode == "replace" else "+"
+                self.app.show_snackbar(f"{n} artist{'s' if n != 1 else ''} {verb} {what}",
+                                       icon=ft.Icons.CHECK_CIRCLE, color=CYAN)
+                self._schedule_walk_refresh()
+            _close(lambda: self.app.page.run_task(_do))
+
+        title = names[0] if len(names) == 1 else f"Genres for {len(names)} artists"
+        height = max(420, int((getattr(self.app.page, "height", None) or 760) * 0.88))
+        sheet = ft.BottomSheet(
+            content=ft.Container(
+                height=height,
+                content=ft.Column([
+                    ft.Container(
+                        content=ft.Container(width=36, height=5, bgcolor=SURFACE_ELEVATED,
+                                             border_radius=3),
+                        alignment=ft.Alignment(0, 0),
+                        padding=ft.Padding.only(top=10, bottom=2),
+                    ),
+                    ft.Container(
+                        content=ft.Row([
+                            ft.Text(title, size=17, weight=ft.FontWeight.W_600, color=TEXT,
+                                    overflow=ft.TextOverflow.ELLIPSIS, max_lines=1,
+                                    expand=True),
+                            ft.IconButton(icon=ft.Icons.CLOSE_ROUNDED, icon_color=DIM,
+                                          icon_size=20, tooltip="Close",
+                                          on_click=lambda _e: _close()),
+                        ], vertical_alignment=ft.CrossAxisAlignment.CENTER, spacing=8),
+                        padding=ft.Padding.only(left=16, right=8),
+                    ),
+                    ft.Container(content=field, padding=ft.Padding.symmetric(horizontal=16)),
+                    ft.Container(
+                        content=ft.Column([mode_bar, picked_row, hint], spacing=8, tight=True),
+                        padding=ft.Padding.only(left=16, right=16, top=10),
+                    ),
+                    ft.Container(content=listing, expand=True,
+                                 padding=ft.Padding.symmetric(horizontal=12)),
+                    ft.Divider(color=BORDER_SUBTLE, height=1),
+                    ft.Container(
+                        content=ft.Column([
+                            ft.Text("COUNTRY (optional — kept if none tapped)", size=10,
+                                    color=TEXT_TERTIARY, weight=ft.FontWeight.W_800),
+                            country_row,
+                            ft.Row([save_btn], alignment=ft.MainAxisAlignment.END),
+                        ], spacing=8, tight=True),
+                        padding=ft.Padding.only(left=16, right=16, top=10, bottom=14),
+                    ),
+                ], spacing=8, expand=True),
+                bgcolor=SURFACE,
+                border_radius=ft.BorderRadius.only(top_left=20, top_right=20),
+            ),
+            bgcolor=SURFACE, draggable=True, use_safe_area=True,
+            show_drag_handle=False, scrollable=True,
             on_dismiss=_on_dismiss,
         )
-        self.app.page.show_dialog(dlg)
+        _rebuild()
+        self.app.page.show_dialog(sheet)
 
     # ── EDITOR (bottom sheet) ────────────────────────────────────────────────
     def _open_editor(self, item: dict):
@@ -1188,11 +1557,13 @@ class MetadataWorkbenchPane(ft.Column):
         genres = {g.lower() for g in _genre_names(item.get("genres"))}
         files = item.get("source_genres") or []
         country = {"v": (item.get("country") or "").upper()}
+        # Why this artist looks doubtful, whichever filter the sheet came from.
+        review = list(item.get("review") or self.review_by_name.get(name) or [])
 
         chips_row = ft.Row(wrap=True, spacing=6, run_spacing=6)
         country_row = ft.Row(wrap=True, spacing=6, run_spacing=6)
         custom = ft.TextField(
-            hint_text="Add a genre…", dense=True, width=160, bgcolor=SURFACE2,
+            hint_text="Find or add a genre…", dense=True, width=180, bgcolor=SURFACE2,
             border=_input_border(BORDER, CYAN, 8),
             text_style=ft.TextStyle(color=TEXT, size=12),
             content_padding=ft.Padding.symmetric(horizontal=10, vertical=6),
@@ -1224,7 +1595,13 @@ class MetadataWorkbenchPane(ft.Column):
                 c.on_click = lambda _e, t=t: (genres.add(t.lower()), _rebuild())
                 sug.append(c)
             voc = []
-            for v in self.vocab[:12]:
+            # Typing in the field LOOKS UP the library's genres rather than
+            # only accepting free text: an existing genre is one Auto-Play
+            # already relates to everything else.
+            needle = (custom.value or "").strip().lower()
+            pool = [v for v in self.vocab if needle in v["name"].lower()] if needle \
+                else self.vocab[:12]
+            for v in pool:
                 t = v["name"]
                 if t.lower() in genres or t.lower() in {f.lower() for f in files}:
                     continue
@@ -1234,7 +1611,11 @@ class MetadataWorkbenchPane(ft.Column):
             # Selected first, then what the sources suggest, then the library's
             # vocabulary, and the free-text field LAST — it led the row before,
             # so the first thing you saw was an empty box rather than your tags.
-            chips_row.controls = sel + sug + voc + [custom]
+            # The field sits OUTSIDE this row: rebuilding the row on every
+            # keystroke (the lookup) would remount it and drop focus.
+            chips_row.controls = sel + sug + voc
+            genre_hint.value = self._genre_hint(sorted(genres))
+            genre_hint.visible = bool(genre_hint.value)
 
             country_row.controls = []
             # Tap a country, don't type an ISO code. The library already knows
@@ -1253,6 +1634,7 @@ class MetadataWorkbenchPane(ft.Column):
             try:
                 chips_row.update()
                 country_row.update()
+                genre_hint.update()
             except Exception:
                 self._safe_update()
 
@@ -1266,6 +1648,8 @@ class MetadataWorkbenchPane(ft.Column):
             e.control.value = ""
             _rebuild()
         custom.on_submit = _add_custom
+        custom.on_change = lambda _e: _rebuild()
+        genre_hint = ft.Text("", size=11, color=ACCENT_AMBER, visible=False)
         _rebuild()
 
         # ── AI suggestion section ──
@@ -1300,7 +1684,10 @@ class MetadataWorkbenchPane(ft.Column):
                 ai_state["busy"] = True
                 _render_ai()
                 try:
-                    res = await metadata_ai.research_artist(self.db, name, force=force)
+                    # A flagged artist's research is told what looks wrong.
+                    dispute = " ".join(r["text"] for r in review if r["kind"] == "audit")
+                    res = await metadata_ai.research_artist(self.db, name, force=force,
+                                                            dispute=dispute)
                 except Exception as exc:
                     ai_state["busy"] = False
                     _render_ai()
@@ -1347,20 +1734,29 @@ class MetadataWorkbenchPane(ft.Column):
                     sug.append(c)
                 if sug:
                     ctrls.append(ft.Row(sug, wrap=True, spacing=6, run_spacing=6))
-                origin_mode = p.get("origin_mode")
-                if not p.get("grounded"):
-                    if p.get("country"):
-                        ctrls.append(ft.Text(
-                            "Derived from Gemini's training memory (forums, Reddit & cultural discography).",
-                            size=10.5, color=CYAN))
-                    else:
-                        ctrls.append(ft.Text(
-                            "Derived from the model's training memory; confidence was low, so no country is offered.",
-                            size=10.5, color=ACCENT_AMBER))
-                elif origin_mode == "web_snippets":
-                    ctrls.append(ft.Text(
-                        "Grounded via live web search snippets (DuckDuckGo / Open Web).",
-                        size=10.5, color=CYAN))
+                origin = {
+                    "google_grounding": "From Google Search.",
+                    "web_snippets": ("From web search results that mention your albums or tracks."
+                                     if p.get("grounded") else
+                                     "From web search results — none mention your albums or tracks, "
+                                     "so check it's the right artist."),
+                # Answers cached before origin_mode existed were Google-grounded.
+                }.get(p.get("origin_mode") or ("google_grounding" if p.get("grounded") else ""),
+                      "From the model's memory — no web search results"
+                      + (" (search was unreachable)." if p.get("search_failed") else "."))
+                basis_note = {
+                    "web": "The search results name this country.",
+                    "script": "Country matches the script of your titles.",
+                    "memory": "Country is from memory only.",
+                }.get(p.get("country_basis") or "", "")
+                withheld_note = {
+                    "contradicted": "Country withheld: the search results name a different one.",
+                    "unsupported": "Country withheld: nothing backs the model's answer.",
+                }.get(p.get("country_withheld") or "", "")
+                ctrls.append(ft.Text(" ".join(x for x in (origin, basis_note) if x),
+                                     size=10.5, color=CYAN))
+                if withheld_note:
+                    ctrls.append(ft.Text(withheld_note, size=10.5, color=ACCENT_AMBER))
                 links = [self._link(src.get("title") or "source", src["uri"])
                          for src in (p.get("sources") or [])[:5] if src.get("uri")]
                 if links:
@@ -1426,6 +1822,159 @@ class MetadataWorkbenchPane(ft.Column):
             _render_ai()
             self.app.page.run_task(_load_cached_ai)
 
+        # ── REVIEW section: why the artist is here, and the one-tap answers ──
+        review_box = ft.Column(spacing=8, tight=True)
+        dup_state = {r["alias"]: {"keep": r["canonical"]} for r in review if r["kind"] == "dup"}
+        evidence: dict[str, list] = {}   # artist → a few album titles
+
+        def _drop_reason(reason):
+            if reason in review:
+                review.remove(reason)
+            _render_review()
+            self.app.page.run_task(self._reload_async)
+
+        def _dismiss_flag(reason):
+            async def _do():
+                await self.db.dismiss_audit_flag(name, reason["rule"], country_now)
+                _drop_reason(reason)
+            country_now = (item.get("country") or "").upper()
+            self.app.page.run_task(_do)
+
+        def _vouch(reason):
+            async def _do():
+                await self.db.accept_artist_matches([name])
+                _drop_reason(reason)
+            self.app.page.run_task(_do)
+
+        def _not_same(reason):
+            async def _do():
+                await self.db.reject_alias_pair(reason["alias"], reason["canonical"])
+                _drop_reason(reason)
+            self.app.page.run_task(_do)
+
+        def _keep(alias, keep):
+            dup_state[alias]["keep"] = keep
+            _render_review()
+
+        def _evidence_line(artist, n):
+            albums = evidence.get(artist)
+            tail = f" · {n} track{'s' if n != 1 else ''}"
+            return ft.Text(f"{artist}: {', '.join(albums) if albums else '…'}{tail}",
+                           size=11, color=DIM, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS)
+
+        def _render_review():
+            parts: list[ft.Control] = []
+            for r in review:
+                parts.append(ft.Text(r["text"], size=12.5, color=TEXT))
+                if r["kind"] == "mb":
+                    parts.append(ft.Row([
+                        self._ghost_btn(
+                            "Reject this match",
+                            lambda _e, n=name: _close(lambda: self._review_reject(n)),
+                            fg=ACCENT_RED, icon=ft.Icons.CLOSE_ROUNDED),
+                        self._ghost_btn("It's right", lambda _e, r=r: _vouch(r), fg=DIM),
+                    ], spacing=8))
+                elif r["kind"] == "audit" and r.get("rule") == "collab":
+                    # A namesake row: its genres belong to the other artist too.
+                    sg = list(r.get("suggest_genres") or [])
+
+                    def _namesake(_e, cc=r.get("suggest_country"), sg=sg):
+                        genres.clear()
+                        genres.update(sg)
+                        country["v"] = cc or ""
+                        _rebuild()
+                    label = (f"Use {r.get('suggest_country')} + {', '.join(sg[:2])}"
+                             if sg else f"Use {r.get('suggest_country')}, clear its genres")
+                    parts.append(ft.Row([
+                        self._ghost_btn(label, _namesake, fg="#BF5AF2",
+                                        icon=ft.Icons.PUBLIC_ROUNDED),
+                        self._ghost_btn("It's right", lambda _e, r=r: _dismiss_flag(r), fg=DIM),
+                    ], spacing=8))
+                elif r["kind"] == "audit":
+                    btns = []
+                    cc = r.get("suggest_country")
+                    if cc:
+                        btns.append(self._ghost_btn(
+                            f"Use {cc}", lambda _e, cc=cc: _use((), cc), fg="#BF5AF2",
+                            icon=ft.Icons.PUBLIC_ROUNDED))
+                    btns.append(self._ghost_btn(
+                        "Country is right", lambda _e, r=r: _dismiss_flag(r), fg=DIM))
+                    # Not wrap=True: in a Wrap each button's centred Container
+                    # stretches to the full width and they stack.
+                    parts.append(ft.Row(btns, spacing=8))
+                elif r["kind"] == "dup":
+                    st = dup_state[r["alias"]]
+                    parts += [
+                        _evidence_line(r["alias"], r["alias_tracks"]),
+                        _evidence_line(r["canonical"], r["canonical_tracks"]),
+                        ft.Text("Keep the name", size=10, color=TEXT_TERTIARY,
+                                weight=ft.FontWeight.W_800),
+                    ]
+                    pills = []
+                    for opt in (r["canonical"], r["alias"]):
+                        c = _chip(opt, on=False, accent=CYAN) if st["keep"] != opt else ft.Container(
+                            content=ft.Text(opt, size=12, color=BG, weight=ft.FontWeight.W_600),
+                            bgcolor=CYAN, border_radius=RADIUS_PILL,
+                            padding=ft.Padding.symmetric(horizontal=11, vertical=6))
+                        c.on_click = lambda _e, a=r["alias"], o=opt: _keep(a, o)
+                        pills.append(c)
+                    parts.append(ft.Row(pills, spacing=6, run_spacing=6, wrap=True))
+                    keep = st["keep"]
+                    other = r["alias"] if keep == r["canonical"] else r["canonical"]
+                    parts.append(ft.Row([
+                        self._filled_btn("Merge", lambda _e, o=other, k=keep: _close(
+                            lambda: self._merge(o, k)), icon=ft.Icons.CALL_MERGE_ROUNDED),
+                        self._ghost_btn("Not the same", lambda _e, r=r: _not_same(r), fg=DIM),
+                    ], spacing=8))
+            review_box.controls = [self._sheet_section(
+                "REVIEW", ft.Icons.FLAG_ROUNDED, ACCENT_AMBER,
+                ft.Column(parts, spacing=8, tight=True))] if review else []
+            review_box.visible = bool(review)
+            try:
+                review_box.update()
+            except Exception:
+                self._safe_update()
+
+        async def _load_dup_evidence():
+            for r in review:
+                if r["kind"] == "dup":
+                    for a in (r["alias"], r["canonical"]):
+                        evidence[a] = await metadata_audit.album_titles(self.db, a)
+            _render_review()
+
+        _render_review()
+        if dup_state:
+            self.app.page.run_task(_load_dup_evidence)
+
+        # ── ALSO KNOWN AS: names merged into this one, each separable ──
+        alias_box = ft.Column(spacing=8, tight=True, visible=False)
+
+        async def _load_aliases():
+            try:
+                aliases = await self.db.get_artist_aliases(name)
+            except Exception:
+                aliases = []
+            if not aliases:
+                return
+            rows = [ft.Row([
+                ft.Text(a, size=12.5, color=TEXT, expand=True, max_lines=2,
+                        overflow=ft.TextOverflow.ELLIPSIS),
+                self._ghost_btn("Separate", lambda _e, a=a: _close(lambda: self._separate(a, name)),
+                                fg=DIM, icon=ft.Icons.CALL_SPLIT_ROUNDED),
+            ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER) for a in aliases]
+            alias_box.controls = [self._sheet_section(
+                "ALSO KNOWN AS", ft.Icons.CALL_MERGE_ROUNDED, CYAN,
+                ft.Column(rows + [ft.Text(
+                    "Merged in this library only; your files keep their tags.",
+                    size=10.5, color=TEXT_TERTIARY)], spacing=6, tight=True))]
+            alias_box.visible = True
+            try:
+                alias_box.update()
+            except Exception:
+                self._safe_update()
+
+        self.app.page.run_task(_load_aliases)
+
         def _save(_e):
             # Capture any unsubmitted genre left in the custom input field
             unsubmitted = (custom.value or "").strip().lower()
@@ -1485,9 +2034,12 @@ class MetadataWorkbenchPane(ft.Column):
 
         # The AI section only exists when research can run or an answer is on
         # file; an empty column would still cost a gap at the top of the sheet.
-        body = ([ai_box] if (self.ai_ready or ai_state["payload"]) else []) + [
-            self._sheet_section("GENRES", ft.Icons.LABEL_ROUNDED, CYAN, chips_row),
+        body = ([review_box] if review else []) + \
+            ([ai_box] if (self.ai_ready or ai_state["payload"]) else []) + [
+            self._sheet_section("GENRES", ft.Icons.LABEL_ROUNDED, CYAN,
+                                ft.Column([chips_row, genre_hint, custom], spacing=8, tight=True)),
             self._sheet_section("COUNTRY", ft.Icons.PUBLIC_ROUNDED, "#BF5AF2", country_row),
+            alias_box,
             ft.Text("OTHER SOURCES", size=10, color=TEXT_TERTIARY, weight=ft.FontWeight.W_800),
             ft.Row([
                 self._ghost_btn("Find on MusicBrainz",
@@ -1498,12 +2050,6 @@ class MetadataWorkbenchPane(ft.Column):
                                 fg="#FF9F0A", icon=ft.Icons.CLOUD_DOWNLOAD_ROUNDED),
             ], spacing=8, wrap=True),
         ]
-        if self.filter == "uncertain":
-            body.append(ft.Row([
-                self._ghost_btn("Reject this match",
-                                lambda _e, n=name: _close(lambda: self._review_reject(n)),
-                                fg=ACCENT_RED, icon=ft.Icons.CLOSE_ROUNDED),
-            ]))
 
         sheet = ft.BottomSheet(
             content=ft.Container(
@@ -1567,6 +2113,36 @@ class MetadataWorkbenchPane(ft.Column):
         ], spacing=8)
 
     # ── REVIEW actions ───────────────────────────────────────────────────────
+    def _merge(self, alias: str, canonical: str):
+        async def _do():
+            try:
+                await self.db.merge_artists(alias, canonical)
+            except Exception as exc:
+                logger.exception("merge %s → %s failed: %s", alias, canonical, exc)
+                self.app.show_snackbar(f"Couldn't merge: {exc}", color=ACCENT_RED)
+                return
+            self.selected.discard(alias)
+            await self._reload_async()
+            self.app.show_snackbar(
+                f"Merged into {canonical}. Separate them again from its editor.",
+                icon=ft.Icons.CALL_MERGE_ROUNDED, color=CYAN)
+            self._schedule_walk_refresh()
+        self.app.page.run_task(_do)
+
+    def _separate(self, alias: str, canonical: str):
+        async def _do():
+            try:
+                await self.db.separate_artist(alias)
+            except Exception as exc:
+                logger.exception("separate %s failed: %s", alias, exc)
+                self.app.show_snackbar(f"Couldn't separate: {exc}", color=ACCENT_RED)
+                return
+            await self._reload_async()
+            self.app.show_snackbar(f"{alias} is separate from {canonical} again.",
+                                   icon=ft.Icons.CALL_SPLIT_ROUNDED, color=CYAN)
+            self._schedule_walk_refresh()
+        self.app.page.run_task(_do)
+
     def _review_reject(self, name: str):
         async def _do():
             try:

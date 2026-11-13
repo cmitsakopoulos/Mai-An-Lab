@@ -95,14 +95,26 @@ class NowPlayingSheet:
             icon=ft.Icons.LINK_ROUNDED if self.app.play_similar_mode else ft.Icons.LINK_OFF_ROUNDED,
             icon_color=CYAN if self.app.play_similar_mode else DIM,
             icon_size=20,
-            # Tap opens the Auto-play sheet (on/off, Follow/Stay); long-press is
-            # the instant on/off shortcut. The sheet lives behind the existing
-            # icon rather than a status pill, which cost vertical space the
-            # layout doesn't have. No tooltip: on Android it claims long-press.
-            on_click=lambda e: self.open_autoplay_sheet(),
+            # One tap turns Auto-Play ON — it used to open a sheet first, so
+            # starting it took two taps and a decision. Once it's on, a tap
+            # opens the sheet (station, Off). Long-press toggles either way.
+            # No tooltip: on Android it claims long-press.
+            on_click=lambda e: self._on_autoplay_tap(e),
             on_long_press=self._toggle_play_similar,
             disabled=True,
             opacity=0.4,
+            # Tighter than the shuffle/repeat buttons so icon + the label above
+            # it fit in the row's existing 48pt height: nothing moves.
+            style=ft.ButtonStyle(padding=6),
+        )
+        self._autoplay_label = ft.Text(
+            "AUTO-PLAY", size=8, weight=ft.FontWeight.W_700, color=DIM,
+            opacity=0.4, no_wrap=True,
+        )
+        self._autoplay_cell = ft.Column(
+            [self._autoplay_label, self._play_similar_btn],
+            spacing=0, tight=True,
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
         )
         self._repeat_btn = ft.IconButton(
             icon=ft.Icons.REPEAT_ROUNDED,
@@ -230,7 +242,7 @@ class NowPlayingSheet:
                         [
                             self._shuffle_btn,
                             ft.Container(expand=True),
-                            self._play_similar_btn,
+                            self._autoplay_cell,
                             ft.Container(expand=True),
                             self._repeat_btn,
                         ],
@@ -381,6 +393,12 @@ class NowPlayingSheet:
         self.app.mini_player.update_state(is_playing)
         self.page.update()
 
+    def _on_autoplay_tap(self, e):
+        if self.app.play_similar_mode:
+            self.open_autoplay_sheet()
+        else:
+            self._toggle_play_similar(e)
+
     def _toggle_play_similar(self, e):
         self.page.run_task(self._toggle_play_similar_async)
 
@@ -405,12 +423,14 @@ class NowPlayingSheet:
         # Preserve disabled state if set by availability check
         if not self._play_similar_btn.disabled:
             self._play_similar_btn.opacity = 1.0
+        self._autoplay_label.color = CYAN if enabled else DIM
+        self._autoplay_label.opacity = self._play_similar_btn.opacity
         
         self._artwork_container.border = ft.Border.all(3, CYAN) if enabled else None
         self._art_placeholder.border   = ft.Border.all(3, CYAN) if enabled else None
 
         try:
-            self._play_similar_btn.update()
+            self._autoplay_cell.update()
         except (RuntimeError, AssertionError):
             pass
         try:
@@ -448,13 +468,14 @@ class NowPlayingSheet:
         def _apply():
             self._play_similar_btn.disabled = not available
             self._play_similar_btn.opacity  = 1.0 if available else 0.4
+            self._autoplay_label.opacity = self._play_similar_btn.opacity
             self._play_similar_btn.tooltip  = (
                 None
                 if available else
                 "Auto-play is unavailable \u2014 run the Jarvis Analyser to compute DSP features first."
             )
             try:
-                self._play_similar_btn.update()
+                self._autoplay_cell.update()
             except (RuntimeError, AssertionError):
                 pass
         self.app.safe_update(_apply)

@@ -13,7 +13,8 @@ Metrics:
     country  right / wrong / blank    exact ISO match against MusicBrainz
     genre    family-hit / miss / blank   a predicted tag shares a genre family
                                          (genre_taxonomy.genre_families) with MB
-    grounded share of answers that came back with web sources
+    grounded share of answers backed by Google Search or a snippet naming
+                                         one of the artist's own titles
 
 Usage (key from env, never from argv so it stays out of shell history):
     GEMINI_API_KEY=… python tools/eval_ai_metadata.py --n 20 --greek 10
@@ -69,6 +70,8 @@ async def main():
     ap.add_argument("--greek", type=int, default=10, help="of which country GR")
     ap.add_argument("--model", default="")
     ap.add_argument("--seed", type=int, default=7)
+    ap.add_argument("--mode", default="", help="research mode (default: the configured one)")
+    ap.add_argument("--batch", type=int, default=12, help="artists per model call, as the app sends")
     args = ap.parse_args()
 
     key = os.environ.get("GEMINI_API_KEY", "").strip()
@@ -93,46 +96,56 @@ async def main():
           f"({sum(t['country'] == 'GR' for t in sample)} Greek) on {model}\n")
 
     vocab = [v["name"] for v in await db.get_genre_vocabulary(limit=60)]
+    mode = (args.mode or metadata_ai.load_research_mode()).lower()
+    print(f"Mode: {mode}\n")
     tally = {"c_right": 0, "c_wrong": 0, "c_blank": 0,
              "g_hit": 0, "g_miss": 0, "g_blank": 0, "grounded": 0, "errors": 0}
+    wrong_by_basis: dict = {}
     import aiohttp
     async with aiohttp.ClientSession() as session:
-        for i, t in enumerate(sample):
-            if i:
+        for start in range(0, len(sample), max(1, args.batch)):
+            chunk = sample[start:start + max(1, args.batch)]
+            if start:
                 await asyncio.sleep(4)
-            ev = await db.get_artist_research_evidence(t["artist"])
-            # Blind: hide what MusicBrainz said.
-            ev.update(known_country="", known_area="", known_genres=[])
+            evs = []
+            for t in chunk:
+                ev = await db.get_artist_research_evidence(t["artist"])
+                # Blind: hide what MusicBrainz said.
+                ev.update(known_country="", known_area="", known_genres=[])
+                evs.append(ev)
             try:
-                data = await metadata_ai._generate(
-                    key, model, metadata_ai.build_prompt(ev, vocab), session=session)
+                # The same pass research_artists runs (search, one batched call,
+                # corroborate, validate) minus the cache write.
+                results = await metadata_ai.research_evidence_batch(
+                    evs, vocab, api_key=key, model=model, mode=mode, session=session)
             except Exception as exc:
-                print(f"  ERROR {t['artist']}: {exc}")
-                tally["errors"] += 1
+                print(f"  ERROR batch from {chunk[0]['artist']}: {exc}")
+                tally["errors"] += len(chunk)
                 if isinstance(exc, metadata_ai.ResearchUnavailable):
                     break
                 continue
-            sources, _q = metadata_ai._grounding(data)
-            res = metadata_ai.validate(
-                metadata_ai.parse_answer(metadata_ai._response_text(data)), sources, vocab)
-            tally["grounded"] += bool(sources)
-
-            cc = res["country"]
-            c = "blank" if not cc else ("right" if cc == t["country"] else "wrong")
-            tally[f"c_{c}"] += 1
-            if not res["genres"]:
-                g = "blank"
-            else:
-                g = "hit" if genre_families(res["genres"]) & genre_families(t["genres"]) else "miss"
-            tally[f"g_{g}"] += 1
-            flag = "  <-- WRONG" if (c == "wrong" or g == "miss") else ""
-            print(f"  {t['artist'][:28]:28}  country {cc or '-':2} vs {t['country']} [{c:5}]  "
-                  f"genres {', '.join(res['genres']) or '-'} vs {', '.join(t['genres'][:3])} "
-                  f"[{g}] conf={res['confidence']} src={len(sources)}{flag}")
+            for t, res in zip(chunk, results):
+                tally["grounded"] += bool(res["grounded"])
+                cc = res["country"]
+                c = "blank" if not cc else ("right" if cc == t["country"] else "wrong")
+                tally[f"c_{c}"] += 1
+                if c == "wrong":
+                    wrong_by_basis[res["country_basis"]] = wrong_by_basis.get(res["country_basis"], 0) + 1
+                if not res["genres"]:
+                    g = "blank"
+                else:
+                    g = "hit" if genre_families(res["genres"]) & genre_families(t["genres"]) else "miss"
+                tally[f"g_{g}"] += 1
+                flag = "  <-- WRONG" if (c == "wrong" or g == "miss") else ""
+                print(f"  {t['artist'][:28]:28}  country {cc or '-':2} vs {t['country']} [{c:5}]  "
+                      f"genres {', '.join(res['genres']) or '-'} vs {', '.join(t['genres'][:3])} "
+                      f"[{g}] conf={res['confidence']} basis={res['country_basis'] or res['country_withheld'] or '-'} "
+                      f"src={len(res['sources'])}{flag}")
 
     n = len(sample) - tally["errors"]
     print("\nSummary")
-    print(f"  country  right {tally['c_right']}  wrong {tally['c_wrong']}  blank {tally['c_blank']}")
+    print(f"  country  right {tally['c_right']}  wrong {tally['c_wrong']}  blank {tally['c_blank']}"
+          + (f"   wrong by basis {wrong_by_basis}" if wrong_by_basis else ""))
     print(f"  genre    hit {tally['g_hit']}  miss {tally['g_miss']}  blank {tally['g_blank']}")
     print(f"  grounded {tally['grounded']}/{n}   errors {tally['errors']}")
     print("\nShip bar: wrong countries ≈ 0 and genre misses well below blanks.")

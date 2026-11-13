@@ -192,7 +192,7 @@ def test_engine_parses_tool_calls():
     parsed = LLMEngine._parse_tool_calls(raw)
     assert parsed[0] == {"id": "1", "name": "play_music", "args": {"query": "x"}}
     assert parsed[1]["args"] == {}
-    assert parsed[2]["id"] == "skip"  # falls back to the function name
+    assert parsed[2]["id"] == "skip_2"  # name + position: unique per call
 
 
 # ── Gemini thinking-model thought_signature must be echoed back verbatim ──────

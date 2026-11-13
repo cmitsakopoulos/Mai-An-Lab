@@ -7,11 +7,10 @@ term is meant to stop than any synthetic graph. This test runs the shipping
 walk over such an image and asserts:
 
   • structural invariants hold across many random seeds (seed excluded, no dupes,
-    avoid respected, length bounded, every hop is a real coordinate-graph
-    neighbour);
-  • the metadata pool does its job in aggregate — smooth+meta is at least as
-    genre-cohesive as the acoustic-only walk, and strictly more cohesive on at
-    least some seeds.
+    avoid respected, length bounded);
+  • the artist drift stays in the seed's genres at least as well as the plain
+    nearest-in-sound list does. A guardrail only — queue quality is judged by
+    reading queues (tools/walk_probe.py), not by this number.
 
 It needs a *built* image (Zr coordinates + enrichment). Point it with
 
@@ -51,33 +50,24 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-async def _genre_cohesion(db, seed, seq):
-    """Mean NPMI soft-set-sim of each track in `seq` vs the seed's genres, over
-    the pairs where both sides carry genre tokens. Returns (mean_sim, n_scored).
-    This is the walk's real quality target under the metadata-pool design —
-    genre coherence, not timbral-cluster stickiness."""
-    from utils.genre_similarity import soft_set_sim
-    model = await db.get_genre_affinity()
+async def _on_family(db, seed, seq):
+    """Share of `seq` whose artist shares a coarse genre family with the seed's,
+    over the tracks whose artist is tagged. (n_on, n_scored)."""
+    from utils.genre_taxonomy import genre_families
     meta = await db.get_artist_meta_for_paths([seed] + list(seq))
-    sg = (meta.get(seed) or {}).get("genres") or frozenset()
-    sims = [
-        soft_set_sim(sg, gc, model)
-        for p in seq
-        for gc in [(meta.get(p) or {}).get("genres") or frozenset()]
-        if sg and gc
-    ]
-    return (sum(sims) / len(sims) if sims else 0.0), len(sims)
+    fs = genre_families((meta.get(seed) or {}).get("genres") or ())
+    if not fs:
+        return 0, 0
+    fams = [genre_families((meta.get(p) or {}).get("genres") or ()) for p in seq]
+    scored = [f for f in fams if f]
+    return sum(1 for f in scored if f & fs), len(scored)
 
 
-def _seed_affinity(graph, seed, other) -> float:
-    """The cosine similarity the walk ranks by. The coordinate graph — not
-    track_neighbors — is the walk's live similarity oracle."""
-    ia = graph["path_to_idx"].get(seed)
-    ib = graph["path_to_idx"].get(other)
-    if ia is None or ib is None:
-        return -2.0
+def _nearest_in_sound(graph, seed, n):
     U = graph["X_unit"]
-    return float(U[ia] @ U[ib])
+    i = graph["path_to_idx"][seed]
+    order = (U @ U[i]).argsort()[::-1]
+    return [graph["paths"][j] for j in order if j != i][:n]
 
 
 async def _has_coords(db) -> bool:
@@ -135,14 +125,7 @@ class TestWalkOnRealLibrary(unittest.TestCase):
                 self.assertNotIn(seed, out, f"seed leaked into its own walk: {seed}")
                 self.assertEqual(len(out), len(set(out)), f"duplicate in walk from {seed}")
                 self.assertLessEqual(len(out), WALK_LEN)
-                # The queue is the library RANKED by affinity to the seed, so
-                # it must come back in non-increasing affinity order. (The
-                # repeat caps skip tracks, but never reorder the survivors.)
-                affs = [_seed_affinity(graph, seed, p) for p in out]
-                self.assertTrue(
-                    all(a >= b - 1e-6 for a, b in zip(affs, affs[1:])),
-                    f"queue not in descending seed affinity for {seed}: {affs}",
-                )
+                self.assertTrue(set(out) <= set(graph["paths"]))
         _run(_check())
 
     def test_avoid_set_is_never_emitted(self):
@@ -155,49 +138,22 @@ class TestWalkOnRealLibrary(unittest.TestCase):
             self.assertNotIn(seed, second)
         _run(_check())
 
-    def test_metadata_improves_genre_cohesion(self):
-        # Under the metadata-pool design the walk's target is GENRE coherence,
-        # not timbral-cluster stickiness (the pool deliberately spans Louvain
-        # clusters — a Greek queue jumps between laiko ballads and Greek trap).
-        # So we measure mean NPMI genre-similarity-to-seed: the metadata walk
-        # must be at least as genre-cohesive as the pure-acoustic walk in
-        # aggregate, and strictly more cohesive on a meaningful share of seeds.
+    def test_drift_holds_genre_at_least_as_well_as_sound(self):
         async def _check():
-            meta_coh_sum = 0.0
-            aco_coh_sum = 0.0
-            strictly_better = 0
-            nonempty = 0
+            graph = await tg.load_live_coordinate_graph(self.db)
+            drift = [0, 0]
+            sound = [0, 0]
             for seed in self.seeds:
-                meta = await tg.walk(self.db, seed, length=WALK_LEN)  # defaults on
-                aco = await tg.walk(self.db, seed, length=WALK_LEN,
-                                    veto_genre_floor=0.0)
-                if not meta and not aco:
-                    continue
-                nonempty += 1
-                m_coh, _ = await _genre_cohesion(self.db, seed, meta)
-                a_coh, _ = await _genre_cohesion(self.db, seed, aco)
-                meta_coh_sum += m_coh
-                aco_coh_sum += a_coh
-                if m_coh > a_coh + 1e-9:
-                    strictly_better += 1
-
-            self.assertGreater(nonempty, 0, "no non-empty walks — image not built?")
-            # Aggregate: metadata must not REDUCE genre cohesion, and should
-            # raise it on a meaningful share of seeds.
-            self.assertGreaterEqual(
-                meta_coh_sum, aco_coh_sum - 1e-6,
-                f"metadata reduced genre cohesion: {meta_coh_sum:.3f} < {aco_coh_sum:.3f}",
-            )
-            self.assertGreater(
-                strictly_better, 0,
-                "metadata never improved genre cohesion on any seed — pool not "
-                f"firing? (meta={meta_coh_sum:.3f}, acoustic={aco_coh_sum:.3f})",
-            )
-            # Surface the numbers when run with -s.
-            print(f"\n[real-library] seeds={nonempty}  mean genre-cohesion: "
-                  f"smooth+meta={meta_coh_sum / nonempty:.3f}  "
-                  f"acoustic-only={aco_coh_sum / nonempty:.3f}  "
-                  f"strictly-better-seeds={strictly_better}/{nonempty}")
+                out = await tg.walk(self.db, seed, length=WALK_LEN)
+                for acc, seq in ((drift, out), (sound, _nearest_in_sound(graph, seed, WALK_LEN))):
+                    on, n = await _on_family(self.db, seed, seq)
+                    acc[0] += on
+                    acc[1] += n
+            self.assertGreater(drift[1], 0, "no tagged neighbours — image not enriched?")
+            d, s_ = drift[0] / drift[1], sound[0] / max(sound[1], 1)
+            print(f"\n[real-library] on-family: drift={d:.1%}  nearest-in-sound={s_:.1%}")
+            self.assertGreaterEqual(d, s_ - 1e-9)
+        _run(_check())
         _run(_check())
 
 

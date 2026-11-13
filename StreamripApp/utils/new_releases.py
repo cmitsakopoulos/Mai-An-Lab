@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 DEEZER_API = "https://api.deezer.com"
 COVER_ART_ARCHIVE = "https://coverartarchive.org/release-group/{id}/front-250"
 
-REFRESH_AFTER_S = 7 * 24 * 3600   # re-check each artist weekly
+REFRESH_AFTER_S = 20 * 3600        # re-check eligible artists daily (20h window)
 KEEP_DAYS = 730                    # what the cache stores per artist
 SHOW_DAYS = 365                    # what the landing page calls "new"
 SINGLE_DAYS = 45                   # ...and for singles, which come and go
@@ -193,7 +193,8 @@ def _from_musicbrainz(groups: list[dict]) -> list[dict]:
 
 
 async def refresh_new_releases(db, *, session=None, mb_client=None,
-                               refresh_after_s: float = REFRESH_AFTER_S) -> int:
+                               refresh_after_s: float = REFRESH_AFTER_S,
+                               trigger_type: str = "daily_auto") -> int:
     """Re-check every library artist whose cache entry is missing or older
     than `refresh_after_s`. Returns how many artists were (re)written. Stops
     early when the network looks down, leaving the rest for the next pass."""
@@ -202,6 +203,14 @@ async def refresh_new_releases(db, *, session=None, mb_client=None,
         if aiohttp is None:
             return 0
         session = aiohttp.ClientSession()
+
+    log_id = None
+    if hasattr(db, "log_release_sync_start"):
+        try:
+            log_id = await db.log_release_sync_start(trigger_type=trigger_type)
+        except Exception as e:
+            logger.debug(f"Failed to log sync start: {e}")
+
     try:
         if mb_client is None:
             from utils.metadata_enrich import MusicBrainzClient, DEFAULT_CONTACT
@@ -211,15 +220,35 @@ async def refresh_new_releases(db, *, session=None, mb_client=None,
         now = time.time()
         written = 0
         errors_in_a_row = 0
-        for name in await db.get_release_lookup_artists():
+        total_checked = 0
+        artists = await db.get_release_lookup_artists()
+
+        # Batch-fetch all owned titles in 1 query if available
+        if hasattr(db, "get_all_owned_artist_titles"):
+            try:
+                all_owned_map = await db.get_all_owned_artist_titles()
+            except Exception as e:
+                logger.debug(f"Batched owned titles fallback: {e}")
+                all_owned_map = None
+        else:
+            all_owned_map = None
+
+        for name in artists:
             if not is_lookup_candidate(name):
                 continue
             row = cache.get(name.lower())
             if row and now - row["fetched_at"] < refresh_after_s:
                 continue
-            albums, tracks = await db.get_artist_owned_titles(name)
-            # Track titles count too: an owned single is an album on Deezer.
-            owned = {norm(t) for t in (*albums, *tracks)} - {""}
+
+            total_checked += 1
+            if all_owned_map is not None:
+                raw_owned = all_owned_map.get(name.lower(), set())
+                owned = {norm(t) for t in raw_owned} - {""}
+            else:
+                albums, tracks = await db.get_artist_owned_titles(name)
+                # Track titles count too: an owned single is an album on Deezer.
+                owned = {norm(t) for t in (*albums, *tracks)} - {""}
+
             known = row["source_id"] if row and row["source"] == "deezer" else None
             status, source_id, releases = await fetcher.deezer_releases(name, owned, known)
             source = "deezer"
@@ -239,7 +268,27 @@ async def refresh_new_releases(db, *, session=None, mb_client=None,
                 source, source_id, releases = "none", None, []
             await db.save_artist_releases(name, source, source_id, releases)
             written += 1
+
+            # Cooperative pacing: give event loop breathing room so UI is never blocked
+            await asyncio.sleep(0.08)
+
+        if log_id is not None and hasattr(db, "log_release_sync_finish"):
+            final_status = "interrupted" if errors_in_a_row >= 3 else "completed"
+            await db.log_release_sync_finish(
+                log_id,
+                artists_checked=total_checked,
+                new_found=written,
+                status=final_status,
+            )
+
         return written
+    except Exception as exc:
+        if log_id is not None and hasattr(db, "log_release_sync_finish"):
+            try:
+                await db.log_release_sync_finish(log_id, status="error")
+            except Exception:
+                pass
+        raise
     finally:
         if own_session:
             await session.close()
@@ -258,9 +307,27 @@ async def get_new_releases(db, *, days: int = SHOW_DAYS, limit: int = 12,
     single_cutoff = _cutoff(min(days, SINGLE_DAYS))
     cache = await db.get_artist_release_cache()
     picked: dict[tuple[str, str], dict] = {}
-    owned_cache: dict[str, set[str]] = {}
+
+    # Bulk-fetch all owned titles in 1 fast query instead of N+1 database queries
+    if hasattr(db, "get_all_owned_artist_titles"):
+        try:
+            raw_owned_map = await db.get_all_owned_artist_titles()
+            owned_cache: dict[str, set[str]] = {
+                artist: {norm(t) for t in titles} for artist, titles in raw_owned_map.items()
+            }
+        except Exception as e:
+            logger.debug(f"Bulk owned cache fallback: {e}")
+            owned_cache = {}
+    else:
+        owned_cache = {}
+
     for row in cache.values():
         artist = row["artist_name"]
+        artist_lower = artist.lower()
+        if artist_lower not in owned_cache:
+            albums, tracks = await db.get_artist_owned_titles(artist)
+            owned_cache[artist_lower] = {norm(t) for t in (*albums, *tracks)}
+
         for rel in row["releases"]:
             date = rel.get("date") or ""
             single = rel.get("type") == "single"
@@ -268,11 +335,8 @@ async def get_new_releases(db, *, days: int = SHOW_DAYS, limit: int = 12,
                 continue
             if single and _VARIANT.search(rel.get("title") or ""):
                 continue
-            key = (artist.lower(), norm(rel.get("title")))
-            if artist not in owned_cache:
-                albums, tracks = await db.get_artist_owned_titles(artist)
-                owned_cache[artist] = {norm(t) for t in (*albums, *tracks)}
-            if key[1] in owned_cache[artist]:
+            key = (artist_lower, norm(rel.get("title")))
+            if key[1] in owned_cache[artist_lower]:
                 continue
             prev = picked.get(key)
             if prev is None or (prev["type"] != "album" and rel.get("type") == "album"):

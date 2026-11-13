@@ -261,6 +261,8 @@ def test_metadata_workbench_open_editor_handoff():
     pane.all_gaps = []
     pane.coverage = {}
     pane.low_conf = []
+    pane.review_rows = []
+    pane.review_by_name, pane.sort = {}, "least"
     pane.ai_pending = {}
     pane.researched = set()
     pane.ai_ready = False
@@ -273,6 +275,9 @@ def test_metadata_workbench_open_editor_handoff():
 
     item = {"artist_name": "Pink Floyd", "genres": ["Classic Rock"], "source_genres": ["Rock"], "country": "GB"}
     pane._open_editor(item)
+    # Opening loads the artist's merged names in the background; only the
+    # Save task's timing is under test here.
+    app.page.run_task.reset_mock()
 
     # Sheet should have been presented
     app.page.show_dialog.assert_called_once()
@@ -303,7 +308,9 @@ def test_metadata_workbench_visible_genre_filter():
     pane = MetadataWorkbenchPane.__new__(MetadataWorkbenchPane)
     pane.filter = "all"
     pane.search = "psychedelic"
-    pane.all_gaps = [
+    pane.review_by_name, pane.sort = {}, "least"
+    # "All" is every artist now, not just the incomplete ones.
+    pane.everyone = [
         {"artist_name": "Pink Floyd", "genres": ["Classic Rock", "Psychedelic Rock"], "source_genres": []},
         {"artist_name": "Metallica", "genres": ["Heavy Metal"], "source_genres": ["Metal"]},
         {"artist_name": "The Doors", "genres": [], "source_genres": ["psychedelic rock"]},
@@ -332,6 +339,8 @@ async def test_metadata_workbench_focus_artist_non_gap():
     pane.all_gaps = []
     pane.coverage = {}
     pane.low_conf = []
+    pane.review_rows = []
+    pane.review_by_name, pane.sort = {}, "least"
     pane.ai_pending = {}
     pane.researched = set()
     pane.ai_ready = False
@@ -356,7 +365,7 @@ async def test_metadata_workbench_focus_artist_non_gap():
 
     app.db_manager.get_artist_workbench_item.assert_called_with("Pink Floyd")
     pane._open_editor.assert_called_once()
-    assert any(g["artist_name"] == "Pink Floyd" for g in pane.all_gaps)
+    assert pane._open_editor.call_args[0][0]["artist_name"] == "Pink Floyd"
 
 
 @pytest.mark.asyncio
@@ -381,6 +390,8 @@ async def test_metadata_workbench_unsubmitted_and_comma_genres():
     pane.all_gaps = []
     pane.coverage = {}
     pane.low_conf = []
+    pane.review_rows = []
+    pane.review_by_name, pane.sort = {}, "least"
     pane.ai_pending = {}
     pane.researched = set()
     pane.ai_ready = False

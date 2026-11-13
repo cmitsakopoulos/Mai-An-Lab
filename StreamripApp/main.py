@@ -167,7 +167,7 @@ from ui.player.dialogs import PlaylistEditorDialog
 debug_log("importing queue_controller and error_boundary")
 from utils.queue_controller import QueueController
 from utils import play_ledger
-from utils.autoplay import AutoPlay, VARIETY_MODES, DETERMINISTIC
+from utils.autoplay import AutoPlay
 
 # One auto-play controller per PROCESS, like the audio engine: Android can tear
 # the Flet session down (a new StreamripFletApp) while playback carries on, and
@@ -186,10 +186,14 @@ _QUEUE_STATE: dict = {"held": False}
 # Serialises flet_prefs.json writes across sessions (see _save_pref).
 _PREFS_WRITE_LOCK = threading.Lock()
 _BOOT_ENRICH_DELAY_S = 30.0
-# New-releases refresh for the Search landing page: once per process, after the
-# metadata pass has had its head start (both talk to MusicBrainz).
-_RELEASES_STATE: dict = {"started": False, "running": False}
+# New-releases refresh for the Search landing page. Boot runs the daily gate
+# after the metadata pass has had its head start (both talk to MusicBrainz);
+# the landing page re-runs it at most hourly so a process that outlives the day
+# still picks up the next day's pass. "pending" is claimed synchronously so a
+# second trigger can't slip in while the first task is still waiting to start.
+_RELEASES_STATE: dict = {"pending": False, "running": False, "gate_checked_at": None}
 _BOOT_RELEASES_DELAY_S = 90.0
+_RELEASES_RECHECK_S = 3600.0
 # The native handler's resume record (see FletAudioService setResumePath).
 NATIVE_RESUME_NAME = "native_resume.json"
 from utils.error_boundary import ErrorBoundary
@@ -505,9 +509,7 @@ class StreamripFletApp:
             _AUTOPLAY.bind_ui(run_task, notify)
         self.autoplay = _AUTOPLAY
         self.autoplay.db = self.db_manager
-        variety = self._prefs.get("autoplay_variety", DETERMINISTIC)
-        self.autoplay.variety = variety if variety in VARIETY_MODES else DETERMINISTIC
-        await self.autoplay.load_feedback()
+        await self.autoplay.load_history()
         # Restored silently: the restored queue already carries its buffer, and
         # refills resume on the next track change.
         self.autoplay.enabled = self.play_similar_mode
@@ -600,9 +602,9 @@ class StreamripFletApp:
             _ENRICH_STATE["boot_done"] = True
             self.schedule_metadata_enrichment(delay=_BOOT_ENRICH_DELAY_S)
 
-        # Discographies of library artists for "New from your artists". Only
-        # artists not checked in the last week are fetched, so most boots
-        # cost nothing.
+        # Discographies of library artists for "New from your artists". The
+        # daily gate (release_sync_log) makes every boot after the first of the
+        # day a single SELECT.
         self.ensure_new_releases_refresh(delay=_BOOT_RELEASES_DELAY_S)
 
         # Similarity-graph readiness check, off the hot path. Without this the
@@ -618,8 +620,7 @@ class StreamripFletApp:
         self.page.run_task(self._prune_caches_async)
 
     async def _ensure_graph_built_async(self):
-        """Build the similarity graph if it is MISSING — never on a schedule —
-        and rebuild the journey graph if an older builder made it.
+        """Build the similarity graph if it is MISSING — never on a schedule.
 
         Guarded on the real artifact (`coord_tracks`, i.e. persisted Zr
         coordinates), not on an edge table nobody writes and not on a sidecar
@@ -635,13 +636,6 @@ class StreamripFletApp:
             await asyncio.sleep(5)
             from utils import track_graph as tg
             status = await tg.graph_status(self.db_manager)
-            if status["coord_tracks"] > 0 and await tg.journey_graph_stale(self.db_manager):
-                # Geometry is there but the genre graph predates the current
-                # builder (e.g. v2's bridge-artist adjacency): rebuild just it.
-                await self._await_scroll_quiet()
-                await tg.build_journey_graph(self.db_manager)
-                logger.info("Graph readiness: journey graph rebuilt (stale version).")
-                return
             if status["total_tracks"] < 2 or status["coord_tracks"] > 0:
                 return  # nothing to do, or geometry already present
             analysed = len(await self.db_manager.get_tracks_with_features(tg.FEATURES_VERSION))
@@ -691,10 +685,11 @@ class StreamripFletApp:
     def new_releases_refreshing(self) -> bool:
         return _RELEASES_STATE["running"]
 
-    def ensure_new_releases_refresh(self, delay: float = 0.0):
-        """Start this process's new-releases pass, once. Called at boot and
-        when the landing toggle is switched on."""
-        if _RELEASES_STATE["started"]:
+    def ensure_new_releases_refresh(self, delay: float = 0.0, force: bool = False):
+        """Start a new-releases pass unless one is already pending or running.
+        Unforced calls (boot, the Settings toggle, the landing re-check) defer to
+        the persistent daily gate; `force` is the manual refresh button."""
+        if _RELEASES_STATE["pending"] or _RELEASES_STATE["running"]:
             return
         try:
             from utils.streamrip_api import load_config
@@ -702,26 +697,61 @@ class StreamripFletApp:
                 return
         except Exception:
             pass
-        _RELEASES_STATE["started"] = True
-        asyncio.create_task(self._refresh_new_releases_async(delay))
+        if not force:
+            _RELEASES_STATE["gate_checked_at"] = time.monotonic()
+        _RELEASES_STATE["pending"] = True
+        # A manual pass starts immediately, so the button can show its spinner
+        # on the very next rebuild rather than after the task gets scheduled.
+        _RELEASES_STATE["running"] = force
+        asyncio.create_task(self._refresh_new_releases_async(delay, force=force))
 
-    async def _refresh_new_releases_async(self, delay: float):
-        await asyncio.sleep(delay)
-        await self._await_scroll_quiet()
-        from utils.new_releases import refresh_new_releases
-        _RELEASES_STATE["running"] = True
-        written = 0
+    def maybe_recheck_new_releases(self):
+        """Landing-page hook: re-run the daily gate at most hourly. Boot owns the
+        first check, so this is a no-op until that has happened."""
+        last = _RELEASES_STATE["gate_checked_at"]
+        if last is None or time.monotonic() - last < _RELEASES_RECHECK_S:
+            return
+        self.ensure_new_releases_refresh()
+
+    def trigger_manual_new_releases_refresh(self):
+        """Called by the manual reload button in the search landing view."""
+        self.ensure_new_releases_refresh(delay=0.0, force=True)
+
+    async def _refresh_new_releases_async(self, delay: float, force: bool = False):
+        written = None
         try:
-            written = await refresh_new_releases(self.db_manager)
-            logger.info("New releases: %d artists refreshed", written)
-        except Exception:
-            # Never fatal: the landing page keeps whatever the cache holds.
-            logger.warning("New releases refresh failed", exc_info=True)
+            if delay > 0:
+                await asyncio.sleep(delay)
+            await self._await_scroll_quiet()
+
+            if not force:
+                try:
+                    if not await self.db_manager.should_run_daily_release_sync():
+                        logger.debug("New releases: daily sync already done, skipping auto-check")
+                        return
+                except Exception as e:
+                    logger.warning(f"Error checking daily release sync gate: {e}")
+
+            from utils.new_releases import refresh_new_releases
+            _RELEASES_STATE["running"] = True
+            trigger = "manual" if force else "daily_auto"
+            # The manual button means "check now": re-check every artist, not
+            # just those the daily pass hasn't reached in the last 20 h.
+            kwargs = {"refresh_after_s": 0.0} if force else {}
+            written = 0
+            try:
+                written = await refresh_new_releases(self.db_manager, trigger_type=trigger, **kwargs)
+                logger.info("New releases: %d artists refreshed (trigger: %s)", written, trigger)
+            except Exception:
+                # Never fatal: the landing page keeps whatever the cache holds.
+                logger.warning("New releases refresh failed", exc_info=True)
         finally:
+            _RELEASES_STATE["pending"] = False
             _RELEASES_STATE["running"] = False
+
         search = getattr(self, "search_view", None)
-        if written and search is not None:
-            search.refresh_setup_state()
+        if written is not None and search is not None:
+            search.on_new_releases_refreshed(written)
 
     def schedule_metadata_enrichment(self, delay: float = 5.0):
         """Run the automatic artist-metadata pass in `delay` seconds.
@@ -1349,8 +1379,14 @@ class StreamripFletApp:
         
         # Pre-build the startup view
         startup_view = view_builders[self._current_tab]()
-        self._tab_content = ft.Container(
+        startup_view.key = f"tab_view_{self._current_tab}"
+        self._tab_content = ft.AnimatedSwitcher(
             content=startup_view,
+            transition=ft.AnimatedSwitcherTransition.FADE,
+            duration=220,
+            reverse_duration=160,
+            switch_in_curve=ft.AnimationCurve.EASE_OUT_QUAD,
+            switch_out_curve=ft.AnimationCurve.EASE_IN_QUAD,
             expand=True,
         )
 
@@ -1648,6 +1684,7 @@ class StreamripFletApp:
             self._view_cache[3] = content
             
         def _mutate():
+            content.key = f"tab_view_{index}"
             self._tab_content.content = content
             nav_idx = self._get_nav_index(index)
             is_nav_tab = index < 3
@@ -1971,6 +2008,7 @@ class StreamripFletApp:
                 self._extract_artwork_async(restored_path)
                 autoplay = getattr(self, "autoplay", None) or _AUTOPLAY
                 if autoplay:
+                    autoplay.held = list(state.get("autoplay_held") or [])
                     autoplay.resume(restored_path)
 
             # Manually drive the now-playing UI since restore_queue runs
@@ -2147,6 +2185,11 @@ class StreamripFletApp:
             # any pre-load scrub computes a meaningless target.
             "duration":      audio_engine.duration,
         }
+        # The queue auto-play set aside lives outside the player: persist it
+        # so turning auto-play off after a process restart still returns it.
+        autoplay = getattr(self, "autoplay", None) or _AUTOPLAY
+        if autoplay is not None and autoplay.held:
+            state["autoplay_held"] = autoplay.held
         tmp = path + ".tmp"
         try:
             with open(tmp, "w") as fh:
@@ -2480,21 +2523,12 @@ class StreamripFletApp:
             audio_engine.is_shuffle = False
             self.now_playing.update_shuffle(False)
             self._save_pref("is_shuffle", False)
-        # Non-destructive both ways: on inserts a buffer after the current
-        # track; off drops only that buffer (the queue tail was never removed).
+        # On sets the rest of the queue aside (your picks stay first); off
+        # drops the recommendations and puts the set-aside queue back.
         if getattr(self, "autoplay", None):
             self.autoplay.set_enabled(enabled, audio_engine.current_path)
         if hasattr(self, "queue_sheet") and self.queue_sheet and self.queue_sheet._initialized:
             self.safe_update(self.queue_sheet.refresh)
-
-    def set_autoplay_variety(self, mode: str):
-        """UI hook (the Deterministic / Random pills). Switching rebuilds the
-        pending buffer as a new station from the playing track."""
-        if mode not in VARIETY_MODES:
-            return
-        if getattr(self, "autoplay", None):
-            self.autoplay.set_variety(mode)
-        self._save_pref("autoplay_variety", mode)
 
     async def start_radio(self, path: str):
         """UI hook (long-press → Start radio): play `path` now and restart

@@ -1,21 +1,17 @@
 """How the queue after the playing row is laid out, shared by both engines,
 auto-play and the queue sheet.
 
-    [playing] [up next] [auto-play station] [held]
+    [playing] [up next] [auto-play]
 
 Up next     the listener's own picks (Play Next / Add to Queue), tagged
             QUEUED. They always play before auto-play's recommendations.
-Station     auto-play's pending recommendations (tagged `_autoplay`), topped up
-            just below the last one.
-Held        everything after: the queue auto-play paused. Shown dimmed and
-            inert while auto-play is on; turning auto-play off drops the unheard
-            station rows, so the held queue is next again exactly where it
-            stopped. (If the station runs dry, e.g. with the UI session gone,
-            playback falls through into it rather than stopping.)
+Auto-play   pending recommendations (tagged `_autoplay`), topped up just below
+            the last one. While auto-play is on nothing else is in the player
+            after the playing row: the rest of the queue is set aside outside
+            it (utils.autoplay) and comes back when auto-play is turned off.
 
-Nothing here is a second list: it is one queue, one native playlist, read
-three ways. With auto-play off there is no station, so "held" is just the rest
-of the queue.
+With auto-play off, everything after the up-next block is just the rest of the
+queue.
 """
 from __future__ import annotations
 
@@ -40,13 +36,3 @@ def up_next_end(queue: list[dict], current_index: int) -> int:
         i += 1
     return min(i, len(queue))
 
-
-def held_start(queue: list[dict], current_index: int) -> int:
-    """First held row: past the last pending recommendation, or past the
-    up-next block while none is pending (a refill in flight, or a dry station).
-    Everything before it plays while auto-play stays on."""
-    last = None
-    for i in range(max(current_index + 1, 0), len(queue)):
-        if queue[i].get(AUTOPLAY):
-            last = i
-    return last + 1 if last is not None else up_next_end(queue, current_index)

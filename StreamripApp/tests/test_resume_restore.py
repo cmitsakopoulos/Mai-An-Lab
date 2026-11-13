@@ -88,21 +88,19 @@ class QueueSnapshotTests(unittest.TestCase):
 class AutoPlayMemoryTests(unittest.TestCase):
     def _ap(self, recent):
         db = MagicMock()
-        db.get_autoplay_hidden = AsyncMock(return_value=[])
-        db.get_hop_rejects = AsyncMock(return_value=[])
         db.get_recent_tracks = AsyncMock(return_value=recent)
         engine = MagicMock(queue=[], current_index=0)
         return AutoPlay(engine, db, run_task=MagicMock())
 
     def test_cold_start_seeds_history_from_recent_plays_oldest_first(self):
         ap = self._ap([{"path": "/new"}, {"path": "/old"}])
-        asyncio.run(ap.load_feedback())
+        asyncio.run(ap.load_history())
         self.assertEqual(list(ap.history), ["/old", "/new"])
 
     def test_a_live_history_is_not_reseeded(self):
         ap = self._ap([{"path": "/x"}])
         ap.history.append("/live")
-        asyncio.run(ap.load_feedback())
+        asyncio.run(ap.load_history())
         self.assertEqual(list(ap.history), ["/live"])
 
     def test_listens_heard_while_the_ui_was_away_join_history(self):

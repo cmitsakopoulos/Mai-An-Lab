@@ -172,7 +172,7 @@ class LLMEngine:
         arguments delivered as a JSON string (Gemini/OpenAI) or an object (some
         local servers)."""
         parsed: List[Dict[str, Any]] = []
-        for tc in raw_tool_calls or []:
+        for i, tc in enumerate(raw_tool_calls or []):
             fn = tc.get("function", {}) or {}
             fn_name = fn.get("name")
             if not fn_name:
@@ -185,7 +185,9 @@ class LLMEngine:
                     fn_args = {}
             if not isinstance(fn_args, dict):
                 fn_args = {}
-            parsed.append({"id": tc.get("id") or fn_name, "name": fn_name, "args": fn_args})
+            # Two parallel calls of one function with no ids would share an id
+            # and their results would be attributed to the same call.
+            parsed.append({"id": tc.get("id") or f"{fn_name}_{i}", "name": fn_name, "args": fn_args})
         return parsed
 
 
