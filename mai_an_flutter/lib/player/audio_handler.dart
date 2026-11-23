@@ -193,6 +193,10 @@ class AudioPlayerHandler extends BaseAudioHandler
   Stream<void> get changes => _changes.stream;
   @override
   Stream<PlaybackFailure> get failures => _failures.stream;
+
+  final _listens = StreamController<Listen>.broadcast();
+  @override
+  Stream<Listen> get listens => _listens.stream;
   @override
   bool get playing => _player.playing;
   @override
@@ -575,11 +579,20 @@ class AudioPlayerHandler extends BaseAudioHandler
       ..stop()
       ..reset();
     if (item == null || ms < _ledgerMinMs) return;
+    final dur = item.duration?.inMilliseconds ?? 0;
+    final path = srcToPath(item.id);
+    if (path.isNotEmpty) {
+      _listens.add((
+        path: path,
+        listenedS: ms / 1000.0,
+        durationS: dur / 1000.0,
+      ));
+    }
     _ledgerAppend(
       jsonEncode({
         'id': item.id,
         'ms': ms,
-        'dur': item.duration?.inMilliseconds ?? 0,
+        'dur': dur,
         'start': _ledgerStartedAt,
         'end': _nowSecs(),
       }),

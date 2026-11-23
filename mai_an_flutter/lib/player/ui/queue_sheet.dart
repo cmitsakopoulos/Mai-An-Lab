@@ -2,8 +2,10 @@ import 'package:flutter/material.dart';
 
 import '../../ui/tokens.dart';
 import '../playback_backend.dart';
+import '../autoplay.dart';
 import '../player_controller.dart';
 import '../queue_entry.dart';
+import 'autoplay_sheet.dart';
 
 /// ui/player/queue_sheet.py: "Playing Next". The playing row and the next
 /// rows in play order (15 at most, as in Flet), reorderable outside shuffle.
@@ -32,7 +34,7 @@ class QueueSheet extends StatelessWidget {
     return SizedBox(
       height: MediaQuery.sizeOf(context).height,
       child: ListenableBuilder(
-        listenable: player,
+        listenable: Listenable.merge([player, ?player.autoplay]),
         builder: (context, _) {
           final q = player.queue;
           final remaining = q.isEmpty ? 0 : q.length - q.currentIndex - 1;
@@ -42,6 +44,20 @@ class QueueSheet extends StatelessWidget {
               ? const <(int, QueueEntry)>[]
               : q.upcoming(player.shuffleIndices).take(visibleRows).toList();
           final notice = _notice(player);
+          // Auto-play, Apple Music style: above the first recommendation, or
+          // at the end while the next block is on its way.
+          final ap = player.autoplay;
+          int? header;
+          var pending = false;
+          if (ap != null && ap.enabled && rows.isNotEmpty) {
+            final first = [
+              for (var p = 1; p < rows.length; p++)
+                if (rows[p].$2.autoplay) p,
+            ].firstOrNull;
+            header = first ?? rows.length;
+            pending = first == null;
+          }
+          int toTrack(int c) => header != null && header < c ? c - 1 : c;
           return Column(
             children: [
               Padding(
@@ -165,15 +181,27 @@ class QueueSheet extends StatelessWidget {
                           horizontal: 12,
                           vertical: 6,
                         ),
-                        itemCount: rows.length,
-                        onReorder: (a, b) => _reorder(rows, a, b),
-                        itemBuilder: (context, pos) {
+                        itemCount: rows.length + (header == null ? 0 : 1),
+                        onReorder: (a, b) {
+                          if (a == header) return;
+                          _reorder(rows, toTrack(a), toTrack(b));
+                        },
+                        itemBuilder: (context, c) {
+                          if (c == header) {
+                            return _AutoPlayHeader(
+                              key: const ValueKey('q_autoplay_header'),
+                              autoplay: ap!,
+                              pending: pending,
+                            );
+                          }
+                          final pos = header != null && header < c ? c - 1 : c;
                           final (i, row) = rows[pos];
                           return _QueueRow(
                             key: ObjectKey(row),
                             player: player,
                             row: row,
                             position: pos,
+                            dragIndex: c,
                             active: i == q.currentIndex,
                           );
                         },
@@ -236,12 +264,16 @@ class _QueueRow extends StatelessWidget {
     required this.player,
     required this.row,
     required this.position,
+    required this.dragIndex,
     required this.active,
   });
 
   final PlayerController player;
   final QueueEntry row;
   final int position;
+
+  /// The row's index among the list's children (the header included).
+  final int dragIndex;
   final bool active;
 
   @override
@@ -324,7 +356,7 @@ class _QueueRow extends StatelessWidget {
               ),
               if (!active && !player.shuffle)
                 ReorderableDragStartListener(
-                  index: position,
+                  index: dragIndex,
                   child: const Padding(
                     padding: EdgeInsets.all(8),
                     child: Icon(
@@ -342,6 +374,61 @@ class _QueueRow extends StatelessWidget {
               ),
             ],
           ),
+        ),
+      ),
+    );
+  }
+}
+
+/// `_autoplay_header`: tap for the Auto-play sheet.
+class _AutoPlayHeader extends StatelessWidget {
+  const _AutoPlayHeader({
+    super.key,
+    required this.autoplay,
+    required this.pending,
+  });
+
+  final AutoPlay autoplay;
+  final bool pending;
+
+  @override
+  Widget build(BuildContext context) {
+    final cyan = Theme.of(context).colorScheme.primary;
+    final label = anchorLabel(autoplay);
+    final detail = pending
+        ? 'finding similar songs…'
+        : (label.isNotEmpty ? 'from $label' : 'similar songs');
+    return InkWell(
+      onTap: () => AutoPlaySheet.open(context, autoplay),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(10, 12, 6, 4),
+        child: Row(
+          children: [
+            Icon(Icons.all_inclusive_rounded, color: cyan, size: 14),
+            const SizedBox(width: 6),
+            Text(
+              'AUTO-PLAY',
+              style: TextStyle(
+                color: cyan,
+                fontSize: 11,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Text(
+                detail,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(color: Tokens.dim, fontSize: 12),
+              ),
+            ),
+            const Icon(
+              Icons.chevron_right_rounded,
+              color: Tokens.dim,
+              size: 16,
+            ),
+          ],
         ),
       ),
     );

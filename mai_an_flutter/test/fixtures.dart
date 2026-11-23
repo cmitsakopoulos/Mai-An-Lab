@@ -28,7 +28,9 @@ void createLibrarySchema(Database db) {
       artist_tag TEXT);
     CREATE TABLE play_counts (track_path TEXT PRIMARY KEY, count INTEGER DEFAULT 0,
       last_played INTEGER, bpm REAL DEFAULT 0, energy REAL DEFAULT 0,
-      brightness REAL DEFAULT 0, pca_coords BLOB);
+      brightness REAL DEFAULT 0, pca_coords BLOB, timbre BLOB,
+      features_version INTEGER DEFAULT 0, beat_strength REAL DEFAULT 0,
+      spectral_contrast REAL DEFAULT 0, cluster_id INTEGER);
     PRAGMA user_version = 2;
   ''');
 }

@@ -1,9 +1,12 @@
 import 'package:flutter/foundation.dart';
 
+import 'dart:async';
+
 import '../core/db_worker.dart';
 import '../data/library_repository.dart';
-import '../graph/coord_graph.dart';
+import '../player/autoplay.dart';
 import '../player/dsp.dart';
+import '../stations/station.dart';
 import 'track_query.dart';
 
 enum LoadState { loading, ready, error }
@@ -16,7 +19,7 @@ enum LoadState { loading, ready, error }
 /// db_manager.get_all_tracks): same sort modes and default, same search
 /// fallback to a "closest match" list. Search runs in memory on every
 /// keystroke, so the Flet 300 ms debounce isn't needed.
-class LibraryController extends ChangeNotifier {
+class LibraryController extends ChangeNotifier implements AutoPlayLibrary {
   LibraryController(this._open, {LibrarySort sort = LibrarySort.date})
     : _sort = sort;
 
@@ -30,7 +33,6 @@ class LibraryController extends ChangeNotifier {
   /// Every track, in the current sort order, with its search key alongside.
   List<(Track, String)> _sorted = const [];
   List<Track> visible = const [];
-  Map<String, Track> _byPath = const {};
 
   LibrarySort _sort;
   LibrarySort get sort => _sort;
@@ -39,11 +41,18 @@ class LibraryController extends ChangeNotifier {
   /// True when [visible] is the fuzzy fallback, not real matches.
   bool closestMatch = false;
 
-  CoordGraph? graph;
+  /// The stations' graphs, once built.
+  StationSource? graph;
+  final Completer<StationSource?> _stations = Completer();
 
-  /// Set when the coordinate graph couldn't be built (e.g. an older database
+  /// Set when the station graphs couldn't be built (e.g. an older database
   /// without `play_counts.pca_coords`). The library stays usable without it.
   String? graphError;
+
+  /// Auto-play can start from some track: at least one has coordinates.
+  /// (Flet's chain-button availability check: some track is analysed.)
+  @override
+  bool get stationsAvailable => (graph?.length ?? 0) > 0;
 
   int get total => _sorted.length;
 
@@ -59,7 +68,6 @@ class LibraryController extends ChangeNotifier {
     try {
       final repo = _repo = await _open();
       final tracks = await repo.allTracks();
-      _byPath = {for (final t in tracks) t.path: t};
       _resort(tracks);
       state = LoadState.ready;
       loadTime = sw.elapsed;
@@ -67,18 +75,20 @@ class LibraryController extends ChangeNotifier {
     } catch (e) {
       state = LoadState.error;
       error = '$e';
+      if (!_stations.isCompleted) _stations.complete(null);
       notifyListeners();
       return;
     }
     // The list is usable already; the graph arrives a moment later, and a
-    // failure here only disables "similar tracks".
+    // failure here only disables auto-play.
     try {
-      graph = await _repo!.coordGraph();
+      graph = await _repo!.stations();
     } on DbWorkerException catch (e) {
       graphError = e.message;
     } catch (e) {
       graphError = '$e';
     }
+    if (!_stations.isCompleted) _stations.complete(graph);
     notifyListeners();
   }
 
@@ -120,17 +130,39 @@ class LibraryController extends ChangeNotifier {
     }
   }
 
-  /// A cosine-nearest walk over the acoustic coordinates. NOT yet the Flet
-  /// app's "Play Similar" station (track_graph.open_station + artist_graph
-  /// Drift); see docs/PORT_MAP.md, phase 2.
-  ///
-  /// Null when the graph hasn't loaded or this track has no coordinates yet.
-  List<Track>? similarTo(Track seed, {int length = 15}) {
-    final g = graph;
-    final idx = g?.indexOf[seed.path];
-    if (g == null || idx == null) return null;
-    return [for (final i in g.walk(idx, length: length)) ?_byPath[g.paths[i]]];
-  }
+  // ── AutoPlayLibrary ──────────────────────────────────────────────────────
+
+  /// The station graphs once built; null when they couldn't be.
+  Future<StationSource?> stations() => _stations.future;
+
+  @override
+  Future<StationHandle?> openStation(
+    String seed, {
+    required Set<String> avoid,
+    required bool focused,
+    required int maxPerArtist,
+    required int maxPerAlbum,
+    required int window,
+  }) async => (await stations())?.open(
+    seed,
+    avoid: avoid,
+    focused: focused,
+    maxPerArtist: maxPerArtist,
+    maxPerAlbum: maxPerAlbum,
+    window: window,
+  );
+
+  @override
+  Future<Map<String, Track>> tracksBrief(List<String> paths) async =>
+      await _repo?.tracksBrief(paths) ?? const {};
+
+  @override
+  Future<bool> hasCurrentFeatures(String path) async =>
+      await _repo?.hasCurrentFeatures(path) ?? false;
+
+  @override
+  Future<List<String>> recentPaths(int limit) async =>
+      await _repo?.recentTrackPaths(limit) ?? const [];
 
   /// The play_counts audio features of [path] for the player's per-track
   /// sound settings; null when the track has none or the library isn't open.

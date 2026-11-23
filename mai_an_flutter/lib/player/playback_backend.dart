@@ -23,6 +23,10 @@ typedef PlaybackFailure = ({
   String action, // skipped | stopped
 });
 
+/// One finished listen, as the handler appends it to play_ledger.jsonl
+/// (`play_ledger.parse_lines`' entry).
+typedef Listen = ({String path, double listenedS, double durationS});
+
 /// What the player controller needs from the native player. The Android
 /// implementation is [AudioPlayerHandler] (audio_handler.dart); tests use a
 /// fake that mirrors the playlist in a list.
@@ -35,6 +39,9 @@ abstract interface class PlaybackBackend {
 
   /// Fires when the player gives up on, or skips past, an unplayable track.
   Stream<PlaybackFailure> get failures;
+
+  /// Each listen as the handler records it in the play ledger.
+  Stream<Listen> get listens;
 
   bool get playing;
   Processing get processing;

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../ui/tokens.dart';
+import '../autoplay.dart';
 import '../playback_backend.dart';
 import '../player_controller.dart';
 import 'artwork.dart';
@@ -49,9 +50,11 @@ class _NowPlayingState extends State<NowPlaying> {
     return SizedBox(
       height: MediaQuery.sizeOf(context).height,
       child: ListenableBuilder(
-        listenable: p,
+        listenable: Listenable.merge([p, ?p.autoplay, ?p.autoplay?.library]),
         builder: (context, _) {
           final row = p.nowPlaying;
+          final ap = p.autoplay;
+          final similar = ap?.enabled ?? false;
           // update_meta: `value or "Unknown"`.
           String or(String? v) => (v == null || v.isEmpty) ? 'Unknown' : v;
           final title = or(row?.title);
@@ -95,39 +98,50 @@ class _NowPlayingState extends State<NowPlaying> {
                     child: GestureDetector(
                       onTap: _tapArt,
                       child: DecoratedBox(
+                        // update_play_similar: a 3 px border while auto-play
+                        // is on.
+                        position: DecorationPosition.foreground,
                         decoration: BoxDecoration(
                           borderRadius: BorderRadius.circular(22),
-                          boxShadow: [
-                            BoxShadow(
-                              blurRadius: 32,
-                              spreadRadius: -4,
-                              color: accent.withValues(alpha: 0.15),
-                            ),
-                          ],
+                          border: similar
+                              ? Border.all(color: accent, width: 3)
+                              : null,
                         ),
-                        child: Stack(
-                          fit: StackFit.expand,
-                          children: [
-                            Artwork(
-                              path: p.art,
-                              size: null,
-                              radius: 22,
-                              placeholder: Icons.album_rounded,
-                              placeholderSize: 96,
-                              cacheWidth: 1024,
-                            ),
-                            Center(
-                              child: AnimatedOpacity(
-                                opacity: _overlay ? 1 : 0,
-                                duration: const Duration(milliseconds: 400),
-                                child: Icon(
-                                  p.playing ? Icons.pause : Icons.play_arrow,
-                                  size: 64,
-                                  color: Tokens.text,
+                        child: DecoratedBox(
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(22),
+                            boxShadow: [
+                              BoxShadow(
+                                blurRadius: 32,
+                                spreadRadius: -4,
+                                color: accent.withValues(alpha: 0.15),
+                              ),
+                            ],
+                          ),
+                          child: Stack(
+                            fit: StackFit.expand,
+                            children: [
+                              Artwork(
+                                path: p.art,
+                                size: null,
+                                radius: 22,
+                                placeholder: Icons.album_rounded,
+                                placeholderSize: 96,
+                                cacheWidth: 1024,
+                              ),
+                              Center(
+                                child: AnimatedOpacity(
+                                  opacity: _overlay ? 1 : 0,
+                                  duration: const Duration(milliseconds: 400),
+                                  child: Icon(
+                                    p.playing ? Icons.pause : Icons.play_arrow,
+                                    size: 64,
+                                    color: Tokens.text,
+                                  ),
                                 ),
                               ),
-                            ),
-                          ],
+                            ],
+                          ),
                         ),
                       ),
                     ),
@@ -202,30 +216,7 @@ class _NowPlayingState extends State<NowPlaying> {
                         onPressed: p.toggleShuffle,
                       ),
                       const Spacer(),
-                      // Auto-play (the chain): phase 2. Shown disabled, as
-                      // Flet does while no track has been analysed.
-                      const Opacity(
-                        opacity: 0.4,
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Text(
-                              'AUTO-PLAY',
-                              style: TextStyle(
-                                fontSize: 8,
-                                fontWeight: FontWeight.w700,
-                                color: Tokens.dim,
-                              ),
-                            ),
-                            IconButton(
-                              icon: Icon(Icons.link_off_rounded),
-                              iconSize: 20,
-                              color: Tokens.dim,
-                              onPressed: null,
-                            ),
-                          ],
-                        ),
-                      ),
+                      _AutoPlayButton(autoplay: ap, accent: accent),
                       const Spacer(),
                       IconButton(
                         icon: Icon(
@@ -437,6 +428,56 @@ class _DynamismBadge extends StatelessWidget {
               fontSize: 10,
               fontWeight: FontWeight.w700,
             ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// The chain: a plain on/off toggle for auto-play. Disabled (dimmed) while
+/// no track has coordinates, as Flet's availability check does.
+class _AutoPlayButton extends StatelessWidget {
+  const _AutoPlayButton({required this.autoplay, required this.accent});
+
+  final AutoPlay? autoplay;
+  final Color accent;
+
+  @override
+  Widget build(BuildContext context) {
+    final ap = autoplay;
+    final on = ap?.enabled ?? false;
+    final available = ap != null && ap.library.stationsAvailable;
+    final color = on ? accent : Tokens.dim;
+    return Opacity(
+      opacity: available ? 1 : 0.4,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            'AUTO-PLAY',
+            style: TextStyle(
+              fontSize: 8,
+              fontWeight: FontWeight.w700,
+              color: color,
+            ),
+          ),
+          IconButton(
+            icon: Icon(on ? Icons.link_rounded : Icons.link_off_rounded),
+            iconSize: 20,
+            color: color,
+            onPressed: available
+                ? () {
+                    // Say where the listener's own queue went.
+                    final enabling = !ap.enabled;
+                    ap.setMode(enabling);
+                    ap.player.say(
+                      enabling
+                          ? 'Auto-play on. Your queue is on hold.'
+                          : 'Auto-play off. Back to your queue.',
+                    );
+                  }
+                : null,
           ),
         ],
       ),

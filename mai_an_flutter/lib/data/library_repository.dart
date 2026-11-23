@@ -1,10 +1,13 @@
+import 'dart:convert';
+import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'package:sqlite3/sqlite3.dart';
 
 import '../core/db_worker.dart';
-import '../graph/coord_graph.dart';
+import '../core/py_text.dart';
 import '../player/dsp.dart';
+import '../stations/station.dart';
 
 class Track {
   const Track({
@@ -65,7 +68,27 @@ class LibraryRepository {
 
   Future<List<Track>> allTracks() => _db.run(_selectAllTracks);
 
-  Future<CoordGraph> coordGraph() => _db.run(_buildCoordGraph);
+  /// The stations' coordinate and artist graphs. The rows come from the DB
+  /// isolate; the graph is built on a one-off isolate so a library read
+  /// isn't held up behind it.
+  Future<StationSource> stations() async {
+    final data = await _db.run(_selectStationData);
+    return Isolate.run(() => StationSource.build(data));
+  }
+
+  /// `get_tracks_brief`: title/artist/album/duration per path, for queue rows
+  /// built from station output.
+  Future<Map<String, Track>> tracksBrief(List<String> paths) =>
+      _db.run(_tracksBriefJob(paths));
+
+  /// `has_current_features`: the track has DSP features a station can seed
+  /// from.
+  Future<bool> hasCurrentFeatures(String path) =>
+      _db.run(_hasFeaturesJob(path));
+
+  /// `get_recent_tracks`: distinct paths most recently played, newest first.
+  Future<List<String>> recentTrackPaths(int limit) =>
+      _db.run(_recentJob(limit));
 
   /// The play_counts row's audio features for [path] (what `reapply_dsp`
   /// selects), or null when the track has no row.
@@ -125,32 +148,156 @@ class StaleGeometryException implements Exception {
       'analysis to rebuild them.';
 }
 
-/// Mirrors `db_manager.get_tracks_pca_coords` + `load_live_coordinate_graph`,
+/// `db_manager.get_tracks_pca_coords` (same SQL, so the same row order as
+/// the Flet app's), `get_artist_meta_for_paths` and `get_genre_affinity`,
 /// including `_migrate_pca`'s rule that coordinates from an older
 /// GEOMETRY_VERSION are invalid.
-CoordGraph _buildCoordGraph(Database db) {
+StationData _selectStationData(Database db) {
   final version = db.select('PRAGMA user_version').first.values.first as int;
   if (version < kGeometryVersion) throw StaleGeometryException(version);
   final rows = db.select('''
-    SELECT pc.track_path AS path, pc.pca_coords,
-           ar.name  AS artist,
-           al.title AS album
-    FROM play_counts pc
-    INNER JOIN tracks  t  ON t.path = pc.track_path
-    LEFT  JOIN albums  al ON al.id  = t.album_id
-    LEFT  JOIN artists ar ON ar.id  = al.artist_id
-    WHERE pc.pca_coords IS NOT NULL
-  ''');
-  return CoordGraph.fromRows([
+            SELECT pc.track_path AS path, pc.pca_coords, pc.cluster_id, pc.bpm, pc.energy,
+                   t.title, t.duration,
+                   ar.name  AS artist,
+                   al.title AS album,
+                   al.genre AS genre
+            FROM play_counts pc
+            INNER JOIN tracks  t  ON t.path  = pc.track_path
+            LEFT JOIN albums  al ON al.id   = t.album_id
+            LEFT JOIN artists ar ON ar.id   = al.artist_id
+            WHERE pc.pca_coords IS NOT NULL
+        ''');
+  final stationRows = [
     for (final r in rows)
-      CoordRow(
+      StationRow(
         path: r['path'] as String,
         coords: r['pca_coords'] as Uint8List,
+        bpm: (r['bpm'] as num?)?.toDouble() ?? 0,
+        energy: (r['energy'] as num?)?.toDouble() ?? 0,
+        title: r['title'] as String?,
         artist: r['artist'] as String?,
         album: r['album'] as String?,
       ),
-  ]);
+  ];
+
+  // Python logs and carries on without enrichment or the genre model (an
+  // older database without the tables, a malformed row).
+  final enrichment = <String, ArtistMeta>{};
+  try {
+    for (final r in db.select('''
+      SELECT t.path AS path, ar.name AS artist,
+             e.country AS country, e.genres AS genres, e.source AS source
+      FROM tracks t
+      JOIN albums al ON al.id = t.album_id
+      JOIN artists ar ON ar.id = al.artist_id
+      LEFT JOIN artist_enrichment e ON e.artist_name = ar.name
+    ''')) {
+      final toks = <String>{};
+      final raw = r['genres'] as String?;
+      if (raw != null && raw.isNotEmpty) {
+        try {
+          for (final g in jsonDecode(raw) as List) {
+            final tk = alnumOnly(pyLower((g as Map)['name'] as String? ?? ''));
+            if (tk.isNotEmpty) toks.add(tk);
+          }
+        } catch (_) {}
+      }
+      enrichment[r['path'] as String] = ArtistMeta(
+        artist: r['artist'] as String?,
+        country: r['country'] as String?,
+        genres: toks.toList(),
+        manual: r['source'] == 'manual',
+      );
+    }
+  } on SqliteException {
+    enrichment.clear();
+  }
+  final npmi = <String, double>{};
+  try {
+    final m = db.select('SELECT model FROM genre_affinity WHERE id = 1');
+    final raw = m.isEmpty ? null : m.first.values.first as String?;
+    if (raw != null && raw.isNotEmpty) {
+      (jsonDecode(raw) as Map).forEach((k, v) {
+        npmi[k as String] = (v as num).toDouble();
+      });
+    }
+  } catch (_) {
+    npmi.clear();
+  }
+  return StationData(rows: stationRows, enrichment: enrichment, npmi: npmi);
 }
+
+DbJob<Map<String, Track>> _tracksBriefJob(List<String> paths) =>
+    (db) => _selectTracksBrief(db, paths);
+
+Map<String, Track> _selectTracksBrief(Database db, List<String> paths) {
+  final out = <String, Track>{};
+  for (var i = 0; i < paths.length; i += 500) {
+    final chunk = paths.sublist(
+      i,
+      i + 500 > paths.length ? paths.length : i + 500,
+    );
+    final rows = db.select('''
+      SELECT t.id, t.path, t.title, t.duration, t.format, t.track_num,
+             t.added_date, ar.name AS artist, al.title AS album
+      FROM tracks t
+      LEFT JOIN albums  al ON al.id = t.album_id
+      LEFT JOIN artists ar ON ar.id = al.artist_id
+      WHERE t.path IN (${List.filled(chunk.length, '?').join(',')})
+    ''', chunk);
+    for (final r in rows) {
+      final path = r['path'] as String;
+      // autoplay._tracks: `title or basename`, `artist or "Unknown Artist"`,
+      // `album or "Unknown Album"`.
+      out[path] = Track(
+        id: r['id'] as int,
+        path: path,
+        title: _or(r['title'] as String?, _basename(path)),
+        artist: _or(r['artist'] as String?, 'Unknown Artist'),
+        album: _or(r['album'] as String?, 'Unknown Album'),
+        duration: (r['duration'] as num?)?.toDouble() ?? 0,
+        format: (r['format'] as String?) ?? '',
+        trackNum: r['track_num'] as int?,
+        addedDate: (r['added_date'] as num?)?.toDouble(),
+      );
+    }
+  }
+  return out;
+}
+
+/// `dsp.FEATURES_VERSION`.
+const kFeaturesVersion = 5;
+
+DbJob<bool> _hasFeaturesJob(String path) =>
+    (db) => db.select(
+      'SELECT 1 FROM play_counts WHERE track_path = ? AND timbre IS NOT NULL '
+      'AND COALESCE(features_version, 0) >= ?',
+      [path, kFeaturesVersion],
+    ).isNotEmpty;
+
+DbJob<List<String>> _recentJob(int limit) => (db) {
+  try {
+    return [
+      for (final r in db.select(
+        '''
+        SELECT t.path, MAX(ph.played_at) AS last_played
+        FROM playback_history ph
+        JOIN tracks t   ON t.path = ph.track_path
+        JOIN albums al  ON al.id  = t.album_id
+        JOIN artists ar ON ar.id  = al.artist_id
+        WHERE ph.event IN ('played', 'completed')
+        GROUP BY t.path
+        ORDER BY last_played DESC
+        LIMIT ?
+      ''',
+        [limit],
+      ))
+        r['path'] as String,
+    ];
+  } on SqliteException {
+    return const [];
+  }
+};
 
 /// Top-level so the job closure captures only [path] (it crosses to the DB
 /// isolate).

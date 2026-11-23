@@ -46,6 +46,14 @@ android {
             signingConfig = signingConfigs.getByName("debug")
         }
     }
+
+    lint {
+        // Release builds run lint over maian_native, whose Kotlin is a
+        // symlink into the Flet extension (PORT_MAP §8); lint crashes on it
+        // ("Cannot find a KaModule for the VirtualFile"). Drop this once that
+        // directory moves in at cutover.
+        checkReleaseBuilds = false
+    }
 }
 
 flutter {

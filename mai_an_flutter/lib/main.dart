@@ -12,6 +12,7 @@ import 'data/library_repository.dart';
 import 'library/library_controller.dart';
 import 'library/library_screen.dart';
 import 'player/audio_handler.dart';
+import 'player/autoplay.dart';
 import 'player/player_controller.dart';
 import 'player/queue_store.dart';
 import 'ui/tokens.dart';
@@ -82,6 +83,7 @@ Future<PlayerController> _startPlayer(
     dspConfig: () async => (await AppConfig.load(dataDir)).dsp,
     dspFeatures: library.dspFeatures,
   );
+  player.autoplay = AutoPlay(player: player, library: library);
   await player.init();
   return player;
 }

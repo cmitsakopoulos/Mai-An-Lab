@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 
 import '../data/library_repository.dart';
+import 'autoplay.dart';
 import 'dsp.dart';
 import 'play_queue.dart';
 import 'playback_backend.dart';
@@ -55,6 +56,16 @@ class PlayerController extends ChangeNotifier {
 
   final PlayQueue queue = PlayQueue();
 
+  /// Auto-play, when the app has one (set before [init]).
+  AutoPlay? autoplay;
+
+  /// At the end of the queue, ask auto-play for more instead of stopping
+  /// (engine `continues_at_end`). Set by [AutoPlay.enabled].
+  bool continuesAtEnd = false;
+
+  /// Path of the row the queue is on ('' when empty).
+  String get currentPath => queue.current?.path ?? '';
+
   Repeat _repeat = Repeat.none;
   Repeat get repeat => _repeat;
   bool get shuffle => queue.shuffle;
@@ -93,6 +104,7 @@ class PlayerController extends ChangeNotifier {
 
   StreamSubscription<void>? _changesSub;
   StreamSubscription<PlaybackFailure>? _failSub;
+  StreamSubscription<Listen>? _listenSub;
   Timer? _ticker;
   bool _foreground = true;
 
@@ -105,10 +117,18 @@ class PlayerController extends ChangeNotifier {
     );
     await prefs.load();
     queue.shuffle = prefs.getBool('is_shuffle');
+    final ap = autoplay;
+    if (ap != null) {
+      ap.enabled = prefs.getBool('play_similar_mode');
+      unawaited(ap.loadHistory());
+    }
     _repeat = Repeat.parse(prefs['repeat_mode']);
     _op(() => backend.setRepeat(_repeat));
     _changesSub = backend.changes.listen((_) => _onBackendChange());
     _failSub = backend.failures.listen(_onFailure);
+    _listenSub = backend.listens.listen(
+      (l) => autoplay?.onListen(l.path, l.listenedS, l.durationS),
+    );
     await restore();
     _positionSaveLoop();
   }
@@ -120,10 +140,13 @@ class PlayerController extends ChangeNotifier {
     if (loaded == null) return;
     final (saved, at) = loaded;
     _autoplayHeld = saved.autoplayHeld;
+    autoplay?.restoreHeldJson(saved.autoplayHeld);
     final change = queue.set(saved.queue, at.index);
     if (change is! Reload) return;
     store.held = true;
     _show(queue.current);
+    // A restore is not a track change (Flet's `restoring` flag).
+    _changedPath = queue.current?.path;
     _applyDsp();
     position.value = _secs(at.position);
     duration = _secs(at.duration);
@@ -136,6 +159,7 @@ class PlayerController extends ChangeNotifier {
     } else {
       _needsPush = true;
     }
+    autoplay?.resume(currentPath);
     notifyListeners();
   }
 
@@ -153,6 +177,7 @@ class PlayerController extends ChangeNotifier {
       final existing = queue.entries.indexWhere((t) => t.path == target.path);
       if (existing >= 0) {
         playTrackAt(existing);
+        _userChose(target.path);
         return;
       }
     }
@@ -180,7 +205,12 @@ class PlayerController extends ChangeNotifier {
       return;
     }
     _setQueue(items, idx);
+    _userChose(target.path);
   }
+
+  /// `autoplay.on_user_chose`, after the track-change hook has run.
+  void _userChose(String path) =>
+      scheduleMicrotask(() => autoplay?.onUserChose(path));
 
   void playTrackAt(int index) {
     if (index < 0 || index >= queue.length) return;
@@ -231,8 +261,11 @@ class PlayerController extends ChangeNotifier {
       playTrackAt(target);
       return;
     }
-    // Auto-play's continuation at the queue end arrives in phase 2.
-    stop();
+    if (continuesAtEnd) {
+      autoplay?.onQueueDry();
+    } else {
+      stop();
+    }
   }
 
   void previous() {
@@ -279,10 +312,36 @@ class PlayerController extends ChangeNotifier {
   );
 
   /// Remove one row (identity: the same song can be queued twice).
+  /// Removing a recommendation is a "not this" for the current station,
+  /// reported after the removal so the top-up sees the gap.
   void removeRow(QueueEntry row) {
     final i = queue.indexOfRow(row);
     if (i == null) return;
     _apply(queue.removeAt(i));
+    if (row.autoplay) autoplay?.reject(row.path);
+  }
+
+  // Engine edits auto-play makes (audio_engine.remove_indices,
+  // queue_after_current, replace_rows, queue_extend).
+  void removeIndices(List<int> indices) => _apply(queue.removeIndices(indices));
+  void insertAfter(List<QueueEntry> rows, {int? afterIndex}) =>
+      _apply(queue.insertAfterCurrent(rows, afterIndex: afterIndex));
+  void replaceRows(List<int> indices, List<QueueEntry> rows) =>
+      _apply(queue.replaceRows(indices, rows));
+  void extend(List<QueueEntry> rows) => _apply(queue.extend(rows));
+
+  /// A one-line message for the snackbar.
+  void say(String message) => _messages.add(message);
+
+  /// `audio_engine.is_shuffle = False`: play order back to queue order,
+  /// keeping the queue (auto-play turning on). Not the shuffle toggle, which
+  /// also swaps the library queue for the set-aside one.
+  void disableShuffleOrder() {
+    if (!queue.shuffle) return;
+    queue.shuffle = false;
+    unawaited(prefs.set('is_shuffle', false));
+    _op(() => backend.setShuffle(false));
+    notifyListeners();
   }
 
   void moveRow(int from, int to) => _apply(queue.move(from, to));
@@ -296,6 +355,7 @@ class PlayerController extends ChangeNotifier {
   Future<void> toggleShuffle() async {
     final on = !queue.shuffle;
     unawaited(prefs.set('is_shuffle', on));
+    if (on && (autoplay?.enabled ?? false)) autoplay!.setMode(false);
     final cur = queue.current;
     if (on) {
       unawaited(_savePartition('queue_regular.json'));
@@ -352,6 +412,9 @@ class PlayerController extends ChangeNotifier {
       // Nothing was ticked while hidden.
       _onBackendChange();
     } else {
+      // Nothing may refill auto-play while hidden for long: queue enough to
+      // ride it out.
+      autoplay?.prefillForBackground();
       unawaited(_savePosition());
     }
     _syncTicker();
@@ -400,9 +463,11 @@ class PlayerController extends ChangeNotifier {
         // Removing the playing row moves the shown track along with the
         // player (provisional; the player's index is adopted after the op).
         _syncForCurrent(keepPosition: true);
-        _op(() => backend.splice(edits));
+        // Nothing is loaded (stopped, or a restored track missing on disk):
+        // the first play pushes the whole queue, edits included.
+        if (!_needsPush) _op(() => backend.splice(edits));
       case Move(:final from, :final to):
-        _op(() => backend.move(from, to));
+        if (!_needsPush) _op(() => backend.move(from, to));
     }
     _queueMutated();
     notifyListeners();
@@ -537,7 +602,11 @@ class PlayerController extends ChangeNotifier {
     if (processing == Processing.completed && !wasCompleted) {
       // A finite queue ran out (repeat-all never completes: the player loops).
       playing = false;
-      _completedTerminal = true;
+      if (continuesAtEnd && autoplay != null) {
+        autoplay!.onQueueDry();
+      } else {
+        _completedTerminal = true;
+      }
     }
 
     if (_pending == 0 && !_needsPush) _mirrorIndex();
@@ -593,6 +662,7 @@ class PlayerController extends ChangeNotifier {
   void _syncForCurrent({bool keepPosition = false}) {
     final cur = queue.current;
     _show(cur);
+    _trackChanged(cur?.path);
     if (!keepPosition) position.value = Duration.zero;
     if (cur != null) {
       duration = _secs(cur.duration);
@@ -648,6 +718,18 @@ class PlayerController extends ChangeNotifier {
     }();
   }
 
+  String? _changedPath;
+
+  /// `autoplay.on_track_changed` when the current path moves, run once the
+  /// edit that moved it has finished (Flet's engine observer).
+  void _trackChanged(String? path) {
+    if (path == null || path == _changedPath) return;
+    _changedPath = path;
+    if (autoplay != null) {
+      scheduleMicrotask(() => autoplay?.onTrackChanged(path));
+    }
+  }
+
   static DspFeatures? _rowFeatures(QueueEntry row) {
     double? n(Object? v) => v is num ? v.toDouble() : null;
     final d = row.data;
@@ -697,7 +779,7 @@ class PlayerController extends ChangeNotifier {
     index: queue.currentIndex,
     position: _s(position.value),
     duration: _s(duration),
-    autoplayHeld: _autoplayHeld,
+    autoplayHeld: autoplay != null ? autoplay!.heldJson : _autoplayHeld,
   );
 
   Future<void> _savePosition() => store.savePosition(
@@ -767,6 +849,7 @@ class PlayerController extends ChangeNotifier {
     _disposed = true;
     _changesSub?.cancel();
     _failSub?.cancel();
+    _listenSub?.cancel();
     _ticker?.cancel();
     _queueSave?.cancel();
     _posLoop?.cancel();

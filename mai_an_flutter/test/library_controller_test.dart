@@ -73,7 +73,8 @@ void main() {
     expect(c.visible, hasLength(3));
     expect(c.graph, isNull);
     expect(c.graphError, contains('pca_coords'));
-    expect(c.similarTo(c.visible.first), isNull);
+    expect(await c.stations(), isNull);
+    expect(c.stationsAvailable, isFalse);
     c.dispose();
   });
 }

@@ -39,6 +39,10 @@ class FakeBackend implements PlaybackBackend {
   Stream<void> get changes => _changes.stream;
   @override
   Stream<PlaybackFailure> get failures => _failures.stream;
+
+  final listenEvents = StreamController<Listen>.broadcast(sync: true);
+  @override
+  Stream<Listen> get listens => listenEvents.stream;
   @override
   List<int> get shuffleIndices => shuffleOn ? order : const [];
   @override

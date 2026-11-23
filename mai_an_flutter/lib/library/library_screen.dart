@@ -229,70 +229,18 @@ class _LibraryScreenState extends State<LibraryScreen> {
               },
             ),
             ListTile(
-              leading: const Icon(Icons.graphic_eq_rounded),
-              title: const Text('Nearest by sound'),
+              leading: const Icon(Icons.all_inclusive_rounded),
+              title: const Text('Start radio'),
+              subtitle: const Text(
+                'Play similar tracks automatically',
+                style: TextStyle(color: Tokens.dim, fontSize: 12),
+              ),
+              enabled: player?.autoplay != null,
               onTap: () {
                 Navigator.pop(sheet);
-                _showSimilar(t);
+                player!.autoplay!.startRadio(t);
+                widget.haptics.trigger('swipe_queue');
               },
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  void _showSimilar(Track seed) {
-    final similar = controller.similarTo(seed);
-    showModalBottomSheet<void>(
-      context: context,
-      backgroundColor: Tokens.surface,
-      showDragHandle: true,
-      isScrollControlled: true,
-      builder: (sheet) => SizedBox(
-        height: MediaQuery.sizeOf(sheet).height * 0.6,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-              child: Text(
-                // A plain nearest-neighbour walk, not yet Flet's Play Similar.
-                'Nearest by sound: ${seed.title}',
-                style: Theme.of(sheet).textTheme.titleMedium,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-            Expanded(
-              child: similar == null
-                  ? Center(
-                      child: Text(
-                        controller.graphError != null
-                            ? 'Similarity is unavailable: the acoustic graph '
-                                  'could not be loaded.\n\n${controller.graphError}'
-                            : controller.graph == null
-                            ? 'The acoustic graph is still loading.'
-                            : 'This track has no acoustic coordinates yet.\n'
-                                  'Analyse it in the desktop app first.',
-                        textAlign: TextAlign.center,
-                        style: const TextStyle(color: Tokens.dim),
-                      ),
-                    )
-                  : ListView.builder(
-                      itemExtent: _TrackRow.height,
-                      itemCount: similar.length,
-                      itemBuilder: (context, i) => _TrackRow(
-                        track: similar[i],
-                        onTap: () {
-                          Navigator.pop(sheet);
-                          widget.player.value?.playTrack(
-                            similar[i],
-                            context: similar,
-                          );
-                        },
-                      ),
-                    ),
             ),
           ],
         ),

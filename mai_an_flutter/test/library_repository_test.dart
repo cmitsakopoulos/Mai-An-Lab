@@ -63,9 +63,9 @@ void main() {
     await repo.close();
   });
 
-  test('builds the coordinate graph, inner-joined to tracks', () async {
+  test('builds the station graphs, inner-joined to tracks', () async {
     final repo = await LibraryRepository.open(path);
-    final g = await repo.coordGraph();
+    final g = await repo.stations();
     expect(g.paths.toSet(), {'/m/z1.flac', '/m/a2.flac'});
     expect(g.dim, 3);
     await repo.close();
@@ -77,7 +77,7 @@ void main() {
     db.close();
     final repo = await LibraryRepository.open(path);
     await expectLater(
-      repo.coordGraph(),
+      repo.stations(),
       throwsA(
         isA<DbWorkerException>().having(
           (e) => e.message,
