@@ -355,7 +355,6 @@ class TestGenreRoutingAndWorkbench(unittest.TestCase):
 
         pane.filter_genre("Synthwave")
 
-        self.assertEqual(pane.filter, "all")
         self.assertEqual(pane.search, "Synthwave")
         self.assertEqual(pane._search_field.value, "Synthwave")
         pane._reload.assert_called_once()

@@ -2701,7 +2701,7 @@ class StreamripFletApp:
                 if pane is not None and action == "sync":
                     pane._start_sync()
                 elif pane is not None and action == "suggestions":
-                    pane._set_filter("suggested")
+                    pane._review_suggestions()
             elif screen == "downloads":
                 self.download_dock.expand()
                 if action == "retry":

@@ -61,7 +61,7 @@ from utils import metadata_ai, metadata_audit
 
 logger = logging.getLogger(__name__)
 
-# DatabaseManager.GAP_NONE: a row with genres and a country, listed only in "All".
+# DatabaseManager.GAP_NONE: a row with genres and a country.
 _GAP_NONE = 3
 
 
@@ -115,7 +115,6 @@ _PROVIDERS = {
 # remaining width instead of the scraps four fixed columns used to leave them.
 _CHECK_W = 34
 _TRACKS_W = 26
-_ACCEPT_W = 34
 
 
 def _flag(cc: str | None) -> str:
@@ -171,10 +170,9 @@ class MetadataWorkbenchPane(ft.Column):
         self.ai_ready = False
 
         # ── view state ──
-        self.filter = "needs"      # needs | suggested | all
-        # How All is ordered: "least" sure first (doubtful matches, then the
-        # unplaceable, … hand-set last) or "most" sure first. This replaced a
-        # separate Review tab: the doubtful rows are the top of All.
+        # One list of every artist (the Needs you / Suggestions tabs were
+        # folded into it), ordered by confidence: "least" sure first (doubtful matches, then the unplaceable, …
+        # hand-set last) or "most" sure first.
         self.sort = "least"
         self.review_by_name: dict[str, list[dict]] = {}
         self.search = ""
@@ -211,7 +209,7 @@ class MetadataWorkbenchPane(ft.Column):
             bgcolor=SURFACE2, border=_input_border(BORDER, CYAN, 10),
             text_style=ft.TextStyle(color=TEXT, size=13),
             dense=True, content_padding=ft.Padding.symmetric(horizontal=12, vertical=8),
-            on_change=self._on_search,
+            on_change=self._on_search, expand=True,
         )
 
         self.controls = [
@@ -227,7 +225,6 @@ class MetadataWorkbenchPane(ft.Column):
         """Jump to one artist and open its editor. The Library's edit button
         routes here instead of opening a second editor of its own."""
         self._pending_focus = name
-        self.filter = "all"
         self.search = name
         self._search_field.value = name
         self._reload()
@@ -235,7 +232,6 @@ class MetadataWorkbenchPane(ft.Column):
     def filter_genre(self, genre_name: str):
         """Filter workbench by genre tag or name."""
         self._pending_focus = None
-        self.filter = "all"
         self.search = genre_name
         self._search_field.value = genre_name
         self._reload()
@@ -366,7 +362,7 @@ class MetadataWorkbenchPane(ft.Column):
                 sub += f" {n_sugg} suggestion{'s' if n_sugg != 1 else ''} ready to review."
             n_doubt = len(self.review_rows)
             if n_doubt:
-                sub += f" {n_doubt} look{'s' if n_doubt == 1 else ''} doubtful (top of All)."
+                sub += f" {n_doubt} look{'s' if n_doubt == 1 else ''} doubtful (listed first)."
 
             actions: list[ft.Control] = [self._sync_button(disabled=(artists == 0))]
             if targets and self.ai_ready:
@@ -375,7 +371,7 @@ class MetadataWorkbenchPane(ft.Column):
                     icon=ft.Icons.AUTO_AWESOME_ROUNDED, bg=_AI))
             elif n_sugg:
                 actions.append(self._filled_btn(
-                    "Review", lambda _e: self._set_filter("suggested"),
+                    "Review", lambda _e: self._review_suggestions(),
                     icon=ft.Icons.CHECKLIST_ROUNDED))
 
             lines: list[ft.Control] = [
@@ -405,8 +401,6 @@ class MetadataWorkbenchPane(ft.Column):
                 bgcolor=SURFACE, border_radius=RADIUS_CARD, padding=14,
                 border=ft.Border.all(1, BORDER_SUBTLE),
             ),
-            ft.Container(height=10),
-            self._search_field,
             ft.Container(height=10),
         ], spacing=0)
 
@@ -624,7 +618,7 @@ class MetadataWorkbenchPane(ft.Column):
 
     def _start_research(self, names: list[str]):
         """Research artists on the web, a dozen per Gemini call. Answers
-        land as suggestions under the Suggestions filter; nothing is saved to
+        land as suggestions on their rows; nothing is saved to
         an artist until the user accepts it."""
         if self.syncing or self.researching or not names:
             return
@@ -691,7 +685,7 @@ class MetadataWorkbenchPane(ft.Column):
             self.app.show_snackbar(status[6:].strip(), color=ACCENT_RED)
             return
         if found:
-            self._set_filter("suggested")
+            self._review_suggestions()
         msg = (f"{found} suggestion{'s' if found != 1 else ''} ready to review"
                if found else "The web had nothing reliable on these artists")
         if unknown and found:
@@ -749,31 +743,43 @@ class MetadataWorkbenchPane(ft.Column):
                 self._schedule_walk_refresh()
         self.app.page.run_task(_do)
 
-    # ── FILTER ───────────────────────────────────────────────────────────────
+    # ── SEARCH + SORT ────────────────────────────────────────────────────────
     def _render_filter(self):
-        # Counts do NOT go in the labels. `CupertinoSegmentedBar` sets
-        # `no_wrap=True` on segment text, so at four segments on a 390pt screen
-        # 'Needs you  11' rendered as 'Needs you 1' and 'Suggested  10' as
-        # 'Suggested 1('. The count belongs in the list caption below.
-        segs = [
-            ("needs", "Needs you", None, ACCENT_RED),
-            ("suggested", "Suggestions", None, ACCENT_GREEN),
-            ("all", "All", None, CYAN),
-        ]
-        self._seg = CupertinoSegmentedBar(segs, self.filter, self._set_filter, height=36)
+        """The search field and the confidence sort, on one row when there is
+        room and stacked on a phone. ResponsiveRow sizes both to the screen
+        instead of the field's intrinsic width."""
+        self._seg = CupertinoSegmentedBar(
+            [("least", "Least sure first", ft.Icons.ARROW_UPWARD_ROUNDED, ACCENT_AMBER),
+             ("most", "Most sure first", ft.Icons.ARROW_DOWNWARD_ROUNDED, CYAN)],
+            self.sort, self._set_sort, height=40,
+        )
         self._h_filter.content = ft.Column([
-            self._seg,
-            ft.Container(height=8),
+            ft.ResponsiveRow(
+                [
+                    ft.Container(content=ft.Row([self._search_field]),
+                                 col={"xs": 12, "sm": 7, "md": 8}),
+                    ft.Container(content=self._seg, col={"xs": 12, "sm": 5, "md": 4}),
+                ],
+                spacing=8, run_spacing=8,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            ft.Container(height=10),
         ], spacing=0)
 
-    def _set_filter(self, key: str):
-        self.filter = key
-        self.selected.clear()
-        # The bar restyles itself when the USER taps it, but not when we set the
-        # filter in code (focus_artist does), so sync it explicitly.
+    def _set_sort(self, key: str):
+        self.sort = key
         seg = getattr(self, "_seg", None)
         if seg is not None and seg.selected_key != key:
             seg.set_selected(key)
+        self._render_list()
+        self._safe_update()
+
+    def _review_suggestions(self):
+        """Select every row with a suggestion waiting, so the tray offers to
+        accept them; each can still be unticked or opened first."""
+        self.selected = {g["artist_name"] for g in self._suggestion_rows()}
+        self.search = ""
+        self._search_field.value = ""
         self._render_list()
         self._render_bins()
         self._safe_update()
@@ -787,19 +793,9 @@ class MetadataWorkbenchPane(ft.Column):
     # ── LIST ─────────────────────────────────────────────────────────────────
     def _visible(self) -> list[dict]:
         q = self.search.strip().lower()
-        if self.filter == "all" or (q and self.filter == "needs"):
-            # Search looks up ANY artist: the one you need to correct is
-            # usually one that already has (wrong) tags, which no gap list
-            # would ever show.
-            pool = self.everyone
-        else:
-            pool = self.all_gaps
-            if self.filter == "needs":
-                # An artist with an answer waiting is under Suggestions, not here.
-                pool = [g for g in pool if g.get("gap_severity") == 0
-                        and g["artist_name"] not in self.ai_pending]
-            elif self.filter == "suggested":
-                pool = self._suggestion_rows()
+        # Every artist: the one you need to correct is often one that already
+        # has (wrong) tags, which no gap list would ever show.
+        pool = self.everyone
         if q:
             def _matches_q(g):
                 if q in (g.get("artist_name") or "").lower():
@@ -812,9 +808,7 @@ class MetadataWorkbenchPane(ft.Column):
                         return True
                 return False
             pool = [g for g in pool if _matches_q(g)]
-        if self.filter == "all":
-            pool = sorted(pool, key=self._sort_key)
-        return pool
+        return sorted(pool, key=self._sort_key)
 
     def _sure_tier(self, g: dict) -> int:
         """How sure we are of a row, 0 (least) … 7 (most):
@@ -839,9 +833,7 @@ class MetadataWorkbenchPane(ft.Column):
         return (tier, score, tracks) if self.sort == "least" else (-tier, -score, tracks)
 
     def _toggle_sort(self):
-        self.sort = "most" if self.sort == "least" else "least"
-        self._render_list()
-        self._safe_update()
+        self._set_sort("most" if self.sort == "least" else "least")
 
     def _render_list(self):
         rows = self._visible()
@@ -856,20 +848,12 @@ class MetadataWorkbenchPane(ft.Column):
             controls.append(ctrl)
         n = len(rows)
         plural = "s" if n != 1 else ""
-        caption = {
-            "needs": f"{n} artist{plural} Auto-Play can't place yet",
-            "suggested": f"{n} suggestion{plural} — tick ✓ to accept, or tap to adjust",
-            "all": f"{n} artist{plural} — tap one to edit, tick several to edit together",
-        }[self.filter]
-        if self.search.strip() and self.filter == "needs":
-            caption = f"{n} artist{plural} matching “{self.search.strip()}”"
+        q = self.search.strip()
+        caption = (f"{n} artist{plural} matching “{q}”" if q else
+                   f"{n} artist{plural} — tap one to edit, tick several to edit together")
         # One inset group with hairline rules between rows, Apple-style, rather
         # than a stack of separate cards.
-        head: ft.Control = ft.Text(caption, size=10.5, color=TEXT_TERTIARY,
-                                   max_lines=2, expand=True)
-        if self.filter == "all":
-            head = ft.Row([head, self._sort_pill()], spacing=8,
-                          vertical_alignment=ft.CrossAxisAlignment.CENTER)
+        head = ft.Text(caption, size=10.5, color=TEXT_TERTIARY, max_lines=2)
         self._list.controls = [
             ft.Container(
                 content=head,
@@ -882,20 +866,6 @@ class MetadataWorkbenchPane(ft.Column):
                 clip_behavior=ft.ClipBehavior.HARD_EDGE,
             ),
         ]
-
-    def _sort_pill(self) -> ft.Control:
-        label = "Least sure first" if self.sort == "least" else "Most sure first"
-        return ft.Container(
-            content=ft.Row([
-                ft.Icon(ft.Icons.SWAP_VERT_ROUNDED, size=13, color=CYAN),
-                ft.Text(label, size=11, weight=ft.FontWeight.W_600, color=CYAN),
-            ], spacing=4, tight=True),
-            bgcolor=apply_opacity(0.10, CYAN), border_radius=RADIUS_PILL,
-            border=ft.Border.all(1, apply_opacity(0.3, CYAN)),
-            padding=ft.Padding.symmetric(horizontal=10, vertical=5),
-            on_click=lambda _e: self._toggle_sort(), ink=True,
-            tooltip="Sort by how sure the metadata is",
-        )
 
     def _column_header(self) -> ft.Control:
         """Three columns, not four.
@@ -915,8 +885,7 @@ class MetadataWorkbenchPane(ft.Column):
                 ft.Container(content=h("GENRE"), expand=4),
                 ft.Container(content=h("♪", text_align=ft.TextAlign.RIGHT),
                              width=_TRACKS_W),
-            ] + ([ft.Container(width=_ACCEPT_W)] if self.filter == "suggested" else []),
-                spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            ], spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER),
             padding=ft.Padding.only(left=8, right=10, top=9, bottom=5),
         )
 
@@ -1014,16 +983,7 @@ class MetadataWorkbenchPane(ft.Column):
                                 text_align=ft.TextAlign.RIGHT),
                 width=_TRACKS_W,
             ),
-        ] + ([ft.Container(
-            content=ft.IconButton(
-                icon=ft.Icons.CHECK_CIRCLE_OUTLINE_ROUNDED, icon_size=20,
-                icon_color=_AI if ai else ACCENT_GREEN, tooltip="Accept",
-                on_click=lambda _e, n=name: self._accept([n]),
-                style=ft.ButtonStyle(padding=0),
-            ),
-            width=_ACCEPT_W, alignment=ft.Alignment(0, 0),
-        )] if self.filter == "suggested" else []),
-            spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER)
+        ], spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER)
 
         row = ft.Container(
             content=inner,
@@ -1071,13 +1031,6 @@ class MetadataWorkbenchPane(ft.Column):
         elif self.search.strip():
             icon, title, sub = (ft.Icons.SEARCH_OFF_ROUNDED, "No artist by that name.",
                                 "Try a different spelling, or clear the search.")
-        elif self.filter == "needs":
-            icon, title, sub = (ft.Icons.CHECK_CIRCLE_ROUNDED,
-                                "Every artist can be placed.",
-                                "Auto-Play has a genre or a country for all of them.")
-        elif self.filter == "suggested":
-            icon, title, sub = (ft.Icons.CHECK_CIRCLE_ROUNDED, "No suggestions waiting.",
-                                "Research artists under Needs you, or Sync.")
         else:
             icon, title, sub = (ft.Icons.CHECK_CIRCLE_ROUNDED, "Nothing to fix here.",
                                 "This view is clear.")
@@ -1103,10 +1056,6 @@ class MetadataWorkbenchPane(ft.Column):
         picker (search, scroll, replace-or-add in one visible choice), plus
         the answers for doubtful rows when the selection holds any."""
         n = len(self.selected)
-        if self.filter == "suggested" and self.everyone:
-            self._h_bins.visible = True
-            self._render_accept_tray(n)
-            return
         if not n or not self.everyone:
             self._h_bins.content = None
             self._h_bins.visible = False
@@ -1115,6 +1064,8 @@ class MetadataWorkbenchPane(ft.Column):
         names = sorted(self.selected)
         flagged = [x for x in names if self.review_by_name.get(x)]
         fixable = [x for x in flagged if self._fix_of(x)]
+        waiting = {g["artist_name"] for g in self._suggestion_rows()}
+        acceptable = [x for x in names if x in waiting]
 
         top: list[ft.Control] = [
             ft.Text(f"{n} selected", size=12, color=CYAN, weight=ft.FontWeight.W_700,
@@ -1134,6 +1085,12 @@ class MetadataWorkbenchPane(ft.Column):
                 )],
             ))
         actions: list[ft.Control] = []
+        if acceptable:
+            actions.append(self._ghost_btn(
+                f"Accept suggestion · {len(acceptable)}",
+                lambda _e: self._accept(acceptable),
+                fg=_AI if any(x in self.ai_pending for x in acceptable) else ACCENT_GREEN,
+                icon=ft.Icons.DONE_ALL_ROUNDED))
         if fixable:
             actions.append(self._ghost_btn(
                 f"Apply fix · {len(fixable)}", lambda _e: self._apply_fixes(fixable),
@@ -1160,25 +1117,6 @@ class MetadataWorkbenchPane(ft.Column):
         names = sorted(self.selected)
         self.selected.clear()
         self._start_research(names)
-
-    def _render_accept_tray(self, n: int):
-        rows = self._visible()
-        target = sorted(self.selected) if n else [g["artist_name"] for g in rows]
-        label = (f"Accept {n} selected" if n else f"Accept all {len(rows)}")
-        self._h_bins.content = ft.Container(
-            content=ft.Row([
-                ft.Text("Accepting saves the suggestion as your own answer. "
-                        "AI answers keep an AI label.",
-                        size=10.5, color=TEXT_TERTIARY, expand=True, max_lines=2),
-                (ft.TextButton("Clear", on_click=lambda _e: self._clear_selection(),
-                               style=ft.ButtonStyle(color=DIM)) if n else ft.Container()),
-                self._filled_btn(label, lambda _e: self._accept(target),
-                                 icon=ft.Icons.DONE_ALL_ROUNDED,
-                                 disabled=not target),
-            ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
-            padding=ft.Padding.only(left=2, right=2, top=8, bottom=6),
-            border=ft.Border.only(top=ft.BorderSide(1, BORDER_SUBTLE)),
-        )
 
     def _fix_of(self, name: str) -> dict | None:
         """The audit's own answer for a flagged row, if it has one: a namesake
