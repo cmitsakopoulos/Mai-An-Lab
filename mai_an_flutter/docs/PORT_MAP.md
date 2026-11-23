@@ -1,8 +1,9 @@
 # Mai An Lab: Flet → Flutter port map
 
 *Status: 2026-11-23. Phase 0 (backbone) done. Phase 1 (phone player) is
-written and passes its desktop tests (`flutter test`: 76) and the debug APK
-builds, but it has not run on the phone yet. Nothing ships from this port yet.*
+written and passes its desktop tests (`flutter test`: 87) and the debug APK
+builds, but it has not run on the phone yet. Nothing ships from this port yet.
+Phases 0–1 were audited against the Flet sources on 2026-11-23 (§9).*
 
 The Flet app (`StreamripApp/`) is the reference. It is tested (16.9k lines of
 tests) and it ships. Every behaviour here is checked against it, not against a
@@ -74,14 +75,14 @@ Status key:
 | 11 | **Path identity** | Absolute, platform-specific paths: phone `/storage/emulated/0/Music/…`, Mac `/Users/…/Desktop/Music/…`. NFC-normalised everywhere (`normalize_nfc`). `play_counts.track_path` is the join key. | Dart has no Unicode normaliser. A package such as `unorm_dart` is needed before the port writes any path (scanner, sync). Search already strips NFD combining marks (`fold`). | 3 | 🔨⚠️ |
 | 12 | **Artwork** | Kotlin `resolveArtwork`: embedded art via `MediaMetadataRetriever`, then the sidecar file, cached by sha1 | Keep the Kotlin. The handler resolves it for the current and next rows; sidecar lookup is lazy (per folder, not per queue row). | 1 | 🧪 |
 | 13 | **Audio analysis** | Kotlin `decodePcm` (MediaCodec, to mono PCM) + `dsp.py` (numpy, 906 lines). Usually offloaded to the Mac (sync). | Keep the decoder. The feature maths becomes Dart, or never runs on the phone (§6, decision B). | 6 | ⚠️ |
-| 14 | **EQ and loudness boost** | `set_eq_band_gain` and `set_loudness_boost` in the extension (just_audio Android effects) | In the handler (`setEqBandGain`, `setLoudnessBoost`). No settings UI yet. | 1 | 🧪 |
+| 14 | **EQ and loudness boost** | `set_eq_band_gain` and `set_loudness_boost` in the extension (just_audio Android effects). `reapply_dsp` runs on every track change: config.toml `[dsp]` preset + Dynamism (boost and EQ contour from the track's play_counts features). | In the handler (`setEqBandGain`, `setLoudnessBoost`). `player/dsp.dart` ports `reapply_dsp` with Python reference values; the controller applies it on every row change, including background auto-advance. Now Playing shows the Dynamism badge. Gains set before the device's EQ bands load are applied when they arrive. No settings UI yet (the Flet-written config is honoured). | 1 | 🧪 |
 | 15 | **Voice** | `flutter_tts`, `speech_to_text`, `RECORD_AUDIO`, `<queries>` for `RecognitionService` | Same plugins | 5 | ♻️ |
 | 16 | **Plain HTTP to the Mac** | `usesCleartextTraffic="true"` app-wide | `network_security_config` permitting cleartext only for local or private addresses (the sync server speaks plain HTTP) | 4 | 🔨 |
 | 17 | **LAN discovery** | UDP beacon on port 54545, `CHANGE_WIFI_MULTICAST_STATE`, listens for 10 s while the sync page is open | `RawDatagramSocket`, plus a small Kotlin call to hold a `WifiManager.MulticastLock`. ⚠️ Recheck local-network permission rules before raising targetSdk past 36. | 4 | 🔨⚠️ |
 | 18 | **Lifecycle** | `on_app_lifecycle_state_change`: suspend UI updates in the background, prefill the autoplay buffer on hide, run assistant and companion background hooks, pick up listens finished in the background | `AppLifecycleListener`. Flutter stops drawing frames by itself. Done: the position ticker stops and the position is saved on hide. Still to come: the auto-play prefill (2), ledger catch-up (3), assistant and companion hooks (4–5). | 1–4 | 🔨 |
 | 19 | **Edge-to-edge, predictive back** | Flet/Flutter defaults | targetSdk 36 forces both. Back on the root screen calls `moveTaskToBack` (MainActivity channel `mai_an/app`); predictive back is enabled. Still to audit: edge-to-edge insets in the sheets. | 1 | 🧪 |
 | 20 | **16 KB memory pages** (Android 15+ devices) | Flet build | ✅ Checked: every `.so` in the port's APK has 16 KB LOAD alignment, and the zip is 16 KB-aligned | 0 | ✅ |
-| 21 | **Haptics, links, clipboard, file picker** | `HapticFeedback` (about 15 call sites, configurable intensity), `UrlLauncher`, `FilePicker` (1) | `HapticFeedback` (core Flutter), `url_launcher`, `file_selector` | as needed | 🔨 |
+| 21 | **Haptics, links, clipboard, file picker** | `HapticFeedback` (about 15 call sites, configurable intensity), `UrlLauncher`, `FilePicker` (1) | `core/haptics.dart` reads `[haptics]` (on/off, per-action intensity, main.py's defaults); used by the track menu (long_press, swipe_queue). `url_launcher`, `file_selector` when needed. | as needed | 🔨 |
 | 22 | **APK size** | CPython + site-packages (about 72 MB of site-packages before trimming) | Debug build 146 MB (tooling included); release still to be measured | 1 | 🔨 |
 | 23 | **macOS** | Same Python codebase | No Xcode on this Mac (15.7.3). Build in CI or after an Xcode install. The Mac keeps the Flet app until phase 8. | 8 | ⚠️ |
 
@@ -262,6 +263,8 @@ uninstall and reinstall; the bundle export/import covers the data.
 | Microphone permission | Asked at first launch with the rest | Not asked until voice exists (phase 5) | Intentional. |
 | Long-press on a track | Flet's full context menu | Play next, Add to queue, Nearest by sound | The rest arrives with the features behind it (playlists, radio, metadata). |
 | Notification taps | Routed to the target tab | Received and dropped (one screen) | When there are screens to route to. |
+| DSP after background auto-advance | `reapply_dsp` runs only while the Python session hears the player, so tracks reached with the session torn down keep the previous track's settings | Applied on every row change | Intentional. |
+| Track row | Format badge, Flet subtitle rules, tint on the playing row | Same | Fixed in the phase 0–1 audit. |
 
 ---
 
@@ -280,3 +283,40 @@ uninstall and reinstall; the bundle export/import covers the data.
   so a fix there reaches both apps. At cutover, move that directory in.
 - **Desktop tests:** `flutter test`. Add `LIBRARY_DB=… flutter test
   test/real_library_test.dart` to run against a real database.
+
+---
+
+## 9. Phase 0–1 audit (2026-11-23)
+
+Every Flet source in the phase 0–1 scope was read against the port:
+the extension's `AudioPlayerHandler` and wrapper, `audio_engine.py`,
+`queue_layout.py`, main.py's playback, persistence, shuffle, repeat and
+lifecycle code, `now_playing.py`, `mini_player.py`, `queue_sheet.py`, and the
+tracks part of `library.py` and `db_manager.get_all_tracks`.
+
+Matched line for line: the handler (ledger, resume record, art, skip on
+error, idle release, audio focus, notification config), the queue model and
+every mutation, the op ordering and divergence repair, `_choose_resume` and
+all five persistence files, shuffle on/off with the set-aside queue, repeat,
+the position save loop, permissions, and the mini player, Now Playing and
+queue sheet layouts and texts.
+
+Gaps found and fixed in this pass:
+
+1. Per-track DSP (`reapply_dsp`): EQ preset and Dynamism were not applied at
+   all, and the Dynamism badge was missing (§1 row 14).
+2. Haptics ignored `[haptics]`; the track menu now uses Flet's actions and
+   intensities, and Play next / Add to queue give a haptic tick, not a
+   snackbar, as in Flet.
+3. Track rows lacked the format badge, Flet's subtitle rules and the
+   playing-row tint; durations were rounded instead of truncated.
+4. Missing title/artist/album fell back to "Unknown artist/album" instead of
+   Flet's `basename` / "Unknown".
+5. The "stopped" playback-failure snackbar used different wording.
+6. The queue sheet hid the kept queue after a stop.
+
+Still out of scope by phase (not gaps): the auto-play chain (2), the
+tracks tab's selection mode and playlist rows (3), Start radio, Add to
+playlist and Delete in the long-press menu (2–3), notification routing,
+the ledger drain (3), EQ settings UI (with the settings phases).
+

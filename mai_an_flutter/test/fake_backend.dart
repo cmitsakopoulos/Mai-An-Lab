@@ -196,6 +196,16 @@ class FakeBackend implements PlaybackBackend {
     emit();
   }
 
+  double boostDb = 0;
+  final eq = List<double>.filled(5, 0);
+
+  @override
+  Future<void> setLoudnessBoost(double gainDb) async => boostDb = gainDb;
+
+  @override
+  Future<void> setEqBandGain(int index, double gainDb) async =>
+      eq[index] = gainDb;
+
   @override
   Future<void> skipToNext() async => advance();
   @override

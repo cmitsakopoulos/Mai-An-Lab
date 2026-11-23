@@ -75,6 +75,12 @@ abstract interface class PlaybackBackend {
   Future<void> skipToNext();
   Future<void> skipToPrevious();
 
+  /// Loudness enhancer target gain in dB (Flet `set_loudness_boost`).
+  Future<void> setLoudnessBoost(double gainDb);
+
+  /// Gain of EQ band [index] (0–4) in dB (Flet `set_eq_band_gain`).
+  Future<void> setEqBandGain(int index, double gainDb);
+
   /// Where the handler appends finished listens and writes its resume
   /// record (Flet: `set_play_log_path`).
   void setPaths({required String ledgerPath, required String resumePath});

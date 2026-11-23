@@ -4,6 +4,7 @@ import 'package:sqlite3/sqlite3.dart';
 
 import '../core/db_worker.dart';
 import '../graph/coord_graph.dart';
+import '../player/dsp.dart';
 
 class Track {
   const Track({
@@ -30,9 +31,23 @@ class Track {
   /// Unix seconds (Python `time.time()`), null for rows that predate the column.
   final double? addedDate;
 
+  /// ui/widgets.py `fmt_time`: whole seconds, truncated.
   String get durationLabel {
-    final s = duration.round();
+    final s = duration.truncate();
     return '${s ~/ 60}:${(s % 60).toString().padLeft(2, '0')}';
+  }
+
+  /// library.py `_track_row`'s badge: the format column, else the file
+  /// extension, else "AUD"; upper case, at most 5 characters.
+  String get formatBadge {
+    var f = format;
+    if (f.isEmpty) {
+      final name = path.split('/').last;
+      final dot = name.lastIndexOf('.');
+      f = dot > 0 ? name.substring(dot + 1) : '';
+    }
+    f = (f.isEmpty ? 'AUD' : f).toUpperCase();
+    return f.length > 5 ? f.substring(0, 5) : f;
   }
 }
 
@@ -51,6 +66,11 @@ class LibraryRepository {
   Future<List<Track>> allTracks() => _db.run(_selectAllTracks);
 
   Future<CoordGraph> coordGraph() => _db.run(_buildCoordGraph);
+
+  /// The play_counts row's audio features for [path] (what `reapply_dsp`
+  /// selects), or null when the track has no row.
+  Future<DspFeatures?> dspFeatures(String path) =>
+      _db.run(_dspFeaturesJob(path));
 
   Future<void> close() => _db.close();
 }
@@ -75,9 +95,11 @@ List<Track> _selectAllTracks(Database db) {
       Track(
         id: r['id'] as int,
         path: r['path'] as String,
-        title: (r['title'] as String?) ?? _basename(r['path'] as String),
-        artist: (r['artist'] as String?) ?? 'Unknown artist',
-        album: (r['album'] as String?) ?? 'Unknown album',
+        // library.py `_track_row` / main.py `_play_track_core`:
+        // `title or basename(path)`, `artist or "Unknown"`, `album or "Unknown"`.
+        title: _or(r['title'] as String?, _basename(r['path'] as String)),
+        artist: _or(r['artist'] as String?, 'Unknown'),
+        album: _or(r['album'] as String?, 'Unknown'),
         duration: (r['duration'] as num?)?.toDouble() ?? 0,
         format: (r['format'] as String?) ?? '',
         trackNum: r['track_num'] as int?,
@@ -129,5 +151,28 @@ CoordGraph _buildCoordGraph(Database db) {
       ),
   ]);
 }
+
+/// Top-level so the job closure captures only [path] (it crosses to the DB
+/// isolate).
+DbJob<DspFeatures?> _dspFeaturesJob(String path) =>
+    (db) => _selectDspFeatures(db, path);
+
+DspFeatures? _selectDspFeatures(Database db, String path) {
+  final rows = db.select(
+    'SELECT energy, beat_strength, spectral_contrast FROM play_counts '
+    'WHERE track_path = ?',
+    [path],
+  );
+  if (rows.isEmpty) return null;
+  final r = rows.first;
+  return (
+    energy: (r['energy'] as num?)?.toDouble(),
+    beatStrength: (r['beat_strength'] as num?)?.toDouble(),
+    spectralContrast: (r['spectral_contrast'] as num?)?.toDouble(),
+  );
+}
+
+String _or(String? v, String fallback) =>
+    (v == null || v.isEmpty) ? fallback : v;
 
 String _basename(String path) => path.split(RegExp(r'[/\\]')).last;

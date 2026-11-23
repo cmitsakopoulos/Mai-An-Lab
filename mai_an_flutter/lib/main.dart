@@ -7,6 +7,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import 'core/app_config.dart';
+import 'core/haptics.dart';
 import 'data/library_repository.dart';
 import 'library/library_controller.dart';
 import 'library/library_screen.dart';
@@ -54,6 +55,7 @@ Future<void> main() async {
       library: library,
       player: player,
       accent: config.accent ?? Tokens.accent,
+      haptics: Haptics(config.haptics),
     ),
   );
   player.value = await _startPlayer(dataDir, library);
@@ -76,6 +78,9 @@ Future<PlayerController> _startPlayer(
     store: QueueStore(dataDir),
     prefs: Prefs(dataDir),
     libraryTracks: () async => library.allTracks,
+    // Re-read per track change, like Flet's reapply_dsp.
+    dspConfig: () async => (await AppConfig.load(dataDir)).dsp,
+    dspFeatures: library.dspFeatures,
   );
   await player.init();
   return player;
@@ -106,11 +111,13 @@ class MaiAnApp extends StatefulWidget {
     required this.library,
     required this.player,
     required this.accent,
+    required this.haptics,
   });
 
   final LibraryController library;
   final ValueNotifier<PlayerController?> player;
   final Color accent;
+  final Haptics haptics;
 
   @override
   State<MaiAnApp> createState() => _MaiAnAppState();
@@ -150,7 +157,11 @@ class _MaiAnAppState extends State<MaiAnApp> {
       title: 'Mai An Lab',
       debugShowCheckedModeBanner: false,
       theme: Tokens.theme(accentColor: widget.accent),
-      home: LibraryScreen(controller: widget.library, player: widget.player),
+      home: LibraryScreen(
+        controller: widget.library,
+        player: widget.player,
+        haptics: widget.haptics,
+      ),
     );
   }
 }

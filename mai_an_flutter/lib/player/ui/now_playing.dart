@@ -52,9 +52,11 @@ class _NowPlayingState extends State<NowPlaying> {
         listenable: p,
         builder: (context, _) {
           final row = p.nowPlaying;
-          final title = row?.title ?? 'Unknown';
-          final artist = row?.artist ?? 'Unknown';
-          final album = row?.album ?? 'Unknown';
+          // update_meta: `value or "Unknown"`.
+          String or(String? v) => (v == null || v.isEmpty) ? 'Unknown' : v;
+          final title = or(row?.title);
+          final artist = or(row?.artist);
+          final album = or(row?.album);
           return Padding(
             padding: const EdgeInsets.only(top: 10, bottom: 20),
             child: Column(
@@ -163,6 +165,15 @@ class _NowPlayingState extends State<NowPlaying> {
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: const TextStyle(color: Tokens.dim, fontSize: 14),
+                      ),
+                      ValueListenableBuilder(
+                        valueListenable: p.loudnessBoost,
+                        builder: (context, boost, _) => boost > 0
+                            ? Padding(
+                                padding: const EdgeInsets.only(top: 8),
+                                child: _DynamismBadge(boostDb: boost),
+                              )
+                            : const SizedBox.shrink(),
                       ),
                     ],
                   ),
@@ -379,6 +390,55 @@ class _QueuePill extends StatelessWidget {
             ),
           ),
         ),
+      ),
+    );
+  }
+}
+
+/// now_playing.py `_dynamism_badge`: shown while Dynamism boosts the track.
+class _DynamismBadge extends StatelessWidget {
+  const _DynamismBadge({required this.boostDb});
+  final double boostDb;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      decoration: BoxDecoration(
+        color: Tokens.amber.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.flash_on_rounded, color: Tokens.amber, size: 14),
+          const SizedBox(width: 6),
+          const Text(
+            'DYNAMISM ACTIVE',
+            style: TextStyle(
+              color: Tokens.amber,
+              fontSize: 10,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          const SizedBox(width: 6),
+          Text(
+            '|',
+            style: TextStyle(
+              color: Tokens.amber.withValues(alpha: 0.2),
+              fontSize: 10,
+            ),
+          ),
+          const SizedBox(width: 6),
+          Text(
+            '+${boostDb.toStringAsFixed(1)} dB',
+            style: const TextStyle(
+              color: Tokens.text,
+              fontSize: 10,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ],
       ),
     );
   }

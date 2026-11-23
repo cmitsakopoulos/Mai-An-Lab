@@ -5,18 +5,31 @@ import 'package:flutter/foundation.dart';
 import 'package:toml/toml.dart';
 
 import '../library/track_query.dart';
+import '../player/dsp.dart';
+import 'haptics.dart';
 
 /// The parts of the Flet app's config.toml the port reads so far. Read-only:
 /// utils/config.py owns the file (and its migrations) until the settings that
 /// write it are ported.
 class AppConfig {
-  const AppConfig({this.librarySort = LibrarySort.date, this.accent});
+  const AppConfig({
+    this.librarySort = LibrarySort.date,
+    this.accent,
+    this.dsp = const DspConfig(),
+    this.haptics = const HapticsConfig(),
+  });
 
   /// `general.library_sort` (Flet library.py: the initial sort).
   final LibrarySort librarySort;
 
   /// `appearance.accent_color`, legacy values mapped as in ui/tokens.py.
   final Color? accent;
+
+  /// `[dsp]`: EQ preset and Dynamism, applied on every track change.
+  final DspConfig dsp;
+
+  /// `[haptics]`: on/off and the intensity per action.
+  final HapticsConfig haptics;
 
   /// Where utils/config.py puts it. The Flet app points HOME at the data dir
   /// first (main.py), so `Path.home()` is `<data>`:
@@ -50,6 +63,8 @@ class AppConfig {
     return AppConfig(
       librarySort: LibrarySort.fromConfig(sort is String ? sort : null),
       accent: rawAccent is String ? parseAccent(rawAccent) : null,
+      dsp: DspConfig.fromToml(doc['dsp']),
+      haptics: HapticsConfig.fromToml(doc['haptics']),
     );
   }
 

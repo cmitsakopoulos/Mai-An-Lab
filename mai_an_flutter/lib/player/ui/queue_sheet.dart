@@ -36,7 +36,9 @@ class QueueSheet extends StatelessWidget {
         builder: (context, _) {
           final q = player.queue;
           final remaining = q.isEmpty ? 0 : q.length - q.currentIndex - 1;
-          final rows = q.isEmpty || player.stopped
+          // After a stop the queue is kept (from row 0), and Flet still
+          // lists it.
+          final rows = q.isEmpty
               ? const <(int, QueueEntry)>[]
               : q.upcoming(player.shuffleIndices).take(visibleRows).toList();
           final notice = _notice(player);
@@ -74,7 +76,10 @@ class QueueSheet extends StatelessWidget {
                             q.isEmpty
                                 ? 'Nothing queued'
                                 : '$remaining track${remaining == 1 ? '' : 's'} remaining',
-                            style: const TextStyle(color: Tokens.dim, fontSize: 12),
+                            style: const TextStyle(
+                              color: Tokens.dim,
+                              fontSize: 12,
+                            ),
                           ),
                         ],
                       ),
@@ -105,8 +110,14 @@ class QueueSheet extends StatelessWidget {
               const Divider(color: Tokens.borderSubtle, height: 1),
               if (notice != null)
                 Container(
-                  margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                  padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 12),
+                  margin: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 6,
+                  ),
+                  padding: const EdgeInsets.symmetric(
+                    vertical: 8,
+                    horizontal: 12,
+                  ),
                   decoration: BoxDecoration(
                     color: accent.withValues(alpha: 0.1),
                     border: Border.all(color: accent.withValues(alpha: 0.2)),
@@ -135,7 +146,11 @@ class QueueSheet extends StatelessWidget {
                         child: Column(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            Icon(Icons.queue_music_rounded, color: Tokens.dim, size: 48),
+                            Icon(
+                              Icons.queue_music_rounded,
+                              color: Tokens.dim,
+                              size: 48,
+                            ),
                             SizedBox(height: 8),
                             Text(
                               'Queue is empty',
@@ -146,7 +161,10 @@ class QueueSheet extends StatelessWidget {
                       )
                     : ReorderableListView.builder(
                         buildDefaultDragHandles: false,
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 6,
+                        ),
                         itemCount: rows.length,
                         onReorder: (a, b) => _reorder(rows, a, b),
                         itemBuilder: (context, pos) {
@@ -230,7 +248,8 @@ class _QueueRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final accent = Theme.of(context).colorScheme.primary;
     final curArtist = player.nowPlaying?.artist ?? '';
-    final sameArtist = !active && curArtist.isNotEmpty && row.artist == curArtist;
+    final sameArtist =
+        !active && curArtist.isNotEmpty && row.artist == curArtist;
     final showArtist =
         row.artist.trim().toLowerCase() != row.title.trim().toLowerCase();
     return Padding(
@@ -247,7 +266,9 @@ class _QueueRow extends StatelessWidget {
                 ? Tokens.libTrack.withValues(alpha: 0.06)
                 : Tokens.surface2,
             border: Border.all(
-              color: active ? accent.withValues(alpha: 0.35) : Tokens.borderSubtle,
+              color: active
+                  ? accent.withValues(alpha: 0.35)
+                  : Tokens.borderSubtle,
             ),
             borderRadius: BorderRadius.circular(Tokens.radiusCard),
           ),
@@ -306,7 +327,11 @@ class _QueueRow extends StatelessWidget {
                   index: position,
                   child: const Padding(
                     padding: EdgeInsets.all(8),
-                    child: Icon(Icons.reorder_rounded, color: Tokens.dim, size: 18),
+                    child: Icon(
+                      Icons.reorder_rounded,
+                      color: Tokens.dim,
+                      size: 18,
+                    ),
                   ),
                 ),
               IconButton(

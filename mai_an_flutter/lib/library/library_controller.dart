@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 import '../core/db_worker.dart';
 import '../data/library_repository.dart';
 import '../graph/coord_graph.dart';
+import '../player/dsp.dart';
 import 'track_query.dart';
 
 enum LoadState { loading, ready, error }
@@ -130,6 +131,11 @@ class LibraryController extends ChangeNotifier {
     if (g == null || idx == null) return null;
     return [for (final i in g.walk(idx, length: length)) ?_byPath[g.paths[i]]];
   }
+
+  /// The play_counts audio features of [path] for the player's per-track
+  /// sound settings; null when the track has none or the library isn't open.
+  Future<DspFeatures?> dspFeatures(String path) async =>
+      _repo?.dspFeatures(path);
 
   @override
   void dispose() {

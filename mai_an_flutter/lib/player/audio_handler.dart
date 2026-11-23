@@ -19,7 +19,8 @@ Future<AudioPlayerHandler> startAudioService() => AudioService.init(
   config: const AudioServiceConfig(
     // Same channel id as the Flet app: after cutover the user's notification
     // settings for it carry over.
-    androidNotificationChannelId: 'com.example.flet_audio_service.channel.audio',
+    androidNotificationChannelId:
+        'com.example.flet_audio_service.channel.audio',
     androidNotificationChannelName: 'Audio Playback',
     // false: EVERY playing→paused edge would otherwise drop the foreground and
     // the wakelock, including the ones nobody chose (a transient focus loss, a
@@ -52,7 +53,15 @@ class AudioPlayerHandler extends BaseAudioHandler
       _equalizer.setEnabled(true);
       _loudnessEnhancer.setEnabled(true);
       _equalizer.parameters
-          .then((p) => _equalizerBands = p.bands)
+          .then((p) {
+            _equalizerBands = p.bands;
+            // Gains set before the bands were known (the first track's DSP
+            // at startup) land now instead of being dropped.
+            for (var i = 0; i < _eqGains.length && i < p.bands.length; i++) {
+              p.bands[i].setGain(_eqGains[i]);
+            }
+            return p.bands;
+          })
           .catchError((Object e) {
             debugPrint('AudioPlayerHandler: equalizer parameters failed: $e');
             return <AndroidEqualizerBand>[];
@@ -187,7 +196,8 @@ class AudioPlayerHandler extends BaseAudioHandler
   @override
   bool get playing => _player.playing;
   @override
-  Processing get processing => Processing.values.byName(_player.processingState.name);
+  Processing get processing =>
+      Processing.values.byName(_player.processingState.name);
   @override
   Duration get position => _player.position;
   @override
@@ -258,11 +268,19 @@ class AudioPlayerHandler extends BaseAudioHandler
 
   // ── EQ and loudness (Flet: set_eq_band_gain, set_loudness_boost) ─────────
 
+  final _eqGains = List<double>.filled(5, 0);
+
+  @override
   Future<void> setLoudnessBoost(double gainDb) async {
-    if (Platform.isAndroid) await _loudnessEnhancer.setTargetGain(gainDb);
+    // engine._update_player_volume: never a cut.
+    if (Platform.isAndroid) {
+      await _loudnessEnhancer.setTargetGain(gainDb < 0 ? 0 : gainDb);
+    }
   }
 
+  @override
   Future<void> setEqBandGain(int index, double gainDb) async {
+    if (index >= 0 && index < _eqGains.length) _eqGains[index] = gainDb;
     final bands = _equalizerBands;
     if (bands == null || index < 0 || index >= bands.length) return;
     await bands[index].setGain(gainDb);
@@ -314,7 +332,8 @@ class AudioPlayerHandler extends BaseAudioHandler
     // its own. Only a player still idle on the same item is a dead track.
     Future.delayed(const Duration(milliseconds: 300), () async {
       if (_player.processingState != ProcessingState.idle) return;
-      if (_player.currentIndex != idx || idAt(_player.currentIndex) != failedId) {
+      if (_player.currentIndex != idx ||
+          idAt(_player.currentIndex) != failedId) {
         return;
       }
       var action = 'stopped';
@@ -341,7 +360,12 @@ class AudioPlayerHandler extends BaseAudioHandler
           ),
         );
       }
-      _reportPlaybackError(e.message ?? 'error ${e.code}', title, artist, action);
+      _reportPlaybackError(
+        e.message ?? 'error ${e.code}',
+        title,
+        artist,
+        action,
+      );
     });
   }
 
@@ -492,7 +516,12 @@ class AudioPlayerHandler extends BaseAudioHandler
     final folder = path.substring(0, slash);
     if (_sidecarByFolder.containsKey(folder)) return _sidecarByFolder[folder];
     String? found;
-    for (final name in const ['cover.jpg', 'folder.jpg', 'cover.png', 'front.jpg']) {
+    for (final name in const [
+      'cover.jpg',
+      'folder.jpg',
+      'cover.png',
+      'front.jpg',
+    ]) {
       try {
         if (await File('$folder/$name').exists()) {
           found = '$folder/$name';
@@ -565,11 +594,9 @@ class AudioPlayerHandler extends BaseAudioHandler
     }
     _ledgerWrites = _ledgerWrites.then((_) async {
       try {
-        await File(path).writeAsString(
-          '$line\n',
-          mode: FileMode.append,
-          flush: true,
-        );
+        await File(
+          path,
+        ).writeAsString('$line\n', mode: FileMode.append, flush: true);
       } catch (e) {
         debugPrint('AudioPlayerHandler: play-ledger append failed: $e');
       }
@@ -612,7 +639,9 @@ class AudioPlayerHandler extends BaseAudioHandler
     }
     _idleStopTimer ??= Timer(_idleStopAfter, () {
       _idleStopTimer = null;
-      debugPrint('AudioPlayerHandler: idle for $_idleStopAfter, releasing service');
+      debugPrint(
+        'AudioPlayerHandler: idle for $_idleStopAfter, releasing service',
+      );
       stop();
     });
   }
@@ -789,7 +818,9 @@ class AudioPlayerHandler extends BaseAudioHandler
     bool keepListen = false,
     bool autoplay = false,
   }) async {
-    final sources = [for (final item in items) _buildAudioSource(item.id, item)];
+    final sources = [
+      for (final item in items) _buildAudioSource(item.id, item),
+    ];
     // ignore: deprecated_member_use
     _playlist = ConcatenatingAudioSource(
       children: sources,

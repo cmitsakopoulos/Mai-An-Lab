@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 
 import '../data/library_repository.dart';
+import 'dsp.dart';
 import 'play_queue.dart';
 import 'playback_backend.dart';
 import 'queue_entry.dart';
@@ -34,6 +35,8 @@ class PlayerController extends ChangeNotifier {
     required this.store,
     required this.prefs,
     required this.libraryTracks,
+    this.dspConfig,
+    this.dspFeatures,
   });
 
   final PlaybackBackend backend;
@@ -42,6 +45,13 @@ class PlayerController extends ChangeNotifier {
 
   /// Every library track, for shuffle (which plays the whole library).
   final Future<List<Track>> Function() libraryTracks;
+
+  /// config.toml `[dsp]`, re-read on each track change as Flet's
+  /// `reapply_dsp` does. Null: no per-track sound settings.
+  final Future<DspConfig> Function()? dspConfig;
+
+  /// The play_counts features of a track (null: no row).
+  final Future<DspFeatures?> Function(String path)? dspFeatures;
 
   final PlayQueue queue = PlayQueue();
 
@@ -59,6 +69,10 @@ class PlayerController extends ChangeNotifier {
 
   /// Resolved cover for the playing row (a local file), if any.
   String? art;
+
+  /// Dynamism's loudness boost for the playing track, dB (0 = off). Drives
+  /// Now Playing's "DYNAMISM ACTIVE" badge (Flet `loudness_boost_db`).
+  final ValueNotifier<double> loudnessBoost = ValueNotifier(0);
 
   /// Play position → row while shuffling (the player owns the order).
   List<int> shuffleIndices = const [];
@@ -85,7 +99,10 @@ class PlayerController extends ChangeNotifier {
   // ── startup ──────────────────────────────────────────────────────────────
 
   Future<void> init() async {
-    backend.setPaths(ledgerPath: store.ledgerPath, resumePath: store.nativeResumePath);
+    backend.setPaths(
+      ledgerPath: store.ledgerPath,
+      resumePath: store.nativeResumePath,
+    );
     await prefs.load();
     queue.shuffle = prefs.getBool('is_shuffle');
     _repeat = Repeat.parse(prefs['repeat_mode']);
@@ -107,6 +124,7 @@ class PlayerController extends ChangeNotifier {
     if (change is! Reload) return;
     store.held = true;
     _show(queue.current);
+    _applyDsp();
     position.value = _secs(at.position);
     duration = _secs(at.duration);
     playing = false;
@@ -140,7 +158,9 @@ class PlayerController extends ChangeNotifier {
     }
     if (queue.shuffle) {
       // Shuffle plays from the ENTIRE library.
-      final lib = [for (final t in await libraryTracks()) QueueEntry.fromTrack(t)];
+      final lib = [
+        for (final t in await libraryTracks()) QueueEntry.fromTrack(t),
+      ];
       var idx = lib.indexWhere((t) => t.path == target.path);
       if (idx < 0) {
         lib.insert(0, QueueEntry.fromTrack(target));
@@ -202,7 +222,9 @@ class PlayerController extends ChangeNotifier {
     }
     var target = queue.neighbour(1, shuffleIndices);
     if (target == null && _repeat == Repeat.all) {
-      target = (queue.shuffle && shuffleIndices.isNotEmpty) ? shuffleIndices.first : 0;
+      target = (queue.shuffle && shuffleIndices.isNotEmpty)
+          ? shuffleIndices.first
+          : 0;
       target = target.clamp(0, queue.length - 1);
     }
     if (target != null) {
@@ -252,8 +274,9 @@ class PlayerController extends ChangeNotifier {
 
   void queueNext(Track t) => _apply(queue.queueNext(QueueEntry.fromTrack(t)));
   void queueLast(Track t) => _apply(queue.queueLast(QueueEntry.fromTrack(t)));
-  void queueLastMany(List<Track> ts) =>
-      _apply(queue.queueLastMany([for (final t in ts) QueueEntry.fromTrack(t)]));
+  void queueLastMany(List<Track> ts) => _apply(
+    queue.queueLastMany([for (final t in ts) QueueEntry.fromTrack(t)]),
+  );
 
   /// Remove one row (identity: the same song can be queued twice).
   void removeRow(QueueEntry row) {
@@ -276,7 +299,9 @@ class PlayerController extends ChangeNotifier {
     final cur = queue.current;
     if (on) {
       unawaited(_savePartition('queue_regular.json'));
-      final lib = [for (final t in await libraryTracks()) QueueEntry.fromTrack(t)];
+      final lib = [
+        for (final t in await libraryTracks()) QueueEntry.fromTrack(t),
+      ];
       queue.shuffle = true;
       if (lib.isEmpty) {
         _op(() => backend.setShuffle(true));
@@ -441,7 +466,9 @@ class PlayerController extends ChangeNotifier {
     if (failed) {
       _resync('queue op failed');
     } else if (backend.length != queue.length) {
-      _resync('native playlist has ${backend.length} rows, queue has ${queue.length}');
+      _resync(
+        'native playlist has ${backend.length} rows, queue has ${queue.length}',
+      );
     } else {
       _onBackendChange();
     }
@@ -469,7 +496,10 @@ class PlayerController extends ChangeNotifier {
       Timer(_resyncCooldown - now.difference(last), () {
         _resyncDeferred = false;
         if (_pushFloor != floor) return; // a push since then re-synced
-        _resync('$reason, deferred', playingSrc: backend.idAt(backend.currentIndex));
+        _resync(
+          '$reason, deferred',
+          playingSrc: backend.idAt(backend.currentIndex),
+        );
       });
       return;
     }
@@ -484,7 +514,9 @@ class PlayerController extends ChangeNotifier {
         start = found;
       }
     }
-    debugPrint('PlayerController: divergence ($reason); re-pushing ${queue.length} rows at $start');
+    debugPrint(
+      'PlayerController: divergence ($reason); re-pushing ${queue.length} rows at $start',
+    );
     if (start != queue.currentIndex) {
       queue.currentIndex = start;
       _syncForCurrent();
@@ -552,7 +584,7 @@ class PlayerController extends ChangeNotifier {
     _messages.add(
       f.action == 'skipped'
           ? "Couldn't play $name. Skipped to the next track."
-          : "Couldn't play $name. Playback stopped.",
+          : "Playback stopped: couldn't play $name or the tracks after it.",
     );
   }
 
@@ -566,7 +598,64 @@ class PlayerController extends ChangeNotifier {
       duration = _secs(cur.duration);
       art = backend.artFor(cur.src);
     }
+    _applyDsp();
     notifyListeners();
+  }
+
+  // ── per-track sound (EQ preset, Dynamism) ────────────────────────────────
+
+  String? _dspPath;
+  int _dspGen = 0;
+
+  /// `reapply_dsp`, run when the playing row changes (Flet: from
+  /// `_sync_metadata_for_current`). Here it also follows background
+  /// auto-advance, which the Flet session missed while torn down.
+  void _applyDsp() {
+    final loadCfg = dspConfig;
+    final cur = queue.current;
+    if (loadCfg == null || cur == null || cur.path == _dspPath) return;
+    _dspPath = cur.path;
+    final gen = ++_dspGen;
+    () async {
+      DspSettings out;
+      try {
+        final cfg = await loadCfg();
+        if (!cfg.dynamismEnabled) {
+          out = computeDsp(cfg, null);
+        } else {
+          // The row's own features first (as Flet reads the track dict),
+          // then the database.
+          final own = _rowFeatures(cur);
+          final f = hasDspFeatures(own)
+              ? own
+              : await dspFeatures?.call(cur.path);
+          out = computeDsp(cfg, f);
+        }
+      } catch (e) {
+        debugPrint('PlayerController: DSP failed: $e');
+        out = kNeutralDsp;
+      }
+      if (gen != _dspGen || _disposed) return;
+      loudnessBoost.value = out.boostDb;
+      try {
+        await backend.setLoudnessBoost(out.boostDb);
+        for (var i = 0; i < out.bands.length; i++) {
+          await backend.setEqBandGain(i, out.bands[i]);
+        }
+      } catch (e) {
+        debugPrint('PlayerController: applying DSP failed: $e');
+      }
+    }();
+  }
+
+  static DspFeatures? _rowFeatures(QueueEntry row) {
+    double? n(Object? v) => v is num ? v.toDouble() : null;
+    final d = row.data;
+    return (
+      energy: n(d['energy']),
+      beatStrength: n(d['beat_strength']),
+      spectralContrast: n(d['spectral_contrast']),
+    );
   }
 
   void _show(QueueEntry? row) {
@@ -645,7 +734,8 @@ class PlayerController extends ChangeNotifier {
 
   static Duration _secs(double s) =>
       Duration(microseconds: (s * Duration.microsecondsPerSecond).round());
-  static double _s(Duration d) => d.inMicroseconds / Duration.microsecondsPerSecond;
+  static double _s(Duration d) =>
+      d.inMicroseconds / Duration.microsecondsPerSecond;
 
   /// Completes when every queued backend op has run.
   Future<void> get settled async {
@@ -681,6 +771,7 @@ class PlayerController extends ChangeNotifier {
     _queueSave?.cancel();
     _posLoop?.cancel();
     position.dispose();
+    loudnessBoost.dispose();
     _messages.close();
     super.dispose();
   }

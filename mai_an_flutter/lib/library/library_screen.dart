@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../core/haptics.dart';
 import '../data/library_repository.dart';
 import '../player/player_controller.dart';
 import '../player/ui/mini_player.dart';
@@ -18,9 +19,11 @@ class LibraryScreen extends StatefulWidget {
     super.key,
     required this.controller,
     required this.player,
+    required this.haptics,
   });
 
   final LibraryController controller;
+  final Haptics haptics;
 
   /// Null until the player has started (after the permission prompts).
   final ValueListenable<PlayerController?> player;
@@ -116,7 +119,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
                   LoadState.loading => const Center(
                     child: CircularProgressIndicator(),
                   ),
-                  LoadState.error => _ErrorView(message: controller.error ?? ''),
+                  LoadState.error => _ErrorView(
+                    message: controller.error ?? '',
+                  ),
                   LoadState.ready => Column(
                     children: [
                       Padding(
@@ -179,7 +184,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   }
 
   void _trackMenu(Track t) {
-    HapticFeedback.selectionClick();
+    widget.haptics.trigger('long_press');
     final player = widget.player.value;
     showModalBottomSheet<void>(
       context: context,
@@ -190,7 +195,11 @@ class _LibraryScreenState extends State<LibraryScreen> {
           mainAxisSize: MainAxisSize.min,
           children: [
             ListTile(
-              title: Text(t.title, maxLines: 1, overflow: TextOverflow.ellipsis),
+              title: Text(
+                t.title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
               subtitle: Text(
                 '${t.artist} · ${t.album}',
                 maxLines: 1,
@@ -206,7 +215,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
               onTap: () {
                 Navigator.pop(sheet);
                 player!.queueNext(t);
-                _snack('Playing next: ${t.title}');
+                widget.haptics.trigger('swipe_queue');
               },
             ),
             ListTile(
@@ -216,7 +225,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
               onTap: () {
                 Navigator.pop(sheet);
                 player!.queueLast(t);
-                _snack('Added to queue: ${t.title}');
+                widget.haptics.trigger('swipe_queue');
               },
             ),
             ListTile(
@@ -321,7 +330,9 @@ class _Header extends StatelessWidget {
   }
 }
 
-/// Deliberately light: one InkWell, one Row, three Texts.
+/// library.py `_track_row`: format badge, title, "artist · album", duration.
+/// The playing row is tinted and drawn in the accent. Kept light: one
+/// InkWell, one Row.
 class _TrackRow extends StatelessWidget {
   const _TrackRow({
     required this.track,
@@ -330,62 +341,101 @@ class _TrackRow extends StatelessWidget {
     this.onLongPress,
   });
 
-  static const height = 60.0;
+  /// library.py ROW_H.
+  static const height = 64.0;
   final Track track;
   final bool playing;
   final VoidCallback? onTap;
   final VoidCallback? onLongPress;
 
+  /// The subtitle rules of `_track_row`: "Unknown" and a value equal to the
+  /// title are left out.
+  static String subtitle(Track t) {
+    bool keep(String v) =>
+        v.isNotEmpty &&
+        v != 'Unknown' &&
+        v.trim().toLowerCase() != t.title.trim().toLowerCase();
+    final parts = [if (keep(t.artist)) t.artist, if (keep(t.album)) t.album];
+    if (parts.isNotEmpty) return parts.join('  ·  ');
+    return (t.artist.isNotEmpty && t.artist != 'Unknown') ? t.artist : '';
+  }
+
   @override
   Widget build(BuildContext context) {
     final accent = Theme.of(context).colorScheme.primary;
-    return InkWell(
-      onTap: onTap,
-      onLongPress: onLongPress,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16),
-        child: Row(
-          children: [
-            Expanded(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    track.title,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      color: playing ? accent : Tokens.text,
-                      fontSize: 15,
-                      fontWeight: playing ? FontWeight.w600 : null,
+    return Material(
+      color: playing ? accent.withValues(alpha: 0.1) : Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        onLongPress: onLongPress,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          child: Row(
+            children: [
+              Container(
+                width: 40,
+                height: 20,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: playing
+                      ? accent.withValues(alpha: 0.22)
+                      : Tokens.text.withValues(alpha: 0.08),
+                  border: Border.all(
+                    color: playing ? accent : Tokens.borderSubtle,
+                  ),
+                  borderRadius: BorderRadius.circular(5),
+                ),
+                child: Text(
+                  track.formatBadge,
+                  style: TextStyle(
+                    fontSize: 9,
+                    fontWeight: FontWeight.w700,
+                    color: playing ? accent : Tokens.dim,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 16),
+              Expanded(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      track.title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: playing ? accent : Tokens.text,
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                      ),
                     ),
+                    const SizedBox(height: 2),
+                    Text(
+                      subtitle(track),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: playing ? accent : Tokens.dim,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              if (track.duration > 0) ...[
+                const SizedBox(width: 12),
+                Text(
+                  track.durationLabel,
+                  style: TextStyle(
+                    color: playing ? accent : Tokens.textTertiary,
+                    fontSize: 12,
+                    fontFeatures: const [FontFeature.tabularFigures()],
                   ),
-                  const SizedBox(height: 2),
-                  Text(
-                    '${track.artist} · ${track.album}',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(color: Tokens.dim, fontSize: 13),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(width: 12),
-            if (playing)
-              Padding(
-                padding: const EdgeInsets.only(right: 8),
-                child: Icon(Icons.graphic_eq_rounded, color: accent, size: 16),
-              ),
-            Text(
-              track.durationLabel,
-              style: const TextStyle(
-                color: Tokens.textTertiary,
-                fontSize: 13,
-                fontFeatures: [FontFeature.tabularFigures()],
-              ),
-            ),
-          ],
+                ),
+              ],
+            ],
+          ),
         ),
       ),
     );
