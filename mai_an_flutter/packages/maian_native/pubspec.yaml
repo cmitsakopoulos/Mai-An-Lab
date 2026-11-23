@@ -1,0 +1,22 @@
+name: maian_native
+description: >-
+  The Android half of the Flet app's flet_audio_service extension (Kotlin:
+  artwork, notifications, PCM decode, the library task service), compiled from
+  the SAME source files the Flet app ships. See android/build.gradle.kts.
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ^3.11.1
+  flutter: ">=3.10.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+flutter:
+  plugin:
+    platforms:
+      android:
+        package: com.flet.flet_audio_service
+        pluginClass: FletAudioServicePlugin
