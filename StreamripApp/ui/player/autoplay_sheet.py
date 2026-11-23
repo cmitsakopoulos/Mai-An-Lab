@@ -1,5 +1,5 @@
-"""Auto-play sheet: on/off and what the station is playing from. Opened by tapping the chain icon in Now Playing (long-press there
-is the instant on/off shortcut) and from the queue sheet's Auto-play header.
+"""Auto-play sheet: on/off and what the station is playing from. Opened from the
+queue sheet's Auto-play header (Now Playing's chain icon is a plain toggle).
 
 All behaviour lives in utils/autoplay.py; this only presents it.
 """

@@ -156,20 +156,18 @@ class QueueHeaderTests(_Base):
 
 
 class NowPlayingChainTests(_Base):
-    def test_tap_turns_on_then_opens_sheet(self):
+    def test_tap_toggles_both_ways(self):
         from ui.player import now_playing as np_mod
         np = np_mod.NowPlayingSheet(self.app)
         np._ensure_initialized()
-        opened, toggled = MagicMock(), MagicMock()
-        np.open_autoplay_sheet, np._toggle_play_similar = opened, toggled
         self.app.play_similar_mode = False
-        np._play_similar_btn.on_click(MagicMock())       # off: one tap turns it on
-        toggled.assert_called_once()
-        opened.assert_not_called()
+        np._play_similar_btn.on_click(MagicMock())       # off -> on
+        self.app.page.run_task.assert_called_with(np._toggle_play_similar_async)
+        self.app.page.run_task.reset_mock()
         self.app.play_similar_mode = True
-        np._play_similar_btn.on_click(MagicMock())       # on: tap opens the sheet
-        opened.assert_called_once()
-        self.assertIsNotNone(np._play_similar_btn.on_long_press)
+        np._play_similar_btn.on_click(MagicMock())       # on -> off, no sheet
+        self.app.page.run_task.assert_called_with(np._toggle_play_similar_async)
+        self.assertFalse(hasattr(np, "open_autoplay_sheet"))
         # The label rides above the icon in the same row; no status pill.
         self.assertIn(np._autoplay_label, np._autoplay_cell.controls)
         self.assertFalse(hasattr(np, "_autoplay_pill"))

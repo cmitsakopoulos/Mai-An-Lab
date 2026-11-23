@@ -95,12 +95,9 @@ class NowPlayingSheet:
             icon=ft.Icons.LINK_ROUNDED if self.app.play_similar_mode else ft.Icons.LINK_OFF_ROUNDED,
             icon_color=CYAN if self.app.play_similar_mode else DIM,
             icon_size=20,
-            # One tap turns Auto-Play ON — it used to open a sheet first, so
-            # starting it took two taps and a decision. Once it's on, a tap
-            # opens the sheet (station, Off). Long-press toggles either way.
-            # No tooltip: on Android it claims long-press.
-            on_click=lambda e: self._on_autoplay_tap(e),
-            on_long_press=self._toggle_play_similar,
+            # A plain on/off button: one tap toggles Auto-Play either way.
+            # The station details live in the queue sheet's Auto-play header.
+            on_click=self._toggle_play_similar,
             disabled=True,
             opacity=0.4,
             # Tighter than the shuffle/repeat buttons so icon + the label above
@@ -393,12 +390,6 @@ class NowPlayingSheet:
         self.app.mini_player.update_state(is_playing)
         self.page.update()
 
-    def _on_autoplay_tap(self, e):
-        if self.app.play_similar_mode:
-            self.open_autoplay_sheet()
-        else:
-            self._toggle_play_similar(e)
-
     def _toggle_play_similar(self, e):
         self.page.run_task(self._toggle_play_similar_async)
 
@@ -441,10 +432,6 @@ class NowPlayingSheet:
             self._art_placeholder.update()
         except (RuntimeError, AssertionError):
             pass
-
-    def open_autoplay_sheet(self):
-        from ui.player.autoplay_sheet import AutoPlaySheet
-        AutoPlaySheet(self.app).open()
 
     async def _check_play_similar_availability(self):
         """Background check: disable the chain button when no tracks have DSP features."""
