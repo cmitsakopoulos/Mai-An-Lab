@@ -18,9 +18,9 @@ state bundles (export, import, the boot snapshot and import, backup to the
 Mac), and the DSP offload with the acoustic build (the SVD geometry and the
 genre model, identical in effect to Python's: the same stations on all 20
 golden seeds) (§4, phase 4). Phase 5 (the assistant) is planned in seven
-stages; stage a (the intent parser and text helpers, identical to Python on
-4,961 utterances) is done (§4, phase 5). Desktop
-tests pass (`flutter test`: 571, including the real-library golden tests
+stages; stages a (the intent parser and text helpers, identical to Python
+on 4,961 utterances) and b (the LLM client) are done (§4, phase 5). Desktop
+tests pass (`flutter test`: 591, including the real-library golden tests
 that need the gitignored goldens; analyzer clean in Dart's strict modes);
 debug and release APKs build.
 It is installed on the phone (2026-11-24, with the 2026-11-02 library, an
@@ -202,7 +202,7 @@ Verdicts:
 | `sync/server.py`, `transcoder.py` (ffmpeg) | ~1,340 | Keep on Mac until phase 8 | 8 |
 | `ui/views/sync_hub.py` | 1,012 | Rewrite ✅ (`settings/sync_hub.dart`: the Android view's four cards; the Mac's server view with phase 8) | 4 |
 | `state_export.py` | 294 | Port ✅ (`data/state_export.dart`, `core/zip_archive.dart`, `sync/state_bundles.dart`) | 4 |
-| `llm_engine.py` (Gemini/Ollama over an OpenAI-compatible API) | 231 | Port: plain HTTP + JSON | 5 |
+| `llm_engine.py` (Gemini/Ollama over an OpenAI-compatible API) | 231 | Port ✅ (`assistant/llm_engine.dart`, golden-tested) | 5 |
 | `llm_tools.py`, `assistant_runner.py`, `assistant_intent.py`, `chat_memory.py`, `web_research.py` | ~4,500 | Port, with golden intent and tool-call tests (§4, phase 5). `assistant_intent` ✅ (`assistant/intent.dart`), `chat_memory` ✅, `llm_tools`' text helpers and `names_mentioned` ✅ (`assistant/agent_text.dart`, `assistant/web_text.dart`), over `core/py_re.dart` (Python's `re` semantics) | 5 |
 | `ui/views/assistant.py` | 861 | Rewrite | 5 |
 | `qobuz.py`, `deezer.py`, `streamrip_api.py`, `streamrip_search.py`, `downloadable.py`, `search_results.py`, `source_metadata.py`, `new_releases.py` + deezer-py, streamrip, pycryptodomex | ~3,000 + libraries | ⚠️ Port or keep on Mac (§6, decision A) | 6 |
@@ -817,7 +817,7 @@ AI Assistant, and voice through the extension's `flutter_tts` and
 | | Stage | Flet source | |
 |---|---|---|---|
 | a | The intent parser and text helpers: `parse` (Python `re` → Dart `RegExp`), `strip_markdown`, `_slim_track`, `ChatMemoryManager` (`chat_history.json`, `graph_state.json`), `names_mentioned` | `assistant_intent.py`, `llm_tools.py` (helpers), `chat_memory.py`, `web_research.py` (`_fold`, `names_mentioned`) | ✅ |
-| b | The LLM client and the tool declarations: one OpenAI-compatible request (Gemini and Ollama URLs, headers, timeouts, the retry after a connection failure), `_parse_tool_calls`, the raw message kept for the echo, `list_gemini_models`; `get_agent_tools()` | `llm_engine.py`, `llm_tools.get_agent_tools` | 🔨 |
+| b | The LLM client and the tool declarations: one OpenAI-compatible request (Gemini and Ollama URLs, headers, timeouts, the retry after a connection failure), `_parse_tool_calls`, the raw message kept for the echo, `list_gemini_models`; `get_agent_tools()` | `llm_engine.py`, `llm_tools.get_agent_tools` | ✅ |
 | c | The runner's deterministic half: dispatch, the pending confirmation and choice, anaphora, every `_handle_*`, `_resolve_queries` (with difflib's `SequenceMatcher` ported), the avoid set, over an interface the player controller implements | `assistant_runner.py` | 🔨 |
 | d | The agent: `_dispatch_llm`'s loop and prompt, `execute_tool` for the library, playback and status tools | `assistant_runner._dispatch_llm`, `llm_tools.execute_tool` | 🔨 |
 | e | The web tools: `ask` (DuckDuckGo Lite, Wikipedia, Google grounding), `learn_about`, `find_related_artists` | `web_research.py`, `metadata_ai`'s search half | 🔨 |
@@ -859,12 +859,35 @@ per 4,096); `save_session` and `save_graph_state` byte for byte with a
 fixed clock, and `load_session` at 900 s (kept, 50 messages) and 900.5 s
 (expired, file deleted).
 
-**Stage b.** `get_agent_tools()` is sent as Python builds it, so the model
-sees the same tool list (§7 for the tools whose features come later).
-Proved with a local HTTP server that records requests: Python's
-`LLMEngine` and the port send the same bodies and headers for the same
-messages, and parse the same scripted replies alike (tool calls as a JSON
-string, as an object, without ids, malformed; HTTP errors; empty choices).
+**Stage b.** `assistant/llm_engine.dart` is `llm_engine.py`: one
+OpenAI-compatible POST over dart:io (Gemini's endpoint with the key as a
+Bearer token and 30 s, or `<endpoint>/chat/completions` locally and 45 s;
+10 s to connect), the payload as aiohttp's `json=` writes it
+(`pyJsonDumps`), one retry 1.5 s after a refused connection, Python's
+error texts (`Provider returned HTTP n: <200 characters>`, `Empty
+response from provider.`, `Network error: ` and an empty reason on a
+timeout), `_parse_tool_calls` (arguments as a JSON string or an object,
+`<name>_<i>` for a call without an id, `{}` for anything malformed), the
+provider's message kept for the echo, and `list_gemini_models` (pages of
+1,000, the page token quoted as yarl quotes it, the non-chat families left
+out, newest id first). `assistant/agent_tools.dart` is
+`get_agent_tools()`, generated once from Python's list and pinned by the
+golden: 30 tools, the later phases' included (§7).
+
+**How parity is proved (stage b).** `tool/export_llm_goldens.py` runs
+Flet's `LLMEngine` against a local server that records each request and
+answers from a script; `test/llm_engine_test.dart` replays the same
+scripts against the port from its own server. Equal: every request
+(method, path and query, the Authorization, Content-Type and
+x-goog-api-key headers, the body byte for byte) and every parsed result
+(content, tool calls, success, error, raw message) in 12 chat scenarios
+(Ollama, Gemini with all 30 tools, the default model, an empty tool list,
+HTTP 400 with a long Greek body, HTTP 500, empty or missing choices, no
+message, unconfigured, an unknown provider, a reply that isn't JSON;
+eleven tool-call shapes) and 4 model-list scenarios (two pages with
+filtering, duplicates and a token with `+/=`, HTTP 403, no key, an empty
+reply); `get_agent_tools()` byte for byte. Also: a refused connection is
+retried once, a stalled server ends in `Network error: `.
 
 **Stage c.** The runner drives the player through an interface
 (queue, `set_queue`, add last/next/many, remove, move, transport,
@@ -1024,6 +1047,7 @@ uninstall and reinstall; the bundle export/import covers the data.
 | Boot snapshot on desktop | Written to ~/Downloads on every start | Not written | Desktop runs are development until phase 8. |
 | Export State on desktop | A native folder picker (~/Downloads when cancelled) | ~/Downloads | No native picker in the port yet; desktop isn't shipped. |
 | A `sync` notification tap with Settings open | Switches the Settings view to Companion & Sync | Pushes Settings at Companion & Sync over what is open | Back returns to where the user was; nothing to fix unless it bothers in use. |
+| Network errors from the LLM client | aiohttp's text after `Network error: ` | dart:io's | Different words, same bubble; a timeout reads `Network error: ` in both. |
 | Discovery on Android | Hears only the Mac's unicast replies to its query (no multicast lock without pyjnius) | Holds a MulticastLock while listening, so the Mac's 2 s broadcast beacons arrive as well | Intentional (§1 row 17): finds the Mac sooner on networks that pass broadcasts. |
 | The acoustic SVD | numpy's float32 LAPACK SVD of Z | The eigenvectors of ZᵀZ in float64 (cyclic Jacobi) for the identical float32 Z | Within float32 precision: on the real library coordinates differ by at most 2.4e-4 (largest 11.6) and cosines by 1.3e-6, and stations match on all 20 golden seeds. The port's eigenvalues equal a float64 SVD's to 1e-9. |
 | The sign of each coordinate axis | Whatever LAPACK returns (it differs between numpy builds, so the Mac's and the phone's Flet can disagree) | scikit-learn's `svd_flip`: each component's largest loading positive | Cosine and distances, which the stations use, are unchanged; the Network view's map can come out mirrored next to a Python-built one. |
@@ -1127,7 +1151,8 @@ landing; then this plan; all pushed to origin. Then Settings (`e946579`)
 and the Network view, local. Then phase 4a (the Companion protocol), 4b (notifications), 4c (the
 sync manager), 4d (the download queue and dock), 4e (the Companion UI),
 4f (state bundles) and 4g (the DSP offload and the acoustic build), local.
-Then the phase 5 plan and stage a (the intent parser), local.
+Then the phase 5 plan, stage a (the intent parser) and b (the LLM
+client), local.
 
 **Done**
 - [x] Phase 0: backbone (read-only DB isolate, tracks tab, sort, search,
@@ -1215,6 +1240,9 @@ Then the phase 5 plan and stage a (the intent parser), local.
       RegExp), `strip_markdown`, `_slim_track`, `names_mentioned`, the chat
       memory files; identical to Python on 4,961 utterances. `pyLower` and
       `pyCasefold` now table-driven, equal to Python on every code point.
+- [x] Phase 5b: the LLM client (`llm_engine.py`) and the tool
+      declarations; requests and parsed replies identical to Python's in
+      16 recorded scenarios.
 
 **To do, in order**
 1. [ ] Install the current build on the phone: `tool/install_phone.sh
@@ -1272,9 +1300,9 @@ Then the phase 5 plan and stage a (the intent parser), local.
           Cancel with the screen off; the graph rebuilt after; Settings →
           Database Management → Recompute PCA).
        k. Phase 5 (the assistant), planned 2026-11-24 in seven stages
-          (§4, phase 5). Stage a done (the intent parser and text
-          helpers). Next: stage b (the LLM client and the tool
-          declarations).
+          (§4, phase 5). Stages a (the intent parser and text helpers)
+          and b (the LLM client and the tool declarations) done. Next:
+          stage c (the runner's deterministic half).
 5. [ ] Decisions A, B, C (§6) before phase 6 is planned in detail.
 6. [ ] Flet, on master: the album menu's Play Album tuple,
        Appearance's sort writing `library_sort`, the Network view's

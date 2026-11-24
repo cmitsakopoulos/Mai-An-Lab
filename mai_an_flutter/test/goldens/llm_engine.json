@@ -1,0 +1,1310 @@
+{
+ "tools": [
+  {
+   "name": "search_library",
+   "description": "Search the user's LOCAL music library for tracks. Returns matches with their 'path' (the stable identity you pass to other tools). Use this to check what the user owns before playing.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "query": {
+      "type": "string",
+      "description": "Track title, artist, or album to search for."
+     },
+     "genre": {
+      "type": "string",
+      "description": "Optional genre filter, e.g. 'Jazz'."
+     },
+     "limit": {
+      "type": "integer",
+      "description": "Max results (default 10)."
+     }
+    },
+    "required": []
+   }
+  },
+  {
+   "name": "play_music",
+   "description": "Play tracks matching a query immediately, REPLACING the current queue. Resolves the query against the local library (handles artist/title/album). If a non-empty queue would be replaced, the user is asked to confirm first.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "query": {
+      "type": "string",
+      "description": "What to play (artist, title, or album)."
+     },
+     "path": {
+      "type": "string",
+      "description": "Optional exact track path from search_library for a precise pick."
+     }
+    },
+    "required": []
+   }
+  },
+  {
+   "name": "enqueue_music",
+   "description": "Add tracks matching a query to the END of the queue without interrupting playback.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "query": {
+      "type": "string",
+      "description": "What to enqueue."
+     },
+     "path": {
+      "type": "string",
+      "description": "Optional exact track path from search_library."
+     }
+    },
+    "required": [
+     "query"
+    ]
+   }
+  },
+  {
+   "name": "play_next",
+   "description": "Insert a track to play right AFTER the current one, without clearing the queue.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "query": {
+      "type": "string",
+      "description": "What to play next."
+     },
+     "path": {
+      "type": "string",
+      "description": "Optional exact track path from search_library."
+     }
+    },
+    "required": [
+     "query"
+    ]
+   }
+  },
+  {
+   "name": "play_similar",
+   "description": "Curate more tracks acoustically similar to what is currently playing, using the DSP similarity walk. Use when the user wants 'more like this'.",
+   "parameters": {
+    "type": "object",
+    "properties": {},
+    "required": []
+   }
+  },
+  {
+   "name": "steer_mood",
+   "description": "Build a mood/vibe-based mix from the local library based on any mood descriptor (e.g. 'chill', 'energetic', 'melancholic', 'focus', 'workout', 'dark', 'upbeat', 'rainy day') and start playing it using DSP acoustic feature matching.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "mood": {
+      "type": "string",
+      "description": "Target mood or vibe description."
+     }
+    },
+    "required": [
+     "mood"
+    ]
+   }
+  },
+  {
+   "name": "search_by_acoustic_profile",
+   "description": "Search the local music library by acoustic properties extracted by DSP (energy 0.0-1.0, brightness 0.0-1.0, bpm range, genre filters). Use when the user asks for music with specific acoustic traits or energy levels.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "min_energy": {
+      "type": "number",
+      "description": "Minimum energy (0.0=calm to 1.0=intense)."
+     },
+     "max_energy": {
+      "type": "number",
+      "description": "Maximum energy (0.0 to 1.0)."
+     },
+     "min_brightness": {
+      "type": "number",
+      "description": "Minimum acoustic brightness (0.0=dark/warm to 1.0=bright)."
+     },
+     "max_brightness": {
+      "type": "number",
+      "description": "Maximum acoustic brightness."
+     },
+     "min_bpm": {
+      "type": "integer",
+      "description": "Minimum tempo in BPM."
+     },
+     "max_bpm": {
+      "type": "integer",
+      "description": "Maximum tempo in BPM."
+     },
+     "genre": {
+      "type": "string",
+      "description": "Optional genre substring filter."
+     },
+     "limit": {
+      "type": "integer",
+      "description": "Max results (default 10)."
+     }
+    },
+    "required": []
+   }
+  },
+  {
+   "name": "playback_control",
+   "description": "Control transport: pause, resume, skip, previous, stop, clear_queue, or shuffle.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "action": {
+      "type": "string",
+      "enum": [
+       "pause",
+       "resume",
+       "skip",
+       "previous",
+       "stop",
+       "clear_queue",
+       "shuffle"
+      ],
+      "description": "Transport action to perform."
+     }
+    },
+    "required": [
+     "action"
+    ]
+   }
+  },
+  {
+   "name": "save_queue_as_playlist",
+   "description": "Save the current queue/walk (from the current position onward) as a named playlist.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "name": {
+      "type": "string",
+      "description": "Playlist name."
+     }
+    },
+    "required": [
+     "name"
+    ]
+   }
+  },
+  {
+   "name": "get_player_status",
+   "description": "Get the currently playing track, playback state, and queue length.",
+   "parameters": {
+    "type": "object",
+    "properties": {},
+    "required": []
+   }
+  },
+  {
+   "name": "get_current_track_info",
+   "description": "Get detailed metadata (title, artist, album, duration) about the current track.",
+   "parameters": {
+    "type": "object",
+    "properties": {},
+    "required": []
+   }
+  },
+  {
+   "name": "search_online",
+   "description": "Search Qobuz ONLINE for tracks/albums the user may not own locally. Returns results. Set download=true to fetch the top result — this ALWAYS asks the user to confirm first.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "query": {
+      "type": "string",
+      "description": "Online search query."
+     },
+     "download": {
+      "type": "boolean",
+      "description": "If true, offer to download the top match (requires user confirmation)."
+     }
+    },
+    "required": [
+     "query"
+    ]
+   }
+  },
+  {
+   "name": "web_search",
+   "description": "Look anything up on the web that the library can't answer: an artist's story, what a song is about, release dates, who produced or sampled what, band members, new or upcoming releases, tours, what genre or scene something belongs to, translations of titles. Returns a written answer (Google) or search snippets, each with its source. Answer from what it returns, briefly naming the source; never guess facts you could look up.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "query": {
+      "type": "string",
+      "description": "The question or search terms, with the artist name for context."
+     }
+    },
+    "required": [
+     "query"
+    ]
+   }
+  },
+  {
+   "name": "learn_about",
+   "description": "Background on the CURRENT track, its artist or its album (or a named one): what the library knows (album, year, genre, country, plays) plus the web's story. Use for 'tell me about this song', 'who is this', 'what's this album'.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "subject": {
+      "type": "string",
+      "enum": [
+       "track",
+       "artist",
+       "album"
+      ],
+      "description": "What to describe (default: track)."
+     },
+     "name": {
+      "type": "string",
+      "description": "Optional: a named track/artist/album instead of what's playing."
+     }
+    },
+    "required": []
+   }
+  },
+  {
+   "name": "find_related_artists",
+   "description": "Artists the web calls similar to an artist (default: the one playing), split into those already in the user's library (playable now with play_music / enqueue_music) and the sources naming others (findable with search_online). Use for 'who else sounds like this', 'artists like X', 'build me a mix around X'.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "artist": {
+      "type": "string",
+      "description": "Artist name; omit for the current artist."
+     }
+    },
+    "required": []
+   }
+  },
+  {
+   "name": "get_library_overview",
+   "description": "Summary stats of the local library: total tracks, artist/album/playlist counts, and the top genres. Use for 'how big is my library' / 'what genres do I have'.",
+   "parameters": {
+    "type": "object",
+    "properties": {},
+    "required": []
+   }
+  },
+  {
+   "name": "get_top_played",
+   "description": "The user's most-played tracks with play counts. Use for 'my most played', 'favourite songs'.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "limit": {
+      "type": "integer",
+      "description": "How many (default 10)."
+     }
+    },
+    "required": []
+   }
+  },
+  {
+   "name": "list_artists",
+   "description": "List artists in the library (with per-artist track & album counts), optionally filtered. Use for 'how many artists', 'do I have <artist>', 'how many tracks by <artist>'.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "search": {
+      "type": "string",
+      "description": "Optional name filter."
+     },
+     "limit": {
+      "type": "integer",
+      "description": "Max results (default 25)."
+     }
+    },
+    "required": []
+   }
+  },
+  {
+   "name": "get_artist_albums",
+   "description": "List the albums the library holds for a given artist (title, year, genre, track count).",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "artist": {
+      "type": "string",
+      "description": "Artist name."
+     }
+    },
+    "required": [
+     "artist"
+    ]
+   }
+  },
+  {
+   "name": "get_album_tracks",
+   "description": "List the tracks on an album, in order. Artist is optional but disambiguates same-named albums.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "album": {
+      "type": "string",
+      "description": "Album title."
+     },
+     "artist": {
+      "type": "string",
+      "description": "Optional artist name."
+     }
+    },
+    "required": [
+     "album"
+    ]
+   }
+  },
+  {
+   "name": "list_playlists",
+   "description": "List the user's saved playlists with their track counts.",
+   "parameters": {
+    "type": "object",
+    "properties": {},
+    "required": []
+   }
+  },
+  {
+   "name": "get_playlist_tracks",
+   "description": "List the tracks inside a named playlist, in order.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "name": {
+      "type": "string",
+      "description": "Playlist name."
+     }
+    },
+    "required": [
+     "name"
+    ]
+   }
+  },
+  {
+   "name": "get_recently_played",
+   "description": "The most recently played tracks, newest first. Use for 'what did I just play', 'what was I listening to'.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "limit": {
+      "type": "integer",
+      "description": "How many (default 15)."
+     }
+    },
+    "required": []
+   }
+  },
+  {
+   "name": "get_track_details",
+   "description": "Rich metadata for one track (album, genre, year, duration, bpm, energy). Pass a query, or a path, or nothing to describe the current track. Use for 'what bpm is this', 'what year is this from'.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "query": {
+      "type": "string",
+      "description": "Track/artist to look up."
+     },
+     "path": {
+      "type": "string",
+      "description": "Exact track path from another tool."
+     }
+    },
+    "required": []
+   }
+  },
+  {
+   "name": "play_album",
+   "description": "Play a whole album in order, replacing the queue. Artist optional but disambiguates. Confirms first if a queue is already playing.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "album": {
+      "type": "string",
+      "description": "Album title."
+     },
+     "artist": {
+      "type": "string",
+      "description": "Optional artist name."
+     }
+    },
+    "required": [
+     "album"
+    ]
+   }
+  },
+  {
+   "name": "play_playlist",
+   "description": "Play a named playlist in order, replacing the queue. Confirms first if a queue is already playing.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "name": {
+      "type": "string",
+      "description": "Playlist name."
+     }
+    },
+    "required": [
+     "name"
+    ]
+   }
+  },
+  {
+   "name": "get_metadata_status",
+   "description": "Metadata health: how many artists Auto-Play can place (have a genre or country), which artists have neither, and AI suggestions waiting for review. Use for 'which artists are missing info', 'is my metadata OK'.",
+   "parameters": {
+    "type": "object",
+    "properties": {},
+    "required": []
+   }
+  },
+  {
+   "name": "get_artist_metadata",
+   "description": "The stored genres and country of one library artist, where each came from, and any AI suggestion on file.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "artist": {
+      "type": "string",
+      "description": "Artist name."
+     }
+    },
+    "required": [
+     "artist"
+    ]
+   }
+  },
+  {
+   "name": "research_artist_metadata",
+   "description": "Search the web (Google, with sources) for a library artist's genres and country. Saves the answer only as a SUGGESTION for review; changes nothing. Use when the user asks who an artist is, or to fill in a missing genre/country.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "artist": {
+      "type": "string",
+      "description": "Artist name."
+     },
+     "refresh": {
+      "type": "boolean",
+      "description": "Search again even if an answer is cached."
+     }
+    },
+    "required": [
+     "artist"
+    ]
+   }
+  },
+  {
+   "name": "apply_artist_metadata",
+   "description": "Save genres and/or a country for one or MANY library artists in one call (this changes what Auto-Play does). By default the genres REPLACE what the artists had — use this to correct a wrong genre; mode='add' keeps existing tags. Omit genres and country to accept a single artist's pending AI suggestion. Always confirms with the user first.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "artist": {
+      "type": "string",
+      "description": "Artist name (or use 'artists')."
+     },
+     "artists": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      },
+      "description": "Several artist names to set at once."
+     },
+     "genres": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      },
+      "description": "Lower-case genre tags. Prefer genres the library already uses."
+     },
+     "country": {
+      "type": "string",
+      "description": "ISO 3166-1 alpha-2 country code."
+     },
+     "mode": {
+      "type": "string",
+      "enum": [
+       "replace",
+       "add"
+      ],
+      "description": "replace (default) or add to existing genres."
+     }
+    }
+   }
+  }
+ ],
+ "tools_json": "[{\"name\": \"search_library\", \"description\": \"Search the user's LOCAL music library for tracks. Returns matches with their 'path' (the stable identity you pass to other tools). Use this to check what the user owns before playing.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\", \"description\": \"Track title, artist, or album to search for.\"}, \"genre\": {\"type\": \"string\", \"description\": \"Optional genre filter, e.g. 'Jazz'.\"}, \"limit\": {\"type\": \"integer\", \"description\": \"Max results (default 10).\"}}, \"required\": []}}, {\"name\": \"play_music\", \"description\": \"Play tracks matching a query immediately, REPLACING the current queue. Resolves the query against the local library (handles artist/title/album). If a non-empty queue would be replaced, the user is asked to confirm first.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\", \"description\": \"What to play (artist, title, or album).\"}, \"path\": {\"type\": \"string\", \"description\": \"Optional exact track path from search_library for a precise pick.\"}}, \"required\": []}}, {\"name\": \"enqueue_music\", \"description\": \"Add tracks matching a query to the END of the queue without interrupting playback.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\", \"description\": \"What to enqueue.\"}, \"path\": {\"type\": \"string\", \"description\": \"Optional exact track path from search_library.\"}}, \"required\": [\"query\"]}}, {\"name\": \"play_next\", \"description\": \"Insert a track to play right AFTER the current one, without clearing the queue.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\", \"description\": \"What to play next.\"}, \"path\": {\"type\": \"string\", \"description\": \"Optional exact track path from search_library.\"}}, \"required\": [\"query\"]}}, {\"name\": \"play_similar\", \"description\": \"Curate more tracks acoustically similar to what is currently playing, using the DSP similarity walk. Use when the user wants 'more like this'.\", \"parameters\": {\"type\": \"object\", \"properties\": {}, \"required\": []}}, {\"name\": \"steer_mood\", \"description\": \"Build a mood/vibe-based mix from the local library based on any mood descriptor (e.g. 'chill', 'energetic', 'melancholic', 'focus', 'workout', 'dark', 'upbeat', 'rainy day') and start playing it using DSP acoustic feature matching.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"mood\": {\"type\": \"string\", \"description\": \"Target mood or vibe description.\"}}, \"required\": [\"mood\"]}}, {\"name\": \"search_by_acoustic_profile\", \"description\": \"Search the local music library by acoustic properties extracted by DSP (energy 0.0-1.0, brightness 0.0-1.0, bpm range, genre filters). Use when the user asks for music with specific acoustic traits or energy levels.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"min_energy\": {\"type\": \"number\", \"description\": \"Minimum energy (0.0=calm to 1.0=intense).\"}, \"max_energy\": {\"type\": \"number\", \"description\": \"Maximum energy (0.0 to 1.0).\"}, \"min_brightness\": {\"type\": \"number\", \"description\": \"Minimum acoustic brightness (0.0=dark/warm to 1.0=bright).\"}, \"max_brightness\": {\"type\": \"number\", \"description\": \"Maximum acoustic brightness.\"}, \"min_bpm\": {\"type\": \"integer\", \"description\": \"Minimum tempo in BPM.\"}, \"max_bpm\": {\"type\": \"integer\", \"description\": \"Maximum tempo in BPM.\"}, \"genre\": {\"type\": \"string\", \"description\": \"Optional genre substring filter.\"}, \"limit\": {\"type\": \"integer\", \"description\": \"Max results (default 10).\"}}, \"required\": []}}, {\"name\": \"playback_control\", \"description\": \"Control transport: pause, resume, skip, previous, stop, clear_queue, or shuffle.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"action\": {\"type\": \"string\", \"enum\": [\"pause\", \"resume\", \"skip\", \"previous\", \"stop\", \"clear_queue\", \"shuffle\"], \"description\": \"Transport action to perform.\"}}, \"required\": [\"action\"]}}, {\"name\": \"save_queue_as_playlist\", \"description\": \"Save the current queue/walk (from the current position onward) as a named playlist.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"name\": {\"type\": \"string\", \"description\": \"Playlist name.\"}}, \"required\": [\"name\"]}}, {\"name\": \"get_player_status\", \"description\": \"Get the currently playing track, playback state, and queue length.\", \"parameters\": {\"type\": \"object\", \"properties\": {}, \"required\": []}}, {\"name\": \"get_current_track_info\", \"description\": \"Get detailed metadata (title, artist, album, duration) about the current track.\", \"parameters\": {\"type\": \"object\", \"properties\": {}, \"required\": []}}, {\"name\": \"search_online\", \"description\": \"Search Qobuz ONLINE for tracks/albums the user may not own locally. Returns results. Set download=true to fetch the top result \\u2014 this ALWAYS asks the user to confirm first.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\", \"description\": \"Online search query.\"}, \"download\": {\"type\": \"boolean\", \"description\": \"If true, offer to download the top match (requires user confirmation).\"}}, \"required\": [\"query\"]}}, {\"name\": \"web_search\", \"description\": \"Look anything up on the web that the library can't answer: an artist's story, what a song is about, release dates, who produced or sampled what, band members, new or upcoming releases, tours, what genre or scene something belongs to, translations of titles. Returns a written answer (Google) or search snippets, each with its source. Answer from what it returns, briefly naming the source; never guess facts you could look up.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\", \"description\": \"The question or search terms, with the artist name for context.\"}}, \"required\": [\"query\"]}}, {\"name\": \"learn_about\", \"description\": \"Background on the CURRENT track, its artist or its album (or a named one): what the library knows (album, year, genre, country, plays) plus the web's story. Use for 'tell me about this song', 'who is this', 'what's this album'.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"subject\": {\"type\": \"string\", \"enum\": [\"track\", \"artist\", \"album\"], \"description\": \"What to describe (default: track).\"}, \"name\": {\"type\": \"string\", \"description\": \"Optional: a named track/artist/album instead of what's playing.\"}}, \"required\": []}}, {\"name\": \"find_related_artists\", \"description\": \"Artists the web calls similar to an artist (default: the one playing), split into those already in the user's library (playable now with play_music / enqueue_music) and the sources naming others (findable with search_online). Use for 'who else sounds like this', 'artists like X', 'build me a mix around X'.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"artist\": {\"type\": \"string\", \"description\": \"Artist name; omit for the current artist.\"}}, \"required\": []}}, {\"name\": \"get_library_overview\", \"description\": \"Summary stats of the local library: total tracks, artist/album/playlist counts, and the top genres. Use for 'how big is my library' / 'what genres do I have'.\", \"parameters\": {\"type\": \"object\", \"properties\": {}, \"required\": []}}, {\"name\": \"get_top_played\", \"description\": \"The user's most-played tracks with play counts. Use for 'my most played', 'favourite songs'.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"limit\": {\"type\": \"integer\", \"description\": \"How many (default 10).\"}}, \"required\": []}}, {\"name\": \"list_artists\", \"description\": \"List artists in the library (with per-artist track & album counts), optionally filtered. Use for 'how many artists', 'do I have <artist>', 'how many tracks by <artist>'.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"search\": {\"type\": \"string\", \"description\": \"Optional name filter.\"}, \"limit\": {\"type\": \"integer\", \"description\": \"Max results (default 25).\"}}, \"required\": []}}, {\"name\": \"get_artist_albums\", \"description\": \"List the albums the library holds for a given artist (title, year, genre, track count).\", \"parameters\": {\"type\": \"object\", \"properties\": {\"artist\": {\"type\": \"string\", \"description\": \"Artist name.\"}}, \"required\": [\"artist\"]}}, {\"name\": \"get_album_tracks\", \"description\": \"List the tracks on an album, in order. Artist is optional but disambiguates same-named albums.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"album\": {\"type\": \"string\", \"description\": \"Album title.\"}, \"artist\": {\"type\": \"string\", \"description\": \"Optional artist name.\"}}, \"required\": [\"album\"]}}, {\"name\": \"list_playlists\", \"description\": \"List the user's saved playlists with their track counts.\", \"parameters\": {\"type\": \"object\", \"properties\": {}, \"required\": []}}, {\"name\": \"get_playlist_tracks\", \"description\": \"List the tracks inside a named playlist, in order.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"name\": {\"type\": \"string\", \"description\": \"Playlist name.\"}}, \"required\": [\"name\"]}}, {\"name\": \"get_recently_played\", \"description\": \"The most recently played tracks, newest first. Use for 'what did I just play', 'what was I listening to'.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"limit\": {\"type\": \"integer\", \"description\": \"How many (default 15).\"}}, \"required\": []}}, {\"name\": \"get_track_details\", \"description\": \"Rich metadata for one track (album, genre, year, duration, bpm, energy). Pass a query, or a path, or nothing to describe the current track. Use for 'what bpm is this', 'what year is this from'.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\", \"description\": \"Track/artist to look up.\"}, \"path\": {\"type\": \"string\", \"description\": \"Exact track path from another tool.\"}}, \"required\": []}}, {\"name\": \"play_album\", \"description\": \"Play a whole album in order, replacing the queue. Artist optional but disambiguates. Confirms first if a queue is already playing.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"album\": {\"type\": \"string\", \"description\": \"Album title.\"}, \"artist\": {\"type\": \"string\", \"description\": \"Optional artist name.\"}}, \"required\": [\"album\"]}}, {\"name\": \"play_playlist\", \"description\": \"Play a named playlist in order, replacing the queue. Confirms first if a queue is already playing.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"name\": {\"type\": \"string\", \"description\": \"Playlist name.\"}}, \"required\": [\"name\"]}}, {\"name\": \"get_metadata_status\", \"description\": \"Metadata health: how many artists Auto-Play can place (have a genre or country), which artists have neither, and AI suggestions waiting for review. Use for 'which artists are missing info', 'is my metadata OK'.\", \"parameters\": {\"type\": \"object\", \"properties\": {}, \"required\": []}}, {\"name\": \"get_artist_metadata\", \"description\": \"The stored genres and country of one library artist, where each came from, and any AI suggestion on file.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"artist\": {\"type\": \"string\", \"description\": \"Artist name.\"}}, \"required\": [\"artist\"]}}, {\"name\": \"research_artist_metadata\", \"description\": \"Search the web (Google, with sources) for a library artist's genres and country. Saves the answer only as a SUGGESTION for review; changes nothing. Use when the user asks who an artist is, or to fill in a missing genre/country.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"artist\": {\"type\": \"string\", \"description\": \"Artist name.\"}, \"refresh\": {\"type\": \"boolean\", \"description\": \"Search again even if an answer is cached.\"}}, \"required\": [\"artist\"]}}, {\"name\": \"apply_artist_metadata\", \"description\": \"Save genres and/or a country for one or MANY library artists in one call (this changes what Auto-Play does). By default the genres REPLACE what the artists had \\u2014 use this to correct a wrong genre; mode='add' keeps existing tags. Omit genres and country to accept a single artist's pending AI suggestion. Always confirms with the user first.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"artist\": {\"type\": \"string\", \"description\": \"Artist name (or use 'artists').\"}, \"artists\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}, \"description\": \"Several artist names to set at once.\"}, \"genres\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}, \"description\": \"Lower-case genre tags. Prefer genres the library already uses.\"}, \"country\": {\"type\": \"string\", \"description\": \"ISO 3166-1 alpha-2 country code.\"}, \"mode\": {\"type\": \"string\", \"enum\": [\"replace\", \"add\"], \"description\": \"replace (default) or add to existing genres.\"}}}}]",
+ "chat": [
+  {
+   "name": "ollama_plain",
+   "engine": {
+    "provider": "ollama",
+    "ollama_endpoint": "/v1/",
+    "ollama_model": ""
+   },
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are Jarvis.\n\nLive context — Now playing: Αγάπη — Χ."
+    },
+    {
+     "role": "user",
+     "content": "play something by Björk 🎵"
+    }
+   ],
+   "tools": false,
+   "replies": [
+    {
+     "status": 200,
+     "content_type": "application/json; charset=UTF-8",
+     "body": "{\"id\": \"r\", \"choices\": [{\"index\": 0, \"message\": {\"role\": \"assistant\", \"content\": \"Γεια σου, sir. **Done**.\"}}]}"
+    }
+   ],
+   "requests": [
+    {
+     "method": "POST",
+     "path": "/v1/chat/completions",
+     "headers": {
+      "content-type": "application/json"
+     },
+     "body": "{\"model\": \"llama3.2\", \"messages\": [{\"role\": \"system\", \"content\": \"You are Jarvis.\\n\\nLive context \\u2014 Now playing: \\u0391\\u03b3\\u03ac\\u03c0\\u03b7 \\u2014 \\u03a7.\"}, {\"role\": \"user\", \"content\": \"play something by Bj\\u00f6rk \\ud83c\\udfb5\"}]}"
+    }
+   ],
+   "result": {
+    "content": "Γεια σου, sir. **Done**.",
+    "tool_calls": [],
+    "success": true,
+    "error_message": null,
+    "raw_message": {
+     "role": "assistant",
+     "content": "Γεια σου, sir. **Done**."
+    }
+   }
+  },
+  {
+   "name": "gemini_tools",
+   "engine": {
+    "provider": "gemini",
+    "api_key": "  k-123  ",
+    "model": "gemini-x"
+   },
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are Jarvis.\n\nLive context — Now playing: Αγάπη — Χ."
+    },
+    {
+     "role": "user",
+     "content": "play something by Björk 🎵"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "search_library",
+        "arguments": "{\"query\": \"Αγάπη\"}"
+       },
+       "extra_content": {
+        "google": {
+         "thought_signature": "c2lnbmF0dXJl+/="
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "{\"success\": true, \"count\": 1, \"tracks\": [{\"path\": \"/m/a.flac\", \"title\": \"Αγάπη\", \"energy\": 0.5, \"year\": 1999}]}"
+    },
+    {
+     "role": "user",
+     "content": "Answer my request now from the tool results above, briefly."
+    }
+   ],
+   "tools": true,
+   "replies": [
+    {
+     "status": 200,
+     "content_type": "application/json; charset=UTF-8",
+     "body": "{\"choices\": [{\"message\": {\"role\": \"assistant\", \"content\": null, \"tool_calls\": [{\"id\": \"c1\", \"type\": \"function\", \"function\": {\"name\": \"play_music\", \"arguments\": \"{\\\"query\\\": \\\"Muse\\\"}\"}}, {\"type\": \"function\", \"function\": {\"name\": \"enqueue_music\", \"arguments\": {\"query\": \"x\", \"n\": 2}}}, {\"function\": {\"name\": \"playback_control\", \"arguments\": \"{\\\"action\\\": \\\"skip\\\"}\"}}, {\"function\": {\"name\": \"playback_control\", \"arguments\": \"{\\\"action\\\": \\\"pause\\\"}\"}, \"id\": \"\"}, {\"function\": {\"name\": \"web_search\", \"arguments\": \"{not json\"}}, {\"function\": {\"name\": \"get_player_status\", \"arguments\": \"   \"}}, {\"function\": {\"name\": \"list_artists\", \"arguments\": \"[1, 2]\"}}, {\"function\": {\"name\": \"get_top_played\"}}, {\"function\": {\"arguments\": \"{}\"}}, {\"function\": null, \"id\": \"z\"}, {\"id\": \"only-id\"}], \"extra\": {\"nested\": [1, 2.5, null, true], \"s\": \"ü\"}}}]}"
+    }
+   ],
+   "requests": [
+    {
+     "method": "POST",
+     "path": "/v1beta/openai/chat/completions",
+     "headers": {
+      "authorization": "Bearer k-123",
+      "content-type": "application/json"
+     },
+     "body": "{\"model\": \"gemini-x\", \"messages\": [{\"role\": \"system\", \"content\": \"You are Jarvis.\\n\\nLive context \\u2014 Now playing: \\u0391\\u03b3\\u03ac\\u03c0\\u03b7 \\u2014 \\u03a7.\"}, {\"role\": \"user\", \"content\": \"play something by Bj\\u00f6rk \\ud83c\\udfb5\"}, {\"role\": \"assistant\", \"content\": null, \"tool_calls\": [{\"id\": \"call_1\", \"type\": \"function\", \"function\": {\"name\": \"search_library\", \"arguments\": \"{\\\"query\\\": \\\"\\u0391\\u03b3\\u03ac\\u03c0\\u03b7\\\"}\"}, \"extra_content\": {\"google\": {\"thought_signature\": \"c2lnbmF0dXJl+/=\"}}}]}, {\"role\": \"tool\", \"tool_call_id\": \"call_1\", \"content\": \"{\\\"success\\\": true, \\\"count\\\": 1, \\\"tracks\\\": [{\\\"path\\\": \\\"/m/a.flac\\\", \\\"title\\\": \\\"\\u0391\\u03b3\\u03ac\\u03c0\\u03b7\\\", \\\"energy\\\": 0.5, \\\"year\\\": 1999}]}\"}, {\"role\": \"user\", \"content\": \"Answer my request now from the tool results above, briefly.\"}], \"tools\": [{\"type\": \"function\", \"function\": {\"name\": \"search_library\", \"description\": \"Search the user's LOCAL music library for tracks. Returns matches with their 'path' (the stable identity you pass to other tools). Use this to check what the user owns before playing.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\", \"description\": \"Track title, artist, or album to search for.\"}, \"genre\": {\"type\": \"string\", \"description\": \"Optional genre filter, e.g. 'Jazz'.\"}, \"limit\": {\"type\": \"integer\", \"description\": \"Max results (default 10).\"}}, \"required\": []}}}, {\"type\": \"function\", \"function\": {\"name\": \"play_music\", \"description\": \"Play tracks matching a query immediately, REPLACING the current queue. Resolves the query against the local library (handles artist/title/album). If a non-empty queue would be replaced, the user is asked to confirm first.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\", \"description\": \"What to play (artist, title, or album).\"}, \"path\": {\"type\": \"string\", \"description\": \"Optional exact track path from search_library for a precise pick.\"}}, \"required\": []}}}, {\"type\": \"function\", \"function\": {\"name\": \"enqueue_music\", \"description\": \"Add tracks matching a query to the END of the queue without interrupting playback.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\", \"description\": \"What to enqueue.\"}, \"path\": {\"type\": \"string\", \"description\": \"Optional exact track path from search_library.\"}}, \"required\": [\"query\"]}}}, {\"type\": \"function\", \"function\": {\"name\": \"play_next\", \"description\": \"Insert a track to play right AFTER the current one, without clearing the queue.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\", \"description\": \"What to play next.\"}, \"path\": {\"type\": \"string\", \"description\": \"Optional exact track path from search_library.\"}}, \"required\": [\"query\"]}}}, {\"type\": \"function\", \"function\": {\"name\": \"play_similar\", \"description\": \"Curate more tracks acoustically similar to what is currently playing, using the DSP similarity walk. Use when the user wants 'more like this'.\", \"parameters\": {\"type\": \"object\", \"properties\": {}, \"required\": []}}}, {\"type\": \"function\", \"function\": {\"name\": \"steer_mood\", \"description\": \"Build a mood/vibe-based mix from the local library based on any mood descriptor (e.g. 'chill', 'energetic', 'melancholic', 'focus', 'workout', 'dark', 'upbeat', 'rainy day') and start playing it using DSP acoustic feature matching.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"mood\": {\"type\": \"string\", \"description\": \"Target mood or vibe description.\"}}, \"required\": [\"mood\"]}}}, {\"type\": \"function\", \"function\": {\"name\": \"search_by_acoustic_profile\", \"description\": \"Search the local music library by acoustic properties extracted by DSP (energy 0.0-1.0, brightness 0.0-1.0, bpm range, genre filters). Use when the user asks for music with specific acoustic traits or energy levels.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"min_energy\": {\"type\": \"number\", \"description\": \"Minimum energy (0.0=calm to 1.0=intense).\"}, \"max_energy\": {\"type\": \"number\", \"description\": \"Maximum energy (0.0 to 1.0).\"}, \"min_brightness\": {\"type\": \"number\", \"description\": \"Minimum acoustic brightness (0.0=dark/warm to 1.0=bright).\"}, \"max_brightness\": {\"type\": \"number\", \"description\": \"Maximum acoustic brightness.\"}, \"min_bpm\": {\"type\": \"integer\", \"description\": \"Minimum tempo in BPM.\"}, \"max_bpm\": {\"type\": \"integer\", \"description\": \"Maximum tempo in BPM.\"}, \"genre\": {\"type\": \"string\", \"description\": \"Optional genre substring filter.\"}, \"limit\": {\"type\": \"integer\", \"description\": \"Max results (default 10).\"}}, \"required\": []}}}, {\"type\": \"function\", \"function\": {\"name\": \"playback_control\", \"description\": \"Control transport: pause, resume, skip, previous, stop, clear_queue, or shuffle.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"action\": {\"type\": \"string\", \"enum\": [\"pause\", \"resume\", \"skip\", \"previous\", \"stop\", \"clear_queue\", \"shuffle\"], \"description\": \"Transport action to perform.\"}}, \"required\": [\"action\"]}}}, {\"type\": \"function\", \"function\": {\"name\": \"save_queue_as_playlist\", \"description\": \"Save the current queue/walk (from the current position onward) as a named playlist.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"name\": {\"type\": \"string\", \"description\": \"Playlist name.\"}}, \"required\": [\"name\"]}}}, {\"type\": \"function\", \"function\": {\"name\": \"get_player_status\", \"description\": \"Get the currently playing track, playback state, and queue length.\", \"parameters\": {\"type\": \"object\", \"properties\": {}, \"required\": []}}}, {\"type\": \"function\", \"function\": {\"name\": \"get_current_track_info\", \"description\": \"Get detailed metadata (title, artist, album, duration) about the current track.\", \"parameters\": {\"type\": \"object\", \"properties\": {}, \"required\": []}}}, {\"type\": \"function\", \"function\": {\"name\": \"search_online\", \"description\": \"Search Qobuz ONLINE for tracks/albums the user may not own locally. Returns results. Set download=true to fetch the top result \\u2014 this ALWAYS asks the user to confirm first.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\", \"description\": \"Online search query.\"}, \"download\": {\"type\": \"boolean\", \"description\": \"If true, offer to download the top match (requires user confirmation).\"}}, \"required\": [\"query\"]}}}, {\"type\": \"function\", \"function\": {\"name\": \"web_search\", \"description\": \"Look anything up on the web that the library can't answer: an artist's story, what a song is about, release dates, who produced or sampled what, band members, new or upcoming releases, tours, what genre or scene something belongs to, translations of titles. Returns a written answer (Google) or search snippets, each with its source. Answer from what it returns, briefly naming the source; never guess facts you could look up.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\", \"description\": \"The question or search terms, with the artist name for context.\"}}, \"required\": [\"query\"]}}}, {\"type\": \"function\", \"function\": {\"name\": \"learn_about\", \"description\": \"Background on the CURRENT track, its artist or its album (or a named one): what the library knows (album, year, genre, country, plays) plus the web's story. Use for 'tell me about this song', 'who is this', 'what's this album'.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"subject\": {\"type\": \"string\", \"enum\": [\"track\", \"artist\", \"album\"], \"description\": \"What to describe (default: track).\"}, \"name\": {\"type\": \"string\", \"description\": \"Optional: a named track/artist/album instead of what's playing.\"}}, \"required\": []}}}, {\"type\": \"function\", \"function\": {\"name\": \"find_related_artists\", \"description\": \"Artists the web calls similar to an artist (default: the one playing), split into those already in the user's library (playable now with play_music / enqueue_music) and the sources naming others (findable with search_online). Use for 'who else sounds like this', 'artists like X', 'build me a mix around X'.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"artist\": {\"type\": \"string\", \"description\": \"Artist name; omit for the current artist.\"}}, \"required\": []}}}, {\"type\": \"function\", \"function\": {\"name\": \"get_library_overview\", \"description\": \"Summary stats of the local library: total tracks, artist/album/playlist counts, and the top genres. Use for 'how big is my library' / 'what genres do I have'.\", \"parameters\": {\"type\": \"object\", \"properties\": {}, \"required\": []}}}, {\"type\": \"function\", \"function\": {\"name\": \"get_top_played\", \"description\": \"The user's most-played tracks with play counts. Use for 'my most played', 'favourite songs'.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"limit\": {\"type\": \"integer\", \"description\": \"How many (default 10).\"}}, \"required\": []}}}, {\"type\": \"function\", \"function\": {\"name\": \"list_artists\", \"description\": \"List artists in the library (with per-artist track & album counts), optionally filtered. Use for 'how many artists', 'do I have <artist>', 'how many tracks by <artist>'.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"search\": {\"type\": \"string\", \"description\": \"Optional name filter.\"}, \"limit\": {\"type\": \"integer\", \"description\": \"Max results (default 25).\"}}, \"required\": []}}}, {\"type\": \"function\", \"function\": {\"name\": \"get_artist_albums\", \"description\": \"List the albums the library holds for a given artist (title, year, genre, track count).\", \"parameters\": {\"type\": \"object\", \"properties\": {\"artist\": {\"type\": \"string\", \"description\": \"Artist name.\"}}, \"required\": [\"artist\"]}}}, {\"type\": \"function\", \"function\": {\"name\": \"get_album_tracks\", \"description\": \"List the tracks on an album, in order. Artist is optional but disambiguates same-named albums.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"album\": {\"type\": \"string\", \"description\": \"Album title.\"}, \"artist\": {\"type\": \"string\", \"description\": \"Optional artist name.\"}}, \"required\": [\"album\"]}}}, {\"type\": \"function\", \"function\": {\"name\": \"list_playlists\", \"description\": \"List the user's saved playlists with their track counts.\", \"parameters\": {\"type\": \"object\", \"properties\": {}, \"required\": []}}}, {\"type\": \"function\", \"function\": {\"name\": \"get_playlist_tracks\", \"description\": \"List the tracks inside a named playlist, in order.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"name\": {\"type\": \"string\", \"description\": \"Playlist name.\"}}, \"required\": [\"name\"]}}}, {\"type\": \"function\", \"function\": {\"name\": \"get_recently_played\", \"description\": \"The most recently played tracks, newest first. Use for 'what did I just play', 'what was I listening to'.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"limit\": {\"type\": \"integer\", \"description\": \"How many (default 15).\"}}, \"required\": []}}}, {\"type\": \"function\", \"function\": {\"name\": \"get_track_details\", \"description\": \"Rich metadata for one track (album, genre, year, duration, bpm, energy). Pass a query, or a path, or nothing to describe the current track. Use for 'what bpm is this', 'what year is this from'.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\", \"description\": \"Track/artist to look up.\"}, \"path\": {\"type\": \"string\", \"description\": \"Exact track path from another tool.\"}}, \"required\": []}}}, {\"type\": \"function\", \"function\": {\"name\": \"play_album\", \"description\": \"Play a whole album in order, replacing the queue. Artist optional but disambiguates. Confirms first if a queue is already playing.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"album\": {\"type\": \"string\", \"description\": \"Album title.\"}, \"artist\": {\"type\": \"string\", \"description\": \"Optional artist name.\"}}, \"required\": [\"album\"]}}}, {\"type\": \"function\", \"function\": {\"name\": \"play_playlist\", \"description\": \"Play a named playlist in order, replacing the queue. Confirms first if a queue is already playing.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"name\": {\"type\": \"string\", \"description\": \"Playlist name.\"}}, \"required\": [\"name\"]}}}, {\"type\": \"function\", \"function\": {\"name\": \"get_metadata_status\", \"description\": \"Metadata health: how many artists Auto-Play can place (have a genre or country), which artists have neither, and AI suggestions waiting for review. Use for 'which artists are missing info', 'is my metadata OK'.\", \"parameters\": {\"type\": \"object\", \"properties\": {}, \"required\": []}}}, {\"type\": \"function\", \"function\": {\"name\": \"get_artist_metadata\", \"description\": \"The stored genres and country of one library artist, where each came from, and any AI suggestion on file.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"artist\": {\"type\": \"string\", \"description\": \"Artist name.\"}}, \"required\": [\"artist\"]}}}, {\"type\": \"function\", \"function\": {\"name\": \"research_artist_metadata\", \"description\": \"Search the web (Google, with sources) for a library artist's genres and country. Saves the answer only as a SUGGESTION for review; changes nothing. Use when the user asks who an artist is, or to fill in a missing genre/country.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"artist\": {\"type\": \"string\", \"description\": \"Artist name.\"}, \"refresh\": {\"type\": \"boolean\", \"description\": \"Search again even if an answer is cached.\"}}, \"required\": [\"artist\"]}}}, {\"type\": \"function\", \"function\": {\"name\": \"apply_artist_metadata\", \"description\": \"Save genres and/or a country for one or MANY library artists in one call (this changes what Auto-Play does). By default the genres REPLACE what the artists had \\u2014 use this to correct a wrong genre; mode='add' keeps existing tags. Omit genres and country to accept a single artist's pending AI suggestion. Always confirms with the user first.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"artist\": {\"type\": \"string\", \"description\": \"Artist name (or use 'artists').\"}, \"artists\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}, \"description\": \"Several artist names to set at once.\"}, \"genres\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}, \"description\": \"Lower-case genre tags. Prefer genres the library already uses.\"}, \"country\": {\"type\": \"string\", \"description\": \"ISO 3166-1 alpha-2 country code.\"}, \"mode\": {\"type\": \"string\", \"enum\": [\"replace\", \"add\"], \"description\": \"replace (default) or add to existing genres.\"}}}}}]}"
+    }
+   ],
+   "result": {
+    "content": "",
+    "tool_calls": [
+     {
+      "id": "c1",
+      "name": "play_music",
+      "args": {
+       "query": "Muse"
+      }
+     },
+     {
+      "id": "enqueue_music_1",
+      "name": "enqueue_music",
+      "args": {
+       "query": "x",
+       "n": 2
+      }
+     },
+     {
+      "id": "playback_control_2",
+      "name": "playback_control",
+      "args": {
+       "action": "skip"
+      }
+     },
+     {
+      "id": "playback_control_3",
+      "name": "playback_control",
+      "args": {
+       "action": "pause"
+      }
+     },
+     {
+      "id": "web_search_4",
+      "name": "web_search",
+      "args": {}
+     },
+     {
+      "id": "get_player_status_5",
+      "name": "get_player_status",
+      "args": {}
+     },
+     {
+      "id": "list_artists_6",
+      "name": "list_artists",
+      "args": {}
+     },
+     {
+      "id": "get_top_played_7",
+      "name": "get_top_played",
+      "args": {}
+     }
+    ],
+    "success": true,
+    "error_message": null,
+    "raw_message": {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "c1",
+       "type": "function",
+       "function": {
+        "name": "play_music",
+        "arguments": "{\"query\": \"Muse\"}"
+       }
+      },
+      {
+       "type": "function",
+       "function": {
+        "name": "enqueue_music",
+        "arguments": {
+         "query": "x",
+         "n": 2
+        }
+       }
+      },
+      {
+       "function": {
+        "name": "playback_control",
+        "arguments": "{\"action\": \"skip\"}"
+       }
+      },
+      {
+       "function": {
+        "name": "playback_control",
+        "arguments": "{\"action\": \"pause\"}"
+       },
+       "id": ""
+      },
+      {
+       "function": {
+        "name": "web_search",
+        "arguments": "{not json"
+       }
+      },
+      {
+       "function": {
+        "name": "get_player_status",
+        "arguments": "   "
+       }
+      },
+      {
+       "function": {
+        "name": "list_artists",
+        "arguments": "[1, 2]"
+       }
+      },
+      {
+       "function": {
+        "name": "get_top_played"
+       }
+      },
+      {
+       "function": {
+        "arguments": "{}"
+       }
+      },
+      {
+       "function": null,
+       "id": "z"
+      },
+      {
+       "id": "only-id"
+      }
+     ],
+     "extra": {
+      "nested": [
+       1,
+       2.5,
+       null,
+       true
+      ],
+      "s": "ü"
+     }
+    }
+   }
+  },
+  {
+   "name": "gemini_default_model",
+   "engine": {
+    "provider": "gemini",
+    "api_key": "k",
+    "model": ""
+   },
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are Jarvis.\n\nLive context — Now playing: Αγάπη — Χ."
+    },
+    {
+     "role": "user",
+     "content": "play something by Björk 🎵"
+    }
+   ],
+   "tools": true,
+   "replies": [
+    {
+     "status": 200,
+     "content_type": "application/json; charset=UTF-8",
+     "body": "{\"choices\": [{\"message\": {\"role\": \"assistant\", \"content\": \"ok\", \"tool_calls\": []}}]}"
+    }
+   ],
+   "requests": [
+    {
+     "method": "POST",
+     "path": "/v1beta/openai/chat/completions",
+     "headers": {
+      "authorization": "Bearer k",
+      "content-type": "application/json"
+     },
+     "body": "{\"model\": \"gemini-3.5-flash-lite\", \"messages\": [{\"role\": \"system\", \"content\": \"You are Jarvis.\\n\\nLive context \\u2014 Now playing: \\u0391\\u03b3\\u03ac\\u03c0\\u03b7 \\u2014 \\u03a7.\"}, {\"role\": \"user\", \"content\": \"play something by Bj\\u00f6rk \\ud83c\\udfb5\"}], \"tools\": [{\"type\": \"function\", \"function\": {\"name\": \"search_library\", \"description\": \"Search the user's LOCAL music library for tracks. Returns matches with their 'path' (the stable identity you pass to other tools). Use this to check what the user owns before playing.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\", \"description\": \"Track title, artist, or album to search for.\"}, \"genre\": {\"type\": \"string\", \"description\": \"Optional genre filter, e.g. 'Jazz'.\"}, \"limit\": {\"type\": \"integer\", \"description\": \"Max results (default 10).\"}}, \"required\": []}}}, {\"type\": \"function\", \"function\": {\"name\": \"play_music\", \"description\": \"Play tracks matching a query immediately, REPLACING the current queue. Resolves the query against the local library (handles artist/title/album). If a non-empty queue would be replaced, the user is asked to confirm first.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\", \"description\": \"What to play (artist, title, or album).\"}, \"path\": {\"type\": \"string\", \"description\": \"Optional exact track path from search_library for a precise pick.\"}}, \"required\": []}}}, {\"type\": \"function\", \"function\": {\"name\": \"enqueue_music\", \"description\": \"Add tracks matching a query to the END of the queue without interrupting playback.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\", \"description\": \"What to enqueue.\"}, \"path\": {\"type\": \"string\", \"description\": \"Optional exact track path from search_library.\"}}, \"required\": [\"query\"]}}}, {\"type\": \"function\", \"function\": {\"name\": \"play_next\", \"description\": \"Insert a track to play right AFTER the current one, without clearing the queue.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\", \"description\": \"What to play next.\"}, \"path\": {\"type\": \"string\", \"description\": \"Optional exact track path from search_library.\"}}, \"required\": [\"query\"]}}}, {\"type\": \"function\", \"function\": {\"name\": \"play_similar\", \"description\": \"Curate more tracks acoustically similar to what is currently playing, using the DSP similarity walk. Use when the user wants 'more like this'.\", \"parameters\": {\"type\": \"object\", \"properties\": {}, \"required\": []}}}, {\"type\": \"function\", \"function\": {\"name\": \"steer_mood\", \"description\": \"Build a mood/vibe-based mix from the local library based on any mood descriptor (e.g. 'chill', 'energetic', 'melancholic', 'focus', 'workout', 'dark', 'upbeat', 'rainy day') and start playing it using DSP acoustic feature matching.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"mood\": {\"type\": \"string\", \"description\": \"Target mood or vibe description.\"}}, \"required\": [\"mood\"]}}}, {\"type\": \"function\", \"function\": {\"name\": \"search_by_acoustic_profile\", \"description\": \"Search the local music library by acoustic properties extracted by DSP (energy 0.0-1.0, brightness 0.0-1.0, bpm range, genre filters). Use when the user asks for music with specific acoustic traits or energy levels.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"min_energy\": {\"type\": \"number\", \"description\": \"Minimum energy (0.0=calm to 1.0=intense).\"}, \"max_energy\": {\"type\": \"number\", \"description\": \"Maximum energy (0.0 to 1.0).\"}, \"min_brightness\": {\"type\": \"number\", \"description\": \"Minimum acoustic brightness (0.0=dark/warm to 1.0=bright).\"}, \"max_brightness\": {\"type\": \"number\", \"description\": \"Maximum acoustic brightness.\"}, \"min_bpm\": {\"type\": \"integer\", \"description\": \"Minimum tempo in BPM.\"}, \"max_bpm\": {\"type\": \"integer\", \"description\": \"Maximum tempo in BPM.\"}, \"genre\": {\"type\": \"string\", \"description\": \"Optional genre substring filter.\"}, \"limit\": {\"type\": \"integer\", \"description\": \"Max results (default 10).\"}}, \"required\": []}}}, {\"type\": \"function\", \"function\": {\"name\": \"playback_control\", \"description\": \"Control transport: pause, resume, skip, previous, stop, clear_queue, or shuffle.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"action\": {\"type\": \"string\", \"enum\": [\"pause\", \"resume\", \"skip\", \"previous\", \"stop\", \"clear_queue\", \"shuffle\"], \"description\": \"Transport action to perform.\"}}, \"required\": [\"action\"]}}}, {\"type\": \"function\", \"function\": {\"name\": \"save_queue_as_playlist\", \"description\": \"Save the current queue/walk (from the current position onward) as a named playlist.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"name\": {\"type\": \"string\", \"description\": \"Playlist name.\"}}, \"required\": [\"name\"]}}}, {\"type\": \"function\", \"function\": {\"name\": \"get_player_status\", \"description\": \"Get the currently playing track, playback state, and queue length.\", \"parameters\": {\"type\": \"object\", \"properties\": {}, \"required\": []}}}, {\"type\": \"function\", \"function\": {\"name\": \"get_current_track_info\", \"description\": \"Get detailed metadata (title, artist, album, duration) about the current track.\", \"parameters\": {\"type\": \"object\", \"properties\": {}, \"required\": []}}}, {\"type\": \"function\", \"function\": {\"name\": \"search_online\", \"description\": \"Search Qobuz ONLINE for tracks/albums the user may not own locally. Returns results. Set download=true to fetch the top result \\u2014 this ALWAYS asks the user to confirm first.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\", \"description\": \"Online search query.\"}, \"download\": {\"type\": \"boolean\", \"description\": \"If true, offer to download the top match (requires user confirmation).\"}}, \"required\": [\"query\"]}}}, {\"type\": \"function\", \"function\": {\"name\": \"web_search\", \"description\": \"Look anything up on the web that the library can't answer: an artist's story, what a song is about, release dates, who produced or sampled what, band members, new or upcoming releases, tours, what genre or scene something belongs to, translations of titles. Returns a written answer (Google) or search snippets, each with its source. Answer from what it returns, briefly naming the source; never guess facts you could look up.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\", \"description\": \"The question or search terms, with the artist name for context.\"}}, \"required\": [\"query\"]}}}, {\"type\": \"function\", \"function\": {\"name\": \"learn_about\", \"description\": \"Background on the CURRENT track, its artist or its album (or a named one): what the library knows (album, year, genre, country, plays) plus the web's story. Use for 'tell me about this song', 'who is this', 'what's this album'.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"subject\": {\"type\": \"string\", \"enum\": [\"track\", \"artist\", \"album\"], \"description\": \"What to describe (default: track).\"}, \"name\": {\"type\": \"string\", \"description\": \"Optional: a named track/artist/album instead of what's playing.\"}}, \"required\": []}}}, {\"type\": \"function\", \"function\": {\"name\": \"find_related_artists\", \"description\": \"Artists the web calls similar to an artist (default: the one playing), split into those already in the user's library (playable now with play_music / enqueue_music) and the sources naming others (findable with search_online). Use for 'who else sounds like this', 'artists like X', 'build me a mix around X'.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"artist\": {\"type\": \"string\", \"description\": \"Artist name; omit for the current artist.\"}}, \"required\": []}}}, {\"type\": \"function\", \"function\": {\"name\": \"get_library_overview\", \"description\": \"Summary stats of the local library: total tracks, artist/album/playlist counts, and the top genres. Use for 'how big is my library' / 'what genres do I have'.\", \"parameters\": {\"type\": \"object\", \"properties\": {}, \"required\": []}}}, {\"type\": \"function\", \"function\": {\"name\": \"get_top_played\", \"description\": \"The user's most-played tracks with play counts. Use for 'my most played', 'favourite songs'.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"limit\": {\"type\": \"integer\", \"description\": \"How many (default 10).\"}}, \"required\": []}}}, {\"type\": \"function\", \"function\": {\"name\": \"list_artists\", \"description\": \"List artists in the library (with per-artist track & album counts), optionally filtered. Use for 'how many artists', 'do I have <artist>', 'how many tracks by <artist>'.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"search\": {\"type\": \"string\", \"description\": \"Optional name filter.\"}, \"limit\": {\"type\": \"integer\", \"description\": \"Max results (default 25).\"}}, \"required\": []}}}, {\"type\": \"function\", \"function\": {\"name\": \"get_artist_albums\", \"description\": \"List the albums the library holds for a given artist (title, year, genre, track count).\", \"parameters\": {\"type\": \"object\", \"properties\": {\"artist\": {\"type\": \"string\", \"description\": \"Artist name.\"}}, \"required\": [\"artist\"]}}}, {\"type\": \"function\", \"function\": {\"name\": \"get_album_tracks\", \"description\": \"List the tracks on an album, in order. Artist is optional but disambiguates same-named albums.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"album\": {\"type\": \"string\", \"description\": \"Album title.\"}, \"artist\": {\"type\": \"string\", \"description\": \"Optional artist name.\"}}, \"required\": [\"album\"]}}}, {\"type\": \"function\", \"function\": {\"name\": \"list_playlists\", \"description\": \"List the user's saved playlists with their track counts.\", \"parameters\": {\"type\": \"object\", \"properties\": {}, \"required\": []}}}, {\"type\": \"function\", \"function\": {\"name\": \"get_playlist_tracks\", \"description\": \"List the tracks inside a named playlist, in order.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"name\": {\"type\": \"string\", \"description\": \"Playlist name.\"}}, \"required\": [\"name\"]}}}, {\"type\": \"function\", \"function\": {\"name\": \"get_recently_played\", \"description\": \"The most recently played tracks, newest first. Use for 'what did I just play', 'what was I listening to'.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"limit\": {\"type\": \"integer\", \"description\": \"How many (default 15).\"}}, \"required\": []}}}, {\"type\": \"function\", \"function\": {\"name\": \"get_track_details\", \"description\": \"Rich metadata for one track (album, genre, year, duration, bpm, energy). Pass a query, or a path, or nothing to describe the current track. Use for 'what bpm is this', 'what year is this from'.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\", \"description\": \"Track/artist to look up.\"}, \"path\": {\"type\": \"string\", \"description\": \"Exact track path from another tool.\"}}, \"required\": []}}}, {\"type\": \"function\", \"function\": {\"name\": \"play_album\", \"description\": \"Play a whole album in order, replacing the queue. Artist optional but disambiguates. Confirms first if a queue is already playing.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"album\": {\"type\": \"string\", \"description\": \"Album title.\"}, \"artist\": {\"type\": \"string\", \"description\": \"Optional artist name.\"}}, \"required\": [\"album\"]}}}, {\"type\": \"function\", \"function\": {\"name\": \"play_playlist\", \"description\": \"Play a named playlist in order, replacing the queue. Confirms first if a queue is already playing.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"name\": {\"type\": \"string\", \"description\": \"Playlist name.\"}}, \"required\": [\"name\"]}}}, {\"type\": \"function\", \"function\": {\"name\": \"get_metadata_status\", \"description\": \"Metadata health: how many artists Auto-Play can place (have a genre or country), which artists have neither, and AI suggestions waiting for review. Use for 'which artists are missing info', 'is my metadata OK'.\", \"parameters\": {\"type\": \"object\", \"properties\": {}, \"required\": []}}}, {\"type\": \"function\", \"function\": {\"name\": \"get_artist_metadata\", \"description\": \"The stored genres and country of one library artist, where each came from, and any AI suggestion on file.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"artist\": {\"type\": \"string\", \"description\": \"Artist name.\"}}, \"required\": [\"artist\"]}}}, {\"type\": \"function\", \"function\": {\"name\": \"research_artist_metadata\", \"description\": \"Search the web (Google, with sources) for a library artist's genres and country. Saves the answer only as a SUGGESTION for review; changes nothing. Use when the user asks who an artist is, or to fill in a missing genre/country.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"artist\": {\"type\": \"string\", \"description\": \"Artist name.\"}, \"refresh\": {\"type\": \"boolean\", \"description\": \"Search again even if an answer is cached.\"}}, \"required\": [\"artist\"]}}}, {\"type\": \"function\", \"function\": {\"name\": \"apply_artist_metadata\", \"description\": \"Save genres and/or a country for one or MANY library artists in one call (this changes what Auto-Play does). By default the genres REPLACE what the artists had \\u2014 use this to correct a wrong genre; mode='add' keeps existing tags. Omit genres and country to accept a single artist's pending AI suggestion. Always confirms with the user first.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"artist\": {\"type\": \"string\", \"description\": \"Artist name (or use 'artists').\"}, \"artists\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}, \"description\": \"Several artist names to set at once.\"}, \"genres\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}, \"description\": \"Lower-case genre tags. Prefer genres the library already uses.\"}, \"country\": {\"type\": \"string\", \"description\": \"ISO 3166-1 alpha-2 country code.\"}, \"mode\": {\"type\": \"string\", \"enum\": [\"replace\", \"add\"], \"description\": \"replace (default) or add to existing genres.\"}}}}}]}"
+    }
+   ],
+   "result": {
+    "content": "ok",
+    "tool_calls": [],
+    "success": true,
+    "error_message": null,
+    "raw_message": {
+     "role": "assistant",
+     "content": "ok",
+     "tool_calls": []
+    }
+   }
+  },
+  {
+   "name": "ollama_empty_tools_list",
+   "engine": {
+    "provider": "ollama",
+    "ollama_endpoint": "/v1",
+    "ollama_model": "qwen"
+   },
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are Jarvis.\n\nLive context — Now playing: Αγάπη — Χ."
+    },
+    {
+     "role": "user",
+     "content": "play something by Björk 🎵"
+    }
+   ],
+   "tools": "empty",
+   "replies": [
+    {
+     "status": 200,
+     "content_type": "application/json; charset=UTF-8",
+     "body": "{\"choices\": [{\"message\": {\"content\": \"\"}}]}"
+    }
+   ],
+   "requests": [
+    {
+     "method": "POST",
+     "path": "/v1/chat/completions",
+     "headers": {
+      "content-type": "application/json"
+     },
+     "body": "{\"model\": \"qwen\", \"messages\": [{\"role\": \"system\", \"content\": \"You are Jarvis.\\n\\nLive context \\u2014 Now playing: \\u0391\\u03b3\\u03ac\\u03c0\\u03b7 \\u2014 \\u03a7.\"}, {\"role\": \"user\", \"content\": \"play something by Bj\\u00f6rk \\ud83c\\udfb5\"}]}"
+    }
+   ],
+   "result": {
+    "content": "",
+    "tool_calls": [],
+    "success": true,
+    "error_message": null,
+    "raw_message": {
+     "content": ""
+    }
+   }
+  },
+  {
+   "name": "http_400",
+   "engine": {
+    "provider": "gemini",
+    "api_key": "k"
+   },
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are Jarvis.\n\nLive context — Now playing: Αγάπη — Χ."
+    },
+    {
+     "role": "user",
+     "content": "play something by Björk 🎵"
+    }
+   ],
+   "tools": false,
+   "replies": [
+    {
+     "status": 400,
+     "content_type": "text/plain",
+     "body": "Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα "
+    }
+   ],
+   "requests": [
+    {
+     "method": "POST",
+     "path": "/v1beta/openai/chat/completions",
+     "headers": {
+      "authorization": "Bearer k",
+      "content-type": "application/json"
+     },
+     "body": "{\"model\": \"gemini-3.5-flash-lite\", \"messages\": [{\"role\": \"system\", \"content\": \"You are Jarvis.\\n\\nLive context \\u2014 Now playing: \\u0391\\u03b3\\u03ac\\u03c0\\u03b7 \\u2014 \\u03a7.\"}, {\"role\": \"user\", \"content\": \"play something by Bj\\u00f6rk \\ud83c\\udfb5\"}]}"
+    }
+   ],
+   "result": {
+    "content": "",
+    "tool_calls": [],
+    "success": false,
+    "error_message": "Provider returned HTTP 400: Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλμα Σφάλ",
+    "raw_message": null
+   }
+  },
+  {
+   "name": "http_500_json",
+   "engine": {
+    "provider": "ollama",
+    "ollama_endpoint": "/v1"
+   },
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are Jarvis.\n\nLive context — Now playing: Αγάπη — Χ."
+    },
+    {
+     "role": "user",
+     "content": "play something by Björk 🎵"
+    }
+   ],
+   "tools": false,
+   "replies": [
+    {
+     "status": 500,
+     "content_type": "application/json; charset=UTF-8",
+     "body": "{\"error\": {\"message\": \"model not found\"}}"
+    }
+   ],
+   "requests": [
+    {
+     "method": "POST",
+     "path": "/v1/chat/completions",
+     "headers": {
+      "content-type": "application/json"
+     },
+     "body": "{\"model\": \"llama3.2\", \"messages\": [{\"role\": \"system\", \"content\": \"You are Jarvis.\\n\\nLive context \\u2014 Now playing: \\u0391\\u03b3\\u03ac\\u03c0\\u03b7 \\u2014 \\u03a7.\"}, {\"role\": \"user\", \"content\": \"play something by Bj\\u00f6rk \\ud83c\\udfb5\"}]}"
+    }
+   ],
+   "result": {
+    "content": "",
+    "tool_calls": [],
+    "success": false,
+    "error_message": "Provider returned HTTP 500: {\"error\": {\"message\": \"model not found\"}}",
+    "raw_message": null
+   }
+  },
+  {
+   "name": "empty_choices",
+   "engine": {
+    "provider": "gemini",
+    "api_key": "k"
+   },
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are Jarvis.\n\nLive context — Now playing: Αγάπη — Χ."
+    },
+    {
+     "role": "user",
+     "content": "play something by Björk 🎵"
+    }
+   ],
+   "tools": false,
+   "replies": [
+    {
+     "status": 200,
+     "content_type": "application/json; charset=UTF-8",
+     "body": "{\"choices\": []}"
+    }
+   ],
+   "requests": [
+    {
+     "method": "POST",
+     "path": "/v1beta/openai/chat/completions",
+     "headers": {
+      "authorization": "Bearer k",
+      "content-type": "application/json"
+     },
+     "body": "{\"model\": \"gemini-3.5-flash-lite\", \"messages\": [{\"role\": \"system\", \"content\": \"You are Jarvis.\\n\\nLive context \\u2014 Now playing: \\u0391\\u03b3\\u03ac\\u03c0\\u03b7 \\u2014 \\u03a7.\"}, {\"role\": \"user\", \"content\": \"play something by Bj\\u00f6rk \\ud83c\\udfb5\"}]}"
+    }
+   ],
+   "result": {
+    "content": "",
+    "tool_calls": [],
+    "success": false,
+    "error_message": "Empty response from provider.",
+    "raw_message": null
+   }
+  },
+  {
+   "name": "no_choices_key",
+   "engine": {
+    "provider": "gemini",
+    "api_key": "k"
+   },
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are Jarvis.\n\nLive context — Now playing: Αγάπη — Χ."
+    },
+    {
+     "role": "user",
+     "content": "play something by Björk 🎵"
+    }
+   ],
+   "tools": false,
+   "replies": [
+    {
+     "status": 200,
+     "content_type": "application/json; charset=UTF-8",
+     "body": "{\"id\": \"x\"}"
+    }
+   ],
+   "requests": [
+    {
+     "method": "POST",
+     "path": "/v1beta/openai/chat/completions",
+     "headers": {
+      "authorization": "Bearer k",
+      "content-type": "application/json"
+     },
+     "body": "{\"model\": \"gemini-3.5-flash-lite\", \"messages\": [{\"role\": \"system\", \"content\": \"You are Jarvis.\\n\\nLive context \\u2014 Now playing: \\u0391\\u03b3\\u03ac\\u03c0\\u03b7 \\u2014 \\u03a7.\"}, {\"role\": \"user\", \"content\": \"play something by Bj\\u00f6rk \\ud83c\\udfb5\"}]}"
+    }
+   ],
+   "result": {
+    "content": "",
+    "tool_calls": [],
+    "success": false,
+    "error_message": "Empty response from provider.",
+    "raw_message": null
+   }
+  },
+  {
+   "name": "no_message",
+   "engine": {
+    "provider": "gemini",
+    "api_key": "k"
+   },
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are Jarvis.\n\nLive context — Now playing: Αγάπη — Χ."
+    },
+    {
+     "role": "user",
+     "content": "play something by Björk 🎵"
+    }
+   ],
+   "tools": false,
+   "replies": [
+    {
+     "status": 200,
+     "content_type": "application/json; charset=UTF-8",
+     "body": "{\"choices\": [{\"finish_reason\": \"stop\"}]}"
+    }
+   ],
+   "requests": [
+    {
+     "method": "POST",
+     "path": "/v1beta/openai/chat/completions",
+     "headers": {
+      "authorization": "Bearer k",
+      "content-type": "application/json"
+     },
+     "body": "{\"model\": \"gemini-3.5-flash-lite\", \"messages\": [{\"role\": \"system\", \"content\": \"You are Jarvis.\\n\\nLive context \\u2014 Now playing: \\u0391\\u03b3\\u03ac\\u03c0\\u03b7 \\u2014 \\u03a7.\"}, {\"role\": \"user\", \"content\": \"play something by Bj\\u00f6rk \\ud83c\\udfb5\"}]}"
+    }
+   ],
+   "result": {
+    "content": "",
+    "tool_calls": [],
+    "success": true,
+    "error_message": null,
+    "raw_message": {}
+   }
+  },
+  {
+   "name": "not_configured",
+   "engine": {
+    "provider": "gemini",
+    "api_key": "   "
+   },
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are Jarvis.\n\nLive context — Now playing: Αγάπη — Χ."
+    },
+    {
+     "role": "user",
+     "content": "play something by Björk 🎵"
+    }
+   ],
+   "tools": true,
+   "replies": [],
+   "requests": [],
+   "result": {
+    "content": "",
+    "tool_calls": [],
+    "success": false,
+    "error_message": "AI Agent not configured. Set your Gemini API key or local server in Settings → AI Assistant.",
+    "raw_message": null
+   }
+  },
+  {
+   "name": "unknown_provider",
+   "engine": {
+    "provider": "openai",
+    "api_key": "k"
+   },
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are Jarvis.\n\nLive context — Now playing: Αγάπη — Χ."
+    },
+    {
+     "role": "user",
+     "content": "play something by Björk 🎵"
+    }
+   ],
+   "tools": true,
+   "replies": [],
+   "requests": [],
+   "result": {
+    "content": "",
+    "tool_calls": [],
+    "success": false,
+    "error_message": "AI Agent not configured. Set your Gemini API key or local server in Settings → AI Assistant.",
+    "raw_message": null
+   }
+  },
+  {
+   "name": "wrong_mimetype",
+   "network_error": true,
+   "engine": {
+    "provider": "gemini",
+    "api_key": "k"
+   },
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are Jarvis.\n\nLive context — Now playing: Αγάπη — Χ."
+    },
+    {
+     "role": "user",
+     "content": "play something by Björk 🎵"
+    }
+   ],
+   "tools": false,
+   "replies": [
+    {
+     "status": 200,
+     "content_type": "text/html",
+     "body": "{\"choices\": []}"
+    }
+   ],
+   "requests": [
+    {
+     "method": "POST",
+     "path": "/v1beta/openai/chat/completions",
+     "headers": {
+      "authorization": "Bearer k",
+      "content-type": "application/json"
+     },
+     "body": "{\"model\": \"gemini-3.5-flash-lite\", \"messages\": [{\"role\": \"system\", \"content\": \"You are Jarvis.\\n\\nLive context \\u2014 Now playing: \\u0391\\u03b3\\u03ac\\u03c0\\u03b7 \\u2014 \\u03a7.\"}, {\"role\": \"user\", \"content\": \"play something by Bj\\u00f6rk \\ud83c\\udfb5\"}]}"
+    }
+   ],
+   "result": {
+    "content": "",
+    "tool_calls": [],
+    "success": false,
+    "error_message": "Network error: 200, message='Attempt to decode JSON with unexpected mimetype: text/html', url='http://127.0.0.1:61768/v1beta/openai/chat/completions'",
+    "raw_message": null
+   }
+  }
+ ],
+ "models": [
+  {
+   "name": "two_pages",
+   "api_key": " key-1 ",
+   "replies": [
+    {
+     "status": 200,
+     "content_type": "application/json; charset=UTF-8",
+     "body": "{\"models\": [{\"name\": \"models/gemini-2.5-flash\", \"displayName\": \"Gemini 2.5 Flash\", \"supportedGenerationMethods\": [\"generateContent\", \"countTokens\"]}, {\"name\": \"models/gemini-embedding-001\", \"displayName\": \"Embedding\", \"supportedGenerationMethods\": [\"embedContent\", \"generateContent\"]}, {\"name\": \"models/gemini-3.5-flash-lite\", \"supportedGenerationMethods\": [\"generateContent\"]}, {\"name\": \"models/gemma-3-27b-it\", \"supportedGenerationMethods\": [\"generateContent\"]}, {\"name\": \"models/gemini-2.5-flash-preview-tts\", \"supportedGenerationMethods\": [\"generateContent\"]}, {\"name\": \"models/gemini-2.0-flash\", \"displayName\": \"\", \"supportedGenerationMethods\": [\"generateContent\"]}], \"nextPageToken\": \"tok+/=2\"}"
+    },
+    {
+     "status": 200,
+     "content_type": "application/json; charset=UTF-8",
+     "body": "{\"models\": [{\"name\": \"models/gemini-live-2.5\", \"supportedGenerationMethods\": [\"generateContent\"]}, {\"name\": \"gemini-3-pro\", \"displayName\": \"Gemini 3 Pro\", \"supportedGenerationMethods\": [\"generateContent\"]}, {\"name\": \"models/gemini-2.5-flash\", \"displayName\": \"Duplicate\", \"supportedGenerationMethods\": [\"generateContent\"]}, {\"name\": \"models/gemini-1.5-pro\", \"supportedGenerationMethods\": []}, {\"name\": \"models/gemini-robotics-er\", \"supportedGenerationMethods\": [\"generateContent\"]}]}"
+    }
+   ],
+   "requests": [
+    {
+     "method": "GET",
+     "path": "/v1beta/models?pageSize=1000",
+     "headers": {
+      "x-goog-api-key": "key-1"
+     },
+     "body": ""
+    },
+    {
+     "method": "GET",
+     "path": "/v1beta/models?pageSize=1000&pageToken=tok%2B/%3D2",
+     "headers": {
+      "x-goog-api-key": "key-1"
+     },
+     "body": ""
+    }
+   ],
+   "result": {
+    "models": [
+     {
+      "id": "gemini-3.5-flash-lite",
+      "name": "gemini-3.5-flash-lite"
+     },
+     {
+      "id": "gemini-3-pro",
+      "name": "Gemini 3 Pro"
+     },
+     {
+      "id": "gemini-2.5-flash",
+      "name": "Gemini 2.5 Flash"
+     },
+     {
+      "id": "gemini-2.5-flash",
+      "name": "Duplicate"
+     },
+     {
+      "id": "gemini-2.0-flash",
+      "name": "gemini-2.0-flash"
+     }
+    ]
+   }
+  },
+  {
+   "name": "forbidden",
+   "api_key": "bad",
+   "replies": [
+    {
+     "status": 403,
+     "content_type": "application/json; charset=UTF-8",
+     "body": "{\"error\": {\"code\": 403, \"message\": \"API key not valid. API key not valid. API key not valid. API key not valid. API key not valid. API key not valid. API key not valid. API key not valid. API key not valid. API key not valid. API key not valid. API key not valid. API key not valid. API key not valid. API key not valid. \"}}"
+    }
+   ],
+   "requests": [
+    {
+     "method": "GET",
+     "path": "/v1beta/models?pageSize=1000",
+     "headers": {
+      "x-goog-api-key": "bad"
+     },
+     "body": ""
+    }
+   ],
+   "result": {
+    "error": "HTTP 403: {\"error\": {\"code\": 403, \"message\": \"API key not valid. API key not valid. API key not valid. API key not valid. API key not valid. API key not valid. API key not valid. API key not valid. API key not "
+   }
+  },
+  {
+   "name": "no_key",
+   "api_key": "  ",
+   "replies": [],
+   "requests": [],
+   "result": {
+    "error": "No Gemini API key set."
+   }
+  },
+  {
+   "name": "empty",
+   "api_key": "k",
+   "replies": [
+    {
+     "status": 200,
+     "content_type": "application/json; charset=UTF-8",
+     "body": "{}"
+    }
+   ],
+   "requests": [
+    {
+     "method": "GET",
+     "path": "/v1beta/models?pageSize=1000",
+     "headers": {
+      "x-goog-api-key": "k"
+     },
+     "body": ""
+    }
+   ],
+   "result": {
+    "models": []
+   }
+  }
+ ]
+}
