@@ -4,8 +4,9 @@ import 'package:flutter/material.dart';
 
 import '../../ui/tokens.dart';
 
-/// Cover art from a local file, cross-fading when it changes, with the Flet
-/// placeholder (an icon on SURFACE2) underneath while there is none.
+/// Cover art from a local file or an `http(s)` URL (stream previews, new
+/// releases), cross-fading when it changes, with the Flet placeholder (an
+/// icon on SURFACE2) underneath while there is none.
 class Artwork extends StatelessWidget {
   const Artwork({
     super.key,
@@ -17,6 +18,7 @@ class Artwork extends StatelessWidget {
     this.cacheWidth,
   });
 
+  /// Local file path or `http://` / `https://` URL.
   final String? path;
 
   /// Null to fill the parent.
@@ -27,6 +29,11 @@ class Artwork extends StatelessWidget {
 
   /// Decode width in physical pixels (the art is at most 512 px anyway).
   final int? cacheWidth;
+
+  static bool isNetworkUrl(String value) {
+    final lower = value.toLowerCase();
+    return lower.startsWith('https://') || lower.startsWith('http://');
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -39,6 +46,27 @@ class Artwork extends StatelessWidget {
       alignment: Alignment.center,
       child: Icon(placeholder, color: accent, size: placeholderSize),
     );
+    Widget imageFor(String src) {
+      if (isNetworkUrl(src)) {
+        return Image.network(
+          src,
+          key: ValueKey(src),
+          fit: BoxFit.cover,
+          cacheWidth: cacheWidth,
+          gaplessPlayback: true,
+          errorBuilder: (_, _, _) => const SizedBox.shrink(),
+        );
+      }
+      return Image.file(
+        File(src),
+        key: ValueKey(src),
+        fit: BoxFit.cover,
+        cacheWidth: cacheWidth,
+        gaplessPlayback: true,
+        errorBuilder: (_, _, _) => const SizedBox.shrink(),
+      );
+    }
+
     return ClipRRect(
       borderRadius: BorderRadius.circular(radius),
       child: SizedBox(
@@ -52,14 +80,7 @@ class Artwork extends StatelessWidget {
               duration: const Duration(milliseconds: 250),
               child: p == null || p.isEmpty
                   ? const SizedBox.shrink()
-                  : Image.file(
-                      File(p),
-                      key: ValueKey(p),
-                      fit: BoxFit.cover,
-                      cacheWidth: cacheWidth,
-                      gaplessPlayback: true,
-                      errorBuilder: (_, _, _) => const SizedBox.shrink(),
-                    ),
+                  : imageFor(p),
             ),
           ],
         ),

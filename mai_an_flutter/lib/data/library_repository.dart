@@ -19,6 +19,7 @@ import 'play_ledger.dart';
 import 'playlists.dart';
 import 'maintenance.dart';
 import 'network_queries.dart';
+import 'release_queries.dart';
 import 'scan_writes.dart';
 
 export 'graph_build.dart' show AcousticBuildResult, GraphReadiness, GraphStatus;
@@ -27,6 +28,8 @@ export 'landing_queries.dart'
     show LibraryCounts, MostPlayedGroup, MostPlayedTrack;
 export 'network_queries.dart' show NeighborRow, NetworkTrackRow;
 export 'playlists.dart' show PlaylistRow;
+export 'release_queries.dart'
+    show ArtistReleaseRow, ReleaseItem, ReleaseSyncEntry;
 export 'scan_writes.dart' show ScannedTrack;
 
 class Track {
@@ -222,6 +225,66 @@ class LibraryRepository {
   Future<List<MostPlayedGroup>> mostPlayedGenres(int limit) =>
       _db.run(mostPlayedGenresJob(limit));
   Future<LibraryCounts> libraryCounts() => _db.run(libraryCountsJob);
+
+  // New From Your Artists & Search ownership (release_queries.dart).
+  Future<Map<String, ArtistReleaseRow>> artistReleaseCache() =>
+      _db.run(artistReleaseCacheJob);
+  Future<void> saveArtistReleases(
+    String artistName,
+    String source,
+    String? sourceId,
+    List<ReleaseItem> releases, {
+    double? fetchedAt,
+  }) => _write(
+    saveArtistReleasesJob(
+      artistName,
+      source,
+      sourceId,
+      releases,
+      fetchedAt: fetchedAt,
+    ),
+  );
+  Future<List<String>> releaseLookupArtists() =>
+      _db.run(releaseLookupArtistsJob);
+  Future<(List<String>, List<String>)> artistOwnedTitles(String artistName) =>
+      _db.run(artistOwnedTitlesJob(artistName));
+  Future<Map<String, Set<String>>> allOwnedArtistTitles() =>
+      _db.run(allOwnedArtistTitlesJob);
+  Future<int> logReleaseSyncStart({
+    String triggerType = 'daily_auto',
+    DateTime? now,
+  }) {
+    if (!writable) throw StateError('library opened read-only');
+    return _db.run(
+      logReleaseSyncStartJob(triggerType: triggerType, now: now),
+    );
+  }
+
+  Future<void> logReleaseSyncFinish(
+    int logId, {
+    int artistsChecked = 0,
+    int newFound = 0,
+    String status = 'completed',
+    DateTime? now,
+  }) => _write(
+    logReleaseSyncFinishJob(
+      logId,
+      artistsChecked: artistsChecked,
+      newFound: newFound,
+      status: status,
+      now: now,
+    ),
+  );
+  Future<ReleaseSyncEntry?> latestReleaseSync() =>
+      _db.run(latestReleaseSyncJob);
+  Future<bool> shouldRunDailyReleaseSync({DateTime? now}) =>
+      _db.run(shouldRunDailyReleaseSyncJob(now: now));
+  Future<bool> hasTrackByMeta(String title, String artist) =>
+      _db.run(hasTrackByMetaJob(title, artist));
+  Future<int> albumOwnedCount(String title, String artist) =>
+      _db.run(albumOwnedCountJob(title, artist));
+  Future<int> artistOwnedCount(String name) =>
+      _db.run(artistOwnedCountJob(name));
 
   // Playlists (playlists.dart). Writes throw on a read-only library.
   Future<List<PlaylistRow>> allPlaylists(String sortMode) =>

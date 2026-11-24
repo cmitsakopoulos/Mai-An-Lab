@@ -1,8 +1,8 @@
 # Mai An Lab: Flet → Flutter port map
 
-*Updated: 2026-11-24. Branch `flutter-port`, tagged **`v0.1.0`** (`0.1.0+2`). **Phases 0–5 code is complete** (59/91 Flet features ported; desktop tests pass including real-library goldens; strict Dart analyzer clean; release APK builds at 27.5 MB). Decisions A, B and C are resolved (§6).*
+*Updated: 2026-11-24. Branch `flutter-port`, tagged **`v0.1.0`** (`0.1.0+2`). **Phases 0–5 + Phase 6a code is complete** (65/91 Flet features ported; desktop tests pass including real-library goldens; strict Dart analyzer clean; release APK builds at 27.5 MB). Decisions A, B and C are resolved (§6).*
 
-*Primary blocker right now: **on-device verification** — the phone still has an older pre-scan/pre-Settings build, so Phases 1–5 are `🧪` (written & tested on desktop, not yet verified in daily phone use). Next code milestones: **Phase 6** (Sources, Downloads, New Releases & On-Phone DSP) and **Phase 7** (Metadata Workbench, Auto-Enrichment & Lean Onboarding), followed by a **pre-cutover UI Polish pass**, Android cutover (§5), and **Phase 8** (macOS).*
+*Primary blocker right now: **on-device verification** — the phone still has an older pre-scan/pre-Settings build, so Phases 1–6a are `🧪` (written & tested on desktop, not yet verified in daily phone use). Next code milestones: **Phase 6b–6d** (Qobuz/Deezer source clients, full Search/Downloads/Tagger & On-Phone DSP) and **Phase 7** (Metadata Workbench, Auto-Enrichment & Lean Onboarding), followed by a **pre-cutover UI Polish pass**, Android cutover (§5), and **Phase 8** (macOS).*
 
 **New agent? Start at §10 (Open items) and §11 (Remaining features).**
 Archived history (Phase 0–5 build logs, golden test inventories, §3 full module table, §9 Phase 0–1 audit, completed §10/§11 items) lives in [PORT_HISTORY.md](PORT_HISTORY.md). Third-party attributions & package candidates (§12) live in [THIRD_PARTY.md](THIRD_PARTY.md).
@@ -50,12 +50,12 @@ Active constraints & items needing verification or future work:
 All files live under `<appSupport>/data` (Android: `/data/user/0/<pkg>/files/data`) in Flet's exact format so cutover is zero-migration.
 
 - **`library.db`**: `PRAGMA user_version` = `GEOMETRY_VERSION` (currently `2`; keep `kGeometryVersion` synced with Python). FTS5 is maintained by 11 SQLite triggers.
-  - **Already ported (Phases 0–5):** `artists`, `albums`, `tracks`, `play_counts`, `playback_history`, `artist_enrichment`, `genre_affinity`, `track_neighbors`, `playlists`, `playlist_tracks`, `fts_search`, `artist_ai_research` (read).
-  - **Phase 6 tables:** `artist_releases`, `release_sync_log`, plus `play_counts` local DSP feature writes.
+  - **Already ported (Phases 0–6a):** `artists`, `albums`, `tracks`, `play_counts`, `playback_history`, `artist_enrichment`, `genre_affinity`, `track_neighbors`, `playlists`, `playlist_tracks`, `fts_search`, `artist_ai_research` (read), `artist_releases`, `release_sync_log`.
+  - **Phase 6d writes:** `play_counts` local DSP feature writes.
   - **Phase 7 tables:** `artist_ai_research` (writes), `metadata_audit_dismissed`, `artist_aliases`, `artist_alias_rejections`.
-- **Sidecar files already ported:** `.config/streamrip/config.toml` (read/write byte-identical to tomlkit 0.15.2), `queue_state.json`, `queue_pos.json`, `native_resume.json`, `.cache/queue_{regular,shuffle}.json`, `flet_prefs.json`, `play_ledger.jsonl`, `companion_transfers.json`, `chat_history.json`, `graph_state.json`, `mai_an_lab_port_state_{latest,import}.zip` (renamed back at cutover, §5).
+- **Sidecar files already ported:** `.config/streamrip/config.toml` (read/write byte-identical to tomlkit 0.15.2), `queue_state.json`, `queue_pos.json`, `native_resume.json`, `.cache/queue_{regular,shuffle}.json`, `flet_prefs.json`, `play_ledger.jsonl`, `companion_transfers.json`, `chat_history.json`, `graph_state.json`, `recent_searches.json`, `mai_an_lab_port_state_{latest,import}.zip` (renamed back at cutover, §5).
 - **Sidecar files remaining:**
-  - `recent_searches.json`, `downloads.db`, `failed_downloads.db` → **Phase 6**
+  - `downloads.db`, `failed_downloads.db` → **Phase 6c**
   - `.onboarded` (boot-import already writes it; wizard reads/writes it) → **Phase 7**
 
 ---
@@ -65,14 +65,14 @@ All files live under `<appSupport>/data` (Android: `/data/user/0/<pkg>/files/dat
 | # | Phase | Scope | Status |
 |---|---|---|---|
 | 0–5 | Backbone, Player, Stations, Library writes/Settings/Network, Sync (Android), Jarvis Assistant + Voice | 59/91 features, 732 tests passing. See [PORT_HISTORY.md](PORT_HISTORY.md) for stage details. | 🧪 Code done; phone verify pending |
-| **6** | **Sources, Downloads, New Releases & On-Phone DSP** | Full Flet parity (Decisions A & B): Qobuz/Deezer clients, search/previews/downloads, quality selector, tagger, New From Your Artists, on-phone `dsp.py` + bulk analysis, Authentication & DSP Compute settings, Jarvis `search_online`, cache pruning. | 🔨 Ready to plan & build |
+| **6** | **Sources, Downloads, New Releases & On-Phone DSP** | Full Flet parity (Decisions A & B): **6a done** (New Releases, cache pruning, recent searches, local-library hits & ownership badges, URL artwork); 6b–6d remaining (Qobuz/Deezer clients, search/previews/downloads, quality selector, tagger, on-phone `dsp.py` + bulk analysis, Authentication & DSP Compute settings, Jarvis `search_online`). | 🔨 6a 🧪; 6b–6d next |
 | **7** | **Metadata Tools & Lean Onboarding** | Independent of Phase 6: Metadata workbench (one confidence-ordered artist list), auto-enrichment pass (MusicBrainz/Qobuz/AI), artist editor, genre curation, audit/dismissals, aliases, Jarvis metadata write tools, leaner onboarding wizard. | 🔨 Ready to plan & build |
 | **P** | **Pre-cutover Visual & UX Polish** | Device-driven polish pass after hardware testing: edge-to-edge sheet insets, Hero artwork transitions (mini-player ↔ Now Playing), motion/haptic tuning, tabular numerals & type hierarchy, Network canvas touch feel. | 🔨 After phone testing |
 | **8** | **macOS Desktop** | Responsive sidebar/split-pane desktop shell, AVFoundation/macOS audio engine (`audio_engine_macos.py`), Companion sync server + ffmpeg transcoder (`sync/server.py`, `transcoder.py`), native folder pickers, Mac download success sound. | 🔨 After Android cutover |
 
 ### Phase 6 suggested staging (Decisions A = Full, B = Yes)
-1. **6a — Public New Releases & Search history:** `new_releases.py` (public Deezer + MusicBrainz, `artist_releases`/`release_sync_log`, daily refresh job), `search_history.py` (`recent_searches.json`), `text_match.py`, Search tab *New From Your Artists* shelf, local-library hits & ownership badges.
-2. **6b — Source clients (Qobuz & Deezer):** `qobuz.py`, `deezer.py`, `streamrip_api.py`, `streamrip_search.py`, `downloadable.py`, `search_results.py`, `source_metadata.py`, URL artwork loading, Settings → Authentication, Settings → Storage default download quality. Golden-test against recorded HTTP fixtures from Python.
+1. **6a — Public New Releases & Search history (🧪 Done):** `data/release_queries.dart`, `search/new_releases.dart` (`ReleaseFetcher` public Deezer + MusicBrainz, `refreshNewReleases`, `getNewReleases`, `NewReleasesScheduler` daily gate), `core/cache_pruner.dart` (`_prune_caches_async`), `search/search_history.dart` (`recent_searches.json`), `core/text_match.dart` (`levenshteinDistance`), `search/local_search.dart` (local-library hits & ownership badges), `player/ui/artwork.dart` (URL support), Search tab *New From Your Artists* shelf + Recent Searches sheet + local search bar. Goldens in `test/goldens/new_releases.json` (`tool/export_new_releases_goldens.py`).
+2. **6b — Source clients (Qobuz & Deezer):** `qobuz.py`, `deezer.py`, `streamrip_api.py`, `streamrip_search.py`, `downloadable.py`, `search_results.py`, `source_metadata.py`, Settings → Authentication, Settings → Storage default download quality. Golden-test against recorded HTTP fixtures from Python.
 3. **6c — Search UI, previews & download pipeline:** Full Search tab (hero/album/artist cards, pagination, source switch, missing-credentials banner), stream previews (progress card, cancel, preview cache pruning), Quality selector sheet, Download queue source workflows + `history_manager.py` (`downloads.db`, `failed_downloads.db`), `tagger.tag_file` (evaluate pure-Dart `metatagger` first; see [THIRD_PARTY.md](THIRD_PARTY.md)), Long-press → Redownload, Jarvis `search_online` hook.
 4. **6d — On-phone DSP analysis:** Port `dsp.py` (906 lines) over existing Kotlin `decodePcm` + `bulk_analyze_library` (cancellable job with `LibraryTaskService` + `progress_notify`, handling Android 15+ `dataSync` timeout). Wire Settings → Database Management (`Commence/Continue DSP Compute`, `Recompute All DSP Features`), Network setup card *Compute DSP Features* button, and quiet-scan *Analyse* button. Verify feature parity against Python on real audio fixtures.
 
@@ -176,21 +176,15 @@ Permanent deliberate differences from Flet (do **not** "fix" these back to Flet'
 
 ## 11. Remaining features (to build)
 
-59 of 91 Flet features are ported (✅/🧪, archived in [PORT_HISTORY.md](PORT_HISTORY.md)); 3 dropped per Decision C (`Demo search mode`, `debug play counts`, `fresh-install reset` — revisit if ever needed). The **29 remaining features** below define completion:
+65 of 91 Flet features are ported (✅/🧪, Phases 0–5 archived in [PORT_HISTORY.md](PORT_HISTORY.md), Phase 6a in §4 above); 3 dropped per Decision C (`Demo search mode`, `debug play counts`, `fresh-install reset` — revisit if ever needed). The **23 remaining features** below define completion:
 
-### Phase 6 — Sources, Downloads, New Releases & On-Phone DSP (15)
+### Phase 6b–6d — Sources, Downloads & On-Phone DSP (9)
 | Area | Feature | Notes |
 |---|---|---|
-| Startup job | New-releases refresh (daily gate) | `new_releases.py` (`artist_releases`, `release_sync_log`) |
-| Startup job | Automatic cache pruning (album art & previews) | `_prune_caches_async` (manual clears already in Settings → Advanced) |
-| Player | Artwork from a URL (stream previews) | `player/ui/artwork.dart` |
 | Player | Quality selector sheet (download quality) | `ui/player/quality_selector.py` |
 | Player | Download dock — source downloads | Mac transfers done; wire streamrip download tasks |
 | Library | Long-press → Redownload | `library/track_menu.dart` |
 | Library | On-phone DSP compute (cancellable, notification) | `dsp.py` + `bulk_analyze_library` over `decodePcm` (Decision B); wire Network & quiet-scan Analyse buttons |
-| Search | Landing: New From Your Artists shelf + manual refresh | Public Deezer API + MusicBrainz |
-| Search | Recent searches | `search_history.py` (`recent_searches.json`) |
-| Search | Local-library hits in search results & ownership badges | `text_match.py` |
 | Search | Qobuz / Deezer search (hero, cards, pagination, source switch, creds banner) | `qobuz.py`, `deezer.py`, `streamrip_search.py` |
 | Search | Stream previews (progress card, cancel) | Preview playback + cache |
 | Search | Download result / selection (quality sheet, dock, haptic/sound, auto-scan) | `streamrip_api.py`, `history_manager.py`, `tagger.tag_file` |

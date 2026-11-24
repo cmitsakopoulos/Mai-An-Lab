@@ -2,6 +2,8 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
+import '../core/text_match.dart';
+
 /// settings.py `SettingSearchEntry`: one hub row as the search box sees it.
 class SettingEntry {
   const SettingEntry({
@@ -265,24 +267,7 @@ List<(double, SettingEntry)> semanticMatches(
 }
 
 /// utils/text_match.py `levenshtein_distance`.
-int levenshtein(String a, String b) {
-  if (a.length < b.length) return levenshtein(b, a);
-  if (b.isEmpty) return a.length;
-  var prev = List<int>.generate(b.length + 1, (i) => i);
-  for (var i = 0; i < a.length; i++) {
-    final cur = [i + 1];
-    for (var j = 0; j < b.length; j++) {
-      cur.add(
-        math.min(
-          math.min(prev[j + 1] + 1, cur[j] + 1),
-          prev[j] + (a[i] == b[j] ? 0 : 1),
-        ),
-      );
-    }
-    prev = cur;
-  }
-  return prev.last;
-}
+int levenshtein(String a, String b) => levenshteinDistance(a, b);
 
 /// A stable sort (List.sort is not guaranteed stable).
 void mergeSort<T>(List<T> list, {required int Function(T, T) compare}) {

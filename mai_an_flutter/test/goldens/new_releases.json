@@ -1,0 +1,96 @@
+{
+  "norm": {
+    "": "",
+    "Burial": "burial",
+    "Ξεχωριστά (Deluxe Edition)": "ξεχωριστα",
+    "ξεχωριστα": "ξεχωριστα",
+    "Untrue [Remastered]": "untrue",
+    "Rossi.": "rossi",
+    "Björk - Homogenic - Deluxe Edition": "bjork",
+    "Track - Acoustic Version": "track",
+    "Album - 2024 Remaster": "album",
+    "Album - Normal Subtitle": "album normal subtitle",
+    "Café Tacvba (Live at MTV) [2020]": "cafe tacvba",
+    "ΟΔΟΣ ΣΤΡΑΤΟΥ": "οδος στρατου",
+    "  multiple   spaces\t&  punct!!! ": "multiple spaces punct",
+    "21 Savage & Metro Boomin": "21 savage metro boomin"
+  },
+  "is_lookup_candidate": {
+    "Mad Clip": true,
+    "Simon & Garfunkel": false,
+    "Billy Sio, Mad Clip": false,
+    "Various Artists": false,
+    "various": false,
+    "Unknown Artist": false,
+    "Unknown": false,
+    "": false,
+    "Travis Scott feat. Drake": false,
+    "Travis Scott feat Drake": false,
+    "Artist ft. Guest": false,
+    "Artist FT Guest": false,
+    "Artist x Other": false,
+    "Artist X Other": false,
+    "The xx": true,
+    "Björk": true,
+    "21 Savage": true
+  },
+  "levenshtein": [
+    {
+      "a": "",
+      "b": "",
+      "d": 0
+    },
+    {
+      "a": "abc",
+      "b": "",
+      "d": 3
+    },
+    {
+      "a": "",
+      "b": "abc",
+      "d": 3
+    },
+    {
+      "a": "kitten",
+      "b": "sitting",
+      "d": 3
+    },
+    {
+      "a": "haptik",
+      "b": "haptic",
+      "d": 1
+    },
+    {
+      "a": "equaliser",
+      "b": "equalizer",
+      "d": 1
+    },
+    {
+      "a": "björk",
+      "b": "bjork",
+      "d": 1
+    },
+    {
+      "a": "αβγ",
+      "b": "αβδ",
+      "d": 1
+    },
+    {
+      "a": "🎵a",
+      "b": "🎵b",
+      "d": 1
+    },
+    {
+      "a": "same",
+      "b": "same",
+      "d": 0
+    }
+  ],
+  "strip_markup": {
+    "Plain text": "Plain text",
+    "[b]Bold[/b] Title": "Bold Title",
+    "[color=#ff0000]Red[/color] & [i]Italic[/i]": "Red & Italic",
+    "No closing [tag": "No closing [tag",
+    "Nested [b][u]Both[/u][/b]!": "Nested Both!"
+  }
+}

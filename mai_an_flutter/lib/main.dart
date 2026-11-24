@@ -11,6 +11,7 @@ import 'assistant/assistant_controller.dart';
 import 'assistant/chat_memory.dart';
 import 'assistant/voice_service.dart';
 import 'core/app_config.dart';
+import 'core/cache_pruner.dart';
 import 'core/config_file.dart';
 import 'core/haptics.dart';
 import 'core/notification_router.dart';
@@ -26,6 +27,8 @@ import 'player/player_controller.dart';
 import 'player/queue_store.dart';
 import 'scan/library_folder.dart';
 import 'search/landing_controller.dart';
+import 'search/new_releases.dart';
+import 'search/search_history.dart';
 import 'settings/config_controller.dart';
 import 'settings/settings_page.dart';
 import 'sync/app_sync_host.dart';
@@ -116,7 +119,22 @@ Future<void> main() async {
     library,
     views: LibraryView.fromConfig(config.libraryTabs.visible),
   );
-  final landing = LandingController(library, sections: config.landing);
+  final releasesScheduler = NewReleasesScheduler(
+    repository: () => library.repository,
+    isEnabled: () => settings.config.landing.newReleases,
+  );
+  final landing = LandingController(
+    library,
+    sections: config.landing,
+    releasesScheduler: releasesScheduler,
+  );
+  final searchHistory = SearchHistoryStore(dataDir);
+  final cachePruner = CachePruner(
+    dataDir,
+    nativeArtworkCacheDir: Platform.isAndroid
+        ? () async => '${(await getTemporaryDirectory()).path}/np_art'
+        : null,
+  );
   final player = ValueNotifier<PlayerController?>(null);
   final assistant = AssistantController(
     memory: ChatMemory(dataDir),
@@ -181,6 +199,8 @@ Future<void> main() async {
       ledger: ledger,
       downloads: downloads,
       syncHost: syncHost,
+      searchHistory: searchHistory,
+      cachePruner: cachePruner,
       settings: SettingsDeps(
         dataDir: dataDir,
         config: settings,
@@ -212,6 +232,11 @@ Future<void> main() async {
   // main.py `_ensure_graph_built_async`: analysed tracks without
   // coordinates get them, once, behind the UI.
   if (writable) unawaited(library.ensureGraphBuilt());
+  // main.py `ensure_new_releases_refresh` + `_prune_caches_async`.
+  if (writable) {
+    releasesScheduler.ensureRefresh(delay: NewReleasesScheduler.bootDelay);
+  }
+  unawaited(cachePruner.pruneIfDue());
   // main.py `_auto_export_state_snapshot`, fire and forget. On the phone
   // only: desktop runs are development until phase 8 (§7).
   if (Platform.isAndroid) unawaited(bundles?.autoExport());
@@ -281,6 +306,8 @@ class MaiAnApp extends StatefulWidget {
     this.ledger,
     this.downloads,
     this.syncHost,
+    this.searchHistory,
+    this.cachePruner,
   });
 
   final LibraryController library;
@@ -303,6 +330,12 @@ class MaiAnApp extends StatefulWidget {
 
   /// The Companion manager's host: told when the app hides and shows.
   final AppSyncHost? syncHost;
+
+  /// Persisted recent searches for the Search tab.
+  final SearchHistoryStore? searchHistory;
+
+  /// Periodic artwork & preview cache pruner (`_prune_caches_async`).
+  final CachePruner? cachePruner;
 
   @override
   State<MaiAnApp> createState() => _MaiAnAppState();
@@ -333,6 +366,7 @@ class _MaiAnAppState extends State<MaiAnApp> {
         widget.assistant?.handleAppResume();
         // Pick up listens that finished while in the background.
         widget.ledger?.schedule(Duration.zero);
+        unawaited(widget.cachePruner?.pruneIfDue());
         // Re-checks a link that may have died while hidden, or re-probes
         // and restarts discovery, and offers transfers queued meanwhile.
         if (widget.syncHost case final h?) {
@@ -382,6 +416,7 @@ class _MaiAnAppState extends State<MaiAnApp> {
           settings: widget.settings,
           router: _router,
           downloads: widget.downloads,
+          searchHistory: widget.searchHistory,
         ),
       ),
     );

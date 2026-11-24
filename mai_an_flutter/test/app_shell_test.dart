@@ -162,7 +162,9 @@ show_top_genres = 0
     final cards = find
         .descendant(
           of: find.byType(SearchScreen),
-          matching: find.byType(Scrollable),
+          matching: find.byWidgetPredicate(
+            (w) => w is Scrollable && w.axisDirection == AxisDirection.down,
+          ),
         )
         .first;
     await tester.scrollUntilVisible(

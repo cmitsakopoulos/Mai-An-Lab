@@ -17,6 +17,7 @@ import 'library/selection.dart';
 import 'player/player_controller.dart';
 import 'player/ui/mini_player.dart';
 import 'search/landing_controller.dart';
+import 'search/search_history.dart';
 import 'search/search_screen.dart';
 import 'settings/settings_page.dart';
 import 'ui/tokens.dart';
@@ -57,6 +58,7 @@ class AppShell extends StatefulWidget {
     this.settings,
     this.router,
     this.downloads,
+    this.searchHistory,
   });
 
   final LibraryController library;
@@ -77,6 +79,9 @@ class AppShell extends StatefulWidget {
 
   /// The download queue: the dock above the mini player.
   final DownloadQueue? downloads;
+
+  /// Persisted recent search queries (`recent_searches.json`).
+  final SearchHistoryStore? searchHistory;
 
   @override
   State<AppShell> createState() => AppShellState();
@@ -279,6 +284,7 @@ class AppShellState extends State<AppShell> {
                 landing: widget.landing,
                 onPlayTrack: _playPath,
                 onOpenInLibrary: openInLibrary,
+                searchHistory: widget.searchHistory,
                 onOpenSettings: _openSettings,
               ),
             ),
