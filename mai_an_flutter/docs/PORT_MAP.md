@@ -1,7 +1,7 @@
 # Mai An Lab: Flet → Flutter port map
 
 *Status: 2026-11-24. Branch `flutter-port` (on origin up to phase 3g; the
-Settings, Network and phase 4a commits are local). Phase 0 (backbone)
+Settings, Network and phase 4 commits are local). Phase 0 (backbone)
 done. Phase 1 (phone player) is written and audited against the Flet sources
 (§9). Phase 2 (stations) is written and matches the Python output exactly on
 a real library (§4, phase 2). Phase 3's code is complete: the Genres, Artists and
@@ -9,19 +9,21 @@ Albums views, the migrations the port now owns, the play-ledger drain, the
 library scan (with tinytag ported to Dart), playlists, the full
 long-press menu, selection mode and Delete Track, the tab bar with
 the Search tab's local landing cards, Settings with the config.toml
-writer, and the Acoustic Network view (§4, phase 3). Phase 4 (sync,
-Android side) is under way: the Companion protocol and discovery, tested
-against Flet's own server, notifications, the sync manager, and the
+writer, and the Acoustic Network view (§4, phase 3). Phase 4's code (sync,
+Android side) is complete: the Companion protocol and discovery, tested
+against Flet's own server, notifications, the sync manager, the
 download queue and dock that bring the Mac's transfers onto the phone,
-the Companion & Sync page, its dialogs and Send to Mac in the menus, and
+the Companion & Sync page, its dialogs and Send to Mac in the menus,
 state bundles (export, import, the boot snapshot and import, backup to the
-Mac) (§4, phase 4). Desktop
-tests pass (`flutter test`: 524, including the real-library golden tests
+Mac), and the DSP offload with the acoustic build (the SVD geometry and the
+genre model, identical in effect to Python's: the same stations on all 20
+golden seeds) (§4, phase 4). Desktop
+tests pass (`flutter test`: 556, including the real-library golden tests
 that need the gitignored goldens; analyzer clean in Dart's strict modes);
 debug and release APKs build.
 It is installed on the phone (2026-11-24, with the 2026-11-02 library, an
 older build: no scan, no Settings yet). The user reports problems found in use; fix
-them, or record intended differences in §7. Nothing ships from this port yet. 51 of the 90 Flet features in §11
+them, or record intended differences in §7. Nothing ships from this port yet. 54 of the 91 Flet features in §11
 are ported. Third-party code the port uses or copies is listed in §12.*
 
 **Next session: start at §10 (open items). §11 lists every Flet feature and
@@ -105,7 +107,7 @@ Status key:
 | 10 | **Music folder rules** | `storage_paths.py`: never return an app-private folder, downloads follow the library folder, fallbacks are never written back | `scan/storage_paths.dart` (resolvers and `is_app_private`; the platform and sandbox roots are passed in) and `scan/library_folder.dart` (`sync_config_to_ui`'s inputs: `library_path` pref, `[downloads] folder`). Python's tests ported (`storage_paths_test.dart`); `pick_download_dir` comes with downloads (6). | 3 | 🧪 |
 | 11 | **Path identity** | Absolute, platform-specific paths: phone `/storage/emulated/0/Music/…`, Mac `/Users/…/Desktop/Music/…`. `play_counts.track_path` is the join key. `normalize_nfc` is applied only where a file is *named* by the app: downloads (`streamrip_api`, `queue_controller`) and files received by the sync server. | The scanner stores `os.scandir` paths unnormalised, and so does the port (golden-tested), so phase 3 needs no normaliser. Mac transfers do (phase 4d): `core/nfc.dart` is `unicodedata.normalize("NFC")` from tables generated out of Python's unicodedata (`tool/gen_nfc_table.py`), equal to Python on 6,142 strings; downloads (6) reuse it. Search already strips NFD combining marks (`fold`). | 4, 6 | 🧪 |
 | 12 | **Artwork** | Kotlin `resolveArtwork`: embedded art via `MediaMetadataRetriever`, then the sidecar file, cached by sha1 | Keep the Kotlin. The handler resolves it for the current and next rows; sidecar lookup is lazy (per folder, not per queue row). | 1 | 🧪 |
-| 13 | **Audio analysis** | Kotlin `decodePcm` (MediaCodec, to mono PCM) + `dsp.py` (numpy, 906 lines). Usually offloaded to the Mac (sync). | Keep the decoder. The feature maths becomes Dart, or never runs on the phone (§6, decision B). | 6 | ⚠️ |
+| 13 | **Audio analysis** | Kotlin `decodePcm` (MediaCodec, to mono PCM) + `dsp.py` (numpy, 906 lines). Usually offloaded to the Mac (sync). | The offload is ported (4g), and so is the geometry built from the features (`build_acoustic_edges`: the SVD, no numpy). Keep the decoder. The feature maths becomes Dart, or never runs on the phone (§6, decision B). | 4, 6 | 🧪⚠️ |
 | 14 | **EQ and loudness boost** | `set_eq_band_gain` and `set_loudness_boost` in the extension (just_audio Android effects). `reapply_dsp` runs on every track change: config.toml `[dsp]` preset + Dynamism (boost and EQ contour from the track's play_counts features). | In the handler (`setEqBandGain`, `setLoudnessBoost`). `player/dsp.dart` ports `reapply_dsp` with Python reference values; the controller applies it on every row change, including background auto-advance. Now Playing shows the Dynamism badge. Gains set before the device's EQ bands load are applied when they arrive. No settings UI yet (the Flet-written config is honoured). | 1 | 🧪 |
 | 15 | **Voice** | `flutter_tts`, `speech_to_text`, `RECORD_AUDIO`, `<queries>` for `RecognitionService` | Same plugins | 5 | ♻️ |
 | 16 | **Plain HTTP to the Mac** | `usesCleartextTraffic="true"` app-wide | Nothing to declare: dart:io sockets don't go through Android's cleartext policy (this SDK's dart:io has no such check). INTERNET is declared. Confirm on the phone with the first real pairing. | 4 | 🧪 |
@@ -126,7 +128,7 @@ The port reuses each file's exact format, so a cutover install inherits it.
 
 | File | Owner today | Port reads | Port writes |
 |---|---|---|---|
-| `library.db` (main database; schema below) | `db_manager.py` | phase 0 ✅ | phase 3: migrations and the ledger drain ✅ (desktop and phone) |
+| `library.db` (main database; schema below) | `db_manager.py` | phase 0 ✅ | phase 3: migrations and the ledger drain ✅ (desktop and phone); 4: offloaded features, coordinates and the genre model ✅ |
 | `.config/streamrip/config.toml` (Android; on the Mac it is under `Library/Application Support/streamrip/`). Holds `general.library_sort`, `appearance.accent_color`, `[dsp]`, `[haptics]`, `[downloads] folder` and credentials. | `config.py`, `streamrip_api.update_config_params` | phase 1 ✅ (sort, accent, `[dsp]`, `[haptics]`: `core/app_config.dart`); 3 ✅ (`[downloads] folder`, `[landing]`, `appearance.show_*`) | 3 ✅: created from the template when missing, and Settings' writes, byte for byte as tomlkit 0.15.2 leaves them (`core/config_file.dart`, golden-tested); the rest of the keys with the settings that own them |
 | `queue_state.json`, `queue_pos.json`, `native_resume.json` | main.py, engine | 1 ✅ | 1 ✅ (`autoplay_held`, the queue auto-play set aside: 2 ✅) |
 | `.cache/queue_regular.json`, `.cache/queue_shuffle.json` (the queue set aside while shuffling the library) | main.py | 1 ✅ | 1 ✅ |
@@ -155,6 +157,7 @@ constant moves.
 | 3 | `playback_history`, `play_counts` (counts), written by the ledger drain |
 | 3 | `track_neighbors` ✅: read by the Network view (`data/network_queries.dart`); its artist tier written by `build_metadata_edges` (ported, golden-tested; called where Flet calls it, phases 4 and B). The assistant reads it too (5); stations don't. |
 | 3 | `playlists`, `playlist_tracks` ✅ (`data/playlists.dart`), `fts_search`. FTS5 is kept in step by 11 triggers stored in the database, so port writes stay consistent for free. |
+| 4 | `play_counts` features (the offload's batches), `play_counts.pca_coords` and `genre_affinity` (the acoustic build) ✅ (`data/graph_build.dart`) |
 | 5 | `artist_ai_research` |
 | 6 | `artist_releases`, `release_sync_log` |
 | 7 | `metadata_audit_dismissed`, `artist_aliases`, `artist_alias_rejections` |
@@ -187,27 +190,27 @@ Verdicts:
 | `db_manager.py`, write half and migrations | ~2,000 | Port. Migrations ✅ (`data/library_schema.dart`: `get_connection` + `initialize`, golden-tested on fresh, legacy and real databases); `record_listens` ✅; the scan's writes ✅; playlists ✅ (`data/playlists.dart`, golden-tested); the rest with its features | 3 |
 | `ui/views/library.py` | 4,915 | Rewrite, one tab at a time (tracks ✅ rows, sort, search; view bar, genres, artists, albums ✅ (`library/browse_*`, `genre_colors.dart`); playlists, the long-press menu, selection mode ✅ (`library/track_menu.dart`, `library_dialogs.dart`, `selection.dart`); the Acoustic Network ✅ (`library/network_*`)) | 1–3 |
 | `track_graph.py` (stations: coordinate graph, artist-graph cache, `Station`, `open_station`, `walk`), `artist_graph.py`, `autoplay.py`, `genre_taxonomy.py`, `credit_keys` (in `metadata_enrich`) | ~2,100 | Port ✅ (`stations/`, `player/autoplay.dart`, `core/py_text.dart`; golden-tested) | 2 |
-| `track_graph.py` builders (`build_acoustic_edges`, `build_genre_affinity`, `build_metadata_edges`, `bulk_analyze_library`), `genre_similarity.py` (builds the NPMI model) | ~500 | Port where Flet calls them (§10 4f): `build_metadata_edges` ✅ (`data/network_queries.dart`, golden-tested; no caller yet: Flet runs it after an import, the readiness build, analysis and Settings' recompute, i.e. phases 4 and B), the acoustic build with offload/import (4), analysis with decision B | 3, 4, 6 |
+| `track_graph.py` builders (`build_acoustic_edges`, `build_genre_affinity`, `build_metadata_edges`, `bulk_analyze_library`), `genre_similarity.py` (builds the NPMI model), `pca_engine.redundant_raw_features` | ~640 | Port where Flet calls them (§10 4f): `build_metadata_edges` ✅ (`data/network_queries.dart`), `build_acoustic_edges` and `build_genre_affinity` ✅ (`stations/acoustic_geometry.dart`, `stations/genre_npmi.dart`, `data/graph_build.dart`; golden-tested, §4 phase 4g), called after a boot import, an offload, at the startup readiness check and by Recompute PCA; `bulk_analyze_library` with decision B | 3, 4, 6 |
 | `harmonic.py` | 132 | Not needed by stations (key was removed from the geometry); port only if a feature needs it | n/a |
 | `ui/player/autoplay_sheet.py` | 156 | Rewrite ✅ (`player/ui/autoplay_sheet.dart`) | 2 |
 | `library_scanner.py`, `storage_paths.py` + `tinytag` 2.3.2 (the tag reader the APK bundles, ~2,500 lines, MIT) | ~2,900 | Port ✅ (`scan/library_scanner.dart`, `scan/tinytag.dart`, `scan/storage_paths.dart`, `data/scan_writes.dart`; golden-tested on a synthetic corpus and the Mac's music folder) | 3 |
 | `tagger.py`, `metadata_editor.py` (mutagen) | ~240 | No Flet feature edits tags. `tagger.tag_file` runs only after a download (`streamrip_api`): port with downloads (decision A), tag writer candidates in §12. `extract_artwork` runs only off Android (the Kotlin resolver serves the phone): Mac | 6, 8 |
-| `sync/client`, `discovery`, `send`, parts of `manager` | ~1,900 | Port (Android side). Client and listener ✅ (`sync/companion_client.dart`, `sync/discovery.dart`; tested against Flet's own server); the manager ✅ (`sync/sync_manager.dart`); its UI and `send.py`'s menu entry with stage e (§4, phase 4) | 4 |
+| `sync/client`, `discovery`, `send`, parts of `manager` | ~1,900 | Port (Android side) ✅. Client and listener (`sync/companion_client.dart`, `sync/discovery.dart`; tested against Flet's own server); the manager (`sync/sync_manager.dart`); `send.py` (`sync/send.dart`) | 4 |
 | `sync/server.py`, `transcoder.py` (ffmpeg) | ~1,340 | Keep on Mac until phase 8 | 8 |
-| `ui/views/sync_hub.py` | 1,012 | Rewrite | 4 |
+| `ui/views/sync_hub.py` | 1,012 | Rewrite ✅ (`settings/sync_hub.dart`: the Android view's four cards; the Mac's server view with phase 8) | 4 |
 | `state_export.py` | 294 | Port ✅ (`data/state_export.dart`, `core/zip_archive.dart`, `sync/state_bundles.dart`) | 4 |
 | `llm_engine.py` (Gemini/Ollama over an OpenAI-compatible API) | 231 | Port: plain HTTP + JSON | 5 |
 | `llm_tools.py`, `assistant_runner.py`, `assistant_intent.py`, `chat_memory.py`, `web_research.py` | ~4,500 | Port, with golden intent and tool-call tests | 5 |
 | `ui/views/assistant.py` | 861 | Rewrite | 5 |
 | `qobuz.py`, `deezer.py`, `streamrip_api.py`, `streamrip_search.py`, `downloadable.py`, `search_results.py`, `source_metadata.py`, `new_releases.py` + deezer-py, streamrip, pycryptodomex | ~3,000 + libraries | ⚠️ Port or keep on Mac (§6, decision A) | 6 |
 | `ui/views/search.py`, `ui/player/download_dock.py` | 3,806 | Rewrite. The landing's local cards ✅ (`search/`, `data/landing_queries.dart`, golden-tested); the dock ✅ (`downloads/download_dock.dart`, 4d); the rest with the sources | 3, 4, 6 |
-| `dsp.py`, `pca_engine.py` | 1,044 | ⚠️ Port to Dart, or keep on Mac (§6, decision B) | 6 |
+| `dsp.py`, `pca_engine.py` | 1,044 | `pca_engine.redundant_raw_features` ✅ (with the acoustic build, 4g); the rest of `pca_engine` is genre-taxonomy re-exports (ported in phase 2). `dsp.py`: ⚠️ port to Dart, or keep on Mac (§6, decision B) | 4, 6 |
 | `metadata_enrich`, `metadata_ai`, `metadata_audit`, `metadata_qobuz`, `ui/player/metadata_workbench.py` | ~5,000 | Port last (desktop-heavy) | 7 |
-| `ui/views/settings.py` | 3,932 | Rewrite, spread across phases (rule 4). Phase 3 ✅ (`settings/`): the hub and its search, Storage, Appearance, Audio & DSP (curve, presets), Haptics, Permissions, Database Management, Advanced (caches, raw TOML; state export and import with phase 4f), About. The other groups with their phases (§11). | all |
+| `ui/views/settings.py` | 3,932 | Rewrite, spread across phases (rule 4). Phase 3 ✅ (`settings/`): the hub and its search, Storage, Appearance, Audio & DSP (curve, presets), Haptics, Permissions, Database Management (Recompute PCA with phase 4g), Advanced (caches, raw TOML; state export and import with phase 4f), About; Companion & Sync with phase 4e. The other groups with their phases (§11). | all |
 | `ui/player/onboarding_modal.py` | 895 | Rewrite, smaller | 7 |
 | `ui/widgets.py`, `ui/tokens.py` | 769 | Rewrite (tokens ✅) | as needed |
 | `audio_engine_macos.py` (pyobjc / AVFoundation) | 1,311 | Rewrite for the Mac | 8 |
-| main.py, the app shell (everything but playback): splash, tab bar and startup tab ✅ (`app_shell.dart`: Search and Library), back navigation and confirm-pop, Settings as a pushed page ✅ (`settings/settings_page.dart`), startup jobs (state-zip auto-import, state auto-export, enrichment pass, new-releases refresh, graph readiness build, cache pruning, companion start), maintenance actions (wipe, clear index/DSP, caches ✅ `data/maintenance.dart`; fresh-install reset: decision C), delete track/playlist ✅, notification routing, success sound | ~2,500 | Rewrite, each piece with the feature behind it (§11) | 3–7 |
+| main.py, the app shell (everything but playback): splash, tab bar and startup tab ✅ (`app_shell.dart`: Search and Library), back navigation and confirm-pop, Settings as a pushed page ✅ (`settings/settings_page.dart`), startup jobs (state-zip auto-import ✅, state auto-export ✅, enrichment pass, new-releases refresh, graph readiness build ✅, cache pruning, companion start ✅), maintenance actions (wipe, clear index/DSP, caches ✅ `data/maintenance.dart`; fresh-install reset: decision C), delete track/playlist ✅, notification routing, success sound | ~2,500 | Rewrite, each piece with the feature behind it (§11) | 3–7 |
 | `config.py` (streamrip config: load, defaults, `repair_config`) + `streamrip_api.py`'s `load_config`, `update_config_params`, `ensure_config_exists` | 552 | Read half for the keys in use (`core/app_config.dart`). Writes ✅ (`core/config_file.dart`: `update_config_params` as tomlkit edits the text, the template copy of `ensure_config_exists`). Its repair half (`fill_missing` from a newer template) when the template next changes (§7). | 1, 3, then all |
 | `progress_notify.py` (job notifications: progress, summary text, retry action, task-service start/stop) | 239 | Port ✅ (`core/progress_notify.dart`, phase 4b): a Dart wrapper over the Kotlin `showProgressNotification`, with the throttle, summary and retry rules; the metadata and analysis helpers with 7 and B. A scan the user starts posts nothing (in-app banner only); the scan's alert ("n tracks not analysed yet") follows only the automatic scan after a download or transfer. First users: sync (4), then downloads (6), analysis (B), metadata (7). | 4 |
 | `ui/player/dialogs.py` (confirm and text-input dialogs) | 100 | Rewrite ✅ (`library/library_dialogs.dart`: playlist editor, name dialog, delete confirmations) | 3 |
@@ -561,7 +564,7 @@ stays Python until phase 8). Stages, one commit each:
 | d | Transfers onto the phone: the download queue for the `companion` source (`.part`, size check, no-overwrite names, `clean_filename`, NFC, `pick_download_dir`, features stored, one quiet scan after the queue drains, Android media scan) and the dock as far as transfers need it | `queue_controller.py`, `streamrip_api.download` (companion branch), `download_dock.py` | ✅ |
 | e | UI: Settings → Companion & Sync and the sync hub, the PIN and transfer dialogs, Send to Mac in the long-press, selection and album menus | `ui/views/sync_hub.py`, manager dialogs, `send.py` | ✅ |
 | f | State bundles: export (Settings, and the boot auto-export to Downloads and the library folder), import (Settings, and `*_import.zip` at boot, with `.onboarded`), upload to the Mac | `state_export.py`, main.py `_heavy_init`, `_auto_export_state_snapshot` | ✅ |
-| g | DSP offload and the acoustic build: features stored in batches, then `build_metadata_edges` and `build_acoustic_edges` (the SVD build, golden-tested against numpy), and the startup readiness build | sync_hub's offload, `track_graph.py`, `pca_engine.redundant_raw_features`, main.py `_ensure_graph_built_async` | 🔨 |
+| g | DSP offload and the acoustic build: features stored in batches, then `build_metadata_edges` and `build_acoustic_edges` (the SVD build, golden-tested against numpy), and the startup readiness build | sync_hub's offload, `track_graph.py`, `pca_engine.redundant_raw_features`, main.py `_ensure_graph_built_async` | ✅ |
 
 **Stage a.** `sync/companion_client.dart` is client.py call for call:
 ping, pair, the offload (cache probe, then one upload per track, features
@@ -664,7 +667,7 @@ connected with the USB/address and the analysis-version warning; Find Mac
 green when found; a failed Find opens Manual IP) and Transfers from Mac
 (the pending count re-asked on every manager change while connected, as
 Flet does; Download (n) from Mac; Check Pending; Ask before downloading).
-The DSP offload card comes with stage g and the backup card with f.
+The DSP offload card came with stage g and the backup card with f.
 `sync/sync_dialogs.dart` holds manager.py's PIN dialog (4 digits,
 masked with reveal, Pairing…, the two error texts, Not now / back / a tap
 outside snooze) and transfer dialog (the summary, the track list,
@@ -709,7 +712,8 @@ relaunch, §7); `_auto_export_state_snapshot` after start (one at a time,
 then a copy in the library folder; Android only, §7); and `_heavy_init`'s
 boot import before the library and config are read, which deletes the
 bundle, writes `.onboarded`, and after the first load rebuilds the
-artist tier (`build_metadata_edges`; the acoustic tier with stage g).
+artist tier (`build_metadata_edges`; since stage g the acoustic build
+too, through `rebuildSimilarityGraph`).
 Until cutover the boot files carry the port's own names,
 `mai_an_lab_port_state_latest.zip` and `mai_an_lab_port_state_import.zip`,
 so the two apps on one phone never overwrite or swallow each other's
@@ -728,6 +732,61 @@ bundle and the port importing Python's, and every kept phone bundle in
 config, a failed import leaving it as it was, the boot snapshot and its
 fallback, the boot import's three cases, and Settings → Advanced through
 the browser), and the hub's backup card in `sync_hub_test.dart`.
+
+**Stage g.** `stations/acoustic_geometry.dart` is `build_acoustic_edges`'
+maths and `pca_engine`'s cleaver: `redundant_raw_features` (the Pearson
+matrix of the seven scalars, centrality-greedy cleaving at |r| ≥ 0.70,
+nothing below 50 tracks), the feature vectors (the 68-float timbre BLOB,
+then the surviving scalars, bpm as log2), z-scoring, the 1.5 scalar
+weight, and the Kaiser-truncated SVD. Everything before the SVD repeats
+numpy's float32 arithmetic op for op (numpy sums a float32 matrix down
+axis 0 sequentially in float32; checked bit for bit), so Z is Python's
+exactly. The SVD is the eigen-decomposition of ZᵀZ in float64 by cyclic
+Jacobi, no new dependency; each component's sign follows scikit-learn's
+`svd_flip` (§7). `stations/genre_npmi.dart` is `build_npmi_model`
+(code-point sort, Python's dict order, `round(x, 4)` as Python rounds:
+`core/py_num.dart` `pyRound`), stored as `json.dumps` writes it
+(`core/py_json.dart`). `data/graph_build.dart` holds the database side:
+`get_tracks_with_features` (word for word, so the same row order), the
+coordinates written in one transaction, `build_genre_affinity` after
+them, the readiness counts (`graph_status`), `get_tracks_missing_features`
+and `update_tracks_features_batch`. `LibraryController.rebuildSimilarityGraph`
+runs the metadata tier, the acoustic build and a reload (the stations and
+the Network view follow); `ensureGraphBuilt` is `_ensure_graph_built_async`
+(5 s after start, only when analysed tracks have no coordinates at all).
+Callers, as in Flet: the boot import, the offload, the readiness check,
+and Settings → Database Management's Recompute PCA (the acoustic build
+alone; its two DSP buttons wait for decision B). The hub's DSP Acoustic
+Offload card is sync_hub.py's: the missing count on connect, Offload to
+Mac with the link held awake, progress on the card (not while hidden) and
+in the `sync` notification with its Cancel, the batches stored through
+`OffloadLibrary` (`sync/offload_library.dart`), the summary texts, unpair
+on a refused token, "progress so far was saved" on a lost link, and the
+graph rebuilt when anything was analysed.
+
+**How parity is proved (stage g).** `tool/export_acoustic_goldens.py` runs
+Python's own `build_acoustic_edges` on nine synthetic scenarios (a
+three-way and a two-way scalar cluster, stale, versionless, short, long
+and missing BLOBs, features outside the library, constant columns, 1, 2,
+3, 30, 60 and 140 tracks, the z_score and scalar_weight variants, and an
+enrichment corpus with Greek, malformed, empty and non-ok rows) and on a
+copy of the real library, capturing numpy's own SVD input. Against them
+(`test/acoustic_build_test.dart`, `test/acoustic_real_golden_test.dart`):
+the cleaved scalars are the same (ties pinned: §7, covariance cleaving); Z is the same bytes (an FNV-1a hash);
+the eigenvalues equal a float64 SVD of that Z to 1e-9 and numpy's float32
+one to its precision; every stored coordinate equals Python's up to the
+axis sign within 2e-4 of the largest (real library: 1,216 tracks × 17
+dimensions), and every cosine within 1e-5; rows the build skips keep
+what they had; the `genre_affinity` JSON is byte for byte Python's. On
+the real library, stations read from the port's coordinates matched the
+station goldens Python produced from its own rebuilt coordinates: all 41
+checks, 20 seeds' walks and auto-play stations (checked once with
+`export_station_goldens.py` on a rebuilt copy; not kept as a test).
+The build takes 48 ms on the Mac. `acoustic_build_test.dart` also covers
+the controller (the readiness check's three cases, Recompute PCA leaving
+the artist tier, the offload's work list and writes) and
+`sync_hub_test.dart` the card (off, counts, a full run with its
+notification lines, Cancel, a refused token, a lost link, nothing to do).
 
 **How parity is proved (stage a).** `tool/companion_test_server.py` runs
 Flet's own `CompanionServer` hermetically (scratch feature cache and
@@ -834,8 +893,8 @@ uninstall and reinstall; the bundle export/import covers the data.
 | Library reload after a scan or delete | The snackbar follows `load_library` (no graph rebuild there) | Rows reload, the snackbar shows, the station graphs rebuild behind | Same order as Flet. |
 | Settings → Appearance's Default Library Sort | The dropdown shows `library_sort` but saves `general.default_sort`, which nothing reads, so the sort never changes | Writes `default_sort` as Flet does, plus `library_sort`, and re-sorts the Library at once | Port is right. The Flet fix: write `library_sort` in `_save_appearance_settings`; not made on master yet. |
 | Applying Settings | Appearance restarts the UI (`restart_ui`); a raw TOML save applies at the next start | Any config change (Settings or the raw editor) reaches the view bar, landing cards, accent, pills and haptics at once | Intentional. |
-| Settings hub | Twelve groups | The eight whose features exist (§4, Settings); Companion & Sync, Authentication, AI Assistant and Metadata with phases 4, A, 5 and 7 | Until then. |
-| Settings rows waiting on features | Default Download Quality, the Jarvis tab switch, compute DSP/PCA, export/import, demo search, debug play counts, fresh-install reset | Not shown; values the hidden rows would save are written back as read | With decisions A, B, C and phases 4, 5. |
+| Settings hub | Twelve groups | The nine whose features exist (§4, Settings; Companion & Sync since 4e); Authentication, AI Assistant and Metadata with A, 5 and 7 | Until then. |
+| Settings rows waiting on features | Default Download Quality, the Jarvis tab switch, Commence/Continue DSP Compute and Recompute All DSP Features, demo search, debug play counts, fresh-install reset | Not shown; values the hidden rows would save are written back as read | With decisions A, B, C and phase 5. (Export/import came with 4f, Recompute PCA with 4g.) |
 | EQ drag and slider writes | `update_config_params` on every drag event of the curve and the sliders | The player gets each step; the file is written when the drag ends | Intentional: same file afterwards, without a write per frame. |
 | EQ curve and slider haptics | `trigger_haptic("light")` on every event | On each 0.1 dB step (slider: each value change, as Flet) | Same feel without a buzz per pixel. |
 | Settings labels | Only the switch toggles | Tapping a switch's label toggles it too | Small usability fix. |
@@ -852,13 +911,18 @@ uninstall and reinstall; the bundle export/import covers the data.
 | Quiet scan while the Library is hidden | The reload is deferred until the tab shows | Reloaded at once | Flutter rebuilds only what is visible; nothing to defer. |
 | Download errors from the network | aiohttp's text ("Cannot connect to host …") | dart:io's (`SocketException: …`) | Different words, same place (the dock's status line). |
 | Companion on desktop builds | The Mac shows the server view | Desktop dev runs act as the phone (client view) | Until phase 8 ports the Mac's server; nothing ships to the Mac before then. |
-| Companion & Sync page | Four cards (connection, transfers, DSP offload, backup) | Connection, transfers, backup | Offload: stage g. |
 | State bundle import from Settings | Closes the database and asks to force-close and relaunch | Reopens the library (migrated) and re-reads config.toml; "Imported …. Library reloaded." | Intentional: no relaunch needed. |
 | Boot snapshot and boot import file names | `mai_an_lab_state_latest.zip`, `mai_an_lab_state_import.zip` | `mai_an_lab_port_state_latest.zip`, `mai_an_lab_port_state_import.zip` | Until cutover (§5 step 6): with both apps installed, the port would overwrite Flet's snapshot and take Flet's import. |
 | Boot snapshot on desktop | Written to ~/Downloads on every start | Not written | Desktop runs are development until phase 8. |
 | Export State on desktop | A native folder picker (~/Downloads when cancelled) | ~/Downloads | No native picker in the port yet; desktop isn't shipped. |
 | A `sync` notification tap with Settings open | Switches the Settings view to Companion & Sync | Pushes Settings at Companion & Sync over what is open | Back returns to where the user was; nothing to fix unless it bothers in use. |
 | Discovery on Android | Hears only the Mac's unicast replies to its query (no multicast lock without pyjnius) | Holds a MulticastLock while listening, so the Mac's 2 s broadcast beacons arrive as well | Intentional (§1 row 17): finds the Mac sooner on networks that pass broadcasts. |
+| The acoustic SVD | numpy's float32 LAPACK SVD of Z | The eigenvectors of ZᵀZ in float64 (cyclic Jacobi) for the identical float32 Z | Within float32 precision: on the real library coordinates differ by at most 2.4e-4 (largest 11.6) and cosines by 1.3e-6, and stations match on all 20 golden seeds. The port's eigenvalues equal a float64 SVD's to 1e-9. |
+| The sign of each coordinate axis | Whatever LAPACK returns (it differs between numpy builds, so the Mac's and the phone's Flet can disagree) | scikit-learn's `svd_flip`: each component's largest loading positive | Cosine and distances, which the stations use, are unchanged; the Network view's map can come out mirrored next to a Python-built one. |
+| Covariance cleaving: a two-scalar cluster | Both scalars carry the same \|r\|, but np.corrcoef divides it by the two deviations in opposite orders; the last bit (it varies between BLAS builds) picks which one stays | The matrix is made exactly symmetric first, (C + Cᵀ) / 2: a tie, and the lower index stays (rolloff over spectral_flatness) | Python's choice there is noise: on the real library it kept rolloff, in the `constant` golden spectral_flatness (0.9661723231667043 against …044). The goldens pin Python's cleaver to the symmetric matrix and record numpy's raw pick beside it. |
+| A constant scalar column | float32 rounding can leave its standard deviation just above 1e-8, so the column survives z-scoring as a constant | The same (numpy's float32 arithmetic is reproduced) | Kept for parity (golden scenario `constant`). |
+| Graph readiness build | Waits up to 20 s for a pause in scrolling before building | Builds 5 s after start, without waiting | The build runs on the database isolate (48 ms on the Mac for 1,216 tracks): nothing to wait out. |
+| Offload button after "All tracks analyzed" | Re-enabled by the next manager change; a tap then says "All tracks already analysed!" | Stays off while the count is 0 | Small fix. |
 
 ---
 
@@ -891,7 +955,10 @@ uninstall and reinstall; the bundle export/import covers the data.
 - **Desktop tests:** `flutter test`. Add `LIBRARY_DB=… flutter test
   test/real_library_test.dart` to run against a real database.
 - **Goldens:** each `tool/export_*_goldens.py` runs with
-  `~/miniconda3/bin/python` from `mai_an_flutter/`. The scan and config
+  `~/miniconda3/bin/python` from `mai_an_flutter/`. The real-library parts
+  of `export_network_goldens.py` and `export_acoustic_goldens.py` read the
+  `library.db` that `export_station_goldens.py` copies beside its output,
+  so run that one first. The scan and config
   exports need the APK's tinytag and tomlkit apart from the dev env (which
   has streamrip's tomlkit 0.7.2):
   `~/miniconda3/bin/pip install --target tool/.pydeps tinytag==2.3.2 tomlkit==0.15.2`
@@ -947,8 +1014,8 @@ views' and playlists' queries, the library UI (views, scan UI, playlists,
 long-press menu, selection, delete), and the tab bar with the Search
 landing; then this plan; all pushed to origin. Then Settings (`e946579`)
 and the Network view, local. Then phase 4a (the Companion protocol), 4b (notifications), 4c (the
-sync manager), 4d (the download queue and dock), 4e (the Companion UI)
-and 4f (state bundles), local.
+sync manager), 4d (the download queue and dock), 4e (the Companion UI),
+4f (state bundles) and 4g (the DSP offload and the acoustic build), local.
 
 **Done**
 - [x] Phase 0: backbone (read-only DB isolate, tracks tab, sort, search,
@@ -1023,6 +1090,14 @@ and 4f (state bundles), local.
       the boot snapshot and boot import, Send Backup to Mac; tested both
       ways against Flet's state_export.py (§4, phase 4). Release APK:
       26.5 MB.
+- [x] Phase 4g: the acoustic build (`build_acoustic_edges`: covariance
+      cleaving, numpy's float32 Z bit for bit, the SVD by Jacobi on ZᵀZ;
+      `build_genre_affinity` with the NPMI model, byte for byte), called
+      after the boot import, an offload, by the startup readiness check and
+      by Settings' Recompute PCA; the hub's DSP Acoustic Offload card. On
+      the real library the port's coordinates give Python's stations on
+      all 20 golden seeds (§4, phase 4g). Phase 4's code is complete.
+      Release APK: 26.6 MB.
 
 **To do, in order**
 1. [ ] Install the current build on the phone: `tool/install_phone.sh
@@ -1071,18 +1146,18 @@ and 4f (state bundles), local.
        i. ~~The Network view with `build_metadata_edges`~~ (done: §4,
           phase 3, the Acoustic Network view). Phase 3's list is complete;
           what remains of it is phone verification (item 1).
-       j. Phase 4 (sync, Android side) started 2026-11-24, before
-          decisions A–C: none of its stages depends on them (transfers
-          from the Mac matter more if A keeps downloads there). Stages a
-          (protocol), b (notifications), c (the manager), d (the
-          download queue and dock), e (the UI and wiring) and f (state
-          bundles) done. Next: g (offload and the acoustic build; the
-          hub's offload card), the last stage; the table in §4, phase 4
-          has it. The boot import already calls `build_metadata_edges`;
-          g adds `build_acoustic_edges` there and after an offload. On
-          the phone, check a real pairing (§1 row 16: cleartext HTTP), a
-          transfer end to end, and a bundle round trip (export, then
-          import it as `mai_an_lab_port_state_import.zip`).
+       j. Phase 4 (sync, Android side), 2026-11-24, before decisions
+          A–C (none of its stages depends on them): stages a–g done (§4,
+          phase 4). What remains is on the phone: a real pairing (§1 row
+          16: cleartext HTTP), a transfer end to end, a bundle round trip
+          (export, then import it as `mai_an_lab_port_state_import.zip`),
+          and an offload end to end (the `sync` notification and its
+          Cancel with the screen off; the graph rebuilt after; Settings →
+          Database Management → Recompute PCA).
+       k. Next: phase 5 (the assistant: `llm_engine`, `llm_tools`,
+          `assistant_*`, `chat_memory`, `web_research`, the Jarvis tab and
+          voice; §3), planned in stages like phase 4, with golden intent
+          and tool-call tests. It needs none of decisions A–C.
 5. [ ] Decisions A, B, C (§6) before phase 6 is planned in detail.
 6. [ ] Flet, on master: the album menu's Play Album tuple,
        Appearance's sort writing `library_sort`, the Network view's
@@ -1105,7 +1180,7 @@ add its row here.
 Status: ✅ done · 🧪 written, not yet confirmed in use · 🔨 to build
 (phase) · ⚠️ depends on a decision (§6) · ✗ dropped.
 
-**Counts:** 51 of the 90 rows are ported (✅ or 🧪); 39 are to build or to decide. The ported rows are the player, the stations, the library views (the Acoustic Network included), playlists, the long-press menu and selection mode, the ledger drain, the scan, the tab bar, the Search landing's local cards, the download dock, Companion pairing, transfers and Send to Mac, state bundles, and Settings for all of these.
+**Counts:** 54 of the 91 rows are ported (✅ or 🧪); 37 are to build or to decide. The ported rows are the player, the stations, the library views (the Acoustic Network included), playlists, the long-press menu and selection mode, the ledger drain, the scan, the tab bar, the Search landing's local cards, the download dock, Companion pairing, transfers, Send to Mac and the DSP offload, state bundles, the similarity-graph builds, and Settings for all of these.
 
 ### App shell (`main.py`)
 
@@ -1129,10 +1204,10 @@ Status: ✅ done · 🧪 written, not yet confirmed in use · 🔨 to build
 | Position save loop; queue saved on every mutation | `_position_save_loop`, `_on_queue_mutated` | 🧪 |
 | Auto-play history from recent plays | `autoplay.load_history` | 🧪 |
 | Ledger drain into `play_counts` / `playback_history` (track change, resume) | `_schedule_ledger_drain`, `play_ledger.py` | 🧪 |
-| Similarity-graph readiness build (edges, coordinates) | `_ensure_graph_built_async`, `track_graph` builders | 🔨 4: it fires only when features exist without coordinates, i.e. after an offload or import; until then the port reads Python-built coordinates |
+| Similarity-graph readiness build (edges, coordinates) | `_ensure_graph_built_async`, `track_graph` builders | 🧪 (5 s after start, when analysed tracks have no coordinates; §7) |
 | Cache pruning | `_prune_caches_async` | 🔨 3 (album art); 6 (previews). The manual clears are in Settings → Advanced 🧪 |
 | State bundle auto-export on every boot (Downloads and library folder) | `_auto_export_state_snapshot` | 🧪 under the port's own name until cutover (§7). The Mac offload and `fresh_build_android.sh` depend on Flet's, which Flet keeps writing while installed |
-| State bundle auto-import (`*_import.zip`) on boot, then graph rebuild | `_heavy_init` | 🧪 (the port's own name until cutover; the artist tier rebuilt, the acoustic tier 🔨 4g) |
+| State bundle auto-import (`*_import.zip`) on boot, then graph rebuild | `_heavy_init` | 🧪 (the port's own name until cutover; the artist tier, coordinates and genre model rebuilt) |
 | Companion auto-discovery | `companion_manager.start` | 🧪 |
 | Artist-metadata enrichment pass (MusicBrainz / Qobuz; after scans and once per launch; retries; notification) | `_enrich_metadata_async`, `metadata_enrich.enrich_pending` | 🔨 7. Stations read its `artist_enrichment`; until it runs, new artists borrow a profile from their sound neighbours |
 | New-releases refresh (daily gate) | `ensure_new_releases_refresh`, `new_releases.py` | 🔨 6 |
@@ -1201,7 +1276,7 @@ Status: ✅ done · 🧪 written, not yet confirmed in use · 🔨 to build
 |---|---|
 | Android: find the Mac (UDP beacon), pair, unpair, manual connect, diagnosis | 🧪 |
 | Android: check for and download transfers from the Mac | 🧪 |
-| Android: DSP offload to the Mac (progress notification, cancel from it) | 🔨 4 |
+| Android: DSP offload to the Mac (progress notification, cancel from it), then the graph rebuilt | 🧪 |
 | Android: upload a state bundle | 🧪 |
 | Mac: server toggle, LAN address, clear pending, reset pairing, open backups | Flet on the Mac until 8 |
 
@@ -1210,7 +1285,7 @@ Status: ✅ done · 🧪 written, not yet confirmed in use · 🔨 to build
 | Group | Contents | Port |
 |---|---|---|
 | Hub | Groups list, fuzzy settings search | 🧪 (search golden-tested) |
-| Companion & Sync | Opens the sync hub | 🧪 (offload and backup cards 🔨 4f–g) |
+| Companion & Sync | Opens the sync hub | 🧪 (all four cards) |
 | Storage & Paths | Library folder, downloads folder, default download quality | 🧪 folders and the Android navigator; ⚠️ A (quality) |
 | Authentication | Qobuz (email/ID, password or token, app ID and secret), Deezer ARL | ⚠️ A |
 | AI Assistant | Enable, provider and API key, model list, test connection, personality presets (built-in and custom) | 🔨 5 |
@@ -1220,7 +1295,8 @@ Status: ✅ done · 🧪 written, not yet confirmed in use · 🔨 to build
 | Metadata | Opens the workbench | 🔨 7 |
 | Permissions | Status and grant buttons, how-to | 🧪 (statuses, the system-settings button) |
 | Database Management | Wipe database, clear index, clear DSP | 🧪 |
-| Database Management | Compute / recompute DSP, recompute PCA | ⚠️ B |
+| Database Management | Recompute PCA (the acoustic build over stored features) | 🧪 |
+| Database Management | Commence/Continue DSP Compute, Recompute All DSP Features | ⚠️ B |
 | Advanced | Raw TOML editor, preview and album-art cache clear | 🧪 |
 | Advanced | State export / import | 🧪 |
 | Advanced | Demo search, debug play counts, fresh-install reset | ⚠️ C |
@@ -1272,6 +1348,8 @@ code or a published template comes in, before it is committed.
 | config.toml template: streamrip's `config.toml` plus the app's `[dsp]`, `[haptics]`, `[assistant]`, `[appearance]` sections (utils/config.toml, copied as is) | `assets/config_template.toml` | https://github.com/nathom/streamrip, via the Flet app | GPL-3.0 (streamrip). The Flet APK ships the same file; decide before release (§10 item 7) |
 | streamrip-derived helpers (filename cleaning; in the Flet app's `filepath_utils.py`, credited there) | `clean_filename` only, written from its behaviour (drop `\/*?:"<>|`, cut at 255 UTF-8 bytes, strip, NFC), not translated: `lib/downloads/file_names.dart` | https://github.com/nathom/streamrip | GPL-3.0: no streamrip code copied; check before porting anything else from it |
 | Unicode canonical decompositions, combining classes and composition exclusions, generated from Python's `unicodedata` | `lib/core/nfc_table.dart` (with `lib/core/nfc.dart`) | Unicode Character Database 15.1, via CPython | Unicode License v3 (data) |
+| numpy's float32 reduction order (`mean`/`std` down axis 0 as one sequential float32 sum per column) and `np.corrcoef`'s arithmetic, reproduced from their behaviour (checked bit for bit), not translated | `lib/stations/acoustic_geometry.dart` | https://github.com/numpy/numpy (2.4) | BSD-3-Clause; no numpy code copied |
+| Python's `json.dumps` defaults (separators, `ensure_ascii`, float `repr`), written from its documented behaviour | `lib/core/py_json.dart` | CPython `json` | PSF License v2; no code copied |
 
 **Templates and guidance adopted**
 
@@ -1279,6 +1357,8 @@ code or a published template comes in, before it is committed.
 |---|---|---|---|
 | Strict analyzer modes (`strict-casts`, `strict-inference`, `strict-raw-types`) on top of `flutter_lints` | `analysis_options.yaml` | dart.dev, "Customizing static analysis" (enabling additional type checks) | BSD-3-Clause (Dart SDK docs and `lints`) |
 | `ReorderableListView` with `ReorderableDragStartListener` handles for playlist reordering | `library/browse_view.dart` | Flutter SDK (material) | BSD-3-Clause |
+| The cyclic Jacobi eigenvalue method (Jacobi 1846; the rotation formulas and the skip rule for negligible elements as in Press et al., *Numerical Recipes*, §11.1), written from the algorithm, not from the book's code | `stations/acoustic_geometry.dart` `_symmetricEigen` | Textbook algorithm | Algorithm only; no code copied |
+| SVD sign convention: each component's largest-magnitude loading positive (scikit-learn's `svd_flip`, `u_based_decision=False`) | `stations/acoustic_geometry.dart` | scikit-learn documentation | BSD-3-Clause; convention only, no code copied |
 
 **Dependencies (pub.dev)**: `sqlite3`, `path_provider`, `audio_service`,
 `just_audio`, `audio_session`, `permission_handler`, `toml`. Their licences

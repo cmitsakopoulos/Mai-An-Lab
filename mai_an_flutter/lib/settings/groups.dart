@@ -914,8 +914,10 @@ class _PermissionsGroupState extends State<PermissionsGroup> {
 // ---------------------------------------------------------------------------
 // Database Management
 
-/// settings.py `_build_database_management_group`: the maintenance half.
-/// The compute pipeline (DSP, PCA) waits for decision B.
+/// settings.py `_build_database_management_group`: the maintenance
+/// buttons, and from the compute pipeline Recompute PCA (the build over the
+/// features already stored). Its two DSP buttons analyse on the phone and
+/// wait for decision B.
 class DatabaseGroup extends StatefulWidget {
   const DatabaseGroup({super.key, required this.deps});
 
@@ -989,6 +991,35 @@ class _DatabaseGroupState extends State<DatabaseGroup> {
       return ok;
     } catch (e) {
       return '$failed: $e';
+    }
+  }
+
+  /// `_do_recompute_pca`: `build_acoustic_edges` alone.
+  Future<void> _recomputePca() async {
+    final messenger = ScaffoldMessenger.of(context);
+    final accent = Theme.of(context).colorScheme.primary;
+    showSnackOn(
+      messenger,
+      'Recomputing PCA space…',
+      icon: Icons.scatter_plot_rounded,
+    );
+    setState(() => _busy = true);
+    try {
+      await d.library.rebuildSimilarityGraph(metadata: false);
+      showSnackOn(
+        messenger,
+        'PCA space rebuilt.',
+        icon: Icons.check_circle,
+        color: accent,
+      );
+    } catch (e) {
+      showSnackOn(
+        messenger,
+        'PCA recompute failed: $e',
+        color: const Color(0xFFFF4444),
+      );
+    } finally {
+      if (mounted) setState(() => _busy = false);
     }
   }
 
@@ -1067,6 +1098,25 @@ class _DatabaseGroupState extends State<DatabaseGroup> {
                         clearsQueue: true,
                       ),
                     ),
+            ),
+          ],
+        ),
+        const Divider(color: Tokens.border, height: 20),
+        const Text(
+          'Compute Pipeline',
+          style: TextStyle(color: Tokens.dim, fontWeight: FontWeight.bold),
+        ),
+        const Dim(
+          'Run the DSP / graph / PCA pipeline manually instead of going '
+          'through Jarvis.',
+        ),
+        Wrap(
+          spacing: 10,
+          children: [
+            TextButton.icon(
+              icon: const Icon(Icons.scatter_plot_rounded),
+              label: const Text('Recompute PCA'),
+              onPressed: can ? _recomputePca : null,
             ),
           ],
         ),

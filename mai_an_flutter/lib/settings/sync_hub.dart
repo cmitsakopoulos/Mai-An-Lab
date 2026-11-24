@@ -1,11 +1,15 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
 import '../core/progress_notify.dart';
+import '../core/py_num.dart';
 import '../data/library_repository.dart' show kFeaturesVersion;
-import '../sync/companion_client.dart' show defaultCompanionPort;
+import '../sync/companion_client.dart'
+    show CompanionAuthError, defaultCompanionPort, isNetworkError;
+import '../sync/offload_library.dart';
 import '../sync/state_bundles.dart';
 import '../sync/sync_manager.dart';
 import '../ui/tokens.dart';
@@ -14,10 +18,18 @@ import 'settings_page.dart';
 /// ui/views/sync_hub.py, the Android view: Settings → Companion & Sync.
 /// The connection card (the switch, its status, Find Mac / Test
 /// Connection, Unpair, Manual IP and the last diagnosis), Transfers from
-/// Mac, and Library State Backup. The DSP offload card comes with stage g.
+/// Mac, DSP Acoustic Offload, and Library State Backup.
 class SyncHubGroup extends StatefulWidget {
-  const SyncHubGroup({super.key, required this.manager, this.bundles});
+  const SyncHubGroup({
+    super.key,
+    required this.manager,
+    this.bundles,
+    this.library,
+  });
   final CompanionSyncManager manager;
+
+  /// The offload card's library; null leaves the card out (tests).
+  final OffloadLibrary? library;
 
   /// The backup card's bundle; null leaves the card out (tests).
   final StateBundles? bundles;
@@ -42,11 +54,26 @@ class SyncHubGroupState extends State<SyncHubGroup> {
   String _transfersText = 'Connect to Mac to check pending transfers.';
   int _pending = 0;
 
+  // The offload card.
+  String _dspText = 'Checking library acoustic features...';
+  int? _missing;
+  bool _offloading = false;
+  bool _cancelOffload = false;
+  double _offloadProgress = 0;
+  String _offloadDetail = '';
+
+  /// Live at the last manager change: the feature count is a library
+  /// query, re-run only when the link comes up (as Flet's
+  /// `_was_connected`), not on every change.
+  bool _wasLive = false;
+
   @override
   void initState() {
     super.initState();
     m.addListener(_changed);
     if (_live) unawaited(refreshPending());
+    _wasLive = _live;
+    if (_live) unawaited(refreshDspStats());
   }
 
   @override
@@ -64,6 +91,8 @@ class SyncHubGroupState extends State<SyncHubGroup> {
     if (!mounted) return;
     setState(() {});
     if (_live) unawaited(refreshPending());
+    if (_live && !_wasLive) unawaited(refreshDspStats());
+    _wasLive = _live;
   }
 
   void _snack(String text, {SyncIcon? icon, bool red = false}) =>
@@ -104,6 +133,170 @@ class SyncHubGroupState extends State<SyncHubGroup> {
       _transfersText = 'Queued $noun to Download Dock.';
       _pending = 0;
     });
+  }
+
+  /// `_refresh_dsp_stats`: how many tracks lack current features.
+  Future<void> refreshDspStats() async {
+    final library = widget.library;
+    if (library == null) return;
+    String text;
+    int? missing;
+    try {
+      final paths = await library.tracksMissingFeatures();
+      if (paths == null) return;
+      missing = paths.length;
+      text = missing == 0
+          ? 'All tracks analyzed. Similarity walks and auto-play are ready.'
+          : '$missing track${missing != 1 ? 's' : ''} require acoustic '
+                'analysis.';
+    } catch (e) {
+      debugPrint('Failed to refresh DSP stats: $e');
+      text = 'Status check unavailable: $e';
+    }
+    if (!mounted) return;
+    setState(() {
+      _dspText = text;
+      _missing = missing;
+    });
+  }
+
+  /// `_do_start_offload`: the tracks without current features sent to the
+  /// Mac (its cache answers for those it has seen), their features stored
+  /// as they come, then the similarity graph rebuilt. The `sync`
+  /// notification carries the progress and its Cancel; the link is held
+  /// awake throughout.
+  Future<void> startOffload() async {
+    final messenger = ScaffoldMessenger.of(context);
+    final accent = Theme.of(context).colorScheme.primary;
+    final client = m.client;
+    final library = widget.library;
+    if (client == null || !m.isConnected) {
+      showSnackOn(
+        messenger,
+        'Connect and pair with your Mac first',
+        color: Tokens.amber,
+      );
+      return;
+    }
+    if (library == null || _offloading) return;
+    _offloading = true;
+    final List<String> missing;
+    try {
+      missing = await library.tracksMissingFeatures() ?? const [];
+    } catch (e) {
+      _offloading = false;
+      rethrow;
+    }
+    if (missing.isEmpty) {
+      _offloading = false;
+      showSnackOn(
+        messenger,
+        'All tracks already analysed!',
+        icon: Icons.check_circle,
+      );
+      return;
+    }
+    if (mounted) {
+      setState(() {
+        _cancelOffload = false;
+        _offloadProgress = 0;
+        _offloadDetail = 'Initiating offload...';
+      });
+    }
+    final notifier = ProgressNotifier(
+      'sync',
+      'DSP Offload to Mac',
+      onCancel: () {
+        _cancelOffload = true;
+        debugPrint('DSP offload cancelled via system notification');
+      },
+    );
+    var summary = '';
+
+    void progress(int done, int total, String current, double rate) {
+      final r = pyRound1(rate).toStringAsFixed(1);
+      notifier.update(done, total, '$done/$total tracks ($r t/s) · $current');
+      // The notification carries progress while hidden.
+      if (m.host.inBackground || !mounted) return;
+      setState(() {
+        _offloadProgress = done / math.max(1, total);
+        _offloadDetail = 'Processed $done/$total ($r tracks/s) • $current';
+      });
+    }
+
+    try {
+      await m.activity(() async {
+        try {
+          notifier.stage('Sending ${missing.length} tracks to Mac…');
+          final res = await client.offloadDsp(
+            missing,
+            persist: library.storeFeatureRows,
+            progress: progress,
+            cancelled: () => _cancelOffload,
+            featuresVersion: kFeaturesVersion,
+          );
+          if (_cancelOffload) {
+            summary =
+                'DSP offload cancelled (${res.analysed} of '
+                '${missing.length} done).';
+          } else if (res.failed > 0) {
+            summary =
+                'Offload finished: ${res.analysed} analysed, '
+                '${res.failed} failed.';
+          } else {
+            summary = 'Offload complete: ${res.analysed} tracks analysed.';
+          }
+          showSnackOn(
+            messenger,
+            summary,
+            icon: Icons.check_circle,
+            color: accent,
+          );
+          if (res.analysed > 0) {
+            notifier.stage('Rebuilding similarity graph…');
+            await library.rebuildSimilarityGraph();
+          }
+        } on CompanionAuthError {
+          summary =
+              'DSP offload stopped: the Mac no longer accepts this phone. '
+              'Pair again.';
+          showSnackOn(messenger, summary, color: Tokens.accentRed);
+          await m.unpair();
+        } catch (e) {
+          if (isNetworkError(e)) {
+            summary =
+                'DSP offload stopped: lost connection to the Mac. Progress '
+                'so far was saved.';
+            showSnackOn(messenger, summary, color: Tokens.accentRed);
+          } else {
+            debugPrint('DSP offload failed: $e');
+            summary = 'DSP offload failed: $e';
+            showSnackOn(
+              messenger,
+              'Offload error: $e',
+              color: Tokens.accentRed,
+            );
+          }
+        } finally {
+          // Always finish: an unfinished notifier keeps the native task
+          // service (and its wakelock) alive.
+          notifier.finish(summary);
+        }
+      });
+    } finally {
+      _offloading = false;
+      if (mounted) setState(() {});
+      await refreshDspStats();
+    }
+  }
+
+  void _cancelOffloadTap() {
+    _cancelOffload = true;
+    showSnackOn(
+      ScaffoldMessenger.of(context),
+      'Cancelling offload...',
+      icon: Icons.cancel_rounded,
+    );
   }
 
   bool _uploading = false;
@@ -465,6 +658,53 @@ class SyncHubGroupState extends State<SyncHubGroup> {
       ),
     ]);
 
+    final offload = card([
+      head(Icons.graphic_eq_rounded, Tokens.amber, 'DSP Acoustic Offload'),
+      Text(_dspText, style: const TextStyle(color: Tokens.text, fontSize: 13)),
+      if (_offloading) ...[
+        ClipRRect(
+          borderRadius: BorderRadius.circular(2),
+          child: LinearProgressIndicator(
+            value: _offloadProgress,
+            minHeight: 4,
+            color: accent,
+            backgroundColor: Tokens.surface,
+          ),
+        ),
+        Text(
+          _offloadDetail,
+          style: const TextStyle(color: Tokens.dim, fontSize: 12),
+        ),
+      ],
+      Wrap(
+        spacing: 8,
+        runSpacing: 4,
+        children: [
+          FilledButton.icon(
+            key: const ValueKey('offload'),
+            style: pillButton,
+            icon: const Icon(Icons.bolt_rounded, size: 18),
+            label: const Text('Offload to Mac'),
+            // Never while one runs (a second would race it), nor once the
+            // count says every track is analysed.
+            onPressed: linked && !_offloading && _missing != 0
+                ? startOffload
+                : null,
+          ),
+          if (_offloading)
+            TextButton.icon(
+              icon: const Icon(Icons.cancel_rounded, size: 18),
+              label: const Text('Cancel'),
+              onPressed: _cancelOffloadTap,
+            ),
+        ],
+      ),
+      const Dim(
+        'Offload acoustic feature extraction (BPM, timbre, key) to your Mac '
+        'for high-speed batch processing.',
+      ),
+    ]);
+
     final backup = card([
       head(Icons.archive_rounded, accent, 'Library State Backup'),
       const Dim(
@@ -488,6 +728,7 @@ class SyncHubGroupState extends State<SyncHubGroup> {
         connection,
         const SizedBox(height: 16),
         transfers,
+        if (widget.library != null) ...[const SizedBox(height: 16), offload],
         if (widget.bundles != null) ...[const SizedBox(height: 16), backup],
       ],
     );

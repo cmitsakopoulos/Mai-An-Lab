@@ -216,3 +216,13 @@ String pyQuote(String s, {String safe = '/'}) {
   }
   return out.toString();
 }
+
+/// Python's `sorted` order on str: by code point (Dart's `compareTo`
+/// compares UTF-16 units, which differs above U+FFFF).
+int pyStrCompare(String a, String b) {
+  final ra = a.runes.toList(), rb = b.runes.toList();
+  for (var i = 0; i < ra.length && i < rb.length; i++) {
+    if (ra[i] != rb[i]) return ra[i] - rb[i];
+  }
+  return ra.length - rb.length;
+}

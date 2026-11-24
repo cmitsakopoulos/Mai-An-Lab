@@ -185,16 +185,18 @@ Future<void> main() async {
   // on_native_ready: listens logged while the app was closed.
   await loaded;
   ledger?.schedule(Duration.zero);
-  // After an auto-import Flet rebuilds the similarity graph: the artist
-  // tier here; the acoustic tier comes with phase 4g.
+  // After an auto-import Flet rebuilds the similarity graph (the artist
+  // tier, then the coordinates and the genre model).
   if (imported) {
     try {
-      await library.repository?.buildMetadataEdges();
-      await library.reload();
+      await library.rebuildSimilarityGraph();
     } catch (e) {
       debugPrint('Auto-import: graph rebuild failed: $e');
     }
   }
+  // main.py `_ensure_graph_built_async`: analysed tracks without
+  // coordinates get them, once, behind the UI.
+  if (writable) unawaited(library.ensureGraphBuilt());
   // main.py `_auto_export_state_snapshot`, fire and forget. On the phone
   // only: desktop runs are development until phase 8 (§7).
   if (Platform.isAndroid) unawaited(bundles?.autoExport());

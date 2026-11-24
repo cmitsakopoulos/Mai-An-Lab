@@ -114,7 +114,11 @@ class SettingsScreenState extends State<SettingsScreen> {
     final d = widget.deps;
     final body = switch (p) {
       SettingsPage.companion => switch (d.sync) {
-        final m? => SyncHubGroup(manager: m, bundles: d.bundles),
+        final m? => SyncHubGroup(
+          manager: m,
+          bundles: d.bundles,
+          library: d.library,
+        ),
         null => const Center(child: Dim('Companion & Sync is not running.')),
       },
       SettingsPage.storage => StorageGroup(deps: d),

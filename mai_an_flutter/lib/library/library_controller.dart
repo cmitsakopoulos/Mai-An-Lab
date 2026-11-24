@@ -11,6 +11,8 @@ import '../player/autoplay.dart';
 import '../player/dsp.dart';
 import '../scan/library_scanner.dart';
 import '../stations/station.dart';
+import '../sync/companion_client.dart' show FeatureRow;
+import '../sync/offload_library.dart';
 import 'track_query.dart';
 
 enum LoadState { loading, ready, error }
@@ -23,7 +25,8 @@ enum LoadState { loading, ready, error }
 /// db_manager.get_all_tracks): same sort modes and default, same search
 /// fallback to a "closest match" list. Search runs in memory on every
 /// keystroke, so the Flet 300 ms debounce isn't needed.
-class LibraryController extends ChangeNotifier implements AutoPlayLibrary {
+class LibraryController extends ChangeNotifier
+    implements AutoPlayLibrary, OffloadLibrary {
   LibraryController(
     this._open, {
     LibrarySort sort = LibrarySort.date,
@@ -329,6 +332,77 @@ class LibraryController extends ChangeNotifier implements AutoPlayLibrary {
     // The station graphs follow; nothing waits for them (Flet's
     // load_library doesn't either).
     unawaited(_rebuildGraph(repo));
+  }
+
+  @override
+  Future<List<String>?> tracksMissingFeatures() async =>
+      _repo?.tracksMissingFeatures();
+
+  @override
+  Future<void> storeFeatureRows(List<FeatureRow> rows) {
+    final repo = _repo;
+    if (repo == null) throw StateError('library not open yet');
+    return repo.storeFeatureRows(rows);
+  }
+
+  /// The similarity graph rebuilt after new features (an offload, a bundle
+  /// import, the readiness check) or from Settings: `build_metadata_edges`
+  /// (skipped for Recompute PCA, as in Flet), `build_acoustic_edges`, then
+  /// the rows and the station graphs again (Python's
+  /// `invalidate_coord_graph_cache` and `load_library`; the Network view
+  /// follows [dataGeneration]).
+  @override
+  Future<AcousticBuildResult> rebuildSimilarityGraph({
+    bool metadata = true,
+  }) async {
+    final repo = _repo;
+    if (repo == null || !repo.writable) {
+      throw StateError('library not open for writing');
+    }
+    if (metadata) await repo.buildMetadataEdges();
+    final res = await repo.buildAcousticEdges();
+    await reload();
+    return res;
+  }
+
+  bool _ensuringGraph = false;
+
+  /// main.py `_ensure_graph_built_async`: a few seconds after start, build
+  /// the graph when tracks are analysed but none has coordinates (a build
+  /// that never ran or failed would leave every station empty). Never
+  /// analyses anything. True when it built. Flet also waits for a pause in
+  /// scrolling; the build runs on the database isolate here, so the UI has
+  /// nothing to wait out (PORT_MAP §7).
+  Future<bool> ensureGraphBuilt({
+    Duration delay = const Duration(seconds: 5),
+  }) async {
+    if (_ensuringGraph) return false;
+    _ensuringGraph = true;
+    try {
+      await Future<void>.delayed(delay);
+      final repo = _repo;
+      if (_disposed || repo == null || !repo.writable) return false;
+      final s = await repo.graphReadiness();
+      if (s.tracks < 2 || s.withCoords > 0) return false;
+      if (s.analysed < 2) {
+        debugPrint(
+          'Graph readiness: ${s.tracks} tracks but only ${s.analysed} '
+          'analysed — deferring to the analyser sweep.',
+        );
+        return false;
+      }
+      debugPrint(
+        'Graph readiness: ${s.analysed} analysed tracks but NO persisted '
+        'coordinates — building the similarity graph.',
+      );
+      await rebuildSimilarityGraph();
+      return true;
+    } catch (e) {
+      debugPrint('Graph readiness build failed: $e');
+      return false;
+    } finally {
+      _ensuringGraph = false;
+    }
   }
 
   /// A state bundle import: the database closed (jobs already queued

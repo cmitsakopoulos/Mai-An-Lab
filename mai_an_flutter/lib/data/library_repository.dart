@@ -9,7 +9,9 @@ import '../core/py_text.dart';
 import '../player/dsp.dart';
 import '../stations/station.dart';
 import 'browse_queries.dart';
+import '../sync/companion_client.dart' show FeatureRow;
 import 'feature_store.dart';
+import 'graph_build.dart';
 import 'landing_queries.dart';
 import 'library_schema.dart';
 import 'play_ledger.dart';
@@ -18,6 +20,7 @@ import 'maintenance.dart';
 import 'network_queries.dart';
 import 'scan_writes.dart';
 
+export 'graph_build.dart' show AcousticBuildResult, GraphReadiness;
 export 'library_schema.dart' show kGeometryVersion;
 export 'landing_queries.dart'
     show LibraryCounts, MostPlayedGroup, MostPlayedTrack;
@@ -254,6 +257,28 @@ class LibraryRepository {
     if (!writable) throw StateError('library opened read-only');
     return _db.run(buildMetadataEdgesJob(k));
   }
+
+  // The similarity graph (graph_build.dart).
+
+  /// `track_graph.build_acoustic_edges`: the coordinates of every analysed
+  /// track recomputed, then the genre model. The caller reloads the
+  /// stations (Python's `invalidate_coord_graph_cache`).
+  Future<AcousticBuildResult> buildAcousticEdges() {
+    if (!writable) throw StateError('library opened read-only');
+    return _db.run(buildAcousticEdgesJob(featuresVersion: kFeaturesVersion));
+  }
+
+  /// The startup readiness check's counts.
+  Future<GraphReadiness> graphReadiness() =>
+      _db.run(graphReadinessJob(kFeaturesVersion));
+
+  /// `get_tracks_missing_features`: the DSP offload's work list.
+  Future<List<String>> tracksMissingFeatures() =>
+      _db.run(tracksMissingFeaturesJob(kFeaturesVersion));
+
+  /// `update_tracks_features_batch`: one batch of offloaded features.
+  Future<void> storeFeatureRows(List<FeatureRow> rows) =>
+      _write(storeFeatureRowsJob(rows));
 
   Future<void> close() => _db.close();
 }

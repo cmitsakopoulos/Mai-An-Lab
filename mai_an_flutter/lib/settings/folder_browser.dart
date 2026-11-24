@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 
+import '../core/py_text.dart';
 import '../ui/tokens.dart';
 
 /// settings.py `_browse_android_paths`: a folder navigator over shared
@@ -19,15 +20,6 @@ Future<String?> showFolderBrowser(
   useSafeArea: true,
   builder: (_) => _FolderBrowser(label: label, isPrivate: isPrivate),
 );
-
-/// Python's `sorted` on str: by code point.
-int _pyCompare(String a, String b) {
-  final ra = a.runes.toList(), rb = b.runes.toList();
-  for (var i = 0; i < ra.length && i < rb.length; i++) {
-    if (ra[i] != rb[i]) return ra[i] - rb[i];
-  }
-  return ra.length - rb.length;
-}
 
 /// `os.path.basename` (a trailing slash ignored, as the browsers show it).
 String _base(String path) {
@@ -74,7 +66,7 @@ class _FolderBrowserState extends State<_FolderBrowser> {
         entries = [
           for (final e in Directory(dir).listSync(followLinks: true))
             if (e is Directory) _base(e.path),
-        ].where((n) => !n.startsWith('.')).toList()..sort(_pyCompare);
+        ].where((n) => !n.startsWith('.')).toList()..sort(pyStrCompare);
       } on FileSystemException {
         denied = true;
       }
@@ -299,7 +291,7 @@ class _BundleBrowserState extends State<_BundleBrowser> {
     if (dir != null) {
       try {
         final entries = Directory(dir).listSync(followLinks: true)
-          ..sort((a, b) => _pyCompare(_base(a.path), _base(b.path)));
+          ..sort((a, b) => pyStrCompare(_base(a.path), _base(b.path)));
         for (final e in entries) {
           final name = _base(e.path);
           if (e is Directory && !name.startsWith('.')) dirs.add(name);

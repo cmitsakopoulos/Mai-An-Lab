@@ -23,7 +23,9 @@ import 'package:mai_an_lab/settings/config_controller.dart';
 import 'package:mai_an_lab/settings/settings_page.dart';
 import 'package:mai_an_lab/settings/sync_hub.dart';
 import 'package:mai_an_lab/sync/app_sync_host.dart';
-import 'package:mai_an_lab/sync/companion_client.dart' show CompanionHttpError;
+import 'package:mai_an_lab/sync/companion_client.dart'
+    show CompanionAuthError, CompanionHttpError, FeatureRow;
+import 'package:mai_an_lab/sync/offload_library.dart';
 import 'package:mai_an_lab/sync/send.dart';
 import 'package:mai_an_lab/sync/state_bundles.dart';
 import 'package:mai_an_lab/sync/sync_manager.dart';
@@ -83,6 +85,30 @@ class _Bundles extends StateBundles {
   }
 }
 
+/// The library as the offload card sees it.
+class _OffloadLib implements OffloadLibrary {
+  _OffloadLib(this.missing);
+  List<String> missing;
+  final stored = <List<String>>[];
+  int rebuilds = 0;
+
+  @override
+  Future<List<String>?> tracksMissingFeatures() async => List.of(missing);
+
+  @override
+  Future<void> storeFeatureRows(List<FeatureRow> rows) async {
+    final paths = [for (final r in rows) r.path];
+    stored.add(paths);
+    missing = [
+      for (final p in missing)
+        if (!paths.contains(p)) p,
+    ];
+  }
+
+  @override
+  Future<void> rebuildSimilarityGraph() async => rebuilds++;
+}
+
 void main() {
   late Directory dir;
   late FakeMac mac;
@@ -134,7 +160,11 @@ void main() {
       ..savePref('companion_paired_name', mac.name);
   }
 
-  Future<void> pumpHub(WidgetTester tester, {StateBundles? bundles}) async {
+  Future<void> pumpHub(
+    WidgetTester tester, {
+    StateBundles? bundles,
+    OffloadLibrary? library,
+  }) async {
     tester.view.physicalSize = const Size(390 * 3, 844 * 3);
     tester.view.devicePixelRatio = 3;
     addTearDown(tester.view.reset);
@@ -143,7 +173,7 @@ void main() {
         navigatorKey: nav,
         theme: Tokens.theme(),
         home: Scaffold(
-          body: SyncHubGroup(manager: m, bundles: bundles),
+          body: SyncHubGroup(manager: m, bundles: bundles, library: library),
         ),
       ),
     );
@@ -592,6 +622,193 @@ void main() {
       final last = (NotificationBridge.instance as RecordingBridge).calls.last;
       expect(last['content'], 'Backup upload failed: ${mac.uploadError}');
       expect(last['done'], isTrue);
+      await drain(tester);
+    });
+  });
+
+  group('DSP Acoustic Offload', () {
+    FilledButton offloadButton(WidgetTester tester) =>
+        tester.widget<FilledButton>(
+          find.ancestor(
+            of: find.text('Offload to Mac'),
+            matching: find.byWidgetPredicate((w) => w is FilledButton),
+          ),
+        );
+
+    Future<void> showCard(WidgetTester tester) async {
+      await tester.scrollUntilVisible(
+        find.text('Offload to Mac'),
+        200,
+        scrollable: find.byType(Scrollable).first,
+      );
+      // The connection's snackbar leaves first (it covers the card).
+      await tester.pump(const Duration(seconds: 5));
+      await tester.pumpAndSettle();
+    }
+
+    List<String> syncNotes() => [
+      for (final c in (NotificationBridge.instance as RecordingBridge).calls)
+        if (c['job'] == 'sync') '${c['done']} ${c['content']}',
+    ];
+
+    testWidgets('off: no count yet, the button disabled', (tester) async {
+      make(tester);
+      await pumpHub(tester, library: _OffloadLib(['/m/a.flac']));
+      expect(find.text('DSP Acoustic Offload'), findsOneWidget);
+      expect(
+        find.text('Checking library acoustic features...'),
+        findsOneWidget,
+      );
+      expect(offloadButton(tester).onPressed, isNull);
+    });
+
+    testWidgets('no library: no card', (tester) async {
+      make(tester);
+      await pumpHub(tester);
+      expect(find.text('DSP Acoustic Offload'), findsNothing);
+    });
+
+    testWidgets('connected: the count, the offload, the rebuild, the '
+        'notification', (tester) async {
+      make(tester, enabled: true);
+      pair();
+      final lib = _OffloadLib(['/m/1.flac', '/m/2.flac', '/m/3.flac']);
+      await pumpHub(tester, library: lib);
+      await connect(tester);
+      await showCard(tester);
+      expect(find.text('3 tracks require acoustic analysis.'), findsOneWidget);
+      expect(offloadButton(tester).onPressed, isNotNull);
+
+      await tester.tap(find.text('Offload to Mac'));
+      await tester.pump();
+      expect(find.text('Initiating offload...'), findsOneWidget);
+      expect(find.text('Cancel'), findsOneWidget);
+      expect(offloadButton(tester).onPressed, isNull);
+      await tester.pump(const Duration(seconds: 1));
+      expect(
+        find.text('Processed 1/3 (1.2 tracks/s) • 1.flac'),
+        findsOneWidget,
+      );
+      await tester.pump(const Duration(seconds: 2));
+      await tester.pumpAndSettle();
+
+      expect(mac.offloaded, ['/m/1.flac', '/m/2.flac', '/m/3.flac']);
+      expect(lib.stored, [
+        ['/m/1.flac', '/m/2.flac', '/m/3.flac'],
+      ]);
+      expect(lib.rebuilds, 1);
+      expect(find.text('Offload complete: 3 tracks analysed.'), findsOneWidget);
+      expect(
+        find.text(
+          'All tracks analyzed. Similarity walks and auto-play are ready.',
+        ),
+        findsOneWidget,
+      );
+      expect(find.text('Cancel'), findsNothing);
+      expect(offloadButton(tester).onPressed, isNull);
+      // About one update a second (the notifier's own clock): the first
+      // track lands right after the stage line, the last always shows.
+      expect(syncNotes(), [
+        'false Sending 3 tracks to Mac…',
+        'false 3/3 tracks (1.2 t/s) · 3.flac',
+        'false Rebuilding similarity graph…',
+        'true Offload complete: 3 tracks analysed.',
+      ]);
+      await drain(tester);
+    });
+
+    testWidgets('one track: "1 track require"', (tester) async {
+      make(tester, enabled: true);
+      pair();
+      await pumpHub(tester, library: _OffloadLib(['/m/1.flac']));
+      await connect(tester);
+      await showCard(tester);
+      expect(find.text('1 track require acoustic analysis.'), findsOneWidget);
+      await drain(tester);
+    });
+
+    testWidgets('Cancel stops between tracks; what was done is kept and the '
+        'graph rebuilt', (tester) async {
+      make(tester, enabled: true);
+      pair();
+      final lib = _OffloadLib(['/m/1.flac', '/m/2.flac', '/m/3.flac']);
+      await pumpHub(tester, library: lib);
+      await connect(tester);
+      await showCard(tester);
+      await tester.tap(find.text('Offload to Mac'));
+      await tester.pump(const Duration(milliseconds: 1500));
+      await tester.tap(find.text('Cancel'));
+      await tester.pump();
+      expect(find.text('Cancelling offload...'), findsOneWidget);
+      await tester.pump(const Duration(seconds: 2));
+      await tester.pumpAndSettle();
+      expect(mac.offloaded, ['/m/1.flac', '/m/2.flac']);
+      expect(lib.rebuilds, 1);
+      expect(find.text('DSP offload cancelled (2 of 3 done).'), findsOneWidget);
+      expect(find.text('1 track require acoustic analysis.'), findsOneWidget);
+      expect(offloadButton(tester).onPressed, isNotNull);
+      await drain(tester);
+    });
+
+    testWidgets('the Mac refuses the token: unpaired, said so', (tester) async {
+      make(tester, enabled: true);
+      pair();
+      mac.offloadError = const CompanionAuthError('Offload: not paired');
+      final lib = _OffloadLib(['/m/1.flac']);
+      await pumpHub(tester, library: lib);
+      await connect(tester);
+      await showCard(tester);
+      await tester.tap(find.text('Offload to Mac'));
+      await tester.pumpAndSettle();
+      const text =
+          'DSP offload stopped: the Mac no longer accepts this phone. '
+          'Pair again.';
+      expect(find.text(text), findsOneWidget);
+      expect(host.pref('companion_paired_token'), isEmpty);
+      expect(m.isConnected, isFalse);
+      expect(lib.rebuilds, 0);
+      expect(syncNotes().last, 'true $text');
+      await drain(tester);
+    });
+
+    testWidgets('the link drops: progress kept, said so', (tester) async {
+      make(tester, enabled: true);
+      pair();
+      mac
+        ..offloadError = const SocketException('Lost connection to Mac')
+        ..offloadErrorAt = 1;
+      final lib = _OffloadLib(['/m/1.flac', '/m/2.flac']);
+      await pumpHub(tester, library: lib);
+      await connect(tester);
+      await showCard(tester);
+      await tester.tap(find.text('Offload to Mac'));
+      await tester.pump(const Duration(seconds: 2));
+      await tester.pumpAndSettle();
+      const text =
+          'DSP offload stopped: lost connection to the Mac. Progress so far '
+          'was saved.';
+      expect(find.text(text), findsOneWidget);
+      expect(lib.stored, [
+        ['/m/1.flac'],
+      ]);
+      // Flet rebuilds only after a run that finished.
+      expect(lib.rebuilds, 0);
+      await drain(tester);
+    });
+
+    testWidgets('nothing missing: the button stays off', (tester) async {
+      make(tester, enabled: true);
+      pair();
+      await pumpHub(tester, library: _OffloadLib([]));
+      await connect(tester);
+      await showCard(tester);
+      expect(
+        find.text(
+          'All tracks analyzed. Similarity walks and auto-play are ready.',
+        ),
+        findsOneWidget,
+      );
+      expect(offloadButton(tester).onPressed, isNull);
       await drain(tester);
     });
   });

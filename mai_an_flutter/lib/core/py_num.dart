@@ -6,7 +6,10 @@ import 'dart:typed_data';
 /// `(x * 10).round() / 10` differs: 61.25 is exact in binary, so Python
 /// gives 61.2 where Dart's round-half-away gives 61.3; and 0.15 is stored
 /// just below .15, so Python gives 0.1 where `0.15 * 10` rounds up to 1.5.
-double pyRound1(double x) {
+double pyRound1(double x) => pyRound(x, 1);
+
+/// Python's `round(x, ndigits)` for `ndigits >= 0` (see [pyRound1]).
+double pyRound(double x, int ndigits) {
   if (!x.isFinite || x == 0) return x;
   final bits = (ByteData(8)..setFloat64(0, x)).getUint64(0);
   final negative = (bits >> 63) != 0;
@@ -15,8 +18,9 @@ double pyRound1(double x) {
   // |x| = mant * 2^e exactly.
   final mant = BigInt.from(exp == 0 ? frac : frac | (1 << 52));
   final e = (exp == 0 ? 1 : exp) - 1075;
-  // 10|x| = num / den exactly.
-  var num = mant * BigInt.from(10);
+  final scale = BigInt.from(10).pow(ndigits);
+  // 10^n |x| = num / den exactly.
+  var num = mant * scale;
   var den = BigInt.one;
   if (e >= 0) {
     num <<= e;
@@ -26,7 +30,9 @@ double pyRound1(double x) {
   var q = num ~/ den;
   final twice = (num - q * den) * BigInt.two;
   if (twice > den || (twice == den && q.isOdd)) q += BigInt.one;
-  final out = q.toDouble() / 10;
+  // Both exact below 2^53 for the values rounded here, so one correctly
+  // rounded division: the double nearest to q / 10^n, as Python returns.
+  final out = q.toDouble() / scale.toDouble();
   return negative ? -out : out;
 }
 

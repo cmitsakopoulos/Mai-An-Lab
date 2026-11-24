@@ -118,7 +118,12 @@ void main() {
         bundleDir: () => downloads,
       );
     });
-    tearDown(() => library.dispose());
+    // The database closed before the folder goes (dispose doesn't wait,
+    // and SQLite removes its -wal and -shm files on close).
+    tearDown(() async {
+      await library.repository?.close();
+      library.dispose();
+    });
 
     /// A bundle from another phone: two tracks and its own accent.
     Future<String> otherBundle() async {
