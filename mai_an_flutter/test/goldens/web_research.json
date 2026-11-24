@@ -1,0 +1,1309 @@
+{
+ "ddg_parse": [
+  {
+   "name": "mixed_ads_entities_orphan",
+   "html": "<!doctype html>\n<html><head><title>DuckDuckGo</title>\n<script>var x = '<a class=\"result-link\" href=\"https://bad.example\">nope</a>';</script>\n</head><body>\n<table>\n  <tr><td><a class=\"result-link\" href=\"//duckduckgo.com/y.js?ad_domain=ads.example\">Sponsored Ad</a></td></tr>\n  <tr><td class=\"result-snippet\">Buy shoegaze pedals now!</td></tr>\n\n  <tr><td><a rel=\"nofollow\" class=\"extra result-link\" href=\"//duckduckgo.com/l/?uddg=https%3A%2F%2Fen.wikipedia.org%2Fwiki%2FSlowdive&amp;rut=123\"><b>Slowdive</b> &mdash; Wikipedia</a></td></tr>\n  <tr><td class=\"result-snippet\">Slowdive are an English rock band formed in Reading in <b>1989</b>.   They&#x27;re known for &quot;Souvlaki&quot; &amp; shoegaze&hellip;</td></tr>\n\n  <tr><td><a class=\"result-link\" href=\"https://pitchfork.com/reviews/albums/slowdive/\">Slowdive: Souvlaki</a></td></tr>\n  <tr><td class=\"result-snippet\">   </td></tr>\n\n  <tr><td><a class=\"result-link\" href=\"https://example.org/orphan\">Orphan link with no snippet</a></td></tr>\n  <tr><td><a class=\"result-link\" href=\"//duckduckgo.com/l/?uddg=https%3A%2F%2Fallmusic.com%2Fartist%2F%CE%91%CE%B3%CE%AC%CF%80%CE%B7\">AllMusic &nbsp; Bio</a></td></tr>\n  <tr><td class=\"result-snippet\">Similar to Slowdive: Ride, Lush, Cocteau Twins &amp; Beyoncé.</td></tr>\n</table>\n</body></html>\n",
+   "result": [
+    {
+     "title": "Slowdive — Wikipedia",
+     "uri": "https://en.wikipedia.org/wiki/Slowdive",
+     "snippet": "Slowdive are an English rock band formed in Reading in 1989. They're known for \"Souvlaki\" & shoegaze…"
+    },
+    {
+     "title": "AllMusic Bio",
+     "uri": "https://allmusic.com/artist/Αγάπη",
+     "snippet": "Similar to Slowdive: Ride, Lush, Cocteau Twins & Beyoncé."
+    }
+   ]
+  },
+  {
+   "name": "empty",
+   "html": "<html><body><table><tr><td>No results</td></tr></table></body></html>",
+   "result": []
+  },
+  {
+   "name": "single_quotes_and_unquoted_attrs",
+   "html": "<A CLASS='result-link' HREF='https://ex.com/a?x=1&amp;y=2'>Title &#39;A&#39;</A><TD class=result-snippet>Line 1\n\tLine 2</TD>",
+   "result": [
+    {
+     "title": "Title 'A'",
+     "uri": "https://ex.com/a?x=1&y=2",
+     "snippet": "Line 1 Line 2"
+    }
+   ]
+  },
+  {
+   "name": "ddg_empty_uddg",
+   "html": "<a class=\"result-link\" href=\"https://duckduckgo.com/l/?uddg=\">Empty</a><td class=\"result-snippet\">Skip me</td>",
+   "result": []
+  }
+ ],
+ "http_reasons": [
+  {
+   "status": 429,
+   "text": "RESOURCE_EXHAUSTED",
+   "model": "gemini-2.5-flash",
+   "result": "Gemini quota reached — try again later."
+  },
+  {
+   "status": 401,
+   "text": "Unauthorized",
+   "model": "gemini-2.5-flash",
+   "result": "Gemini rejected the API key."
+  },
+  {
+   "status": 403,
+   "text": "Forbidden",
+   "model": "gemini-2.5-flash",
+   "result": "Gemini rejected the API key."
+  },
+  {
+   "status": 400,
+   "text": "API key not valid",
+   "model": "gemini-2.5-flash",
+   "result": "Gemini rejected the API key."
+  },
+  {
+   "status": 404,
+   "text": "Not Found",
+   "model": "gemini-old",
+   "result": "Model 'gemini-old' isn't available for this key — pick another in Settings → AI Assistant."
+  },
+  {
+   "status": 400,
+   "text": "model not found",
+   "model": "gemini-old",
+   "result": "Model 'gemini-old' isn't available for this key — pick another in Settings → AI Assistant."
+  },
+  {
+   "status": 400,
+   "text": "Tool googleSearch is not supported",
+   "model": "gemini-lite",
+   "result": "Model 'gemini-lite' can't use Google Search — switch Research Paradigm to 'Smart Hybrid' or 'Training Weights' in Settings → AI Assistant."
+  },
+  {
+   "status": 400,
+   "text": "google_search unavailable",
+   "model": "gemini-lite",
+   "result": "Model 'gemini-lite' can't use Google Search — switch Research Paradigm to 'Smart Hybrid' or 'Training Weights' in Settings → AI Assistant."
+  },
+  {
+   "status": 400,
+   "text": "Bad request",
+   "model": "gemini-2.5-flash",
+   "result": "Gemini returned HTTP 400."
+  }
+ ],
+ "ask_scenarios": [
+  {
+   "name": "ddg_default_and_cache_ttl",
+   "config": {
+    "mode": "hybrid",
+    "key": "",
+    "model": "gemini-2.5-flash"
+   },
+   "steps": [
+    {
+     "time": 1000.0,
+     "args": {
+      "question": "When did Slowdive form?"
+     },
+     "replies": [
+      {
+       "status": 200,
+       "content_type": "text/html; charset=utf-8",
+       "body": "<!doctype html>\n<html><head><title>DuckDuckGo</title>\n<script>var x = '<a class=\"result-link\" href=\"https://bad.example\">nope</a>';</script>\n</head><body>\n<table>\n  <tr><td><a class=\"result-link\" href=\"//duckduckgo.com/y.js?ad_domain=ads.example\">Sponsored Ad</a></td></tr>\n  <tr><td class=\"result-snippet\">Buy shoegaze pedals now!</td></tr>\n\n  <tr><td><a rel=\"nofollow\" class=\"extra result-link\" href=\"//duckduckgo.com/l/?uddg=https%3A%2F%2Fen.wikipedia.org%2Fwiki%2FSlowdive&amp;rut=123\"><b>Slowdive</b> &mdash; Wikipedia</a></td></tr>\n  <tr><td class=\"result-snippet\">Slowdive are an English rock band formed in Reading in <b>1989</b>.   They&#x27;re known for &quot;Souvlaki&quot; &amp; shoegaze&hellip;</td></tr>\n\n  <tr><td><a class=\"result-link\" href=\"https://pitchfork.com/reviews/albums/slowdive/\">Slowdive: Souvlaki</a></td></tr>\n  <tr><td class=\"result-snippet\">   </td></tr>\n\n  <tr><td><a class=\"result-link\" href=\"https://example.org/orphan\">Orphan link with no snippet</a></td></tr>\n  <tr><td><a class=\"result-link\" href=\"//duckduckgo.com/l/?uddg=https%3A%2F%2Fallmusic.com%2Fartist%2F%CE%91%CE%B3%CE%AC%CF%80%CE%B7\">AllMusic &nbsp; Bio</a></td></tr>\n  <tr><td class=\"result-snippet\">Similar to Slowdive: Ride, Lush, Cocteau Twins &amp; Beyoncé.</td></tr>\n</table>\n</body></html>\n"
+      }
+     ],
+     "requests": [
+      {
+       "method": "POST",
+       "path": "/ddg/lite/",
+       "headers": {
+        "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+        "content-type": "application/x-www-form-urlencoded"
+       },
+       "body": "q=When+did+Slowdive+form%3F"
+      }
+     ],
+     "sleeps": [],
+     "google_off_reason": null,
+     "result": {
+      "success": true,
+      "backend": "web",
+      "query": "When did Slowdive form?",
+      "sources": [
+       {
+        "title": "Slowdive — Wikipedia",
+        "uri": "https://en.wikipedia.org/wiki/Slowdive",
+        "snippet": "Slowdive are an English rock band formed in Reading in 1989. They're known for \"Souvlaki\" & shoegaze…"
+       },
+       {
+        "title": "AllMusic Bio",
+        "uri": "https://allmusic.com/artist/Αγάπη",
+        "snippet": "Similar to Slowdive: Ride, Lush, Cocteau Twins & Beyoncé."
+       }
+      ],
+      "note": "Search snippets — answer from them and name the site."
+     }
+    },
+    {
+     "time": 2799.0,
+     "args": {
+      "question": "when did slowdive form?"
+     },
+     "replies": [],
+     "requests": [],
+     "sleeps": [],
+     "google_off_reason": null,
+     "result": {
+      "success": true,
+      "backend": "web",
+      "query": "When did Slowdive form?",
+      "sources": [
+       {
+        "title": "Slowdive — Wikipedia",
+        "uri": "https://en.wikipedia.org/wiki/Slowdive",
+        "snippet": "Slowdive are an English rock band formed in Reading in 1989. They're known for \"Souvlaki\" & shoegaze…"
+       },
+       {
+        "title": "AllMusic Bio",
+        "uri": "https://allmusic.com/artist/Αγάπη",
+        "snippet": "Similar to Slowdive: Ride, Lush, Cocteau Twins & Beyoncé."
+       }
+      ],
+      "note": "Search snippets — answer from them and name the site."
+     }
+    },
+    {
+     "time": 2800.0,
+     "args": {
+      "question": "When did Slowdive form?"
+     },
+     "replies": [
+      {
+       "status": 200,
+       "content_type": "text/html; charset=utf-8",
+       "body": "<!doctype html>\n<html><head><title>DuckDuckGo</title>\n<script>var x = '<a class=\"result-link\" href=\"https://bad.example\">nope</a>';</script>\n</head><body>\n<table>\n  <tr><td><a class=\"result-link\" href=\"//duckduckgo.com/y.js?ad_domain=ads.example\">Sponsored Ad</a></td></tr>\n  <tr><td class=\"result-snippet\">Buy shoegaze pedals now!</td></tr>\n\n  <tr><td><a rel=\"nofollow\" class=\"extra result-link\" href=\"//duckduckgo.com/l/?uddg=https%3A%2F%2Fen.wikipedia.org%2Fwiki%2FSlowdive&amp;rut=123\"><b>Slowdive</b> &mdash; Wikipedia</a></td></tr>\n  <tr><td class=\"result-snippet\">Slowdive are an English rock band formed in Reading in <b>1989</b>.   They&#x27;re known for &quot;Souvlaki&quot; &amp; shoegaze&hellip;</td></tr>\n\n  <tr><td><a class=\"result-link\" href=\"https://pitchfork.com/reviews/albums/slowdive/\">Slowdive: Souvlaki</a></td></tr>\n  <tr><td class=\"result-snippet\">   </td></tr>\n\n  <tr><td><a class=\"result-link\" href=\"https://example.org/orphan\">Orphan link with no snippet</a></td></tr>\n  <tr><td><a class=\"result-link\" href=\"//duckduckgo.com/l/?uddg=https%3A%2F%2Fallmusic.com%2Fartist%2F%CE%91%CE%B3%CE%AC%CF%80%CE%B7\">AllMusic &nbsp; Bio</a></td></tr>\n  <tr><td class=\"result-snippet\">Similar to Slowdive: Ride, Lush, Cocteau Twins &amp; Beyoncé.</td></tr>\n</table>\n</body></html>\n"
+      }
+     ],
+     "requests": [
+      {
+       "method": "POST",
+       "path": "/ddg/lite/",
+       "headers": {
+        "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+        "content-type": "application/x-www-form-urlencoded"
+       },
+       "body": "q=When+did+Slowdive+form%3F"
+      }
+     ],
+     "sleeps": [],
+     "google_off_reason": null,
+     "result": {
+      "success": true,
+      "backend": "web",
+      "query": "When did Slowdive form?",
+      "sources": [
+       {
+        "title": "Slowdive — Wikipedia",
+        "uri": "https://en.wikipedia.org/wiki/Slowdive",
+        "snippet": "Slowdive are an English rock band formed in Reading in 1989. They're known for \"Souvlaki\" & shoegaze…"
+       },
+       {
+        "title": "AllMusic Bio",
+        "uri": "https://allmusic.com/artist/Αγάπη",
+        "snippet": "Similar to Slowdive: Ride, Lush, Cocteau Twins & Beyoncé."
+       }
+      ],
+      "note": "Search snippets — answer from them and name the site."
+     }
+    }
+   ]
+  },
+  {
+   "name": "ddg_403_wiki_fallback",
+   "config": {
+    "mode": "hybrid",
+    "key": "",
+    "model": "gemini-2.5-flash"
+   },
+   "steps": [
+    {
+     "time": 1000.0,
+     "args": {
+      "question": "Slowdive band",
+      "search_query": "Slowdive & shoegaze"
+     },
+     "replies": [
+      {
+       "status": 403,
+       "content_type": "text/plain",
+       "body": "Forbidden"
+      },
+      {
+       "status": 200,
+       "content_type": "application/json; charset=UTF-8",
+       "body": "{\"query\": {\"search\": [{\"title\": \"Slowdive (band)\", \"snippet\": \"<span class=\\\"searchmatch\\\">Slowdive</span> formed in Reading in 1989.\"}, {\"title\": \"Empty Page\", \"snippet\": \"   <b></b>  \"}, {\"title\": \"Μουσική Ελλάδας\", \"snippet\": \"Greek <b>music</b> history &amp; artists.\"}]}}"
+      }
+     ],
+     "requests": [
+      {
+       "method": "POST",
+       "path": "/ddg/lite/",
+       "headers": {
+        "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+        "content-type": "application/x-www-form-urlencoded"
+       },
+       "body": "q=Slowdive+%26+shoegaze"
+      },
+      {
+       "method": "GET",
+       "path": "/wiki/w/api.php?action=query&list=search&srsearch=Slowdive%20%26%20shoegaze&format=json&srlimit=6",
+       "headers": {
+        "user-agent": "StreamripApp/2.0 (personal music library metadata)"
+       },
+       "body": ""
+      }
+     ],
+     "sleeps": [],
+     "google_off_reason": null,
+     "result": {
+      "success": true,
+      "backend": "web",
+      "query": "Slowdive & shoegaze",
+      "sources": [
+       {
+        "title": "Slowdive (band) - Wikipedia",
+        "uri": "https://en.wikipedia.org/wiki/Slowdive_%28band%29",
+        "snippet": "Slowdive formed in Reading in 1989."
+       },
+       {
+        "title": "Μουσική Ελλάδας - Wikipedia",
+        "uri": "https://en.wikipedia.org/wiki/%CE%9C%CE%BF%CF%85%CF%83%CE%B9%CE%BA%CE%AE_%CE%95%CE%BB%CE%BB%CE%AC%CE%B4%CE%B1%CF%82",
+        "snippet": "Greek music history &amp; artists."
+       }
+      ],
+      "note": "Search snippets — answer from them and name the site."
+     }
+    }
+   ]
+  },
+  {
+   "name": "web_empty_falls_back_to_google",
+   "config": {
+    "mode": "hybrid",
+    "key": "k-secret",
+    "model": "gemini-2.5-flash"
+   },
+   "steps": [
+    {
+     "time": 1000.0,
+     "args": {
+      "question": "When did Slowdive form?",
+      "context": "artist_country: GB"
+     },
+     "replies": [
+      {
+       "status": 200,
+       "content_type": "text/html; charset=utf-8",
+       "body": "<html><body><table><tr><td>No results</td></tr></table></body></html>"
+      },
+      {
+       "status": 200,
+       "content_type": "application/json; charset=UTF-8",
+       "body": "{\"query\": {\"search\": []}}"
+      },
+      {
+       "status": 200,
+       "content_type": "application/json; charset=UTF-8",
+       "body": "{\"candidates\": [{\"content\": {\"parts\": [{\"text\": \"internal thinking...\", \"thought\": true}, {\"text\": \"Slowdive formed in Reading, England in 1989. \"}, {\"text\": \"Their album Souvlaki (1993) is a shoegaze landmark.\"}]}, \"groundingMetadata\": {\"groundingChunks\": [{\"web\": {\"uri\": \"https://en.wikipedia.org/wiki/Slowdive\", \"title\": \"Slowdive - Wikipedia\"}}, {\"web\": {\"uri\": \"https://en.wikipedia.org/wiki/Slowdive\", \"title\": \"Duplicate\"}}, {\"web\": {\"uri\": \"https://pitchfork.com/slowdive\", \"title\": \"\"}}, {\"web\": {\"uri\": \"\", \"title\": \"No URI\"}}], \"webSearchQueries\": [\"Slowdive band origin\", \"\", \"Souvlaki release year\", \"q3\", \"q4\", \"q5\"]}}]}"
+      }
+     ],
+     "requests": [
+      {
+       "method": "POST",
+       "path": "/ddg/lite/",
+       "headers": {
+        "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+        "content-type": "application/x-www-form-urlencoded"
+       },
+       "body": "q=When+did+Slowdive+form%3F"
+      },
+      {
+       "method": "GET",
+       "path": "/wiki/w/api.php?action=query&list=search&srsearch=When%20did%20Slowdive%20form?&format=json&srlimit=6",
+       "headers": {
+        "user-agent": "StreamripApp/2.0 (personal music library metadata)"
+       },
+       "body": ""
+      },
+      {
+       "method": "POST",
+       "path": "/v1beta/models/gemini-2.5-flash:generateContent",
+       "headers": {
+        "user-agent": "Python/3.13 aiohttp/3.13.5",
+        "content-type": "application/json",
+        "x-goog-api-key": "k-secret"
+       },
+       "body": "{\"contents\": [{\"role\": \"user\", \"parts\": [{\"text\": \"Search the web and answer for a music listener, in at most 6 short sentences. State facts plainly (names, years, places); say so if the sources disagree or you can't find it. No markdown headings.\\nContext: artist_country: GB\\nQuestion: When did Slowdive form?\"}]}], \"generationConfig\": {\"temperature\": 0.2}, \"tools\": [{\"googleSearch\": {}}]}"
+      }
+     ],
+     "sleeps": [],
+     "google_off_reason": null,
+     "result": {
+      "success": true,
+      "backend": "google",
+      "answer": "Slowdive formed in Reading, England in 1989. Their album Souvlaki (1993) is a shoegaze landmark.",
+      "sources": [
+       {
+        "title": "Slowdive - Wikipedia",
+        "uri": "https://en.wikipedia.org/wiki/Slowdive"
+       },
+       {
+        "title": "https://pitchfork.com/slowdive",
+        "uri": "https://pitchfork.com/slowdive"
+       }
+      ],
+      "searched": [
+       "Slowdive band origin",
+       "Souvlaki release year",
+       "q3",
+       "q4"
+      ],
+      "query": "When did Slowdive form?"
+     }
+    }
+   ]
+  },
+  {
+   "name": "google_grounding_mode_and_latch",
+   "config": {
+    "mode": "google_grounding",
+    "key": "k-1",
+    "model": "gemini-lite"
+   },
+   "steps": [
+    {
+     "time": 1000.0,
+     "args": {
+      "question": "When did Slowdive form?"
+     },
+     "replies": [
+      {
+       "status": 200,
+       "content_type": "application/json; charset=UTF-8",
+       "body": "{\"candidates\": [{\"content\": {\"parts\": [{\"text\": \"internal thinking...\", \"thought\": true}, {\"text\": \"Slowdive formed in Reading, England in 1989. \"}, {\"text\": \"Their album Souvlaki (1993) is a shoegaze landmark.\"}]}, \"groundingMetadata\": {\"groundingChunks\": [{\"web\": {\"uri\": \"https://en.wikipedia.org/wiki/Slowdive\", \"title\": \"Slowdive - Wikipedia\"}}, {\"web\": {\"uri\": \"https://en.wikipedia.org/wiki/Slowdive\", \"title\": \"Duplicate\"}}, {\"web\": {\"uri\": \"https://pitchfork.com/slowdive\", \"title\": \"\"}}, {\"web\": {\"uri\": \"\", \"title\": \"No URI\"}}], \"webSearchQueries\": [\"Slowdive band origin\", \"\", \"Souvlaki release year\", \"q3\", \"q4\", \"q5\"]}}]}"
+      }
+     ],
+     "requests": [
+      {
+       "method": "POST",
+       "path": "/v1beta/models/gemini-lite:generateContent",
+       "headers": {
+        "user-agent": "Python/3.13 aiohttp/3.13.5",
+        "content-type": "application/json",
+        "x-goog-api-key": "k-1"
+       },
+       "body": "{\"contents\": [{\"role\": \"user\", \"parts\": [{\"text\": \"Search the web and answer for a music listener, in at most 6 short sentences. State facts plainly (names, years, places); say so if the sources disagree or you can't find it. No markdown headings.\\nQuestion: When did Slowdive form?\"}]}], \"generationConfig\": {\"temperature\": 0.2}, \"tools\": [{\"googleSearch\": {}}]}"
+      }
+     ],
+     "sleeps": [],
+     "google_off_reason": null,
+     "result": {
+      "success": true,
+      "backend": "google",
+      "answer": "Slowdive formed in Reading, England in 1989. Their album Souvlaki (1993) is a shoegaze landmark.",
+      "sources": [
+       {
+        "title": "Slowdive - Wikipedia",
+        "uri": "https://en.wikipedia.org/wiki/Slowdive"
+       },
+       {
+        "title": "https://pitchfork.com/slowdive",
+        "uri": "https://pitchfork.com/slowdive"
+       }
+      ],
+      "searched": [
+       "Slowdive band origin",
+       "Souvlaki release year",
+       "q3",
+       "q4"
+      ],
+      "query": "When did Slowdive form?"
+     }
+    },
+    {
+     "time": 1010.0,
+     "args": {
+      "question": "Who produced Souvlaki?"
+     },
+     "replies": [
+      {
+       "status": 400,
+       "content_type": "text/plain",
+       "body": "Tool googleSearch is not supported"
+      },
+      {
+       "status": 200,
+       "content_type": "text/html; charset=utf-8",
+       "body": "<!doctype html>\n<html><head><title>DuckDuckGo</title>\n<script>var x = '<a class=\"result-link\" href=\"https://bad.example\">nope</a>';</script>\n</head><body>\n<table>\n  <tr><td><a class=\"result-link\" href=\"//duckduckgo.com/y.js?ad_domain=ads.example\">Sponsored Ad</a></td></tr>\n  <tr><td class=\"result-snippet\">Buy shoegaze pedals now!</td></tr>\n\n  <tr><td><a rel=\"nofollow\" class=\"extra result-link\" href=\"//duckduckgo.com/l/?uddg=https%3A%2F%2Fen.wikipedia.org%2Fwiki%2FSlowdive&amp;rut=123\"><b>Slowdive</b> &mdash; Wikipedia</a></td></tr>\n  <tr><td class=\"result-snippet\">Slowdive are an English rock band formed in Reading in <b>1989</b>.   They&#x27;re known for &quot;Souvlaki&quot; &amp; shoegaze&hellip;</td></tr>\n\n  <tr><td><a class=\"result-link\" href=\"https://pitchfork.com/reviews/albums/slowdive/\">Slowdive: Souvlaki</a></td></tr>\n  <tr><td class=\"result-snippet\">   </td></tr>\n\n  <tr><td><a class=\"result-link\" href=\"https://example.org/orphan\">Orphan link with no snippet</a></td></tr>\n  <tr><td><a class=\"result-link\" href=\"//duckduckgo.com/l/?uddg=https%3A%2F%2Fallmusic.com%2Fartist%2F%CE%91%CE%B3%CE%AC%CF%80%CE%B7\">AllMusic &nbsp; Bio</a></td></tr>\n  <tr><td class=\"result-snippet\">Similar to Slowdive: Ride, Lush, Cocteau Twins &amp; Beyoncé.</td></tr>\n</table>\n</body></html>\n"
+      }
+     ],
+     "requests": [
+      {
+       "method": "POST",
+       "path": "/v1beta/models/gemini-lite:generateContent",
+       "headers": {
+        "user-agent": "Python/3.13 aiohttp/3.13.5",
+        "content-type": "application/json",
+        "x-goog-api-key": "k-1"
+       },
+       "body": "{\"contents\": [{\"role\": \"user\", \"parts\": [{\"text\": \"Search the web and answer for a music listener, in at most 6 short sentences. State facts plainly (names, years, places); say so if the sources disagree or you can't find it. No markdown headings.\\nQuestion: Who produced Souvlaki?\"}]}], \"generationConfig\": {\"temperature\": 0.2}, \"tools\": [{\"googleSearch\": {}}]}"
+      },
+      {
+       "method": "POST",
+       "path": "/ddg/lite/",
+       "headers": {
+        "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+        "content-type": "application/x-www-form-urlencoded"
+       },
+       "body": "q=Who+produced+Souvlaki%3F"
+      }
+     ],
+     "sleeps": [],
+     "google_off_reason": "Model 'gemini-lite' can't use Google Search — switch Research Paradigm to 'Smart Hybrid' or 'Training Weights' in Settings → AI Assistant.",
+     "result": {
+      "success": true,
+      "backend": "web",
+      "query": "Who produced Souvlaki?",
+      "sources": [
+       {
+        "title": "Slowdive — Wikipedia",
+        "uri": "https://en.wikipedia.org/wiki/Slowdive",
+        "snippet": "Slowdive are an English rock band formed in Reading in 1989. They're known for \"Souvlaki\" & shoegaze…"
+       },
+       {
+        "title": "AllMusic Bio",
+        "uri": "https://allmusic.com/artist/Αγάπη",
+        "snippet": "Similar to Slowdive: Ride, Lush, Cocteau Twins & Beyoncé."
+       }
+      ],
+      "note": "Search snippets — answer from them and name the site."
+     }
+    },
+    {
+     "time": 1020.0,
+     "args": {
+      "question": "Third question after latch?"
+     },
+     "replies": [
+      {
+       "status": 200,
+       "content_type": "text/html; charset=utf-8",
+       "body": "<!doctype html>\n<html><head><title>DuckDuckGo</title>\n<script>var x = '<a class=\"result-link\" href=\"https://bad.example\">nope</a>';</script>\n</head><body>\n<table>\n  <tr><td><a class=\"result-link\" href=\"//duckduckgo.com/y.js?ad_domain=ads.example\">Sponsored Ad</a></td></tr>\n  <tr><td class=\"result-snippet\">Buy shoegaze pedals now!</td></tr>\n\n  <tr><td><a rel=\"nofollow\" class=\"extra result-link\" href=\"//duckduckgo.com/l/?uddg=https%3A%2F%2Fen.wikipedia.org%2Fwiki%2FSlowdive&amp;rut=123\"><b>Slowdive</b> &mdash; Wikipedia</a></td></tr>\n  <tr><td class=\"result-snippet\">Slowdive are an English rock band formed in Reading in <b>1989</b>.   They&#x27;re known for &quot;Souvlaki&quot; &amp; shoegaze&hellip;</td></tr>\n\n  <tr><td><a class=\"result-link\" href=\"https://pitchfork.com/reviews/albums/slowdive/\">Slowdive: Souvlaki</a></td></tr>\n  <tr><td class=\"result-snippet\">   </td></tr>\n\n  <tr><td><a class=\"result-link\" href=\"https://example.org/orphan\">Orphan link with no snippet</a></td></tr>\n  <tr><td><a class=\"result-link\" href=\"//duckduckgo.com/l/?uddg=https%3A%2F%2Fallmusic.com%2Fartist%2F%CE%91%CE%B3%CE%AC%CF%80%CE%B7\">AllMusic &nbsp; Bio</a></td></tr>\n  <tr><td class=\"result-snippet\">Similar to Slowdive: Ride, Lush, Cocteau Twins &amp; Beyoncé.</td></tr>\n</table>\n</body></html>\n"
+      }
+     ],
+     "requests": [
+      {
+       "method": "POST",
+       "path": "/ddg/lite/",
+       "headers": {
+        "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+        "content-type": "application/x-www-form-urlencoded"
+       },
+       "body": "q=Third+question+after+latch%3F"
+      }
+     ],
+     "sleeps": [],
+     "google_off_reason": "Model 'gemini-lite' can't use Google Search — switch Research Paradigm to 'Smart Hybrid' or 'Training Weights' in Settings → AI Assistant.",
+     "result": {
+      "success": true,
+      "backend": "web",
+      "query": "Third question after latch?",
+      "sources": [
+       {
+        "title": "Slowdive — Wikipedia",
+        "uri": "https://en.wikipedia.org/wiki/Slowdive",
+        "snippet": "Slowdive are an English rock band formed in Reading in 1989. They're known for \"Souvlaki\" & shoegaze…"
+       },
+       {
+        "title": "AllMusic Bio",
+        "uri": "https://allmusic.com/artist/Αγάπη",
+        "snippet": "Similar to Slowdive: Ride, Lush, Cocteau Twins & Beyoncé."
+       }
+      ],
+      "note": "Search snippets — answer from them and name the site."
+     }
+    }
+   ]
+  },
+  {
+   "name": "google_429_retry_then_quota_latch",
+   "config": {
+    "mode": "google_grounding",
+    "key": "k-2",
+    "model": "gemini-2.5-flash"
+   },
+   "steps": [
+    {
+     "time": 1000.0,
+     "args": {
+      "question": "First retry question?"
+     },
+     "replies": [
+      {
+       "status": 429,
+       "content_type": "application/json; charset=UTF-8",
+       "body": "{\"error\":{\"details\":[{\"retryDelay\":\"2.5s\"}]}}"
+      },
+      {
+       "status": 200,
+       "content_type": "application/json; charset=UTF-8",
+       "body": "{\"candidates\": [{\"content\": {\"parts\": [{\"text\": \"internal thinking...\", \"thought\": true}, {\"text\": \"Slowdive formed in Reading, England in 1989. \"}, {\"text\": \"Their album Souvlaki (1993) is a shoegaze landmark.\"}]}, \"groundingMetadata\": {\"groundingChunks\": [{\"web\": {\"uri\": \"https://en.wikipedia.org/wiki/Slowdive\", \"title\": \"Slowdive - Wikipedia\"}}, {\"web\": {\"uri\": \"https://en.wikipedia.org/wiki/Slowdive\", \"title\": \"Duplicate\"}}, {\"web\": {\"uri\": \"https://pitchfork.com/slowdive\", \"title\": \"\"}}, {\"web\": {\"uri\": \"\", \"title\": \"No URI\"}}], \"webSearchQueries\": [\"Slowdive band origin\", \"\", \"Souvlaki release year\", \"q3\", \"q4\", \"q5\"]}}]}"
+      }
+     ],
+     "requests": [
+      {
+       "method": "POST",
+       "path": "/v1beta/models/gemini-2.5-flash:generateContent",
+       "headers": {
+        "user-agent": "Python/3.13 aiohttp/3.13.5",
+        "content-type": "application/json",
+        "x-goog-api-key": "k-2"
+       },
+       "body": "{\"contents\": [{\"role\": \"user\", \"parts\": [{\"text\": \"Search the web and answer for a music listener, in at most 6 short sentences. State facts plainly (names, years, places); say so if the sources disagree or you can't find it. No markdown headings.\\nQuestion: First retry question?\"}]}], \"generationConfig\": {\"temperature\": 0.2}, \"tools\": [{\"googleSearch\": {}}]}"
+      },
+      {
+       "method": "POST",
+       "path": "/v1beta/models/gemini-2.5-flash:generateContent",
+       "headers": {
+        "user-agent": "Python/3.13 aiohttp/3.13.5",
+        "content-type": "application/json",
+        "x-goog-api-key": "k-2"
+       },
+       "body": "{\"contents\": [{\"role\": \"user\", \"parts\": [{\"text\": \"Search the web and answer for a music listener, in at most 6 short sentences. State facts plainly (names, years, places); say so if the sources disagree or you can't find it. No markdown headings.\\nQuestion: First retry question?\"}]}], \"generationConfig\": {\"temperature\": 0.2}, \"tools\": [{\"googleSearch\": {}}]}"
+      }
+     ],
+     "sleeps": [
+      3.5
+     ],
+     "google_off_reason": null,
+     "result": {
+      "success": true,
+      "backend": "google",
+      "answer": "Slowdive formed in Reading, England in 1989. Their album Souvlaki (1993) is a shoegaze landmark.",
+      "sources": [
+       {
+        "title": "Slowdive - Wikipedia",
+        "uri": "https://en.wikipedia.org/wiki/Slowdive"
+       },
+       {
+        "title": "https://pitchfork.com/slowdive",
+        "uri": "https://pitchfork.com/slowdive"
+       }
+      ],
+      "searched": [
+       "Slowdive band origin",
+       "Souvlaki release year",
+       "q3",
+       "q4"
+      ],
+      "query": "First retry question?"
+     }
+    },
+    {
+     "time": 1010.0,
+     "args": {
+      "question": "Second quota exhausted?"
+     },
+     "replies": [
+      {
+       "status": 429,
+       "content_type": "application/json; charset=UTF-8",
+       "body": "{\"error\":{\"message\":\"Quota exceeded\"}}"
+      },
+      {
+       "status": 200,
+       "content_type": "text/html; charset=utf-8",
+       "body": "<!doctype html>\n<html><head><title>DuckDuckGo</title>\n<script>var x = '<a class=\"result-link\" href=\"https://bad.example\">nope</a>';</script>\n</head><body>\n<table>\n  <tr><td><a class=\"result-link\" href=\"//duckduckgo.com/y.js?ad_domain=ads.example\">Sponsored Ad</a></td></tr>\n  <tr><td class=\"result-snippet\">Buy shoegaze pedals now!</td></tr>\n\n  <tr><td><a rel=\"nofollow\" class=\"extra result-link\" href=\"//duckduckgo.com/l/?uddg=https%3A%2F%2Fen.wikipedia.org%2Fwiki%2FSlowdive&amp;rut=123\"><b>Slowdive</b> &mdash; Wikipedia</a></td></tr>\n  <tr><td class=\"result-snippet\">Slowdive are an English rock band formed in Reading in <b>1989</b>.   They&#x27;re known for &quot;Souvlaki&quot; &amp; shoegaze&hellip;</td></tr>\n\n  <tr><td><a class=\"result-link\" href=\"https://pitchfork.com/reviews/albums/slowdive/\">Slowdive: Souvlaki</a></td></tr>\n  <tr><td class=\"result-snippet\">   </td></tr>\n\n  <tr><td><a class=\"result-link\" href=\"https://example.org/orphan\">Orphan link with no snippet</a></td></tr>\n  <tr><td><a class=\"result-link\" href=\"//duckduckgo.com/l/?uddg=https%3A%2F%2Fallmusic.com%2Fartist%2F%CE%91%CE%B3%CE%AC%CF%80%CE%B7\">AllMusic &nbsp; Bio</a></td></tr>\n  <tr><td class=\"result-snippet\">Similar to Slowdive: Ride, Lush, Cocteau Twins &amp; Beyoncé.</td></tr>\n</table>\n</body></html>\n"
+      }
+     ],
+     "requests": [
+      {
+       "method": "POST",
+       "path": "/v1beta/models/gemini-2.5-flash:generateContent",
+       "headers": {
+        "user-agent": "Python/3.13 aiohttp/3.13.5",
+        "content-type": "application/json",
+        "x-goog-api-key": "k-2"
+       },
+       "body": "{\"contents\": [{\"role\": \"user\", \"parts\": [{\"text\": \"Search the web and answer for a music listener, in at most 6 short sentences. State facts plainly (names, years, places); say so if the sources disagree or you can't find it. No markdown headings.\\nQuestion: Second quota exhausted?\"}]}], \"generationConfig\": {\"temperature\": 0.2}, \"tools\": [{\"googleSearch\": {}}]}"
+      },
+      {
+       "method": "POST",
+       "path": "/ddg/lite/",
+       "headers": {
+        "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+        "content-type": "application/x-www-form-urlencoded"
+       },
+       "body": "q=Second+quota+exhausted%3F"
+      }
+     ],
+     "sleeps": [],
+     "google_off_reason": "Gemini quota reached — try again later.",
+     "result": {
+      "success": true,
+      "backend": "web",
+      "query": "Second quota exhausted?",
+      "sources": [
+       {
+        "title": "Slowdive — Wikipedia",
+        "uri": "https://en.wikipedia.org/wiki/Slowdive",
+        "snippet": "Slowdive are an English rock band formed in Reading in 1989. They're known for \"Souvlaki\" & shoegaze…"
+       },
+       {
+        "title": "AllMusic Bio",
+        "uri": "https://allmusic.com/artist/Αγάπη",
+        "snippet": "Similar to Slowdive: Ride, Lush, Cocteau Twins & Beyoncé."
+       }
+      ],
+      "note": "Search snippets — answer from them and name the site."
+     }
+    },
+    {
+     "time": 1020.0,
+     "args": {
+      "question": "Third skips google?"
+     },
+     "replies": [
+      {
+       "status": 200,
+       "content_type": "text/html; charset=utf-8",
+       "body": "<!doctype html>\n<html><head><title>DuckDuckGo</title>\n<script>var x = '<a class=\"result-link\" href=\"https://bad.example\">nope</a>';</script>\n</head><body>\n<table>\n  <tr><td><a class=\"result-link\" href=\"//duckduckgo.com/y.js?ad_domain=ads.example\">Sponsored Ad</a></td></tr>\n  <tr><td class=\"result-snippet\">Buy shoegaze pedals now!</td></tr>\n\n  <tr><td><a rel=\"nofollow\" class=\"extra result-link\" href=\"//duckduckgo.com/l/?uddg=https%3A%2F%2Fen.wikipedia.org%2Fwiki%2FSlowdive&amp;rut=123\"><b>Slowdive</b> &mdash; Wikipedia</a></td></tr>\n  <tr><td class=\"result-snippet\">Slowdive are an English rock band formed in Reading in <b>1989</b>.   They&#x27;re known for &quot;Souvlaki&quot; &amp; shoegaze&hellip;</td></tr>\n\n  <tr><td><a class=\"result-link\" href=\"https://pitchfork.com/reviews/albums/slowdive/\">Slowdive: Souvlaki</a></td></tr>\n  <tr><td class=\"result-snippet\">   </td></tr>\n\n  <tr><td><a class=\"result-link\" href=\"https://example.org/orphan\">Orphan link with no snippet</a></td></tr>\n  <tr><td><a class=\"result-link\" href=\"//duckduckgo.com/l/?uddg=https%3A%2F%2Fallmusic.com%2Fartist%2F%CE%91%CE%B3%CE%AC%CF%80%CE%B7\">AllMusic &nbsp; Bio</a></td></tr>\n  <tr><td class=\"result-snippet\">Similar to Slowdive: Ride, Lush, Cocteau Twins &amp; Beyoncé.</td></tr>\n</table>\n</body></html>\n"
+      }
+     ],
+     "requests": [
+      {
+       "method": "POST",
+       "path": "/ddg/lite/",
+       "headers": {
+        "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+        "content-type": "application/x-www-form-urlencoded"
+       },
+       "body": "q=Third+skips+google%3F"
+      }
+     ],
+     "sleeps": [],
+     "google_off_reason": "Gemini quota reached — try again later.",
+     "result": {
+      "success": true,
+      "backend": "web",
+      "query": "Third skips google?",
+      "sources": [
+       {
+        "title": "Slowdive — Wikipedia",
+        "uri": "https://en.wikipedia.org/wiki/Slowdive",
+        "snippet": "Slowdive are an English rock band formed in Reading in 1989. They're known for \"Souvlaki\" & shoegaze…"
+       },
+       {
+        "title": "AllMusic Bio",
+        "uri": "https://allmusic.com/artist/Αγάπη",
+        "snippet": "Similar to Slowdive: Ride, Lush, Cocteau Twins & Beyoncé."
+       }
+      ],
+      "note": "Search snippets — answer from them and name the site."
+     }
+    }
+   ]
+  },
+  {
+   "name": "web_empty_not_cached_and_unreachable",
+   "config": {
+    "mode": "hybrid",
+    "key": "",
+    "model": "gemini-2.5-flash"
+   },
+   "steps": [
+    {
+     "time": 1000.0,
+     "args": {
+      "question": "Obscure query"
+     },
+     "replies": [
+      {
+       "status": 200,
+       "content_type": "text/html; charset=utf-8",
+       "body": "<html><body><table><tr><td>No results</td></tr></table></body></html>"
+      },
+      {
+       "status": 200,
+       "content_type": "application/json; charset=UTF-8",
+       "body": "{\"query\": {\"search\": []}}"
+      }
+     ],
+     "requests": [
+      {
+       "method": "POST",
+       "path": "/ddg/lite/",
+       "headers": {
+        "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+        "content-type": "application/x-www-form-urlencoded"
+       },
+       "body": "q=Obscure+query"
+      },
+      {
+       "method": "GET",
+       "path": "/wiki/w/api.php?action=query&list=search&srsearch=Obscure%20query&format=json&srlimit=6",
+       "headers": {
+        "user-agent": "StreamripApp/2.0 (personal music library metadata)"
+       },
+       "body": ""
+      }
+     ],
+     "sleeps": [],
+     "google_off_reason": null,
+     "result": {
+      "success": true,
+      "backend": "web",
+      "query": "Obscure query",
+      "sources": [],
+      "note": "The web search found nothing for this."
+     }
+    },
+    {
+     "time": 1005.0,
+     "args": {
+      "question": "Obscure query"
+     },
+     "replies": [
+      {
+       "status": 500,
+       "content_type": "text/plain",
+       "body": "err"
+      },
+      {
+       "status": 503,
+       "content_type": "text/plain",
+       "body": "err"
+      }
+     ],
+     "requests": [
+      {
+       "method": "POST",
+       "path": "/ddg/lite/",
+       "headers": {
+        "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+        "content-type": "application/x-www-form-urlencoded"
+       },
+       "body": "q=Obscure+query"
+      },
+      {
+       "method": "GET",
+       "path": "/wiki/w/api.php?action=query&list=search&srsearch=Obscure%20query&format=json&srlimit=6",
+       "headers": {
+        "user-agent": "StreamripApp/2.0 (personal music library metadata)"
+       },
+       "body": ""
+      }
+     ],
+     "sleeps": [],
+     "google_off_reason": null,
+     "result": {
+      "success": false,
+      "error": "The web isn't reachable right now."
+     }
+    },
+    {
+     "time": 1010.0,
+     "args": {
+      "question": "   "
+     },
+     "replies": [],
+     "requests": [],
+     "sleeps": [],
+     "google_off_reason": null,
+     "result": {
+      "success": false,
+      "error": "Empty question."
+     }
+    }
+   ]
+  }
+ ],
+ "tool_scenarios": [
+  {
+   "name": "web_search_empty",
+   "config": {
+    "mode": "hybrid",
+    "key": "",
+    "model": "gemini-2.5-flash"
+   },
+   "current_path": "",
+   "tool": "web_search",
+   "args": {
+    "query": "   "
+   },
+   "replies": [],
+   "requests": [],
+   "result": {
+    "success": false,
+    "error": "Empty query."
+   }
+  },
+  {
+   "name": "web_search_ok",
+   "config": {
+    "mode": "hybrid",
+    "key": "",
+    "model": "gemini-2.5-flash"
+   },
+   "current_path": "",
+   "tool": "web_search",
+   "args": {
+    "query": "Slowdive Souvlaki"
+   },
+   "replies": [
+    {
+     "status": 200,
+     "content_type": "text/html; charset=utf-8",
+     "body": "<!doctype html>\n<html><head><title>DuckDuckGo</title>\n<script>var x = '<a class=\"result-link\" href=\"https://bad.example\">nope</a>';</script>\n</head><body>\n<table>\n  <tr><td><a class=\"result-link\" href=\"//duckduckgo.com/y.js?ad_domain=ads.example\">Sponsored Ad</a></td></tr>\n  <tr><td class=\"result-snippet\">Buy shoegaze pedals now!</td></tr>\n\n  <tr><td><a rel=\"nofollow\" class=\"extra result-link\" href=\"//duckduckgo.com/l/?uddg=https%3A%2F%2Fen.wikipedia.org%2Fwiki%2FSlowdive&amp;rut=123\"><b>Slowdive</b> &mdash; Wikipedia</a></td></tr>\n  <tr><td class=\"result-snippet\">Slowdive are an English rock band formed in Reading in <b>1989</b>.   They&#x27;re known for &quot;Souvlaki&quot; &amp; shoegaze&hellip;</td></tr>\n\n  <tr><td><a class=\"result-link\" href=\"https://pitchfork.com/reviews/albums/slowdive/\">Slowdive: Souvlaki</a></td></tr>\n  <tr><td class=\"result-snippet\">   </td></tr>\n\n  <tr><td><a class=\"result-link\" href=\"https://example.org/orphan\">Orphan link with no snippet</a></td></tr>\n  <tr><td><a class=\"result-link\" href=\"//duckduckgo.com/l/?uddg=https%3A%2F%2Fallmusic.com%2Fartist%2F%CE%91%CE%B3%CE%AC%CF%80%CE%B7\">AllMusic &nbsp; Bio</a></td></tr>\n  <tr><td class=\"result-snippet\">Similar to Slowdive: Ride, Lush, Cocteau Twins &amp; Beyoncé.</td></tr>\n</table>\n</body></html>\n"
+    }
+   ],
+   "requests": [
+    {
+     "method": "POST",
+     "path": "/ddg/lite/",
+     "headers": {
+      "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+      "content-type": "application/x-www-form-urlencoded"
+     },
+     "body": "q=Slowdive+Souvlaki"
+    }
+   ],
+   "result": {
+    "success": true,
+    "backend": "web",
+    "query": "Slowdive Souvlaki",
+    "sources": [
+     {
+      "title": "Slowdive — Wikipedia",
+      "uri": "https://en.wikipedia.org/wiki/Slowdive",
+      "snippet": "Slowdive are an English rock band formed in Reading in 1989. They're known for \"Souvlaki\" & shoegaze…"
+     },
+     {
+      "title": "AllMusic Bio",
+      "uri": "https://allmusic.com/artist/Αγάπη",
+      "snippet": "Similar to Slowdive: Ride, Lush, Cocteau Twins & Beyoncé."
+     }
+    ],
+    "note": "Search snippets — answer from them and name the site."
+   }
+  },
+  {
+   "name": "learn_about_current_track_google",
+   "config": {
+    "mode": "google_grounding",
+    "key": "k-1",
+    "model": "gemini-2.5-flash"
+   },
+   "current_path": "/m/0.flac",
+   "tool": "learn_about",
+   "args": {},
+   "replies": [
+    {
+     "status": 200,
+     "content_type": "application/json; charset=UTF-8",
+     "body": "{\"candidates\": [{\"content\": {\"parts\": [{\"text\": \"internal thinking...\", \"thought\": true}, {\"text\": \"Slowdive formed in Reading, England in 1989. \"}, {\"text\": \"Their album Souvlaki (1993) is a shoegaze landmark.\"}]}, \"groundingMetadata\": {\"groundingChunks\": [{\"web\": {\"uri\": \"https://en.wikipedia.org/wiki/Slowdive\", \"title\": \"Slowdive - Wikipedia\"}}, {\"web\": {\"uri\": \"https://en.wikipedia.org/wiki/Slowdive\", \"title\": \"Duplicate\"}}, {\"web\": {\"uri\": \"https://pitchfork.com/slowdive\", \"title\": \"\"}}, {\"web\": {\"uri\": \"\", \"title\": \"No URI\"}}], \"webSearchQueries\": [\"Slowdive band origin\", \"\", \"Souvlaki release year\", \"q3\", \"q4\", \"q5\"]}}]}"
+    }
+   ],
+   "requests": [
+    {
+     "method": "POST",
+     "path": "/v1beta/models/gemini-2.5-flash:generateContent",
+     "headers": {
+      "user-agent": "Python/3.13 aiohttp/3.13.5",
+      "content-type": "application/json",
+      "x-goog-api-key": "k-1"
+     },
+     "body": "{\"contents\": [{\"role\": \"user\", \"parts\": [{\"text\": \"Search the web and answer for a music listener, in at most 6 short sentences. State facts plainly (names, years, places); say so if the sources disagree or you can't find it. No markdown headings.\\nContext: artist_genres: ['shoegaze', 'dream pop'], artist_country: GB, album: Souvlaki, year: 1993, genre: Shoegaze\\nQuestion: What is the song 'Alison' by Slowdive about, and its story or release?\"}]}], \"generationConfig\": {\"temperature\": 0.2}, \"tools\": [{\"googleSearch\": {}}]}"
+    }
+   ],
+   "result": {
+    "success": true,
+    "backend": "google",
+    "answer": "Slowdive formed in Reading, England in 1989. Their album Souvlaki (1993) is a shoegaze landmark.",
+    "sources": [
+     {
+      "title": "Slowdive - Wikipedia",
+      "uri": "https://en.wikipedia.org/wiki/Slowdive"
+     },
+     {
+      "title": "https://pitchfork.com/slowdive",
+      "uri": "https://pitchfork.com/slowdive"
+     }
+    ],
+    "searched": [
+     "Slowdive band origin",
+     "Souvlaki release year",
+     "q3",
+     "q4"
+    ],
+    "query": "\"Alison\" by Slowdive song meaning",
+    "subject": "track",
+    "title": "Alison",
+    "artist": "Slowdive",
+    "album": "Souvlaki",
+    "library": {
+     "artist_genres": [
+      "shoegaze",
+      "dream pop"
+     ],
+     "artist_country": "GB",
+     "album": "Souvlaki",
+     "year": "1993",
+     "genre": "Shoegaze"
+    }
+   }
+  },
+  {
+   "name": "learn_about_current_album_same_name_case",
+   "config": {
+    "mode": "google_grounding",
+    "key": "k-1",
+    "model": "gemini-2.5-flash"
+   },
+   "current_path": "/m/0.flac",
+   "tool": "learn_about",
+   "args": {
+    "subject": "album",
+    "name": "souvlaki"
+   },
+   "replies": [
+    {
+     "status": 200,
+     "content_type": "application/json; charset=UTF-8",
+     "body": "{\"candidates\": [{\"content\": {\"parts\": [{\"text\": \"internal thinking...\", \"thought\": true}, {\"text\": \"Slowdive formed in Reading, England in 1989. \"}, {\"text\": \"Their album Souvlaki (1993) is a shoegaze landmark.\"}]}, \"groundingMetadata\": {\"groundingChunks\": [{\"web\": {\"uri\": \"https://en.wikipedia.org/wiki/Slowdive\", \"title\": \"Slowdive - Wikipedia\"}}, {\"web\": {\"uri\": \"https://en.wikipedia.org/wiki/Slowdive\", \"title\": \"Duplicate\"}}, {\"web\": {\"uri\": \"https://pitchfork.com/slowdive\", \"title\": \"\"}}, {\"web\": {\"uri\": \"\", \"title\": \"No URI\"}}], \"webSearchQueries\": [\"Slowdive band origin\", \"\", \"Souvlaki release year\", \"q3\", \"q4\", \"q5\"]}}]}"
+    }
+   ],
+   "requests": [
+    {
+     "method": "POST",
+     "path": "/v1beta/models/gemini-2.5-flash:generateContent",
+     "headers": {
+      "user-agent": "Python/3.13 aiohttp/3.13.5",
+      "content-type": "application/json",
+      "x-goog-api-key": "k-1"
+     },
+     "body": "{\"contents\": [{\"role\": \"user\", \"parts\": [{\"text\": \"Search the web and answer for a music listener, in at most 6 short sentences. State facts plainly (names, years, places); say so if the sources disagree or you can't find it. No markdown headings.\\nContext: artist_genres: ['shoegaze', 'dream pop'], artist_country: GB, year: 1993, genre: Shoegaze, track_count: 2\\nQuestion: Tell me about the album 'souvlaki' by Slowdive: release, reception, story.\"}]}], \"generationConfig\": {\"temperature\": 0.2}, \"tools\": [{\"googleSearch\": {}}]}"
+    }
+   ],
+   "result": {
+    "success": true,
+    "backend": "google",
+    "answer": "Slowdive formed in Reading, England in 1989. Their album Souvlaki (1993) is a shoegaze landmark.",
+    "sources": [
+     {
+      "title": "Slowdive - Wikipedia",
+      "uri": "https://en.wikipedia.org/wiki/Slowdive"
+     },
+     {
+      "title": "https://pitchfork.com/slowdive",
+      "uri": "https://pitchfork.com/slowdive"
+     }
+    ],
+    "searched": [
+     "Slowdive band origin",
+     "Souvlaki release year",
+     "q3",
+     "q4"
+    ],
+    "query": "\"souvlaki\" by Slowdive album",
+    "subject": "album",
+    "title": null,
+    "artist": "Slowdive",
+    "album": "souvlaki",
+    "library": {
+     "artist_genres": [
+      "shoegaze",
+      "dream pop"
+     ],
+     "artist_country": "GB",
+     "year": "1993",
+     "genre": "Shoegaze",
+     "track_count": 2
+    }
+   }
+  },
+  {
+   "name": "learn_about_other_album",
+   "config": {
+    "mode": "hybrid",
+    "key": "",
+    "model": "gemini-2.5-flash"
+   },
+   "current_path": "/m/0.flac",
+   "tool": "learn_about",
+   "args": {
+    "subject": "album",
+    "name": "Pygmalion"
+   },
+   "replies": [
+    {
+     "status": 200,
+     "content_type": "text/html; charset=utf-8",
+     "body": "<!doctype html>\n<html><head><title>DuckDuckGo</title>\n<script>var x = '<a class=\"result-link\" href=\"https://bad.example\">nope</a>';</script>\n</head><body>\n<table>\n  <tr><td><a class=\"result-link\" href=\"//duckduckgo.com/y.js?ad_domain=ads.example\">Sponsored Ad</a></td></tr>\n  <tr><td class=\"result-snippet\">Buy shoegaze pedals now!</td></tr>\n\n  <tr><td><a rel=\"nofollow\" class=\"extra result-link\" href=\"//duckduckgo.com/l/?uddg=https%3A%2F%2Fen.wikipedia.org%2Fwiki%2FSlowdive&amp;rut=123\"><b>Slowdive</b> &mdash; Wikipedia</a></td></tr>\n  <tr><td class=\"result-snippet\">Slowdive are an English rock band formed in Reading in <b>1989</b>.   They&#x27;re known for &quot;Souvlaki&quot; &amp; shoegaze&hellip;</td></tr>\n\n  <tr><td><a class=\"result-link\" href=\"https://pitchfork.com/reviews/albums/slowdive/\">Slowdive: Souvlaki</a></td></tr>\n  <tr><td class=\"result-snippet\">   </td></tr>\n\n  <tr><td><a class=\"result-link\" href=\"https://example.org/orphan\">Orphan link with no snippet</a></td></tr>\n  <tr><td><a class=\"result-link\" href=\"//duckduckgo.com/l/?uddg=https%3A%2F%2Fallmusic.com%2Fartist%2F%CE%91%CE%B3%CE%AC%CF%80%CE%B7\">AllMusic &nbsp; Bio</a></td></tr>\n  <tr><td class=\"result-snippet\">Similar to Slowdive: Ride, Lush, Cocteau Twins &amp; Beyoncé.</td></tr>\n</table>\n</body></html>\n"
+    }
+   ],
+   "requests": [
+    {
+     "method": "POST",
+     "path": "/ddg/lite/",
+     "headers": {
+      "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+      "content-type": "application/x-www-form-urlencoded"
+     },
+     "body": "q=%22Pygmalion%22+album"
+    }
+   ],
+   "result": {
+    "success": true,
+    "backend": "web",
+    "query": "\"Pygmalion\" album",
+    "sources": [
+     {
+      "title": "Slowdive — Wikipedia",
+      "uri": "https://en.wikipedia.org/wiki/Slowdive",
+      "snippet": "Slowdive are an English rock band formed in Reading in 1989. They're known for \"Souvlaki\" & shoegaze…"
+     },
+     {
+      "title": "AllMusic Bio",
+      "uri": "https://allmusic.com/artist/Αγάπη",
+      "snippet": "Similar to Slowdive: Ride, Lush, Cocteau Twins & Beyoncé."
+     }
+    ],
+    "note": "Search snippets — answer from them and name the site.",
+    "subject": "album",
+    "title": null,
+    "artist": null,
+    "album": "Pygmalion",
+    "library": {}
+   }
+  },
+  {
+   "name": "learn_about_explicit_artist",
+   "config": {
+    "mode": "hybrid",
+    "key": "",
+    "model": "gemini-2.5-flash"
+   },
+   "current_path": "/m/0.flac",
+   "tool": "learn_about",
+   "args": {
+    "subject": "artist",
+    "name": "Ride"
+   },
+   "replies": [
+    {
+     "status": 200,
+     "content_type": "text/html; charset=utf-8",
+     "body": "<!doctype html>\n<html><head><title>DuckDuckGo</title>\n<script>var x = '<a class=\"result-link\" href=\"https://bad.example\">nope</a>';</script>\n</head><body>\n<table>\n  <tr><td><a class=\"result-link\" href=\"//duckduckgo.com/y.js?ad_domain=ads.example\">Sponsored Ad</a></td></tr>\n  <tr><td class=\"result-snippet\">Buy shoegaze pedals now!</td></tr>\n\n  <tr><td><a rel=\"nofollow\" class=\"extra result-link\" href=\"//duckduckgo.com/l/?uddg=https%3A%2F%2Fen.wikipedia.org%2Fwiki%2FSlowdive&amp;rut=123\"><b>Slowdive</b> &mdash; Wikipedia</a></td></tr>\n  <tr><td class=\"result-snippet\">Slowdive are an English rock band formed in Reading in <b>1989</b>.   They&#x27;re known for &quot;Souvlaki&quot; &amp; shoegaze&hellip;</td></tr>\n\n  <tr><td><a class=\"result-link\" href=\"https://pitchfork.com/reviews/albums/slowdive/\">Slowdive: Souvlaki</a></td></tr>\n  <tr><td class=\"result-snippet\">   </td></tr>\n\n  <tr><td><a class=\"result-link\" href=\"https://example.org/orphan\">Orphan link with no snippet</a></td></tr>\n  <tr><td><a class=\"result-link\" href=\"//duckduckgo.com/l/?uddg=https%3A%2F%2Fallmusic.com%2Fartist%2F%CE%91%CE%B3%CE%AC%CF%80%CE%B7\">AllMusic &nbsp; Bio</a></td></tr>\n  <tr><td class=\"result-snippet\">Similar to Slowdive: Ride, Lush, Cocteau Twins &amp; Beyoncé.</td></tr>\n</table>\n</body></html>\n"
+    }
+   ],
+   "requests": [
+    {
+     "method": "POST",
+     "path": "/ddg/lite/",
+     "headers": {
+      "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+      "content-type": "application/x-www-form-urlencoded"
+     },
+     "body": "q=Ride+musician+biography"
+    }
+   ],
+   "result": {
+    "success": true,
+    "backend": "web",
+    "query": "Ride musician biography",
+    "sources": [
+     {
+      "title": "Slowdive — Wikipedia",
+      "uri": "https://en.wikipedia.org/wiki/Slowdive",
+      "snippet": "Slowdive are an English rock band formed in Reading in 1989. They're known for \"Souvlaki\" & shoegaze…"
+     },
+     {
+      "title": "AllMusic Bio",
+      "uri": "https://allmusic.com/artist/Αγάπη",
+      "snippet": "Similar to Slowdive: Ride, Lush, Cocteau Twins & Beyoncé."
+     }
+    ],
+    "note": "Search snippets — answer from them and name the site.",
+    "subject": "artist",
+    "title": null,
+    "artist": "Ride",
+    "album": null,
+    "library": {
+     "artist_genres": []
+    }
+   }
+  },
+  {
+   "name": "learn_about_nothing_playing",
+   "config": {
+    "mode": "hybrid",
+    "key": "",
+    "model": "gemini-2.5-flash"
+   },
+   "current_path": "",
+   "tool": "learn_about",
+   "args": {},
+   "replies": [],
+   "requests": [],
+   "result": {
+    "success": false,
+    "error": "Nothing is playing — name what to look up."
+   }
+  },
+  {
+   "name": "find_related_artists_current_ddg",
+   "config": {
+    "mode": "hybrid",
+    "key": "",
+    "model": "gemini-2.5-flash"
+   },
+   "current_path": "/m/0.flac",
+   "tool": "find_related_artists",
+   "args": {},
+   "replies": [
+    {
+     "status": 200,
+     "content_type": "text/html; charset=utf-8",
+     "body": "<!doctype html>\n<html><head><title>DuckDuckGo</title>\n<script>var x = '<a class=\"result-link\" href=\"https://bad.example\">nope</a>';</script>\n</head><body>\n<table>\n  <tr><td><a class=\"result-link\" href=\"//duckduckgo.com/y.js?ad_domain=ads.example\">Sponsored Ad</a></td></tr>\n  <tr><td class=\"result-snippet\">Buy shoegaze pedals now!</td></tr>\n\n  <tr><td><a rel=\"nofollow\" class=\"extra result-link\" href=\"//duckduckgo.com/l/?uddg=https%3A%2F%2Fen.wikipedia.org%2Fwiki%2FSlowdive&amp;rut=123\"><b>Slowdive</b> &mdash; Wikipedia</a></td></tr>\n  <tr><td class=\"result-snippet\">Slowdive are an English rock band formed in Reading in <b>1989</b>.   They&#x27;re known for &quot;Souvlaki&quot; &amp; shoegaze&hellip;</td></tr>\n\n  <tr><td><a class=\"result-link\" href=\"https://pitchfork.com/reviews/albums/slowdive/\">Slowdive: Souvlaki</a></td></tr>\n  <tr><td class=\"result-snippet\">   </td></tr>\n\n  <tr><td><a class=\"result-link\" href=\"https://example.org/orphan\">Orphan link with no snippet</a></td></tr>\n  <tr><td><a class=\"result-link\" href=\"//duckduckgo.com/l/?uddg=https%3A%2F%2Fallmusic.com%2Fartist%2F%CE%91%CE%B3%CE%AC%CF%80%CE%B7\">AllMusic &nbsp; Bio</a></td></tr>\n  <tr><td class=\"result-snippet\">Similar to Slowdive: Ride, Lush, Cocteau Twins &amp; Beyoncé.</td></tr>\n</table>\n</body></html>\n"
+    }
+   ],
+   "requests": [
+    {
+     "method": "POST",
+     "path": "/ddg/lite/",
+     "headers": {
+      "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+      "content-type": "application/x-www-form-urlencoded"
+     },
+     "body": "q=artists+similar+to+Slowdive"
+    }
+   ],
+   "result": {
+    "success": true,
+    "backend": "web",
+    "query": "artists similar to Slowdive",
+    "sources": [
+     {
+      "title": "Slowdive — Wikipedia",
+      "uri": "https://en.wikipedia.org/wiki/Slowdive",
+      "snippet": "Slowdive are an English rock band formed in Reading in 1989. They're known for \"Souvlaki\" & shoegaze…"
+     },
+     {
+      "title": "AllMusic Bio",
+      "uri": "https://allmusic.com/artist/Αγάπη",
+      "snippet": "Similar to Slowdive: Ride, Lush, Cocteau Twins & Beyoncé."
+     }
+    ],
+    "note": "Search snippets — answer from them and name the site.",
+    "artist": "Slowdive",
+    "in_your_library": [
+     {
+      "name": "Ride",
+      "track_count": 1
+     },
+     {
+      "name": "Lush",
+      "track_count": 1
+     },
+     {
+      "name": "Beyoncé",
+      "track_count": 1
+     }
+    ]
+   }
+  },
+  {
+   "name": "find_related_artists_explicit_google",
+   "config": {
+    "mode": "google_grounding",
+    "key": "k-1",
+    "model": "gemini-2.5-flash"
+   },
+   "current_path": "",
+   "tool": "find_related_artists",
+   "args": {
+    "artist": "Slowdive"
+   },
+   "replies": [
+    {
+     "status": 200,
+     "content_type": "application/json; charset=UTF-8",
+     "body": "{\"candidates\": [{\"content\": {\"parts\": [{\"text\": \"Artists similar to Slowdive include Ride, Lush, Cocteau Twins, and Beyoncé.\"}]}, \"groundingMetadata\": {\"groundingChunks\": [{\"web\": {\"uri\": \"https://last.fm/music/Slowdive/+similar\", \"title\": \"Last.fm\"}}], \"webSearchQueries\": [\"artists similar to Slowdive\"]}}]}"
+    }
+   ],
+   "requests": [
+    {
+     "method": "POST",
+     "path": "/v1beta/models/gemini-2.5-flash:generateContent",
+     "headers": {
+      "user-agent": "Python/3.13 aiohttp/3.13.5",
+      "content-type": "application/json",
+      "x-goog-api-key": "k-1"
+     },
+     "body": "{\"contents\": [{\"role\": \"user\", \"parts\": [{\"text\": \"Search the web and answer for a music listener, in at most 6 short sentences. State facts plainly (names, years, places); say so if the sources disagree or you can't find it. No markdown headings.\\nContext: The listener likes Slowdive and wants similar artists.\\nQuestion: Which artists are similar to Slowdive? List names.\"}]}], \"generationConfig\": {\"temperature\": 0.2}, \"tools\": [{\"googleSearch\": {}}]}"
+    }
+   ],
+   "result": {
+    "success": true,
+    "backend": "google",
+    "answer": "Artists similar to Slowdive include Ride, Lush, Cocteau Twins, and Beyoncé.",
+    "sources": [
+     {
+      "title": "Last.fm",
+      "uri": "https://last.fm/music/Slowdive/+similar"
+     }
+    ],
+    "searched": [
+     "artists similar to Slowdive"
+    ],
+    "query": "artists similar to Slowdive",
+    "artist": "Slowdive",
+    "in_your_library": [
+     {
+      "name": "Ride",
+      "track_count": 1
+     },
+     {
+      "name": "Lush",
+      "track_count": 1
+     },
+     {
+      "name": "Beyoncé",
+      "track_count": 1
+     }
+    ]
+   }
+  },
+  {
+   "name": "find_related_artists_nothing_playing",
+   "config": {
+    "mode": "hybrid",
+    "key": "",
+    "model": "gemini-2.5-flash"
+   },
+   "current_path": "",
+   "tool": "find_related_artists",
+   "args": {},
+   "replies": [],
+   "requests": [],
+   "result": {
+    "success": false,
+    "error": "Nothing is playing — name an artist."
+   }
+  }
+ ]
+}

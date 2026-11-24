@@ -13,6 +13,7 @@ import 'intent.dart';
 import 'llm_engine.dart';
 import 'runner_phrases.dart';
 import 'tool_executor.dart';
+import 'web_research.dart';
 
 /// `assistant_runner.py` (phase 5, stages c and d): dispatch, the pending
 /// confirmation and choice, anaphora, every `_handle_*`, and `_dispatch_llm`'s
@@ -621,6 +622,7 @@ class AssistantRunner {
     this.loadAssistantConfig,
     LlmEngineFactory? engineFactory,
     this.llm,
+    WebResearcher? webResearcher,
     this.webToolHandler,
     this.onlineSearchHandler,
     this.metadataWriteHandler,
@@ -629,7 +631,9 @@ class AssistantRunner {
        now = now ?? DateTime.now,
        _loadHistory = loadHistory ?? (() async => const []),
        _engineFactory = engineFactory ?? _defaultEngineFactory,
-       researchAvailable = researchAvailable ?? (() => false);
+       webResearcher =
+           webResearcher ?? WebResearcher(loadConfig: loadAssistantConfig),
+       _researchAvailableOverride = researchAvailable;
 
   final AssistantLibrary library;
   final AssistantPlayer player;
@@ -655,14 +659,24 @@ class AssistantRunner {
   /// Optional override for `_dispatch_llm`.
   Future<AssistantResponse> Function(Intent intent)? llm;
 
-  /// Stage e / phase 6 / phase 7 tool hooks.
+  /// `web_research.py` backend for `web_search`, `learn_about` and
+  /// `find_related_artists`.
+  final WebResearcher webResearcher;
+
+  /// Optional test/phase hooks.
   final ToolHandler? webToolHandler;
   final ToolHandler? onlineSearchHandler;
   final ToolHandler? metadataWriteHandler;
 
-  /// `metadata_ai.research_available()`: false until phase 7 wires AI
-  /// artist research.
-  final bool Function() researchAvailable;
+  final bool Function()? _researchAvailableOverride;
+
+  /// `metadata_ai.research_available()`: true when a Gemini API key is set
+  /// (or overridden in tests).
+  Future<bool> isResearchAvailable() async {
+    final override = _researchAvailableOverride;
+    if (override != null) return override();
+    return webResearcher.isResearchAvailable();
+  }
 
   final List<String> _recent = [];
   static const _recentCap = 50;

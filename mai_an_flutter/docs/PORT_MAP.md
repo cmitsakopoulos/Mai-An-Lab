@@ -21,10 +21,12 @@ golden seeds) (§4, phase 4). Phase 5 (the assistant) is planned in seven
 stages; stages a (the intent parser and text helpers, identical to Python
 on 4,961 utterances), b (the LLM client and tool declarations), c (the
 runner's deterministic half and its database and player adapters, identical
-to Python across 14 conversations / 124 turns) and d (the agent loop and
+to Python across 14 conversations / 124 turns), d (the agent loop and
 tool executor, identical to Python across 51 tool cases and 9 HTTP-recorded
-loop scenarios) are done (§4, phase 5).
-Desktop tests pass (`flutter test`: 685, including the real-library golden
+loop scenarios) and e (the web tools: DuckDuckGo Lite, Wikipedia and Gemini
+Google Search grounding, identical to Python across 29 golden cases) are done
+(§4, phase 5).
+Desktop tests pass (`flutter test`: 715, including the real-library golden
 tests that need the gitignored goldens; analyzer clean in Dart's strict
 modes); debug and release APKs build.
 It is installed on the phone (2026-11-24, with the 2026-11-02 library, an
@@ -207,7 +209,7 @@ Verdicts:
 | `ui/views/sync_hub.py` | 1,012 | Rewrite ✅ (`settings/sync_hub.dart`: the Android view's four cards; the Mac's server view with phase 8) | 4 |
 | `state_export.py` | 294 | Port ✅ (`data/state_export.dart`, `core/zip_archive.dart`, `sync/state_bundles.dart`) | 4 |
 | `llm_engine.py` (Gemini/Ollama over an OpenAI-compatible API) | 231 | Port ✅ (`assistant/llm_engine.dart`, golden-tested) | 5 |
-| `llm_tools.py`, `assistant_runner.py`, `assistant_intent.py`, `chat_memory.py`, `web_research.py` | ~4,500 | Port, with golden intent and tool-call tests (§4, phase 5). `assistant_intent` ✅ (`assistant/intent.dart`), `chat_memory` ✅, `llm_tools`' text helpers and `names_mentioned` ✅ (`assistant/agent_text.dart`, `assistant/web_text.dart`), over `core/py_re.dart` (Python's `re` semantics); `assistant_runner` (deterministic half + `_dispatch_llm` agent loop and bridges) ✅ (`assistant/runner.dart`, `assistant/runner_phrases.dart`, `assistant/adapters.dart`, `data/assistant_queries.dart`, `core/py_difflib.dart`, `core/py_values.dart`); `llm_tools.execute_tool` for the library, playback, status and read-only metadata tools ✅ (`assistant/tool_executor.dart`) | 5 |
+| `llm_tools.py`, `assistant_runner.py`, `assistant_intent.py`, `chat_memory.py`, `web_research.py` | ~4,500 | Port, with golden intent and tool-call tests (§4, phase 5). `assistant_intent` ✅ (`assistant/intent.dart`), `chat_memory` ✅, `llm_tools`' text helpers and `names_mentioned` ✅ (`assistant/agent_text.dart`, `assistant/web_text.dart`), over `core/py_re.dart` (Python's `re` semantics); `assistant_runner` (deterministic half + `_dispatch_llm` agent loop and bridges) ✅ (`assistant/runner.dart`, `assistant/runner_phrases.dart`, `assistant/adapters.dart`, `data/assistant_queries.dart`, `core/py_difflib.dart`, `core/py_values.dart`); `llm_tools.execute_tool` for library, playback, status, read-only metadata and web tools ✅ (`assistant/tool_executor.dart`); `web_research` + `metadata_ai`'s search/grounding half ✅ (`assistant/web_research.dart`) | 5 |
 | `ui/views/assistant.py` | 861 | Rewrite | 5 |
 | `qobuz.py`, `deezer.py`, `streamrip_api.py`, `streamrip_search.py`, `downloadable.py`, `search_results.py`, `source_metadata.py`, `new_releases.py` + deezer-py, streamrip, pycryptodomex | ~3,000 + libraries | ⚠️ Port or keep on Mac (§6, decision A) | 6 |
 | `ui/views/search.py`, `ui/player/download_dock.py` | 3,806 | Rewrite. The landing's local cards ✅ (`search/`, `data/landing_queries.dart`, golden-tested); the dock ✅ (`downloads/download_dock.dart`, 4d); the rest with the sources | 3, 4, 6 |
@@ -261,7 +263,7 @@ AI Assistant, and voice through the extension's `flutter_tts` and
 | b | The LLM client and the tool declarations: one OpenAI-compatible request (Gemini and Ollama URLs, headers, timeouts, the retry after a connection failure), `_parse_tool_calls`, the raw message kept for the echo, `list_gemini_models`; `get_agent_tools()` | `llm_engine.py`, `llm_tools.get_agent_tools` | ✅ |
 | c | The runner's deterministic half: dispatch, the pending confirmation and choice, anaphora, every `_handle_*`, `_resolve_queries` (with difflib's `SequenceMatcher` ported), the avoid set, and its database and player adapters | `assistant_runner.py`, `db_manager.py` (assistant queries) | ✅ |
 | d | The agent: `_dispatch_llm`'s loop and prompt, `execute_tool` for the library, playback, status and read-only metadata tools | `assistant_runner._dispatch_llm`, `llm_tools.execute_tool` | ✅ |
-| e | The web tools: `ask` (DuckDuckGo Lite, Wikipedia, Google grounding), `learn_about`, `find_related_artists` | `web_research.py`, `metadata_ai`'s search half | 🔨 |
+| e | The web tools: `ask` (DuckDuckGo Lite, Wikipedia, Google grounding), `learn_about`, `find_related_artists` | `web_research.py`, `metadata_ai`'s search half | ✅ |
 | f | The Jarvis tab and Settings → AI Assistant | `ui/views/assistant.py`, `settings.py` (AI Assistant), main.py's tab and lifecycle hooks | 🔨 |
 | g | Voice: replies spoken, push-to-talk, the microphone permission | the extension's `tts_*`/`stt_*`, `assistant.py` | 🔨 |
 
@@ -416,10 +418,29 @@ Every HTTP request (`method`, `path`, `headers`, `body` byte for byte)
 and every turn's response, pending/choice state and player calls match
 Python identically.
 
-**Stage e.** Replayed responses (DuckDuckGo Lite HTML, Wikipedia JSON,
-Gemini grounding JSON) give the same results from Python and the port,
-including the 30-minute cache and Google switching itself off after a
-quota or capability error.
+**Stage e.** `assistant/web_research.dart` ports `web_research.py` (`ask`,
+`searchSnippets`, `relatedArtists`, the 30-minute / 200-entry cache and the
+session-scoped Google-off latch) and `metadata_ai.py`'s search/grounding half
+(`parseDdgLite` with HTML5 character references, `generateContent` with
+`googleSearch` grounding, 429 `retryDelay` + one connection retry,
+`geminiHttpReason`, `geminiResponseText` ignoring thought parts, and
+`geminiGrounding`). `assistant/tool_executor.dart` wires `web_search`,
+`learn_about` (with library enrichment / album facts formatted as Python
+formats context) and `find_related_artists` onto `AssistantRunner.webResearcher`
+and replaces `researchAvailable` with `isResearchAvailable()`.
+
+**How parity is proved (stage e).** `tool/export_web_research_goldens.py` runs
+Flet's `web_research`, `metadata_ai` and `llm_tools._web_tool` against a local
+HTTP recording server and a real synthetic SQLite database
+(`test/goldens/web_research.json`, `test/web_research_test.dart`): 4
+`parseDdgLite` HTML cases (ads, `uddg` redirects, entities, orphans, scripts),
+9 `_http_reason` cases, 6 multi-step `ask` scenarios (DDG + 30-minute cache
+expiry, DDG 403 → Wikipedia fallback, empty web → Gemini grounding fallback,
+`google_grounding` mode + unsupported-tool latch, 429 `retryDelay` retry +
+quota latch, empty web uncached + unreachable error + empty question), and 10
+`execute_tool` scenarios across `web_search`, `learn_about` and
+`find_related_artists`, plus a refused-connection retry test. Every HTTP
+request (method, path, app headers, body) and result matches Python.
 
 **Stage f.** The tab returns to the bar (`appearance.show_jarvis`); the
 chat view keeps Flet's bubbles (user text; assistant Markdown, GitHub
@@ -560,7 +581,7 @@ uninstall and reinstall; the bundle export/import covers the data.
 | A constant scalar column | float32 rounding can leave its standard deviation just above 1e-8, so the column survives z-scoring as a constant | The same (numpy's float32 arithmetic is reproduced) | Kept for parity (golden scenario `constant`). |
 | Graph readiness build | Waits up to 20 s for a pause in scrolling before building | Builds 5 s after start, without waiting | The build runs on the database isolate (48 ms on the Mac for 1,216 tracks): nothing to wait out. |
 | Offload button after "All tracks analyzed" | Re-enabled by the next manager change; a tap then says "All tracks already analysed!" | Stays off while the count is 0 | Small fix. |
-| Assistant tools from later phases (`search_online`, `research_artist_metadata`, `apply_artist_metadata`; web tools until 5e) | Execute against Qobuz / `metadata_ai` / `web_research` | Declared in `agentTools()` (all 30) and hookable on `AssistantRunner`; return `{"success": false, "error": "… not available yet."}` until their phase | Read-only metadata tools (`get_metadata_status`, `get_artist_metadata`) work in 5d (`research_available: false`); web tools arrive in 5e, `search_online` with decision A, metadata writes with phase 7. |
+| Assistant tools from later phases (`search_online`, `research_artist_metadata`, `apply_artist_metadata`) | Execute against Qobuz / `metadata_ai` | Declared in `agentTools()` (all 30) and hookable on `AssistantRunner`; return `{"success": false, "error": "… not available yet."}` until their phase | Read-only metadata tools (`get_metadata_status`, `get_artist_metadata`) work in 5d, web tools (`web_search`, `learn_about`, `find_related_artists`) in 5e; `search_online` arrives with decision A, metadata writes with phase 7. |
 
 ---
 
@@ -658,8 +679,8 @@ and the Network view, local. Then phase 4a (the Companion protocol), 4b (notific
 sync manager), 4d (the download queue and dock), 4e (the Companion UI),
 4f (state bundles) and 4g (the DSP offload and the acoustic build), local.
 Then the phase 5 plan, stages a (the intent parser), b (the LLM
-client), c (the assistant runner and adapters) and d (the agent loop and
-tool executor), local.
+client), c (the assistant runner and adapters), d (the agent loop and
+tool executor) and e (the web tools), local.
 
 **Done**
 - [x] Phase 0: backbone (read-only DB isolate, tracks tab, sort, search,
@@ -761,6 +782,11 @@ tool executor), local.
       playback, status and read-only metadata tools + `assistant_queries.dart`
       / `RepoAssistantLibrary`); identical to Python across 51 tool cases
       and 9 HTTP-recorded loop scenarios (22 requests byte for byte).
+- [x] Phase 5e: the web tools (`assistant/web_research.dart`: DuckDuckGo
+      Lite HTML parser, Wikipedia search, Gemini `generateContent` with
+      `googleSearch` grounding, 30-minute cache and Google-off latch; wired
+      into `tool_executor.dart` for `web_search`, `learn_about` and
+      `find_related_artists`); identical to Python across 29 golden cases.
 
 **To do, in order**
 1. [ ] Install the current build on the phone: `tool/install_phone.sh
@@ -820,11 +846,12 @@ tool executor), local.
        k. Phase 5 (the assistant), planned 2026-11-24 in seven stages
           (§4, phase 5). Stages a (the intent parser and text helpers),
           b (the LLM client and the tool declarations), c (the runner's
-          deterministic half and its database and player adapters) and d
+          deterministic half and its database and player adapters), d
           (the agent loop, bridges and `execute_tool` for the library,
-          playback, status and read-only metadata tools) done.
-          Next: stage e (the web tools: `web_research.py` `ask`,
-          `learn_about`, `find_related_artists`).
+          playback, status and read-only metadata tools) and e (the web
+          tools: `web_research.py` `ask`, `learn_about`,
+          `find_related_artists`) done.
+          Next: stage f (the Jarvis tab and Settings → AI Assistant).
 5. [ ] Decisions A, B, C (§6) before phase 6 is planned in detail.
 6. [ ] Flet, on master: the album menu's Play Album tuple,
        Appearance's sort writing `library_sort`, the Network view's

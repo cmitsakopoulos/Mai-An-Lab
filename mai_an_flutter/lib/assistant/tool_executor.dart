@@ -488,7 +488,7 @@ Future<Map<String, Object?>> executeTool(
     if (_webTools.contains(toolName)) {
       final hook = runner.webToolHandler;
       if (hook != null) return await hook(toolName, args, runner);
-      return {'success': false, 'error': 'Web research is not available yet.'};
+      return await _webTool(toolName, args, runner);
     }
 
     return {'success': false, 'error': 'Unknown tool: $toolName'};
@@ -635,7 +635,7 @@ Future<Map<String, Object?>> _metadataReadTool(
       'missing_genre_and_country': blocking.take(25).toList(),
       'missing_count': blocking.length,
       'ai_suggestions_pending': pendingSorted.take(25).toList(),
-      'research_available': runner.researchAvailable(),
+      'research_available': await runner.isResearchAvailable(),
       'where_to_review': 'Settings → Metadata',
     };
   }
@@ -669,4 +669,171 @@ Future<Map<String, Object?>> _metadataReadTool(
     };
   }
   return out;
+}
+
+Future<Row> _nowPlaying(AssistantRunner runner) async {
+  final path = runner.player.currentPath;
+  if (path.isEmpty) return const {};
+  try {
+    return await runner.library.getTrackFull(path) ?? const {};
+  } catch (_) {
+    return const {};
+  }
+}
+
+/// Python `repr(s)` for strings inside lists when formatting `f"{k}: {v}"`.
+String _pyReprString(String s) {
+  final useDouble = s.contains("'") && !s.contains('"');
+  final quote = useDouble ? '"' : "'";
+  final out = StringBuffer(quote);
+  for (final r in s.runes) {
+    if (r == 0x5c /* \ */ ) {
+      out.write(r'\\');
+    } else if (r == 0x0a) {
+      out.write(r'\n');
+    } else if (r == 0x0d) {
+      out.write(r'\r');
+    } else if (r == 0x09) {
+      out.write(r'\t');
+    } else if (!useDouble && r == 0x27) {
+      out.write(r"\'");
+    } else if (useDouble && r == 0x22) {
+      out.write(r'\"');
+    } else {
+      out.writeCharCode(r);
+    }
+  }
+  out.write(quote);
+  return out.toString();
+}
+
+String _pyContextValue(Object? v) => switch (v) {
+  List<Object?> xs =>
+    '[${xs.map((e) => e is String ? _pyReprString(e) : _pyContextValue(e)).join(', ')}]',
+  _ => pyStr(v),
+};
+
+Future<Map<String, Object?>> _webTool(
+  String toolName,
+  Map<String, Object?> args,
+  AssistantRunner runner,
+) async {
+  final web = runner.webResearcher;
+
+  if (toolName == 'web_search') {
+    final q = pyStrip(_text(args['query']));
+    if (q.isEmpty) return {'success': false, 'error': 'Empty query.'};
+    return await web.ask(q);
+  }
+
+  if (toolName == 'learn_about') {
+    final subject = pyLower(pyStrip(_text(pyOr([args['subject'], 'track']))));
+    final name = pyStrip(_text(args['name']));
+    final cur = await _nowPlaying(runner);
+    var title = _text(cur['title']);
+    var artist = _text(cur['artist']);
+    var album = _text(cur['album']);
+    if (name.isNotEmpty) {
+      if (subject == 'artist') {
+        artist = name;
+        title = '';
+        album = '';
+      } else if (subject == 'album') {
+        album = name;
+        title = '';
+        artist = pyLower(album) == pyLower(_text(cur['album'])) ? artist : '';
+      } else {
+        title = name;
+        album = '';
+        artist = pyLower(title) == pyLower(_text(cur['title'])) ? artist : '';
+      }
+    }
+    if (title.isEmpty && artist.isEmpty && album.isEmpty) {
+      return {
+        'success': false,
+        'error': 'Nothing is playing — name what to look up.',
+      };
+    }
+
+    final library = <String, Object?>{};
+    if (artist.isNotEmpty) {
+      try {
+        final e = await runner.library.getArtistEnrichment(artist) ?? const {};
+        library['artist_genres'] = _genreList(e['genres']);
+        if (pyTruthy(e['country'])) {
+          library['artist_country'] = e['country'];
+        }
+      } catch (_) {}
+    }
+    if (subject == 'track' && cur.isNotEmpty && name.isEmpty) {
+      for (final k in const ['album', 'year', 'genre']) {
+        if (pyTruthy(cur[k])) library[k] = cur[k];
+      }
+    }
+    if (subject == 'album' && album.isNotEmpty && artist.isNotEmpty) {
+      try {
+        final rows = await runner.library.getAlbumsByArtist(artist);
+        Row? hit;
+        for (final r in rows) {
+          if (pyLower(_text(r['album'])) == pyLower(album)) {
+            hit = r;
+            break;
+          }
+        }
+        if (hit != null) {
+          for (final k in const ['year', 'genre', 'track_count']) {
+            if (pyTruthy(hit[k])) library[k] = hit[k];
+          }
+        }
+      } catch (_) {}
+    }
+
+    final by = artist.isNotEmpty ? ' by $artist' : '';
+    final String question;
+    final String sq;
+    if (subject == 'artist') {
+      question =
+          'Who is the music artist $artist? Origin, style, notable work.';
+      sq = '$artist musician biography';
+    } else if (subject == 'album') {
+      question =
+          "Tell me about the album '$album'$by: release, reception, story.";
+      sq = '"$album"$by album';
+    } else {
+      question =
+          "What is the song '$title'$by about, and its story or release?";
+      sq = '"$title"$by song meaning';
+    }
+    final context = [
+      for (final entry in library.entries)
+        if (pyTruthy(entry.value))
+          '${entry.key}: ${_pyContextValue(entry.value)}',
+    ].join(', ');
+    final res = await web.ask(question, searchQuery: sq, context: context);
+    return {
+      ...res,
+      'subject': subject,
+      'title': title.isNotEmpty ? title : null,
+      'artist': artist.isNotEmpty ? artist : null,
+      'album': album.isNotEmpty ? album : null,
+      'library': library,
+    };
+  }
+
+  if (toolName == 'find_related_artists') {
+    var artist = pyStrip(_text(args['artist']));
+    if (artist.isEmpty) {
+      artist = _text((await _nowPlaying(runner))['artist']);
+    }
+    if (artist.isEmpty) {
+      return {
+        'success': false,
+        'error': 'Nothing is playing — name an artist.',
+      };
+    }
+    final lib = await runner.library.getAllArtists();
+    return await web.relatedArtists(artist, lib);
+  }
+
+  return {'success': false, 'error': 'Unknown tool: $toolName'};
 }

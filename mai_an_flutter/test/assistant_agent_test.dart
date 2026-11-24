@@ -347,9 +347,6 @@ void main() {
         final unhooked = AssistantRunner(library: lib, player: eng);
         for (final name in [
           'search_online',
-          'web_search',
-          'learn_about',
-          'find_related_artists',
           'research_artist_metadata',
           'apply_artist_metadata',
         ]) {
