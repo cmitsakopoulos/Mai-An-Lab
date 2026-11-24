@@ -14,6 +14,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:mai_an_lab/core/py_text.dart';
 import 'package:mai_an_lab/sync/companion_client.dart';
 import 'package:mai_an_lab/sync/discovery.dart';
+import 'package:mai_an_lab/sync/sync_manager.dart';
 
 final _python = '${Platform.environment['HOME']}/miniconda3/bin/python';
 
@@ -66,6 +67,46 @@ class _Server {
       },
     );
   }
+}
+
+class _ManagerHost implements SyncHost {
+  final prefs = <String, Object?>{};
+  final snacks = <String>[];
+  final pins = <PinPrompt>[];
+  final queued = <Map<String, Object?>>[];
+  late CompanionSyncManager manager;
+
+  @override
+  Object? pref(String key) => prefs[key];
+  @override
+  Future<void> savePref(String key, Object? value) async => prefs[key] = value;
+  @override
+  bool get inBackground => false;
+  @override
+  void snack(String text, {SyncIcon? icon, bool red = false}) =>
+      snacks.add(text);
+  @override
+  void showPinPrompt(PinPrompt prompt) => pins.add(prompt);
+  @override
+  void dismissPinPrompt(PinPrompt prompt) => manager.pinPromptClosed(prompt);
+  @override
+  void showTransferPrompt(TransferPrompt prompt) {}
+  @override
+  void dismissTransferPrompt(TransferPrompt prompt) {}
+  @override
+  TransferQueue? get queue => _Q(queued);
+  @override
+  Future<Map<String, Object?>?> storedFeatures(String path) async => null;
+}
+
+class _Q implements TransferQueue {
+  _Q(this.items);
+  final List<Map<String, Object?>> items;
+  @override
+  void enqueueMany(
+    List<Map<String, Object?>> items, {
+    String qualityTier = 'mp3',
+  }) => this.items.addAll(items);
 }
 
 /// A FeatureRow as Python's FakeDb records it (timbre base64).
@@ -395,6 +436,76 @@ void main() {
   test('sweep finds the server by TCP connect', () async {
     expect(await sweepSubnet('127.0.0.9', server.port), ['127.0.0.1']);
     expect(await sweepSubnet('not an ip', server.port), isEmpty);
+  });
+
+  test('the manager against the Mac: PIN, transfers, ack, Send', () async {
+    // Last: it takes the transfer the earlier tests left pending.
+    final host = _ManagerHost();
+    final usb = await ServerSocket.bind('127.0.0.1', 0); // not the real 8945
+    final usbPort = usb.port;
+    await usb.close();
+    final m = host.manager = CompanionSyncManager(
+      host,
+      listenerFactory: (f) => BeaconListener(
+        onDeviceFound: f,
+        port: 0,
+        queryPort: server.udpPort,
+        targets: const ['127.0.0.1'],
+        holdMulticastLock: false,
+      ),
+      deviceName: () async => 'Pixel 9 Pro',
+      usbPort: usbPort,
+    );
+    final out = await m.connectManual('127.0.0.1', server.port);
+    expect(out, 'Found Test Mac (127.0.0.1). Enter the PIN shown on the Mac.');
+    final pin = host.pins.single;
+    expect(pin.via, 'USB');
+    expect(await pin.submit('0000'), startsWith('Incorrect PIN.'));
+    expect(await pin.submit(server.pin), isNull);
+    expect(m.isConnected, isTrue);
+    expect(host.prefs['companion_paired_token'], server.token);
+    expect(host.prefs.containsKey('companion_paired_host'), isFalse);
+
+    // Auto-accepted on connect.
+    for (var i = 0; i < 50 && host.queued.isEmpty; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+    }
+    final item = host.queued.single;
+    final pending = (await server.cmd({'cmd': 'state'}))['pending']! as List;
+    expect(item['id'], pending.single);
+    // The URL serves the file.
+    final http = HttpClient();
+    final resp = await (await http.getUrl(
+      Uri.parse(item['url']! as String),
+    )).close();
+    await resp.drain<void>();
+    http.close();
+    expect(resp.statusCode, 200);
+
+    m.onTransferFinished(item['id']! as String, ok: true);
+    for (var i = 0; i < 50; i++) {
+      final st = await server.cmd({'cmd': 'state'});
+      if ((st['pending']! as List).isEmpty) break;
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+    }
+    expect((await server.cmd({'cmd': 'state'}))['pending'], isEmpty);
+
+    final f = File('${phone.path}/Δέλτα.flac')
+      ..writeAsBytesSync(List.filled(77, 3));
+    expect(
+      m.sendTracks([
+        {'path': f.path, 'title': 'Δέλτα', 'artist': 'Β', 'album': 'Γ'},
+      ]),
+      1,
+    );
+    for (var i = 0; i < 100 && m.isSending; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+    }
+    expect(host.snacks.last, 'Sent 1 track to Test Mac');
+    final st = await server.cmd({'cmd': 'state'});
+    expect(st['recv_files'], contains('Β/Γ/Δέλτα.flac'));
+    await m.stop();
+    m.dispose();
   });
 
   test('broadcast targets', () {

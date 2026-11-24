@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io' show Platform;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
@@ -15,8 +16,9 @@ typedef NotificationAction = ({String job, String action});
 abstract final class MaianNative {
   static const _channel = MethodChannel('com.flet.flet_audio_service/decode');
 
-  static bool get _android =>
-      !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
+  /// The real OS, not `defaultTargetPlatform`, which widget tests report
+  /// as Android: there the channel has no messenger.
+  static bool get _android => !kIsWeb && Platform.isAndroid;
 
   static final _actions = StreamController<NotificationAction>.broadcast();
   static bool _listening = false;

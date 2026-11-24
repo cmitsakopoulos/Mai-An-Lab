@@ -12,7 +12,7 @@ the Search tab's local landing cards, Settings with the config.toml
 writer, and the Acoustic Network view (§4, phase 3). Phase 4 (sync,
 Android side) is under way: the Companion protocol and discovery, tested
 against Flet's own server (§4, phase 4). Desktop
-tests pass (`flutter test`: 421, including the real-library golden tests
+tests pass (`flutter test`: 443, including the real-library golden tests
 that need the gitignored goldens; analyzer clean in Dart's strict modes);
 debug and release APKs build.
 It is installed on the phone (2026-11-24, with the 2026-11-02 library, an
@@ -188,7 +188,7 @@ Verdicts:
 | `ui/player/autoplay_sheet.py` | 156 | Rewrite ✅ (`player/ui/autoplay_sheet.dart`) | 2 |
 | `library_scanner.py`, `storage_paths.py` + `tinytag` 2.3.2 (the tag reader the APK bundles, ~2,500 lines, MIT) | ~2,900 | Port ✅ (`scan/library_scanner.dart`, `scan/tinytag.dart`, `scan/storage_paths.dart`, `data/scan_writes.dart`; golden-tested on a synthetic corpus and the Mac's music folder) | 3 |
 | `tagger.py`, `metadata_editor.py` (mutagen) | ~240 | No Flet feature edits tags. `tagger.tag_file` runs only after a download (`streamrip_api`): port with downloads (decision A), tag writer candidates in §12. `extract_artwork` runs only off Android (the Kotlin resolver serves the phone): Mac | 6, 8 |
-| `sync/client`, `discovery`, `send`, parts of `manager` | ~1,900 | Port (Android side). Client and listener ✅ (`sync/companion_client.dart`, `sync/discovery.dart`; tested against Flet's own server); the manager and send with stages c–e (§4, phase 4) | 4 |
+| `sync/client`, `discovery`, `send`, parts of `manager` | ~1,900 | Port (Android side). Client and listener ✅ (`sync/companion_client.dart`, `sync/discovery.dart`; tested against Flet's own server); the manager ✅ (`sync/sync_manager.dart`); its UI and `send.py`'s menu entry with stage e (§4, phase 4) | 4 |
 | `sync/server.py`, `transcoder.py` (ffmpeg) | ~1,340 | Keep on Mac until phase 8 | 8 |
 | `ui/views/sync_hub.py` | 1,012 | Rewrite | 4 |
 | `state_export.py` | 294 | Port (bundle import/export) | 4 |
@@ -553,7 +553,7 @@ stays Python until phase 8). Stages, one commit each:
 |---|---|---|---|
 | a | Protocol: the client, multipart uploads, discovery (query, beacons, /24 sweep), the Kotlin for the route address and the multicast lock, the permissions | `sync/client.py`, `sync/discovery.py` (listener half) | ✅ |
 | b | Progress and alert notifications: a Dart `ProgressNotifier` over the Kotlin `showProgressNotification` (throttle, summary, cancel and Retry buttons, the task service), `post_alert`, notification routing to the screens that exist | `progress_notify.py`, main.py `_on_notification_navigate` | ✅ |
-| c | The manager: enable and idle auto-off, USB and saved-address probe, heartbeat, PIN snooze, Find Mac (probe, query, sweep) and its messages, manual connect, unpair, background and resume hooks, auto-accept, the Send to Mac worker and acks; the device name | `sync/manager.py`, `sync/send.py` | 🔨 |
+| c | The manager: enable and idle auto-off, USB and saved-address probe, heartbeat, PIN snooze, Find Mac (probe, query, sweep) and its messages, manual connect, unpair, background and resume hooks, auto-accept, the Send to Mac worker and acks; the device name | `sync/manager.py`, `sync/send.py` | ✅ (wired into the app with e) |
 | d | Transfers onto the phone: the download queue for the `companion` source (`.part`, size check, no-overwrite names, `clean_filename`, NFC, `pick_download_dir`, features stored, one quiet scan after the queue drains, Android media scan) and the dock as far as transfers need it | `queue_controller.py`, `streamrip_api.download` (companion branch), `download_dock.py` | 🔨 |
 | e | UI: Settings → Companion & Sync and the sync hub, the PIN and transfer dialogs, Send to Mac in the long-press, selection and album menus | `ui/views/sync_hub.py`, manager dialogs, `send.py` | 🔨 |
 | f | State bundles: export (Settings, and the boot auto-export to Downloads and the library folder), import (Settings, and `*_import.zip` at boot, with `.onboarded`), upload to the Mac | `state_export.py`, main.py `_heavy_init`, `_auto_export_state_snapshot` | 🔨 |
@@ -593,6 +593,31 @@ phases 7 and B. `core/notification_router.dart` is
 The Library registers now (`library`, from the scan alert); `sync` and
 `downloads` with stages d and e. `test/progress_notify_test.dart` ports
 test_progress_notify.py and the notifier scenarios.
+
+**Stage c.** `sync/sync_manager.dart` is manager.py without its widgets:
+the PIN and transfer dialogs, snackbars, prefs, the download queue and
+the features lookup belong to a `SyncHost` (the app's comes with stage
+e), and the dialogs call back (`PinPrompt.submit`, `TransferPrompt.download`,
+`pinPromptClosed`). Everything else follows Python: the 4 s probe of the
+USB tunnel (127.0.0.1) and the saved address, beacons, one connection
+attempt at a time (a user tap waits its turn), the PIN prompt and its
+two-minute snooze, the 15 s heartbeat (two misses drop the link; an
+unauthorized reply clears the token), the 60 s background poll with its
+one "transfers" card, the 15-minute idle auto-off (held by long jobs and,
+for up to an hour, by transfers in flight), Find Mac (round trip, probe,
+query, /24 sweep, and its four messages), manual connect with
+`_explain_connect_error`, unpair, auto-accept (until a transfer has
+failed twice) or the dialog once per new set, acks only for files on
+disk, and the Send to Mac worker (one batch, extended by later taps; the
+`sync` notification; three network failures end it; the summary). The
+device name is `getprop ro.product.model`, as in Flet.
+`data/feature_store.dart` is server.py's `stored_features`.
+`test/sync_manager_test.dart` (21 tests, on a virtual clock) covers
+those paths; `test/companion_protocol_test.dart` adds the manager against
+Flet's server: manual connect, a wrong and a right PIN over "USB",
+auto-accept, the stream URL, the ack reaching the Mac, and Send to Mac.
+`MaianNative` and discovery now ask `Platform.isAndroid`: widget tests
+report `defaultTargetPlatform` as Android.
 
 **How parity is proved (stage a).** `tool/companion_test_server.py` runs
 Flet's own `CompanionServer` hermetically (scratch feature cache and
@@ -795,7 +820,8 @@ Python primitives, migrations and the ledger drain, the scan engine, the
 views' and playlists' queries, the library UI (views, scan UI, playlists,
 long-press menu, selection, delete), and the tab bar with the Search
 landing; then this plan; all pushed to origin. Then Settings (`e946579`)
-and the Network view, local. Then phase 4a (the Companion protocol) and 4b (notifications), local.
+and the Network view, local. Then phase 4a (the Companion protocol), 4b (notifications) and 4c (the
+sync manager), local.
 
 **Done**
 - [x] Phase 0: backbone (read-only DB isolate, tracks tab, sort, search,
@@ -906,8 +932,10 @@ and the Network view, local. Then phase 4a (the Companion protocol) and 4b (noti
        j. Phase 4 (sync, Android side) started 2026-11-24, before
           decisions A–C: none of its stages depends on them (transfers
           from the Mac matter more if A keeps downloads there). Stages a
-          (protocol) and b (notifications) done. Next: c (the manager);
-          the table in §4, phase 4 has the order. Stage f and g bring the
+          (protocol), b (notifications) and c (the manager) done. Next: d
+          (transfers onto the phone: the download queue and dock), then
+          e (the UI, which also wires the manager into the app and its
+          lifecycle); the table in §4, phase 4 has the order. Stage f and g bring the
           first callers of `build_metadata_edges`.
 5. [ ] Decisions A, B, C (§6) before phase 6 is planned in detail.
 6. [ ] Flet, on master: the album menu's Play Album tuple,

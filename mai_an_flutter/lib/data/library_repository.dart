@@ -9,6 +9,7 @@ import '../core/py_text.dart';
 import '../player/dsp.dart';
 import '../stations/station.dart';
 import 'browse_queries.dart';
+import 'feature_store.dart';
 import 'landing_queries.dart';
 import 'library_schema.dart';
 import 'play_ledger.dart';
@@ -183,6 +184,10 @@ class LibraryRepository {
   /// selects), or null when the track has no row.
   Future<DspFeatures?> dspFeatures(String path) =>
       _db.run(_dspFeaturesJob(path));
+
+  /// server.py `stored_features` (Send to Mac sends them along).
+  Future<Map<String, Object?>?> storedFeatures(String path) =>
+      _db.run((db) => storedFeaturesJob(db, path));
 
   // The Albums, Artists and Genres tabs (browse_queries.dart). Sort modes
   // are db_manager's sort_map keys.

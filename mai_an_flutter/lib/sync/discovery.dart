@@ -25,7 +25,9 @@ const _queryInterval = Duration(seconds: 2);
 const _vpnPrefixes = ['utun', 'ipsec', 'ppp', 'tun', 'tap', 'wg', 'gpd'];
 
 const _app = MethodChannel('mai_an/app');
-bool get _android => !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
+
+/// The real OS (widget tests report `defaultTargetPlatform` as Android).
+bool get _android => !kIsWeb && Platform.isAndroid;
 
 /// `resolve_local_ip`: the IPv4 address of the default route. Python asks
 /// the kernel by "connecting" a UDP socket to 8.8.8.8, which dart:io can't
