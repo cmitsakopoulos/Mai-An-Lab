@@ -375,7 +375,10 @@ Future<void> _writeJsonAtomic(String path, Object? value) async {
     }
   }
 
-  final big = value is Map && value['queue'] is List && (value['queue'] as List).length > 500;
+  final big =
+      value is Map &&
+      value['queue'] is List &&
+      (value['queue'] as List).length > 500;
   return big ? Isolate.run(write) : write();
 }
 

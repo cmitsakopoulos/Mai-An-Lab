@@ -104,7 +104,9 @@ class FakeLibrary extends ChangeNotifier implements AutoPlayLibrary {
 }
 
 final ranking = [for (var i = 1; i < 30; i++) '/r/$i'];
-final libAbc = [for (final p in ['/lib/a', '/lib/b', '/lib/c']) track(p)];
+final libAbc = [
+  for (final p in ['/lib/a', '/lib/b', '/lib/c']) track(p),
+];
 
 void main() {
   late Directory dir;
@@ -209,17 +211,20 @@ void main() {
     expect(paths(), ['/lib/a', '/u/1', '/u/2', '/lib/b', '/lib/c']);
   });
 
-  test('playing through picks and buffer never reaches the old queue', () async {
-    c.queueLast(track('/u/1'));
-    await enable();
-    for (var i = 0; i < 12; i++) {
-      await advance(c.queue.currentIndex + 1);
-      ahead();
-    }
-    expect(lib.opens, hasLength(1)); // one station throughout
-    expect(paths().skip(1).any((p) => p.startsWith('/lib/')), isFalse);
-    expect(nativePaths(), paths());
-  });
+  test(
+    'playing through picks and buffer never reaches the old queue',
+    () async {
+      c.queueLast(track('/u/1'));
+      await enable();
+      for (var i = 0; i < 12; i++) {
+        await advance(c.queue.currentIndex + 1);
+        ahead();
+      }
+      expect(lib.opens, hasLength(1)); // one station throughout
+      expect(paths().skip(1).any((p) => p.startsWith('/lib/')), isFalse);
+      expect(nativePaths(), paths());
+    },
+  );
 
   test('a new queue starts a station and is set aside', () async {
     await enable();
@@ -245,10 +250,10 @@ void main() {
     final saved = jsonDecode(
       File('${dir.path}/queue_state.json').readAsStringSync(),
     );
-    expect([for (final r in saved['autoplay_held']) r['path']], [
-      '/lib/b',
-      '/lib/c',
-    ]);
+    expect(
+      [for (final r in saved['autoplay_held'] as List) (r as Map)['path']],
+      ['/lib/b', '/lib/c'],
+    );
     c.dispose();
 
     backend = FakeBackend();
@@ -356,14 +361,16 @@ void main() {
     expect(ap.bufferPaths(), ['/r/1', '/r/3', '/r/4', '/r/5']);
   });
 
-  test('a listen through pulls the station; library skips are not negatives',
-      () async {
-    await enable();
-    backend.listenEvents.add((path: '/r/1', listenedS: 120, durationS: 200));
-    backend.listenEvents.add((path: '/lib/b', listenedS: 3, durationS: 200));
-    expect(lib.stations.first.accepted, ['/r/1']);
-    expect(lib.stations.first.rejected, isEmpty);
-  });
+  test(
+    'a listen through pulls the station; library skips are not negatives',
+    () async {
+      await enable();
+      backend.listenEvents.add((path: '/r/1', listenedS: 120, durationS: 200));
+      backend.listenEvents.add((path: '/lib/b', listenedS: 3, durationS: 200));
+      expect(lib.stations.first.accepted, ['/r/1']);
+      expect(lib.stations.first.rejected, isEmpty);
+    },
+  );
 
   test('station shape is passed through', () async {
     await enable();

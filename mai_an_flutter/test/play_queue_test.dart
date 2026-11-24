@@ -9,10 +9,9 @@ QueueEntry row(String path, [Map<String, Object?> tags = const {}]) =>
 
 List<String> paths(PlayQueue q) => [for (final t in q.entries) t.path];
 
-PlayQueue queueOf(List<QueueEntry> rows, [int current = 0]) =>
-    PlayQueue()
-      ..set(rows)
-      ..currentIndex = current;
+PlayQueue queueOf(List<QueueEntry> rows, [int current = 0]) => PlayQueue()
+  ..set(rows)
+  ..currentIndex = current;
 
 /// Applies [change] to a plain list the way the native playlist does.
 void applyNative(List<QueueEntry> native, QueueChange change, PlayQueue q) {
@@ -66,7 +65,15 @@ void main() {
     test('add to queue plays before the station, in order', () {
       q.queueLast(row('/a'));
       q.queueLast(row('/b'));
-      expect(paths(q), ['/now', '/a', '/b', '/r/1', '/r/2', '/lib/1', '/lib/2']);
+      expect(paths(q), [
+        '/now',
+        '/a',
+        '/b',
+        '/r/1',
+        '/r/2',
+        '/lib/1',
+        '/lib/2',
+      ]);
       expect(q.entries[1].queued, isTrue);
     });
 
@@ -180,7 +187,12 @@ void main() {
     final q = queueOf([for (var i = 0; i < 4; i++) row('/t/$i')], 2);
     expect([for (final (i, _) in q.upcoming(const [])) i], [2, 3]);
     q.shuffle = true;
-    expect([for (final (i, _) in q.upcoming(const [3, 2, 0, 1])) i], [2, 0, 1]);
+    expect(
+      [
+        for (final (i, _) in q.upcoming(const [3, 2, 0, 1])) i,
+      ],
+      [2, 0, 1],
+    );
   });
 
   test('findSrc prefers the duplicate nearest the hint', () {
@@ -191,51 +203,57 @@ void main() {
   });
 
   // tests/test_queue_divergence.py::test_random_mutation_storm_keeps_both_sides_identical
-  test('random mutation storm: applied edits keep the native list identical', () {
-    for (var seed = 0; seed < 25; seed++) {
-      final rng = Random(seed);
-      var fresh = 0;
-      QueueEntry track() => row('/r/${fresh++}.flac');
-      final q = queueOf([for (var i = 0; i < 8; i++) track()], 2);
-      final native = List.of(q.entries);
-      for (var step = 0; step < 40; step++) {
-        final n = q.length;
-        final cur = q.currentIndex;
-        final playing = q.current;
-        final op = rng.nextInt(7);
-        QueueChange change = const NoChange();
-        if (op == 0) {
-          change = q.queueNext(track());
-        } else if (op == 1) {
-          change = q.queueLast(track());
-        } else if (op == 2) {
-          change = q.insertAfterCurrent([
-            for (var i = 0; i < 1 + rng.nextInt(5); i++) track(),
-          ]);
-        } else if (op == 3 && n > 2) {
-          final k = 1 + rng.nextInt(min(5, n - 1));
-          final pick = (List.generate(n, (i) => i)..shuffle(rng)).take(k);
-          change = q.removeIndices(pick);
-        } else if (op == 4 && n > 2) {
-          change = q.move(rng.nextInt(n), rng.nextInt(n));
-        } else if (op == 5 && n > 0) {
-          q.currentIndex = rng.nextInt(n);
-        } else if (op == 6 && n > 2 && rng.nextDouble() < 0.3) {
-          final idx = rng.nextInt(n);
-          if (idx != cur) change = q.removeAt(idx);
-        }
-        applyNative(native, change, q);
-        expect(
-          [for (final t in native) t.path],
-          paths(q),
-          reason: 'seed $seed step $step',
-        );
-        expect(q.currentIndex, inInclusiveRange(0, max(0, q.length - 1)));
-        if (op != 5) {
-          expect(identical(q.current, playing), isTrue,
-              reason: 'the playing row moved, seed $seed step $step');
+  test(
+    'random mutation storm: applied edits keep the native list identical',
+    () {
+      for (var seed = 0; seed < 25; seed++) {
+        final rng = Random(seed);
+        var fresh = 0;
+        QueueEntry track() => row('/r/${fresh++}.flac');
+        final q = queueOf([for (var i = 0; i < 8; i++) track()], 2);
+        final native = List.of(q.entries);
+        for (var step = 0; step < 40; step++) {
+          final n = q.length;
+          final cur = q.currentIndex;
+          final playing = q.current;
+          final op = rng.nextInt(7);
+          QueueChange change = const NoChange();
+          if (op == 0) {
+            change = q.queueNext(track());
+          } else if (op == 1) {
+            change = q.queueLast(track());
+          } else if (op == 2) {
+            change = q.insertAfterCurrent([
+              for (var i = 0; i < 1 + rng.nextInt(5); i++) track(),
+            ]);
+          } else if (op == 3 && n > 2) {
+            final k = 1 + rng.nextInt(min(5, n - 1));
+            final pick = (List.generate(n, (i) => i)..shuffle(rng)).take(k);
+            change = q.removeIndices(pick);
+          } else if (op == 4 && n > 2) {
+            change = q.move(rng.nextInt(n), rng.nextInt(n));
+          } else if (op == 5 && n > 0) {
+            q.currentIndex = rng.nextInt(n);
+          } else if (op == 6 && n > 2 && rng.nextDouble() < 0.3) {
+            final idx = rng.nextInt(n);
+            if (idx != cur) change = q.removeAt(idx);
+          }
+          applyNative(native, change, q);
+          expect(
+            [for (final t in native) t.path],
+            paths(q),
+            reason: 'seed $seed step $step',
+          );
+          expect(q.currentIndex, inInclusiveRange(0, max(0, q.length - 1)));
+          if (op != 5) {
+            expect(
+              identical(q.current, playing),
+              isTrue,
+              reason: 'the playing row moved, seed $seed step $step',
+            );
+          }
         }
       }
-    }
-  });
+    },
+  );
 }

@@ -13,7 +13,10 @@ const _roundTrips = [
     "/m/(Live) it's #1 & a+b;c=d@e~f,!.flac",
     'file:///m/%28Live%29%20it%27s%20%231%20%26%20a%2Bb%3Bc%3Dd%40e~f%2C%21.flac',
   ),
-  ('/m/日本語/曲 ?.mp3', 'file:///m/%E6%97%A5%E6%9C%AC%E8%AA%9E/%E6%9B%B2%20%3F.mp3'),
+  (
+    '/m/日本語/曲 ?.mp3',
+    'file:///m/%E6%97%A5%E6%9C%AC%E8%AA%9E/%E6%9B%B2%20%3F.mp3',
+  ),
   ('/m/emoji 🎵.m4a', 'file:///m/emoji%20%F0%9F%8E%B5.m4a'),
   ('/m/100% pure.flac', 'file:///m/100%25%20pure.flac'),
 ];

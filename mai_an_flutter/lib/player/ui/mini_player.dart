@@ -18,7 +18,9 @@ class MiniPlayer extends StatelessWidget {
       listenable: player,
       builder: (context, _) {
         final row = player.nowPlaying;
-        if (!player.hasEverPlayed || row == null) return const SizedBox.shrink();
+        if (!player.hasEverPlayed || row == null) {
+          return const SizedBox.shrink();
+        }
         final accent = Theme.of(context).colorScheme.primary;
         return AnimatedOpacity(
           duration: const Duration(milliseconds: 200),

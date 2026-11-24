@@ -68,8 +68,7 @@ class PlayQueue {
   bool get isEmpty => _rows.isEmpty;
   bool get isNotEmpty => _rows.isNotEmpty;
 
-  QueueEntry? get current =>
-      (currentIndex >= 0 && currentIndex < _rows.length)
+  QueueEntry? get current => (currentIndex >= 0 && currentIndex < _rows.length)
       ? _rows[currentIndex]
       : null;
 
@@ -83,7 +82,10 @@ class PlayQueue {
   /// the kept list.
   static (List<QueueEntry>, int) playable(List<QueueEntry> tracks, int index) {
     if (tracks.every((t) => t.path.isNotEmpty)) return (tracks, index);
-    final kept = [for (final t in tracks) if (t.path.isNotEmpty) t];
+    final kept = [
+      for (final t in tracks)
+        if (t.path.isNotEmpty) t,
+    ];
     final upTo = index.clamp(0, tracks.length);
     final newIndex = tracks.take(upTo).where((t) => t.path.isNotEmpty).length;
     return (kept, kept.isEmpty ? 0 : newIndex.clamp(0, kept.length - 1));
@@ -125,9 +127,7 @@ class PlayQueue {
   QueueChange queueLast(QueueEntry track) => queueLastMany([track]);
 
   QueueChange queueLastMany(List<QueueEntry> tracks) {
-    final rows = [
-      for (final t in playable(tracks, 0).$1) t.asQueued(),
-    ];
+    final rows = [for (final t in playable(tracks, 0).$1) t.asQueued()];
     if (rows.isEmpty) return const NoChange();
     if (_rows.isEmpty) return set(rows);
     final at = shuffle ? _rows.length : upNextEnd();
@@ -178,12 +178,10 @@ class PlayQueue {
   /// `_drop_rows`: pop [indices] (never the playing row), keeping the index on
   /// the playing track. Edits are contiguous runs, highest first.
   (List<SpliceEdit>, int?) _dropRows(Iterable<int> indices) {
-    final targets =
-        {
-          for (final i in indices)
-            if (i >= 0 && i < _rows.length && i != currentIndex) i,
-        }.toList()
-          ..sort((a, b) => b.compareTo(a));
+    final targets = {
+      for (final i in indices)
+        if (i >= 0 && i < _rows.length && i != currentIndex) i,
+    }.toList()..sort((a, b) => b.compareTo(a));
     final edits = <SpliceEdit>[];
     for (final i in targets) {
       if (edits.isNotEmpty && edits.last.start == i + 1) {
@@ -256,7 +254,9 @@ class PlayQueue {
   /// otherwise. Null at either end.
   int? neighbour(int delta, List<int> shuffleOrder) {
     if (_rows.isEmpty) return null;
-    if (shuffle && shuffleOrder.isNotEmpty && shuffleOrder.length == _rows.length) {
+    if (shuffle &&
+        shuffleOrder.isNotEmpty &&
+        shuffleOrder.length == _rows.length) {
       final pos = shuffleOrder.indexOf(currentIndex);
       if (pos < 0) return null;
       final n = pos + delta;
@@ -280,7 +280,9 @@ class PlayQueue {
 
   /// Rows from the playing one on, in play order (the queue sheet's list).
   List<(int, QueueEntry)> upcoming(List<int> shuffleOrder) {
-    if (shuffle && shuffleOrder.isNotEmpty && shuffleOrder.length == _rows.length) {
+    if (shuffle &&
+        shuffleOrder.isNotEmpty &&
+        shuffleOrder.length == _rows.length) {
       final pos = shuffleOrder.indexOf(currentIndex);
       if (pos >= 0) {
         return [for (final i in shuffleOrder.skip(pos)) (i, _rows[i])];

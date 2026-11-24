@@ -10,9 +10,9 @@ import 'package:mai_an_lab/stations/artist_graph.dart';
 import 'package:mai_an_lab/stations/credit_keys.dart';
 import 'package:mai_an_lab/stations/genre_taxonomy.dart';
 
-final Map<String, dynamic> golden = jsonDecode(
-  File('test/goldens/stations_synthetic.json').readAsStringSync(),
-);
+final Map<String, dynamic> golden =
+    jsonDecode(File('test/goldens/stations_synthetic.json').readAsStringSync())
+        as Map<String, dynamic>;
 
 List<String> _strs(Object? l) => [for (final x in l! as List) x as String];
 
@@ -67,7 +67,7 @@ void main() {
       for (final e in (ts['npmi'] as Map).entries)
         e.key as String: (e.value as num).toDouble(),
     };
-    void check(Float32List s, List expected) {
+    void check(Float32List s, List<Object?> expected) {
       for (var i = 0; i < tags.length; i++) {
         for (var j = 0; j < tags.length; j++) {
           expect(

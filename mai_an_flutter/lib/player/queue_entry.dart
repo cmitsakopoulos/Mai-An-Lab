@@ -62,8 +62,11 @@ class QueueEntry {
   String get src => pathToUri(path);
 
   /// queue_layout.as_queued: a copy marked as the listener's pick.
-  QueueEntry asQueued() =>
-      QueueEntry({...data}..remove(kAutoplay)..[kQueued] = true);
+  QueueEntry asQueued() => QueueEntry(
+    {...data}
+      ..remove(kAutoplay)
+      ..[kQueued] = true,
+  );
 
   QueueEntry withTags(Map<String, Object?> tags) =>
       QueueEntry({...data, ...tags});
