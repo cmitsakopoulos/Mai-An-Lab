@@ -8,6 +8,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import '../core/app_config.dart';
+import '../core/app_version.dart';
 import '../library/library_dialogs.dart';
 import '../library/track_query.dart';
 import '../player/queue_store.dart';
@@ -1496,7 +1497,7 @@ class AboutGroup extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(height: 4),
-                const Dim('Version 2.0.0', size: 14),
+                const Dim('Version $kAppVersion', size: 14),
               ],
             ),
           ),
@@ -1571,7 +1572,7 @@ class AboutGroup extends StatelessWidget {
               onPressed: () => showLicensePage(
                 context: context,
                 applicationName: 'Mai An Lab',
-                applicationVersion: '2.0.0',
+                applicationVersion: kAppVersion,
               ),
             ),
             TextButton.icon(

@@ -6,6 +6,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:mai_an_lab/core/app_version.dart';
 import 'package:mai_an_lab/core/config_file.dart';
 import 'package:mai_an_lab/core/haptics.dart';
 import 'package:mai_an_lab/data/library_repository.dart';
@@ -207,7 +208,7 @@ void main() {
       await tester.pump();
       await tester.tap(find.text('About'));
       await tester.pumpAndSettle();
-      expect(find.text('Version 2.0.0'), findsOneWidget);
+      expect(find.text('Version $kAppVersion'), findsOneWidget);
       await tester.tap(find.byTooltip('Back'));
       await tester.pumpAndSettle();
       expect(find.text('Settings'), findsOneWidget);
