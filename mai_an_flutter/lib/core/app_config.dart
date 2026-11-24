@@ -8,6 +8,7 @@ import '../assistant/llm_engine.dart'
     show defaultGeminiModel, defaultOllamaEndpoint, defaultOllamaModel;
 import '../library/track_query.dart';
 import '../player/dsp.dart';
+import '../sources/source_config.dart';
 import 'haptics.dart';
 
 /// The parts of the Flet app's config.toml the port reads so far. Read-only:
@@ -25,6 +26,7 @@ class AppConfig {
     this.startupPage = 'Library',
     this.landing = const LandingSections(),
     this.assistant = const AssistantConfig(),
+    this.sources = const SourceConfig(),
   });
 
   /// `general.library_sort` (Flet library.py: the initial sort).
@@ -58,6 +60,9 @@ class AppConfig {
 
   /// `[assistant]`: Jarvis LLM settings (utils/config.py `AssistantConfig`).
   final AssistantConfig assistant;
+
+  /// `[qobuz]`, `[deezer]`, `[downloads]` & `general.default_quality`.
+  final SourceConfig sources;
 
   /// Where utils/config.py puts it. The Flet app points HOME at the data dir
   /// first (main.py), so `Path.home()` is `<data>`:
@@ -108,6 +113,7 @@ class AppConfig {
       },
       landing: LandingSections.fromToml(doc['landing']),
       assistant: AssistantConfig.fromToml(doc['assistant']),
+      sources: SourceConfig.fromTomlMap(doc),
     );
   }
 

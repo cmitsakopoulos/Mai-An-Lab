@@ -31,7 +31,8 @@ from ui.views import settings as S  # noqa: E402
 from ui.widgets import HubSettingItem  # noqa: E402
 
 PORTED = {
-    "Companion & Sync", "Storage & Paths", "AI Assistant (Jarvis)", "Appearance",
+    "Companion & Sync", "Storage & Paths", "Authentication",
+    "AI Assistant (Jarvis)", "Appearance",
     "Audio & DSP", "Haptic Feedback", "Permissions", "Database Management",
     "Advanced", "About",
 }

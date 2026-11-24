@@ -335,11 +335,15 @@
   },
   {
    "query": "qobuz",
-   "titles": []
+   "titles": [
+    "Authentication"
+   ]
   },
   {
    "query": "token",
-   "titles": []
+   "titles": [
+    "Authentication"
+   ]
   },
   {
    "query": "metadata",
@@ -387,6 +391,7 @@
    "titles": [
     "Companion & Sync",
     "Storage & Paths",
+    "Authentication",
     "AI Assistant (Jarvis)",
     "Appearance",
     "Audio & DSP",
@@ -410,6 +415,7 @@
    "titles": [
     "Companion & Sync",
     "Storage & Paths",
+    "Authentication",
     "AI Assistant (Jarvis)"
    ]
   },

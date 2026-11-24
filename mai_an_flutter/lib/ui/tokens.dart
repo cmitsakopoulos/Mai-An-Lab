@@ -27,6 +27,10 @@ abstract final class Tokens {
   static const libPlaylist = Color(0xFFFF9F0A);
   static const libGenre = Color(0xFFFF375F);
 
+  // QOBUZ_COLOR / DEEZER_COLOR: streaming source accents (ui/tokens.py).
+  static const qobuz = Color(0xFFFF9F0A);
+  static const deezer = Color(0xFFBF5AF2);
+
   static const radiusCard = 14.0;
   static const radiusPill = 20.0;
   static const radiusThumb = 8.0;

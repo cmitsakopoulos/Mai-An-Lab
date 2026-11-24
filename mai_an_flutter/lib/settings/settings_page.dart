@@ -9,6 +9,7 @@ import '../sync/sync_manager.dart';
 import '../ui/tokens.dart';
 import 'assistant_settings.dart';
 import 'audio_dsp.dart';
+import 'auth_settings.dart';
 import 'config_controller.dart';
 import 'groups.dart';
 import 'settings_search.dart';
@@ -123,6 +124,7 @@ class SettingsScreenState extends State<SettingsScreen> {
         null => const Center(child: Dim('Companion & Sync is not running.')),
       },
       SettingsPage.storage => StorageGroup(deps: d),
+      SettingsPage.account => AuthGroup(deps: d),
       SettingsPage.assistant => AssistantSettingsGroup(deps: d),
       SettingsPage.appearance => AppearanceGroup(deps: d),
       SettingsPage.audio => AudioDspGroup(deps: d),
@@ -479,6 +481,7 @@ class _HubState extends State<_Hub> {
         section('GENERAL'),
         if (widget.hasSync) _item(_entry(SettingsPage.companion)),
         _item(_entry(SettingsPage.storage)),
+        _item(_entry(SettingsPage.account)),
         _item(_entry(SettingsPage.assistant)),
         divider,
         section('CUSTOMISATION'),

@@ -25,10 +25,11 @@ Code the port copies, translates, or depends on, for attribution in Settings →
 | `ReorderableListView` with `ReorderableDragStartListener` handles | `lib/library/browse_view.dart` | Flutter SDK (Material) | BSD-3-Clause |
 | Cyclic Jacobi eigenvalue method (Jacobi 1846; Press et al., *Numerical Recipes* §11.1) | `lib/stations/acoustic_geometry.dart` `_symmetricEigen` | Textbook algorithm | Algorithm only; no code copied |
 | SVD sign convention (`svd_flip`, `u_based_decision=False`) | `lib/stations/acoustic_geometry.dart` | scikit-learn docs | BSD-3-Clause; convention only |
+| Blowfish block cipher (Schneier 1993) & AES-128 block cipher (FIPS 197) for Deezer CDN stream decryption and fallback URL encryption | `lib/sources/deezer_crypto.dart` | Standard published specifications (public domain / NIST FIPS 197) | Specifications only; clean-room pure Dart, bit-verified against `pycryptodomex` |
 
 ## pub.dev dependencies
 
-`sqlite3`, `path_provider`, `audio_service`, `just_audio`, `audio_session`, `permission_handler`, `toml`, `flutter_markdown_plus`, `url_launcher`, `flutter_tts`, `speech_to_text`.
+`sqlite3`, `path_provider`, `audio_service`, `just_audio`, `audio_session`, `permission_handler`, `toml`, `flutter_markdown_plus`, `url_launcher`, `flutter_tts`, `speech_to_text`, `crypto`.
 Licences ship via Flutter's `LicenseRegistry` (`showLicensePage` in Settings → About).
 
 ## Candidates for upcoming phases (not yet evaluated)
@@ -37,4 +38,3 @@ Licences ship via Flutter's `LicenseRegistry` (`showLicensePage` in Settings →
 |---|---|---|---|
 | Tag writing (`tagger.py`) | 6c | [`metatagger`](https://pub.dev/packages/metatagger) (pure Dart: ID3v2, Vorbis comments, iTunes `ilst`); [`metadata_god`](https://pub.dev/documentation/metadata_god/latest/) / [`haudiotagger`](https://pub.dev/packages/haudiotagger) (Rust `lofty`); [`flutter_taglib`](https://pub.dev/documentation/flutter_taglib/1.3.2/) (TagLib FFI) | Prefer pure Dart (`metatagger`) if it round-trips identically through `tinytag` and `mutagen` to keep the build free of Rust/native toolchains. |
 | On-phone DSP math (`dsp.py`) | 6d | Pure Dart FFT/STFT (e.g. [`fftea`](https://pub.dev/packages/fftea)) vs native C/FFI | Evaluate pure Dart first (`fftea` / typed `Float64List` / `Float32List` on an isolate) against Python's `dsp.py` accuracy and phone runtime before considering native code. |
-| Crypto for Deezer / Qobuz | 6b | [`pointycastle`](https://pub.dev/packages/pointycastle) / [`crypto`](https://pub.dev/packages/crypto) (MD5, Blowfish CBC for Deezer chunks) | Verify Blowfish CBC compatibility with `pycryptodomex` / `deezer-py` via golden byte tests. |

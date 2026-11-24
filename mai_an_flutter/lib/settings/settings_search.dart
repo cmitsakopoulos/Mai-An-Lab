@@ -22,11 +22,12 @@ class SettingEntry {
 }
 
 /// The hub's groups the port has (settings.py `open_subpage` names). Those
-/// waiting on later phases (Authentication, Metadata) are
-/// left out of the hub and the search alike.
+/// waiting on later phases (Metadata) are left out of the hub and the search
+/// alike.
 enum SettingsPage {
   companion('Companion & Sync'),
   storage('Storage'),
+  account('Account'),
   assistant('AI Assistant'),
   appearance('Appearance'),
   audio('Audio & DSP'),
@@ -65,6 +66,18 @@ const kSettingEntries = [
       'download', 'path', 'folder', 'directory', 'streamrip', 'location', //
       'storage', 'music folder', 'save', 'destination', 'library path',
       'db path', 'disk', 'target',
+    ],
+  ),
+  SettingEntry(
+    page: SettingsPage.account,
+    title: 'Authentication',
+    subtitle: 'Qobuz & Deezer credentials',
+    category: 'GENERAL',
+    icon: Icons.lock_person_rounded,
+    keywords: [
+      'qobuz', 'deezer', 'arl', 'token', 'login', 'auth', 'credentials', //
+      'account', 'app id', 'app secret', 'password', 'username', 'user',
+      'secret', 'qobuz app', 'session', 'sign in', 'reauthenticate',
     ],
   ),
   SettingEntry(

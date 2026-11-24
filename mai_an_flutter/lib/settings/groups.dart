@@ -117,8 +117,6 @@ class SwitchRow extends StatelessWidget {
 // Storage & Paths
 
 /// settings.py `_build_storage_group`, `_save_paths` and the folder pick.
-/// The Default Download Quality card waits for downloads (decision A); its
-/// stored value is written back unchanged, as Flet's untouched dropdown does.
 class StorageGroup extends StatefulWidget {
   const StorageGroup({super.key, required this.deps});
 
@@ -128,11 +126,18 @@ class StorageGroup extends StatefulWidget {
   State<StorageGroup> createState() => _StorageGroupState();
 }
 
+const kDefaultQualityOptions = [
+  ('', 'Ask every time'),
+  ('mp3', 'High \u2014 MP3 / AAC 320kbps'),
+  ('cd', 'CD Quality \u2014 16-bit FLAC'),
+  ('hires', 'Hi-Res \u2014 24-bit FLAC (Deezer: 16-bit)'),
+];
+
 class _StorageGroupState extends State<StorageGroup> {
   final _dl = TextEditingController();
   final _lib = TextEditingController();
   String _baseDl = '', _baseLib = '';
-  String _quality = '';
+  String _quality = '', _baseQuality = '';
 
   SettingsDeps get d => widget.deps;
 
@@ -141,7 +146,8 @@ class _StorageGroupState extends State<StorageGroup> {
     super.initState();
     _dl.addListener(_changed);
     _lib.addListener(_changed);
-    _quality = d.config.string('general', 'default_quality', '').toLowerCase();
+    _quality = _baseQuality =
+        d.config.string('general', 'default_quality', '').toLowerCase();
     _refresh();
   }
 
@@ -161,10 +167,15 @@ class _StorageGroupState extends State<StorageGroup> {
     setState(() {
       _dl.text = _baseDl = download;
       _lib.text = _baseLib = library;
+      _quality = _baseQuality =
+          d.config.string('general', 'default_quality', '').toLowerCase();
     });
   }
 
-  bool get _dirty => _dl.text.trim() != _baseDl || _lib.text.trim() != _baseLib;
+  bool get _dirty =>
+      _dl.text.trim() != _baseDl ||
+      _lib.text.trim() != _baseLib ||
+      _quality != _baseQuality;
 
   Future<String?> _privateError(String path) async {
     final sp = await storagePathsFor(d.dataDir);
@@ -347,6 +358,46 @@ class _StorageGroupState extends State<StorageGroup> {
           field: _dl,
           label: 'Download Path',
           download: true,
+        ),
+        SettingsCard(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                children: [
+                  Icon(
+                    Icons.high_quality_rounded,
+                    color: Theme.of(context).colorScheme.primary,
+                    size: 18,
+                  ),
+                  const SizedBox(width: 8),
+                  const Expanded(
+                    child: Text(
+                      'Default Download Quality',
+                      style: TextStyle(
+                        color: Tokens.text,
+                        fontSize: 13,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              const Dim(
+                'Pick a tier to skip the quality sheet on every download. '
+                '"Ask every time" restores the prompt.',
+                size: 11,
+              ),
+              const SizedBox(height: 12),
+              SettingsDropdown(
+                label: 'Quality',
+                value: _quality,
+                options: kDefaultQualityOptions,
+                onChanged: (v) => setState(() => _quality = v),
+              ),
+            ],
+          ),
         ),
         _folderCard(
           icon: Icons.library_music_rounded,

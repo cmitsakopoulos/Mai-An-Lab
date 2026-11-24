@@ -1,0 +1,663 @@
+{
+  "blowfish_keys": {
+    "3135556": "6c6c666b39662c37652575603c643439",
+    "1234567890": "3b6e376b623172616075773a696c6a31",
+    "42": "623d356a673e2468652827373b653230",
+    "999999999999": "3535353b616e7433372f283b313f3260"
+  },
+  "blowfish_decrypts": [
+    {
+      "track_id": "3135556",
+      "cipher_hex": "0d32577ca1c6eb10355a7fa4c9ee13385d82a7ccf1163b6085aacff4193e6388add2f71c41668bb0d5fa1f44698eb3d8fd22476c91b6db00254a6f94b9de03284d7297bce1062b50759abfe4092e53789dc2e70c31567ba0c5ea0f34597ea3c8ed12375c81a6cbf0153a5f84a9cef3183d6287acd1f61b40658aafd4f91e43688db2d7fc21466b90b5daff24496e93b8dd02274c7196bbe0052a4f7499bee3082d52779cc1e60b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186abd0f51a3f6489aed3f81d42678cb1d6fb20456a8fb4d9fe23486d92b7dc01264b7095badf04294e7398bde2072c51769bc0e50a2f54799ec3e80d32577ca1c6eb10355a7fa4c9ee13385d82a7ccf1163b6085aacff4193e6388add2f71c41668bb0d5fa1f44698eb3d8fd22476c91b6db00254a6f94b9de03284d7297bce1062b50759abfe4092e53789dc2e70c31567ba0c5ea0f34597ea3c8ed12375c81a6cbf0153a5f84a9cef3183d6287acd1f61b40658aafd4f91e43688db2d7fc21466b90b5daff24496e93b8dd02274c7196bbe0052a4f7499bee3082d52779cc1e60b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186abd0f51a3f6489aed3f81d42678cb1d6fb20456a8fb4d9fe23486d92b7dc01264b7095badf04294e7398bde2072c51769bc0e50a2f54799ec3e80d32577ca1c6eb10355a7fa4c9ee13385d82a7ccf1163b6085aacff4193e6388add2f71c41668bb0d5fa1f44698eb3d8fd22476c91b6db00254a6f94b9de03284d7297bce1062b50759abfe4092e53789dc2e70c31567ba0c5ea0f34597ea3c8ed12375c81a6cbf0153a5f84a9cef3183d6287acd1f61b40658aafd4f91e43688db2d7fc21466b90b5daff24496e93b8dd02274c7196bbe0052a4f7499bee3082d52779cc1e60b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186abd0f51a3f6489aed3f81d42678cb1d6fb20456a8fb4d9fe23486d92b7dc01264b7095badf04294e7398bde2072c51769bc0e50a2f54799ec3e80d32577ca1c6eb10355a7fa4c9ee13385d82a7ccf1163b6085aacff4193e6388add2f71c41668bb0d5fa1f44698eb3d8fd22476c91b6db00254a6f94b9de03284d7297bce1062b50759abfe4092e53789dc2e70c31567ba0c5ea0f34597ea3c8ed12375c81a6cbf0153a5f84a9cef3183d6287acd1f61b40658aafd4f91e43688db2d7fc21466b90b5daff24496e93b8dd02274c7196bbe0052a4f7499bee3082d52779cc1e60b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186abd0f51a3f6489aed3f81d42678cb1d6fb20456a8fb4d9fe23486d92b7dc01264b7095badf04294e7398bde2072c51769bc0e50a2f54799ec3e80d32577ca1c6eb10355a7fa4c9ee13385d82a7ccf1163b6085aacff4193e6388add2f71c41668bb0d5fa1f44698eb3d8fd22476c91b6db00254a6f94b9de03284d7297bce1062b50759abfe4092e53789dc2e70c31567ba0c5ea0f34597ea3c8ed12375c81a6cbf0153a5f84a9cef3183d6287acd1f61b40658aafd4f91e43688db2d7fc21466b90b5daff24496e93b8dd02274c7196bbe0052a4f7499bee3082d52779cc1e60b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186abd0f51a3f6489aed3f81d42678cb1d6fb20456a8fb4d9fe23486d92b7dc01264b7095badf04294e7398bde2072c51769bc0e50a2f54799ec3e80d32577ca1c6eb10355a7fa4c9ee13385d82a7ccf1163b6085aacff4193e6388add2f71c41668bb0d5fa1f44698eb3d8fd22476c91b6db00254a6f94b9de03284d7297bce1062b50759abfe4092e53789dc2e70c31567ba0c5ea0f34597ea3c8ed12375c81a6cbf0153a5f84a9cef3183d6287acd1f61b40658aafd4f91e43688db2d7fc21466b90b5daff24496e93b8dd02274c7196bbe0052a4f7499bee3082d52779cc1e60b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186abd0f51a3f6489aed3f81d42678cb1d6fb20456a8fb4d9fe23486d92b7dc01264b7095badf04294e7398bde2072c51769bc0e50a2f54799ec3e80d32577ca1c6eb10355a7fa4c9ee13385d82a7ccf1163b6085aacff4193e6388add2f71c41668bb0d5fa1f44698eb3d8fd22476c91b6db00254a6f94b9de03284d7297bce1062b50759abfe4092e53789dc2e70c31567ba0c5ea0f34597ea3c8ed12375c81a6cbf0153a5f84a9cef3183d6287acd1f61b40658aafd4f91e43688db2d7fc21466b90b5daff24496e93b8dd02274c7196bbe0052a4f7499bee3082d52779cc1e60b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186abd0f51a3f6489aed3f81d42678cb1d6fb20456a8fb4d9fe23486d92b7dc01264b7095badf04294e7398bde2072c51769bc0e50a2f54799ec3e80d32577ca1c6eb10355a7fa4c9ee13385d82a7ccf1163b6085aacff4193e6388add2f71c41668bb0d5fa1f44698eb3d8fd22476c91b6db00254a6f94b9de03284d7297bce1062b50759abfe4092e53789dc2e70c31567ba0c5ea0f34597ea3c8ed12375c81a6cbf0153a5f84a9cef3183d6287acd1f61b40658aafd4f91e43688db2d7fc21466b90b5daff24496e93b8dd02274c7196bbe0052a4f7499bee3082d52779cc1e60b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186abd0f51a3f6489aed3f81d42678cb1d6fb20456a8fb4d9fe23486d92b7dc01264b7095badf04294e7398bde2072c51769bc0e50a2f54799ec3e8",
+      "plain_hex": "c0b0a28ec3f2b95e912240fd3f77bb82499fa8b792e75c2d7d4d2e2cacadfc56ca09412fefb26bbf9da0f734b2590a23d2bbb11338b6f41eb95df7dfda10e7c0312cc563bf1a51079ff681a878741ceb11a047437a09c2a792b35e01926b5fa2299f6cc0cc1cb2206048d5084accbf28bb2150a6c7f331326cc4c70d4f4a15d5aab31bd0c7da5a275637491d76a550d5ec914efe0e1c88e16db7e3c1e77237c086159a09497aaf4bfd72f58e3f3b022c02edbc83d4f9b66d1760dccd1cda7fb45adfb9af23e606273d6be67a91c8f02c112dbd5df40d9f18751b61759676e4233fcadae4090d55dc0c0007290e88b8ba56bad2fe844dce03764a9749bd1b7e8825bb8fd9be697cb1912240fd3f77bb82499fa8b792e75c2d7d4d2e2cacadfc56ca09412fefb26bbf9da0f734b2590a23d2bbb11338b6f41eb95df7dfda10e7c0312cc563bf1a51079ff681a878741ceb11a047437a09c2a792b35e01926b5fa2299f6cc0cc1cb2206048d5084accbf28bb2150a6c7f331326cc4c70d4f4a15d5aab31bd0c7da5a275637491d76a550d5ec914efe0e1c88e16db7e3c1e77237c086159a09497aaf4bfd72f58e3f3b022c02edbc83d4f9b66d1760dccd1cda7fb45adfb9af23e606273d6be67a91c8f02c112dbd5df40d9f18751b61759676e4233fcadae4090d55dc0c0007290e88b8ba56bad2fe844dce03764a9749bd1b7e8825bb8fd9be697cb1912240fd3f77bb82499fa8b792e75c2d7d4d2e2cacadfc56ca09412fefb26bbf9da0f734b2590a23d2bbb11338b6f41eb95df7dfda10e7c0312cc563bf1a51079ff681a878741ceb11a047437a09c2a792b35e01926b5fa2299f6cc0cc1cb2206048d5084accbf28bb2150a6c7f331326cc4c70d4f4a15d5aab31bd0c7da5a275637491d76a550d5ec914efe0e1c88e16db7e3c1e77237c086159a09497aaf4bfd72f58e3f3b022c02edbc83d4f9b66d1760dccd1cda7fb45adfb9af23e606273d6be67a91c8f02c112dbd5df40d9f18751b61759676e4233fcadae4090d55dc0c0007290e88b8ba56bad2fe844dce03764a9749bd1b7e8825bb8fd9be697cb1912240fd3f77bb82499fa8b792e75c2d7d4d2e2cacadfc56ca09412fefb26bbf9da0f734b2590a23d2bbb11338b6f41eb95df7dfda10e7c0312cc563bf1a51079ff681a878741ceb11a047437a09c2a792b35e01926b5fa2299f6cc0cc1cb2206048d5084accbf28bb2150a6c7f331326cc4c70d4f4a15d5aab31bd0c7da5a275637491d76a550d5ec914efe0e1c88e16db7e3c1e77237c086159a09497aaf4bfd72f58e3f3b022c02edbc83d4f9b66d1760dccd1cda7fb45adfb9af23e606273d6be67a91c8f02c112dbd5df40d9f18751b61759676e4233fcadae4090d55dc0c0007290e88b8ba56bad2fe844dce03764a9749bd1b7e8825bb8fd9be697cb1912240fd3f77bb82499fa8b792e75c2d7d4d2e2cacadfc56ca09412fefb26bbf9da0f734b2590a23d2bbb11338b6f41eb95df7dfda10e7c0312cc563bf1a51079ff681a878741ceb11a047437a09c2a792b35e01926b5fa2299f6cc0cc1cb2206048d5084accbf28bb2150a6c7f331326cc4c70d4f4a15d5aab31bd0c7da5a275637491d76a550d5ec914efe0e1c88e16db7e3c1e77237c086159a09497aaf4bfd72f58e3f3b022c02edbc83d4f9b66d1760dccd1cda7fb45adfb9af23e606273d6be67a91c8f02c112dbd5df40d9f18751b61759676e4233fcadae4090d55dc0c0007290e88b8ba56bad2fe844dce03764a9749bd1b7e8825bb8fd9be697cb1912240fd3f77bb82499fa8b792e75c2d7d4d2e2cacadfc56ca09412fefb26bbf9da0f734b2590a23d2bbb11338b6f41eb95df7dfda10e7c0312cc563bf1a51079ff681a878741ceb11a047437a09c2a792b35e01926b5fa2299f6cc0cc1cb2206048d5084accbf28bb2150a6c7f331326cc4c70d4f4a15d5aab31bd0c7da5a275637491d76a550d5ec914efe0e1c88e16db7e3c1e77237c086159a09497aaf4bfd72f58e3f3b022c02edbc83d4f9b66d1760dccd1cda7fb45adfb9af23e606273d6be67a91c8f02c112dbd5df40d9f18751b61759676e4233fcadae4090d55dc0c0007290e88b8ba56bad2fe844dce03764a9749bd1b7e8825bb8fd9be697cb1912240fd3f77bb82499fa8b792e75c2d7d4d2e2cacadfc56ca09412fefb26bbf9da0f734b2590a23d2bbb11338b6f41eb95df7dfda10e7c0312cc563bf1a51079ff681a878741ceb11a047437a09c2a792b35e01926b5fa2299f6cc0cc1cb2206048d5084accbf28bb2150a6c7f331326cc4c70d4f4a15d5aab31bd0c7da5a275637491d76a550d5ec914efe0e1c88e16db7e3c1e77237c086159a09497aaf4bfd72f58e3f3b022c02edbc83d4f9b66d1760dccd1cda7fb45adfb9af23e606273d6be67a91c8f02c112dbd5df40d9f18751b61759676e4233fcadae4090d55dc0c0007290e88b8ba56bad2fe844dce03764a9749bd1b7e8825bb8fd9be697cb1912240fd3f77bb82499fa8b792e75c2d7d4d2e2cacadfc56ca09412fefb26bbf9da0f734b2590a23d2bbb11338b6f41eb95df7dfda10e7c0312cc563bf1a51079ff681a878741ceb11a047437a09c2a792b35e01926b5fa2299f6cc0cc1cb2206048d5084accbf28bb2150a6c7f331326cc4c70d4f4a15d5aab31bd0c7da5a275637491d76a550d5ec914efe0e1c88e16db7e3c1e77237c086159a09497aaf4bfd72f58e3f3b022c02edbc83d4f9b66d1760dccd1cda7fb45adfb9af23e606273d6be67a91c8f02c112dbd5df40d9f18751b61759676e4233fcadae4090d55dc0c0007290e88b8ba56bad2fe844dce03764a9749bd1b7e88"
+    },
+    {
+      "track_id": "42",
+      "cipher_hex": "0d32577ca1c6eb10355a7fa4c9ee13385d82a7ccf1163b6085aacff4193e6388add2f71c41668bb0d5fa1f44698eb3d8fd22476c91b6db00254a6f94b9de03284d7297bce1062b50759abfe4092e53789dc2e70c31567ba0c5ea0f34597ea3c8ed12375c81a6cbf0153a5f84a9cef3183d6287acd1f61b40658aafd4f91e43688db2d7fc21466b90b5daff24496e93b8dd02274c7196bbe0052a4f7499bee3082d52779cc1e60b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186abd0f51a3f6489aed3f81d42678cb1d6fb20456a8fb4d9fe23486d92b7dc01264b7095badf04294e7398bde2072c51769bc0e50a2f54799ec3e80d32577ca1c6eb10355a7fa4c9ee13385d82a7ccf1163b6085aacff4193e6388add2f71c41668bb0d5fa1f44698eb3d8fd22476c91b6db00254a6f94b9de03284d7297bce1062b50759abfe4092e53789dc2e70c31567ba0c5ea0f34597ea3c8ed12375c81a6cbf0153a5f84a9cef3183d6287acd1f61b40658aafd4f91e43688db2d7fc21466b90b5daff24496e93b8dd02274c7196bbe0052a4f7499bee3082d52779cc1e60b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186abd0f51a3f6489aed3f81d42678cb1d6fb20456a8fb4d9fe23486d92b7dc01264b7095badf04294e7398bde2072c51769bc0e50a2f54799ec3e80d32577ca1c6eb10355a7fa4c9ee13385d82a7ccf1163b6085aacff4193e6388add2f71c41668bb0d5fa1f44698eb3d8fd22476c91b6db00254a6f94b9de03284d7297bce1062b50759abfe4092e53789dc2e70c31567ba0c5ea0f34597ea3c8ed12375c81a6cbf0153a5f84a9cef3183d6287acd1f61b40658aafd4f91e43688db2d7fc21466b90b5daff24496e93b8dd02274c7196bbe0052a4f7499bee3082d52779cc1e60b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186abd0f51a3f6489aed3f81d42678cb1d6fb20456a8fb4d9fe23486d92b7dc01264b7095badf04294e7398bde2072c51769bc0e50a2f54799ec3e80d32577ca1c6eb10355a7fa4c9ee13385d82a7ccf1163b6085aacff4193e6388add2f71c41668bb0d5fa1f44698eb3d8fd22476c91b6db00254a6f94b9de03284d7297bce1062b50759abfe4092e53789dc2e70c31567ba0c5ea0f34597ea3c8ed12375c81a6cbf0153a5f84a9cef3183d6287acd1f61b40658aafd4f91e43688db2d7fc21466b90b5daff24496e93b8dd02274c7196bbe0052a4f7499bee3082d52779cc1e60b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186abd0f51a3f6489aed3f81d42678cb1d6fb20456a8fb4d9fe23486d92b7dc01264b7095badf04294e7398bde2072c51769bc0e50a2f54799ec3e80d32577ca1c6eb10355a7fa4c9ee13385d82a7ccf1163b6085aacff4193e6388add2f71c41668bb0d5fa1f44698eb3d8fd22476c91b6db00254a6f94b9de03284d7297bce1062b50759abfe4092e53789dc2e70c31567ba0c5ea0f34597ea3c8ed12375c81a6cbf0153a5f84a9cef3183d6287acd1f61b40658aafd4f91e43688db2d7fc21466b90b5daff24496e93b8dd02274c7196bbe0052a4f7499bee3082d52779cc1e60b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186abd0f51a3f6489aed3f81d42678cb1d6fb20456a8fb4d9fe23486d92b7dc01264b7095badf04294e7398bde2072c51769bc0e50a2f54799ec3e80d32577ca1c6eb10355a7fa4c9ee13385d82a7ccf1163b6085aacff4193e6388add2f71c41668bb0d5fa1f44698eb3d8fd22476c91b6db00254a6f94b9de03284d7297bce1062b50759abfe4092e53789dc2e70c31567ba0c5ea0f34597ea3c8ed12375c81a6cbf0153a5f84a9cef3183d6287acd1f61b40658aafd4f91e43688db2d7fc21466b90b5daff24496e93b8dd02274c7196bbe0052a4f7499bee3082d52779cc1e60b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186abd0f51a3f6489aed3f81d42678cb1d6fb20456a8fb4d9fe23486d92b7dc01264b7095badf04294e7398bde2072c51769bc0e50a2f54799ec3e80d32577ca1c6eb10355a7fa4c9ee13385d82a7ccf1163b6085aacff4193e6388add2f71c41668bb0d5fa1f44698eb3d8fd22476c91b6db00254a6f94b9de03284d7297bce1062b50759abfe4092e53789dc2e70c31567ba0c5ea0f34597ea3c8ed12375c81a6cbf0153a5f84a9cef3183d6287acd1f61b40658aafd4f91e43688db2d7fc21466b90b5daff24496e93b8dd02274c7196bbe0052a4f7499bee3082d52779cc1e60b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186abd0f51a3f6489aed3f81d42678cb1d6fb20456a8fb4d9fe23486d92b7dc01264b7095badf04294e7398bde2072c51769bc0e50a2f54799ec3e80d32577ca1c6eb10355a7fa4c9ee13385d82a7ccf1163b6085aacff4193e6388add2f71c41668bb0d5fa1f44698eb3d8fd22476c91b6db00254a6f94b9de03284d7297bce1062b50759abfe4092e53789dc2e70c31567ba0c5ea0f34597ea3c8ed12375c81a6cbf0153a5f84a9cef3183d6287acd1f61b40658aafd4f91e43688db2d7fc21466b90b5daff24496e93b8dd02274c7196bbe0052a4f7499bee3082d52779cc1e60b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186abd0f51a3f6489aed3f81d42678cb1d6fb20456a8fb4d9fe23486d92b7dc01264b7095badf04294e7398bde2072c51769bc0e50a2f54799ec3e8",
+      "plain_hex": "b16802b62d833a4e4a2a3b99c8be11b4636bdb6994415f4c4bc0acc902bd13d51e72a6729e364acc6c63a2bad7a2739fbccd09bd1225a8653dd24ee874e4e7ebc5eaa44f61bfe905d839dbd358dec261304dccaf5fbd8c84fca2d7149d0d047c05adfb5341b4b5e1fdd2e85f4547654d74fa893f75a2397df0b188f303badb24a760e9afe27dfd4b29177e8b0dfa3ef2b01585c55b9428f1c629ae809c69ad031496bf6753650fda9bb56d9499a72f67858c4eef1ed6fa1f8930dbb336a234ee6bc950e0f020e54e359ff0e6b574980e97134d9814d06ef5fddfdef0bbd88d9dbcf6f6de417a8a34c7cbb8f2b35a9f3cadc97cc84ab9b97494477b9181a2f5bb54632fe15018ffa14a2a3b99c8be11b4636bdb6994415f4c4bc0acc902bd13d51e72a6729e364acc6c63a2bad7a2739fbccd09bd1225a8653dd24ee874e4e7ebc5eaa44f61bfe905d839dbd358dec261304dccaf5fbd8c84fca2d7149d0d047c05adfb5341b4b5e1fdd2e85f4547654d74fa893f75a2397df0b188f303badb24a760e9afe27dfd4b29177e8b0dfa3ef2b01585c55b9428f1c629ae809c69ad031496bf6753650fda9bb56d9499a72f67858c4eef1ed6fa1f8930dbb336a234ee6bc950e0f020e54e359ff0e6b574980e97134d9814d06ef5fddfdef0bbd88d9dbcf6f6de417a8a34c7cbb8f2b35a9f3cadc97cc84ab9b97494477b9181a2f5bb54632fe15018ffa14a2a3b99c8be11b4636bdb6994415f4c4bc0acc902bd13d51e72a6729e364acc6c63a2bad7a2739fbccd09bd1225a8653dd24ee874e4e7ebc5eaa44f61bfe905d839dbd358dec261304dccaf5fbd8c84fca2d7149d0d047c05adfb5341b4b5e1fdd2e85f4547654d74fa893f75a2397df0b188f303badb24a760e9afe27dfd4b29177e8b0dfa3ef2b01585c55b9428f1c629ae809c69ad031496bf6753650fda9bb56d9499a72f67858c4eef1ed6fa1f8930dbb336a234ee6bc950e0f020e54e359ff0e6b574980e97134d9814d06ef5fddfdef0bbd88d9dbcf6f6de417a8a34c7cbb8f2b35a9f3cadc97cc84ab9b97494477b9181a2f5bb54632fe15018ffa14a2a3b99c8be11b4636bdb6994415f4c4bc0acc902bd13d51e72a6729e364acc6c63a2bad7a2739fbccd09bd1225a8653dd24ee874e4e7ebc5eaa44f61bfe905d839dbd358dec261304dccaf5fbd8c84fca2d7149d0d047c05adfb5341b4b5e1fdd2e85f4547654d74fa893f75a2397df0b188f303badb24a760e9afe27dfd4b29177e8b0dfa3ef2b01585c55b9428f1c629ae809c69ad031496bf6753650fda9bb56d9499a72f67858c4eef1ed6fa1f8930dbb336a234ee6bc950e0f020e54e359ff0e6b574980e97134d9814d06ef5fddfdef0bbd88d9dbcf6f6de417a8a34c7cbb8f2b35a9f3cadc97cc84ab9b97494477b9181a2f5bb54632fe15018ffa14a2a3b99c8be11b4636bdb6994415f4c4bc0acc902bd13d51e72a6729e364acc6c63a2bad7a2739fbccd09bd1225a8653dd24ee874e4e7ebc5eaa44f61bfe905d839dbd358dec261304dccaf5fbd8c84fca2d7149d0d047c05adfb5341b4b5e1fdd2e85f4547654d74fa893f75a2397df0b188f303badb24a760e9afe27dfd4b29177e8b0dfa3ef2b01585c55b9428f1c629ae809c69ad031496bf6753650fda9bb56d9499a72f67858c4eef1ed6fa1f8930dbb336a234ee6bc950e0f020e54e359ff0e6b574980e97134d9814d06ef5fddfdef0bbd88d9dbcf6f6de417a8a34c7cbb8f2b35a9f3cadc97cc84ab9b97494477b9181a2f5bb54632fe15018ffa14a2a3b99c8be11b4636bdb6994415f4c4bc0acc902bd13d51e72a6729e364acc6c63a2bad7a2739fbccd09bd1225a8653dd24ee874e4e7ebc5eaa44f61bfe905d839dbd358dec261304dccaf5fbd8c84fca2d7149d0d047c05adfb5341b4b5e1fdd2e85f4547654d74fa893f75a2397df0b188f303badb24a760e9afe27dfd4b29177e8b0dfa3ef2b01585c55b9428f1c629ae809c69ad031496bf6753650fda9bb56d9499a72f67858c4eef1ed6fa1f8930dbb336a234ee6bc950e0f020e54e359ff0e6b574980e97134d9814d06ef5fddfdef0bbd88d9dbcf6f6de417a8a34c7cbb8f2b35a9f3cadc97cc84ab9b97494477b9181a2f5bb54632fe15018ffa14a2a3b99c8be11b4636bdb6994415f4c4bc0acc902bd13d51e72a6729e364acc6c63a2bad7a2739fbccd09bd1225a8653dd24ee874e4e7ebc5eaa44f61bfe905d839dbd358dec261304dccaf5fbd8c84fca2d7149d0d047c05adfb5341b4b5e1fdd2e85f4547654d74fa893f75a2397df0b188f303badb24a760e9afe27dfd4b29177e8b0dfa3ef2b01585c55b9428f1c629ae809c69ad031496bf6753650fda9bb56d9499a72f67858c4eef1ed6fa1f8930dbb336a234ee6bc950e0f020e54e359ff0e6b574980e97134d9814d06ef5fddfdef0bbd88d9dbcf6f6de417a8a34c7cbb8f2b35a9f3cadc97cc84ab9b97494477b9181a2f5bb54632fe15018ffa14a2a3b99c8be11b4636bdb6994415f4c4bc0acc902bd13d51e72a6729e364acc6c63a2bad7a2739fbccd09bd1225a8653dd24ee874e4e7ebc5eaa44f61bfe905d839dbd358dec261304dccaf5fbd8c84fca2d7149d0d047c05adfb5341b4b5e1fdd2e85f4547654d74fa893f75a2397df0b188f303badb24a760e9afe27dfd4b29177e8b0dfa3ef2b01585c55b9428f1c629ae809c69ad031496bf6753650fda9bb56d9499a72f67858c4eef1ed6fa1f8930dbb336a234ee6bc950e0f020e54e359ff0e6b574980e97134d9814d06ef5fddfdef0bbd88d9dbcf6f6de417a8a34c7cbb8f2b35a9f3cadc97cc84ab9b97494477b9181a2f5bb"
+    }
+  ],
+  "aes_encrypted_urls": [
+    {
+      "track_id": "3135556",
+      "md5_origin": "0123456789abcdef0123456789abcdef",
+      "media_version": "1",
+      "url": "https://e-cdns-proxy-0.dzcdn.net/mobile/1/063ce00a612a4e3f64ef79361a3ce285a5b4225134de7a91b5e602e73e081d5dfc55ebdaf19415c9fb377bbdc870fb8335805f758945ebcef0ad5316ab652a66f7e02a33a16f79447ee554d37341a15c"
+    },
+    {
+      "track_id": "987654321",
+      "md5_origin": "fedcba9876543210fedcba9876543210",
+      "media_version": "5",
+      "url": "https://e-cdns-proxy-f.dzcdn.net/mobile/1/ed24fcc1f88b95b19af5c06cd91c79c97f44ad5835db07744c46896a01c3f17e03564ca28c509bbde5807d8b0653dc1190e7c3bfdf925828c38cc9f1d9641a9f9353b51c0af18e8ca553977a8bd85ea62afca94bd5f6dacc53a9391e96d6818b"
+    }
+  ],
+  "qobuz_api_sigs": [
+    {
+      "endpoint": "catalog/search",
+      "params": {
+        "query": "boards of canada",
+        "type": "albums",
+        "limit": "50",
+        "offset": "0",
+        "app_id": "312369995"
+      },
+      "unix_ts": "1700000000",
+      "secret": "e79f8b9be485692b0e5f9dd895826368",
+      "sig": "c2f23644fd38848b28300cdd4505ef1f"
+    },
+    {
+      "endpoint": "album/get",
+      "params": {
+        "album_id": "0886443927087",
+        "limit": "500",
+        "offset": "0",
+        "app_id": "312369995"
+      },
+      "unix_ts": "1700000123",
+      "secret": "e79f8b9be485692b0e5f9dd895826368",
+      "sig": "a59af88c85145d23847468d25a61a124"
+    },
+    {
+      "endpoint": "user/get",
+      "params": {
+        "user_auth_token": "tok_secret",
+        "app_id": "312369995"
+      },
+      "unix_ts": "1700000999",
+      "secret": "e79f8b9be485692b0e5f9dd895826368",
+      "sig": "e4418c169c2859cd7918dc789503a064"
+    }
+  ],
+  "qobuz_file_sigs": [
+    {
+      "track_id": "19512574",
+      "quality": 1,
+      "format_id": 5,
+      "unix_ts": "1700000500.25",
+      "secret": "e79f8b9be485692b0e5f9dd895826368",
+      "sig": "366dcf5f380f079ff1056d8b3b5d1396"
+    },
+    {
+      "track_id": "19512574",
+      "quality": 2,
+      "format_id": 6,
+      "unix_ts": "1700000500.25",
+      "secret": "e79f8b9be485692b0e5f9dd895826368",
+      "sig": "97a8bce6de983e974010ede565937053"
+    },
+    {
+      "track_id": "19512574",
+      "quality": 3,
+      "format_id": 7,
+      "unix_ts": "1700000500.25",
+      "secret": "e79f8b9be485692b0e5f9dd895826368",
+      "sig": "34ac08afc55fa45d6060c09b2fcf6fac"
+    },
+    {
+      "track_id": "19512574",
+      "quality": 4,
+      "format_id": 27,
+      "unix_ts": "1700000500.25",
+      "secret": "e79f8b9be485692b0e5f9dd895826368",
+      "sig": "93aa37f45105dc4c2f587d8292f018b6"
+    }
+  ],
+  "qobuz_spoofer": {
+    "bundle_js": "foo={production:{api:{appId:\"312369995\",appSecret:\"0123456789abcdef0123456789abcdef\"}}};d.initialSeed(\"c2VjcmV0X2Jlcmxp\",window.utimezone.berlin);d.initialSeed(\"c2VjcmV0X2xvbmRv\",window.utimezone.london);name:\"Europe/Berlin\",info:\"bl8zMmJ5dGVzX3BhZGRpbmdf\",extras:\"MDE=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\";name:\"Europe/London\",info:\"bl8zMmJ5dGVzX3BhZGRpbmdf\",extras:\"MDI=BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB\"",
+    "app_id": "312369995",
+    "secrets": [
+      "secret_london_32bytes_padding_02",
+      "secret_berlin_32bytes_padding_01"
+    ]
+  },
+  "url_cases": [
+    {
+      "url": "https://www.qobuz.com/track/19512574",
+      "media_type": "track",
+      "id": "19512574",
+      "source": "qobuz"
+    },
+    {
+      "url": "https://www.qobuz.com/us-en/album/random-access-memories-daft-punk/0886443927087",
+      "media_type": "album",
+      "id": "0886443927087",
+      "source": "qobuz"
+    },
+    {
+      "url": "https://open.qobuz.com/album/0886443927087?foo=bar#frag",
+      "media_type": "album",
+      "id": "0886443927087",
+      "source": "qobuz"
+    },
+    {
+      "url": "https://play.qobuz.com/artist/36819",
+      "media_type": "artist",
+      "id": "36819",
+      "source": "qobuz"
+    },
+    {
+      "url": "https://www.qobuz.com/us-en/playlist/best-electronic/998877",
+      "media_type": "playlist",
+      "id": "998877",
+      "source": "qobuz"
+    },
+    {
+      "url": "https://www.deezer.com/track/3135556",
+      "media_type": "track",
+      "id": "3135556",
+      "source": "deezer"
+    },
+    {
+      "url": "https://www.deezer.com/en/album/302127",
+      "media_type": "album",
+      "id": "302127",
+      "source": "deezer"
+    },
+    {
+      "url": "https://www.deezer.com/fr/artist/27",
+      "media_type": "artist",
+      "id": "27",
+      "source": "deezer"
+    },
+    {
+      "url": "https://www.deezer.co.uk/playlist/908622995",
+      "media_type": "playlist",
+      "id": "908622995",
+      "source": "deezer"
+    },
+    {
+      "url": "http://192.168.1.10:8765/api/v1/tracks/stream?path=a.flac",
+      "media_type": "track",
+      "id": "companion_track",
+      "source": "companion"
+    },
+    {
+      "url": "companion://track/123",
+      "media_type": "track",
+      "id": "companion_track",
+      "source": "companion"
+    },
+    {
+      "url": "https://deezer.page.link/abc123",
+      "media_type": null,
+      "id": null,
+      "source": null
+    },
+    {
+      "url": "https://open.spotify.com/track/1234",
+      "media_type": null,
+      "id": null,
+      "source": null
+    }
+  ],
+  "source_metadata": {
+    "qobuz_album_payload": {
+      "id": "0886443927087",
+      "title": "Random Access Memories",
+      "artist": {
+        "id": 36819,
+        "name": "Daft Punk"
+      },
+      "release_date": "2013-05-17",
+      "tracks_count": 13,
+      "media_count": 1,
+      "genre": {
+        "path": [
+          {
+            "name": "Electronic"
+          },
+          {
+            "name": "French House"
+          }
+        ]
+      },
+      "copyright": "(P) 2013 Daft Life",
+      "image": {
+        "small": "https://img/s.jpg",
+        "large": "https://img/l.jpg"
+      },
+      "tracks": {
+        "items": [
+          {
+            "id": 1001,
+            "title": "Give Life Back to Music",
+            "performer": {
+              "name": "Daft Punk"
+            },
+            "track_number": 1,
+            "media_number": 1,
+            "isrc": "USQX91300101",
+            "composer": {
+              "name": "Thomas Bangalter"
+            }
+          },
+          {
+            "id": 1002,
+            "title": "The Game of Love",
+            "artist": {
+              "name": "Daft Punk"
+            },
+            "media_number": 1
+          }
+        ]
+      }
+    },
+    "qobuz_normalized": [
+      {
+        "id": "1001",
+        "title": "Give Life Back to Music",
+        "artist": "Daft Punk",
+        "track_number": 1,
+        "disc_number": 1,
+        "isrc": "USQX91300101",
+        "composer": "Thomas Bangalter",
+        "album": {
+          "id": "0886443927087",
+          "album": "Random Access Memories",
+          "artist": "Daft Punk",
+          "year": "2013",
+          "tracktotal": 13,
+          "disctotal": 1,
+          "genres": [
+            "Electronic",
+            "French House"
+          ],
+          "copyright": "(P) 2013 Daft Life",
+          "cover_url": "https://img/l.jpg"
+        }
+      },
+      {
+        "id": "1002",
+        "title": "The Game of Love",
+        "artist": "Daft Punk",
+        "track_number": 2,
+        "disc_number": 1,
+        "isrc": null,
+        "composer": null,
+        "album": {
+          "id": "0886443927087",
+          "album": "Random Access Memories",
+          "artist": "Daft Punk",
+          "year": "2013",
+          "tracktotal": 13,
+          "disctotal": 1,
+          "genres": [
+            "Electronic",
+            "French House"
+          ],
+          "copyright": "(P) 2013 Daft Life",
+          "cover_url": "https://img/l.jpg"
+        }
+      }
+    ],
+    "deezer_album_payload": {
+      "id": 302127,
+      "title": "Discovery",
+      "artist": {
+        "id": 27,
+        "name": "Daft Punk"
+      },
+      "release_date": "2001-03-07",
+      "nb_tracks": 14,
+      "track_total": 2,
+      "cover_xl": "https://dz/xl.jpg",
+      "cover_big": "https://dz/big.jpg",
+      "genres": {
+        "data": [
+          {
+            "id": 106,
+            "name": "Electro"
+          },
+          {
+            "id": 113,
+            "name": "Dance"
+          }
+        ]
+      },
+      "tracks": [
+        {
+          "id": 3135556,
+          "title": "One More Time",
+          "artist": {
+            "name": "Daft Punk"
+          },
+          "track_position": 1,
+          "disk_number": 1,
+          "isrc": "GBDUW0000059"
+        },
+        {
+          "id": 3135557,
+          "title": "Aerodynamic",
+          "contributors": [
+            {
+              "name": "Daft Punk (Contrib)"
+            }
+          ],
+          "track_position": 2,
+          "disk_number": 2
+        }
+      ]
+    },
+    "deezer_normalized": [
+      {
+        "id": "3135556",
+        "title": "One More Time",
+        "artist": "Daft Punk",
+        "track_number": 1,
+        "disc_number": 1,
+        "isrc": "GBDUW0000059",
+        "composer": null,
+        "album": {
+          "id": "302127",
+          "album": "Discovery",
+          "artist": "Daft Punk",
+          "year": "2001",
+          "tracktotal": 2,
+          "disctotal": 2,
+          "genres": [
+            "Electro",
+            "Dance"
+          ],
+          "copyright": null,
+          "cover_url": "https://dz/xl.jpg"
+        }
+      },
+      {
+        "id": "3135557",
+        "title": "Aerodynamic",
+        "artist": "Daft Punk (Contrib)",
+        "track_number": 2,
+        "disc_number": 2,
+        "isrc": null,
+        "composer": null,
+        "album": {
+          "id": "302127",
+          "album": "Discovery",
+          "artist": "Daft Punk",
+          "year": "2001",
+          "tracktotal": 2,
+          "disctotal": 2,
+          "genres": [
+            "Electro",
+            "Dance"
+          ],
+          "copyright": null,
+          "cover_url": "https://dz/xl.jpg"
+        }
+      }
+    ]
+  },
+  "search_parsing": {
+    "qobuz_raw": [
+      {
+        "_media_type": "track",
+        "id": 1001,
+        "title": "Give Life Back to Music",
+        "performer": {
+          "name": "Daft Punk"
+        },
+        "album": {
+          "title": "Random Access Memories",
+          "release_date_original": "2013-05-17",
+          "image": {
+            "large": "https://img/l.jpg"
+          }
+        }
+      },
+      {
+        "_media_type": "track",
+        "id": 1099,
+        "title": "Give Life Back to Music",
+        "performer": {
+          "name": "Daft Punk"
+        },
+        "album": {
+          "title": "Random Access Memories (10th Anniversary)",
+          "release_date_original": "2023-05-12",
+          "image": {
+            "large": "https://img/l2.jpg"
+          }
+        }
+      },
+      {
+        "_media_type": "track",
+        "id": 1003,
+        "title": "Single Title",
+        "performer": {
+          "name": "Daft Punk"
+        },
+        "album": {
+          "title": "Single Title",
+          "release_date_original": "2014-01-01"
+        }
+      },
+      {
+        "_media_type": "album",
+        "id": "0886443927087",
+        "title": "Random Access Memories",
+        "version": "10th Anniversary",
+        "artist": {
+          "name": "Daft Punk"
+        },
+        "tracks_count": 22,
+        "release_date_original": "2023-05-12",
+        "image": {
+          "medium": "https://img/m.jpg"
+        }
+      },
+      {
+        "_media_type": "artist",
+        "id": 36819,
+        "name": "Daft Punk",
+        "albums_count": 18
+      },
+      {
+        "_media_type": "playlist",
+        "id": "555",
+        "name": "Electronic Essentials",
+        "owner": {
+          "name": "Qobuz"
+        },
+        "tracks_count": 40,
+        "description": "Best cuts\n| all time"
+      }
+    ],
+    "qobuz_parsed": [
+      {
+        "id": "1001",
+        "name": "Give Life Back to Music",
+        "artist": "Daft Punk",
+        "source": "qobuz",
+        "media_type": "track",
+        "url": "https://www.qobuz.com/track/1001",
+        "year": "2013",
+        "album": "Random Access Memories",
+        "image": "https://img/l.jpg",
+        "num_tracks": 0,
+        "ui_title": "Give Life Back to Music",
+        "ui_subtitle": "Daft Punk",
+        "ui_detail": "Random Access Memories  •  2013  •  TRACK",
+        "ui_source_color": "#FF9F0A"
+      },
+      {
+        "id": "1003",
+        "name": "Single Title",
+        "artist": "Daft Punk",
+        "source": "qobuz",
+        "media_type": "track",
+        "url": "https://www.qobuz.com/track/1003",
+        "year": "2014",
+        "album": "Single Title",
+        "image": "",
+        "num_tracks": 0,
+        "ui_title": "Single Title",
+        "ui_subtitle": "Daft Punk",
+        "ui_detail": "2014  •  TRACK",
+        "ui_source_color": "#FF9F0A"
+      },
+      {
+        "id": "0886443927087",
+        "name": "Random Access Memories (10th Anniversary)",
+        "artist": "Daft Punk",
+        "source": "qobuz",
+        "media_type": "album",
+        "url": "https://www.qobuz.com/album/0886443927087",
+        "year": "2023",
+        "album": "",
+        "image": "https://img/m.jpg",
+        "num_tracks": 22,
+        "ui_title": "Random Access Memories (10th Anniversary)",
+        "ui_subtitle": "Daft Punk",
+        "ui_detail": "2023  •  ALBUM",
+        "ui_source_color": "#FF9F0A"
+      },
+      {
+        "id": "36819",
+        "name": "Daft Punk",
+        "artist": "",
+        "source": "qobuz",
+        "media_type": "artist",
+        "url": "https://www.qobuz.com/artist/36819",
+        "year": "N/A",
+        "album": "",
+        "image": "",
+        "num_tracks": 0,
+        "ui_title": "Daft Punk",
+        "ui_subtitle": "18 Albums",
+        "ui_detail": "ARTIST",
+        "ui_source_color": "#FF9F0A"
+      },
+      {
+        "id": "555",
+        "name": "Electronic Essentials",
+        "artist": "",
+        "source": "qobuz",
+        "media_type": "playlist",
+        "url": "https://www.qobuz.com/playlist/555",
+        "year": "N/A",
+        "album": "",
+        "image": "",
+        "num_tracks": 40,
+        "ui_title": "Electronic Essentials",
+        "ui_subtitle": "",
+        "ui_detail": "PLAYLIST",
+        "ui_source_color": "#FF9F0A"
+      }
+    ],
+    "deezer_raw": [
+      {
+        "_media_type": "track",
+        "id": 3135556,
+        "title": "One More Time",
+        "artist": {
+          "name": "Daft Punk"
+        },
+        "album": {
+          "title": "Discovery",
+          "cover_big": "https://dz/big.jpg"
+        }
+      },
+      {
+        "_media_type": "album",
+        "id": 302127,
+        "title": "Discovery",
+        "artist": {
+          "name": "Daft Punk"
+        },
+        "nb_tracks": 14,
+        "release_date": "2001-03-07",
+        "cover_xl": "https://dz/xl.jpg"
+      }
+    ],
+    "deezer_parsed": [
+      {
+        "id": "3135556",
+        "name": "One More Time",
+        "artist": "Daft Punk",
+        "source": "deezer",
+        "media_type": "track",
+        "url": "https://www.deezer.com/track/3135556",
+        "year": "N/A",
+        "album": "Discovery",
+        "image": "https://dz/big.jpg",
+        "num_tracks": 0,
+        "ui_title": "One More Time",
+        "ui_subtitle": "Daft Punk",
+        "ui_detail": "Discovery  •  TRACK",
+        "ui_source_color": "#BF5AF2"
+      },
+      {
+        "id": "302127",
+        "name": "Discovery",
+        "artist": "Daft Punk",
+        "source": "deezer",
+        "media_type": "album",
+        "url": "https://www.deezer.com/album/302127",
+        "year": "2001",
+        "album": "",
+        "image": "https://dz/xl.jpg",
+        "num_tracks": 14,
+        "ui_title": "Discovery",
+        "ui_subtitle": "Daft Punk",
+        "ui_detail": "2001  •  ALBUM",
+        "ui_source_color": "#BF5AF2"
+      }
+    ],
+    "summaries": {
+      "track": [
+        "1. Give Life Back to Music by Daft Punk"
+      ],
+      "track_preview": "Released on:\n2013-05-17\n\nID: 1001",
+      "album": [
+        "1. Random Access Memories (10th Anniversary) by Daft Punk"
+      ],
+      "album_preview": "Date released:\n2023-05-12\n\n22 Tracks\n\nID: 0886443927087",
+      "artist": [
+        "1. Daft Punk"
+      ],
+      "artist_preview": "18 Albums\n\nID: 36819",
+      "playlist": [
+        "1. Electronic Essentials by Qobuz"
+      ],
+      "playlist_preview": "40 tracks\n\nDescription:\nBest cuts all time\n\nID: 555"
+    }
+  },
+  "humanize_errors": [
+    {
+      "label": "invalid_app_secret",
+      "input": "bad",
+      "is_invalid_secret": true,
+      "output": "Qobuz rejected the App Secret. Check the App ID / Secret in the Settings tab."
+    },
+    {
+      "label": "status_401",
+      "input": "Status: 401, Response: {'message': 'Invalid'}",
+      "is_invalid_secret": false,
+      "output": "Qobuz rejected the request (HTTP 401). Your App ID / Secret or credentials look invalid — verify them in the Settings tab."
+    },
+    {
+      "label": "status_400",
+      "input": "Status: 400, Response: {}",
+      "is_invalid_secret": false,
+      "output": "Qobuz rejected the request (HTTP 400). Your App ID / Secret or credentials look invalid — verify them in the Settings tab."
+    },
+    {
+      "label": "status_429",
+      "input": "Status: 429, Response: {}",
+      "is_invalid_secret": false,
+      "output": "Qobuz is rate-limiting requests (HTTP 429). Wait a moment and try again."
+    },
+    {
+      "label": "network_timeout",
+      "input": "Connection timed out while connecting",
+      "is_invalid_secret": false,
+      "output": "Couldn't reach Qobuz — check your internet connection and try again."
+    },
+    {
+      "label": "generic",
+      "input": "unexpected boom",
+      "is_invalid_secret": false,
+      "output": "Qobuz search failed: unexpected boom"
+    }
+  ]
+}
