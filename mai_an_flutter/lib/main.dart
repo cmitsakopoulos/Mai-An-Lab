@@ -13,6 +13,8 @@ import 'core/haptics.dart';
 import 'core/notification_router.dart';
 import 'data/library_repository.dart';
 import 'data/play_ledger.dart';
+import 'downloads/app_download_host.dart';
+import 'downloads/download_queue.dart';
 import 'library/browse_controller.dart';
 import 'library/library_controller.dart';
 import 'player/audio_handler.dart';
@@ -47,6 +49,13 @@ Future<String> resolveDataDir() async {
   return dir.path;
 }
 
+/// Snackbars from outside the widget tree (the download queue).
+final _messenger = GlobalKey<ScaffoldMessengerState>();
+
+void _snack(String text) => _messenger.currentState
+  ?..hideCurrentSnackBar()
+  ..showSnackBar(SnackBar(content: Text(text)));
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   final dataDir = await resolveDataDir();
@@ -74,6 +83,15 @@ Future<void> main() async {
   final landing = LandingController(library, sections: config.landing);
   final player = ValueNotifier<PlayerController?>(null);
   final haptics = Haptics(config.haptics);
+  // queue_controller.py: Mac transfers now, the sources' downloads later.
+  final downloads = DownloadQueue(
+    AppDownloadHost(
+      dataDir: dataDir,
+      library: library,
+      haptics: haptics,
+      onSnack: _snack,
+    ),
+  );
   // Settings' writes reach the screens at once (Flet: restart_ui).
   settings.addListener(() {
     final c = settings.config;
@@ -91,6 +109,7 @@ Future<void> main() async {
       config: settings,
       haptics: haptics,
       ledger: ledger,
+      downloads: downloads,
       settings: SettingsDeps(
         dataDir: dataDir,
         config: settings,
@@ -167,6 +186,7 @@ class MaiAnApp extends StatefulWidget {
     required this.settings,
     this.startTab = AppTab.library,
     this.ledger,
+    this.downloads,
   });
 
   final LibraryController library;
@@ -182,6 +202,9 @@ class MaiAnApp extends StatefulWidget {
 
   /// Null while the database is opened read-only.
   final LedgerDrain? ledger;
+
+  /// The download queue (the dock and the `downloads` notification target).
+  final DownloadQueue? downloads;
 
   @override
   State<MaiAnApp> createState() => _MaiAnAppState();
@@ -229,6 +252,7 @@ class _MaiAnAppState extends State<MaiAnApp> {
       builder: (context, _) => MaterialApp(
         title: 'Mai An Lab',
         debugShowCheckedModeBanner: false,
+        scaffoldMessengerKey: _messenger,
         theme: Tokens.theme(
           accentColor: widget.config.config.accent ?? Tokens.accent,
         ),
@@ -242,6 +266,7 @@ class _MaiAnAppState extends State<MaiAnApp> {
           startTab: widget.startTab,
           settings: widget.settings,
           router: _router,
+          downloads: widget.downloads,
         ),
       ),
     );

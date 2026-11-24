@@ -37,3 +37,50 @@ Map<String, Object?>? storedFeaturesJob(Database db, String path) {
     'features_version': (v is int && v != 0) ? v : kFeaturesVersion,
   };
 }
+
+/// server.py `persist_features` (db_manager `update_track_features`): store
+/// wire-form features against a local file, creating its play_counts row
+/// if the track has never been played.
+void Function(Database) persistFeaturesJob(
+  String path,
+  Map<String, Object?> dsp,
+) => (db) {
+  final b64 = dsp['timbre_b64'];
+  final timbre = (b64 is String && b64.isNotEmpty) ? base64.decode(b64) : null;
+  db.execute(
+    '''
+    INSERT INTO play_counts
+        (track_path, count, last_played, bpm, energy, brightness,
+         rolloff, beat_strength, spectral_flatness,
+         spectral_contrast, key_index, timbre, features_version)
+    VALUES (?, 0, strftime('%s','now'), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(track_path) DO UPDATE SET
+        bpm = EXCLUDED.bpm,
+        energy = EXCLUDED.energy,
+        brightness = EXCLUDED.brightness,
+        rolloff = EXCLUDED.rolloff,
+        beat_strength = EXCLUDED.beat_strength,
+        spectral_flatness = EXCLUDED.spectral_flatness,
+        spectral_contrast = EXCLUDED.spectral_contrast,
+        key_index = EXCLUDED.key_index,
+        timbre = EXCLUDED.timbre,
+        features_version = EXCLUDED.features_version
+    ''',
+    [
+      path,
+      dsp['bpm'],
+      dsp['energy'],
+      dsp['brightness'],
+      dsp['rolloff'],
+      dsp['beat_strength'],
+      dsp['spectral_flatness'],
+      dsp['spectral_contrast'],
+      dsp['key_index'],
+      timbre,
+      // dsp.get("features_version", FEATURES_VERSION): a present null stays.
+      dsp.containsKey('features_version')
+          ? dsp['features_version']
+          : kFeaturesVersion,
+    ],
+  );
+};

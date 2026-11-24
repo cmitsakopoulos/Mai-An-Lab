@@ -1,5 +1,7 @@
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
+
 /// `utils/storage_paths.py`: where music lives. One resolver for the library
 /// and download folders.
 ///
@@ -178,4 +180,53 @@ class StoragePaths {
     if (usable(downloadCfg)) return _expand(downloadCfg!.trim());
     return usable(libraryDir) ? libraryDir : defaultMusicDir();
   }
+
+  /// `pick_download_dir`: the folder a download actually goes to. The
+  /// download folder, then the library folder, then the public Music
+  /// folder, skipping anything app-private or not writable. Throws rather
+  /// than ever falling back into the sandbox.
+  String pickDownloadDir(
+    String? downloadDir,
+    String? libraryDir, {
+    bool Function(String path)? writable,
+  }) {
+    final canWrite = writable ?? isWritableDir;
+    final tried = <String>[];
+    for (final c in [downloadDir, libraryDir, defaultMusicDir()]) {
+      if (!usable(c)) continue;
+      final cand = _expand(c!.trim());
+      if (tried.contains(cand)) continue;
+      tried.add(cand);
+      if (canWrite(cand)) return cand;
+    }
+    throw StoragePermissionError(
+      'No writable music folder. Grant storage access, or pick a download '
+      'folder in Settings → Storage.'
+      '${tried.isNotEmpty ? ' Tried: ${tried.join(', ')}' : ''}',
+    );
+  }
+}
+
+/// storage_paths.py `_writable`: create the folder, then write and remove a
+/// probe file in it.
+bool isWritableDir(String path) {
+  try {
+    Directory(path).createSync(recursive: true);
+    final probe = File('$path/.mai_an_lab_probe_$pid');
+    probe.writeAsStringSync('');
+    probe.deleteSync();
+    return true;
+  } on FileSystemException catch (e) {
+    debugPrint('download folder $path not writable: ${e.osError ?? e}');
+    return false;
+  }
+}
+
+/// Python's PermissionError from the storage rules: its text is what the
+/// user sees (the download dock shows `str(exc)`).
+class StoragePermissionError implements Exception {
+  const StoragePermissionError(this.message);
+  final String message;
+  @override
+  String toString() => message;
 }

@@ -12,6 +12,7 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mai_an_lab/core/py_text.dart';
+import 'package:mai_an_lab/downloads/companion_download.dart';
 import 'package:mai_an_lab/sync/companion_client.dart';
 import 'package:mai_an_lab/sync/discovery.dart';
 import 'package:mai_an_lab/sync/sync_manager.dart';
@@ -516,5 +517,92 @@ void main() {
     expect(broadcastTargets('127.0.0.1'), ['255.255.255.255']);
     expect(slash24Broadcast('0.1.2.3'), isNull);
     expect(slash24Broadcast('fe80::1'), isNull);
+  });
+
+  // Last: it queues its own transfers, which the tests above don't expect.
+  test('a transfer downloads exactly as streamrip_api.download does', () async {
+    final nfd = 'Άλφα'; // "Άλφα" as macOS spells it (NFD)
+    final queued = await server.cmd({
+      'cmd': 'queue_files',
+      'files': [
+        {'name': '$nfd.flac', 'size': 3000, 'fill': 1},
+        {'name': 'AC:DC?.mp3', 'size': 1500, 'fill': 2},
+        {'name': 'dup.flac', 'size': 2000, 'fill': 3},
+      ],
+    });
+    final ids = (queued['queued']! as List).cast<String>();
+    final c = client(token: server.token);
+    final pending = {for (final t in await c.getPendingTransfers()) t['id']: t};
+    String url(String id) => c.streamUrl(pending[id]!);
+
+    final pyDir = Directory('${scratch.path}/dl_py');
+    final dartDir = Directory('${scratch.path}/dl_dart');
+
+    // Both downloads of [u] into their folders: the same result, and the
+    // same files on disk afterwards.
+    Future<void> same(String u, {String? reason}) async {
+      final py = await server.cmd({
+        'cmd': 'py_download',
+        'url': u,
+        'dir': pyDir.path,
+      });
+      final events = <List<Object?>>[];
+      Object? mine;
+      try {
+        final paths = await companionDownload(
+          u,
+          dartDir.path,
+          progress: (s, p, m) => events.add([s, p, m]),
+        );
+        mine = [for (final p in paths) p.substring(dartDir.path.length)];
+      } on DownloadError catch (e) {
+        mine = [e.pyType, e.message];
+      }
+      final want = py['paths'] != null
+          ? [
+              for (final p in (py['paths']! as List).cast<String>())
+                p.substring(pyDir.path.length),
+            ]
+          : [py['exc_type'], py['exc']];
+      expect(mine, want, reason: reason);
+      Map<String, List<int>> files(Directory d) => {
+        for (final f in d.listSync().whereType<File>())
+          f.path.substring(d.path.length): f.readAsBytesSync(),
+      };
+      expect(files(dartDir), files(pyDir), reason: reason);
+      // The first and last progress reports agree (chunking may differ).
+      final pyEvents = [
+        for (final e in (py['events']! as List).cast<Map<String, Object?>>())
+          [e['status'], e['percent'], e['message']],
+      ];
+      if (pyEvents.isNotEmpty) {
+        expect(events.first, pyEvents.first, reason: reason);
+        expect(events.last, pyEvents.last, reason: reason);
+      }
+    }
+
+    for (final id in ids) {
+      await same(url(id), reason: 'fresh $id');
+    }
+    // The NFD name was saved composed.
+    expect(File('${dartDir.path}/Άλφα.flac').existsSync(), isTrue);
+    // Sent again: already on this device, nothing new written.
+    await same(url(ids[2]), reason: 'again');
+    // A different file holds the name (and the next one): numbered.
+    for (final d in [pyDir, dartDir]) {
+      File('${d.path}/dup.flac').writeAsBytesSync([9]);
+      File('${d.path}/dup (2).flac').writeAsBytesSync([9]);
+    }
+    await same(url(ids[2]), reason: 'taken name');
+    expect(File('${dartDir.path}/dup (3).flac').existsSync(), isTrue);
+    // Not paired, and a file the Mac never queued.
+    await same(url(ids[0]).split('&token=').first, reason: 'no token');
+    await same(
+      c.streamUrl({
+        'stream_path':
+            '/api/v1/tracks/stream?path=%2Fetc%2Fhosts&quality=original',
+      }),
+      reason: 'not queued',
+    );
   });
 }

@@ -189,6 +189,10 @@ class LibraryRepository {
   Future<Map<String, Object?>?> storedFeatures(String path) =>
       _db.run((db) => storedFeaturesJob(db, path));
 
+  /// server.py `persist_features`: features that came with a Mac transfer.
+  Future<void> persistFeatures(String path, Map<String, Object?> dsp) =>
+      _write(persistFeaturesJob(path, dsp));
+
   // The Albums, Artists and Genres tabs (browse_queries.dart). Sort modes
   // are db_manager's sort_map keys.
   Future<List<AlbumRow>> allAlbums(String sortMode) =>

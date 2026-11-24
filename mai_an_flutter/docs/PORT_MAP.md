@@ -11,13 +11,15 @@ long-press menu, selection mode and Delete Track, the tab bar with
 the Search tab's local landing cards, Settings with the config.toml
 writer, and the Acoustic Network view (§4, phase 3). Phase 4 (sync,
 Android side) is under way: the Companion protocol and discovery, tested
-against Flet's own server (§4, phase 4). Desktop
-tests pass (`flutter test`: 443, including the real-library golden tests
+against Flet's own server, notifications, the sync manager, and the
+download queue and dock that bring the Mac's transfers onto the phone
+(§4, phase 4). Desktop
+tests pass (`flutter test`: 479, including the real-library golden tests
 that need the gitignored goldens; analyzer clean in Dart's strict modes);
 debug and release APKs build.
 It is installed on the phone (2026-11-24, with the 2026-11-02 library, an
 older build: no scan, no Settings yet). The user reports problems found in use; fix
-them, or record intended differences in §7. Nothing ships from this port yet. 39 of the 90 Flet features in §11
+them, or record intended differences in §7. Nothing ships from this port yet. 41 of the 90 Flet features in §11
 are ported. Third-party code the port uses or copies is listed in §12.*
 
 **Next session: start at §10 (open items). §11 lists every Flet feature and
@@ -99,7 +101,7 @@ Status key:
 | 8 | **Long tasks with the screen off** | Kotlin `LibraryTaskService`, foreground type `dataSync`. The first job starts it and the last one stops it. | Keep the Kotlin. ⚠️ Android 15+ caps `dataSync` foreground services at about 6 h per 24 h. Long offloads or downloads must handle the timeout callback. Verify on device. | 3–4 | ♻️⚠️ |
 | 9 | **Reading music files** | `MANAGE_EXTERNAL_STORAGE` (all-files access) + `READ_MEDIA_AUDIO` + legacy storage permissions. Plain file paths under `/storage/emulated/0/Music`. | Same permissions via `permission_handler`, requested before the player starts (as Flet did), minus RECORD_AUDIO until phase 5. ⚠️ Play Store policy rejects all-files access, so sideload only, as now. | 1 | 🧪 |
 | 10 | **Music folder rules** | `storage_paths.py`: never return an app-private folder, downloads follow the library folder, fallbacks are never written back | `scan/storage_paths.dart` (resolvers and `is_app_private`; the platform and sandbox roots are passed in) and `scan/library_folder.dart` (`sync_config_to_ui`'s inputs: `library_path` pref, `[downloads] folder`). Python's tests ported (`storage_paths_test.dart`); `pick_download_dir` comes with downloads (6). | 3 | 🧪 |
-| 11 | **Path identity** | Absolute, platform-specific paths: phone `/storage/emulated/0/Music/…`, Mac `/Users/…/Desktop/Music/…`. `play_counts.track_path` is the join key. `normalize_nfc` is applied only where a file is *named* by the app: downloads (`streamrip_api`, `queue_controller`) and files received by the sync server. | The scanner stores `os.scandir` paths unnormalised, and so does the port (golden-tested), so phase 3 needs no normaliser. Phase 4 (sync) and 6 (downloads) do: `unorm_dart` (MIT, Unicode 17, §12) is the candidate. Search already strips NFD combining marks (`fold`). | 4, 6 | 🔨 |
+| 11 | **Path identity** | Absolute, platform-specific paths: phone `/storage/emulated/0/Music/…`, Mac `/Users/…/Desktop/Music/…`. `play_counts.track_path` is the join key. `normalize_nfc` is applied only where a file is *named* by the app: downloads (`streamrip_api`, `queue_controller`) and files received by the sync server. | The scanner stores `os.scandir` paths unnormalised, and so does the port (golden-tested), so phase 3 needs no normaliser. Mac transfers do (phase 4d): `core/nfc.dart` is `unicodedata.normalize("NFC")` from tables generated out of Python's unicodedata (`tool/gen_nfc_table.py`), equal to Python on 6,142 strings; downloads (6) reuse it. Search already strips NFD combining marks (`fold`). | 4, 6 | 🧪 |
 | 12 | **Artwork** | Kotlin `resolveArtwork`: embedded art via `MediaMetadataRetriever`, then the sidecar file, cached by sha1 | Keep the Kotlin. The handler resolves it for the current and next rows; sidecar lookup is lazy (per folder, not per queue row). | 1 | 🧪 |
 | 13 | **Audio analysis** | Kotlin `decodePcm` (MediaCodec, to mono PCM) + `dsp.py` (numpy, 906 lines). Usually offloaded to the Mac (sync). | Keep the decoder. The feature maths becomes Dart, or never runs on the phone (§6, decision B). | 6 | ⚠️ |
 | 14 | **EQ and loudness boost** | `set_eq_band_gain` and `set_loudness_boost` in the extension (just_audio Android effects). `reapply_dsp` runs on every track change: config.toml `[dsp]` preset + Dynamism (boost and EQ contour from the track's play_counts features). | In the handler (`setEqBandGain`, `setLoudnessBoost`). `player/dsp.dart` ports `reapply_dsp` with Python reference values; the controller applies it on every row change, including background auto-advance. Now Playing shows the Dynamism badge. Gains set before the device's EQ bands load are applied when they arrive. No settings UI yet (the Flet-written config is honoured). | 1 | 🧪 |
@@ -176,7 +178,7 @@ Verdicts:
 | `queue_layout.py` + the queue half of `audio_engine.py` | ~500 | Port ✅ (`player/play_queue.dart`, `queue_entry.dart`) | 1 |
 | main.py playback: `_play_track_core`, shuffle toggle, `cycle_repeat`, queue/position saves, restore, `_save_pref` | ~700 | Port ✅ (`player/player_controller.dart`, `queue_store.dart`) | 1 |
 | `play_ledger.py` (drain into the database) | 126 | Port ✅ (`data/play_ledger.dart`, with `record_listens`; golden-tested; runs on the phone) | 3 |
-| `queue_controller.py` (the DOWNLOAD queue, despite the name), `history_manager.py` (download history) | ~530 | Port with downloads | 6 |
+| `queue_controller.py` (the DOWNLOAD queue, despite the name), `history_manager.py` (download history) | ~530 | Port. The queue ✅ (`downloads/download_queue.dart`, phase 4d; its tests ported); the source workflows and `history_manager` with downloads | 4, 6 |
 | `ui/player/now_playing`, `mini_player`, `queue_sheet` | 1,087 | Rewrite ✅ (`player/ui/`). The auto-play chain is shown disabled until phase 2. | 1 |
 | `ui/player/quality_selector` (download quality) | 168 | Rewrite | 6 |
 | `db_manager.py`, read half | ~2,000 | Port, one method at a time on demand | 0–3 |
@@ -196,7 +198,7 @@ Verdicts:
 | `llm_tools.py`, `assistant_runner.py`, `assistant_intent.py`, `chat_memory.py`, `web_research.py` | ~4,500 | Port, with golden intent and tool-call tests | 5 |
 | `ui/views/assistant.py` | 861 | Rewrite | 5 |
 | `qobuz.py`, `deezer.py`, `streamrip_api.py`, `streamrip_search.py`, `downloadable.py`, `search_results.py`, `source_metadata.py`, `new_releases.py` + deezer-py, streamrip, pycryptodomex | ~3,000 + libraries | ⚠️ Port or keep on Mac (§6, decision A) | 6 |
-| `ui/views/search.py`, `ui/player/download_dock.py` | 3,806 | Rewrite. The landing's local cards ✅ (`search/`, `data/landing_queries.dart`, golden-tested); the rest with the sources | 3, 6 |
+| `ui/views/search.py`, `ui/player/download_dock.py` | 3,806 | Rewrite. The landing's local cards ✅ (`search/`, `data/landing_queries.dart`, golden-tested); the dock ✅ (`downloads/download_dock.dart`, 4d); the rest with the sources | 3, 4, 6 |
 | `dsp.py`, `pca_engine.py` | 1,044 | ⚠️ Port to Dart, or keep on Mac (§6, decision B) | 6 |
 | `metadata_enrich`, `metadata_ai`, `metadata_audit`, `metadata_qobuz`, `ui/player/metadata_workbench.py` | ~5,000 | Port last (desktop-heavy) | 7 |
 | `ui/views/settings.py` | 3,932 | Rewrite, spread across phases (rule 4). Phase 3 ✅ (`settings/`): the hub and its search, Storage, Appearance, Audio & DSP (curve, presets), Haptics, Permissions, Database Management, Advanced (caches, raw TOML), About. The other groups with their phases (§11). | all |
@@ -554,7 +556,7 @@ stays Python until phase 8). Stages, one commit each:
 | a | Protocol: the client, multipart uploads, discovery (query, beacons, /24 sweep), the Kotlin for the route address and the multicast lock, the permissions | `sync/client.py`, `sync/discovery.py` (listener half) | ✅ |
 | b | Progress and alert notifications: a Dart `ProgressNotifier` over the Kotlin `showProgressNotification` (throttle, summary, cancel and Retry buttons, the task service), `post_alert`, notification routing to the screens that exist | `progress_notify.py`, main.py `_on_notification_navigate` | ✅ |
 | c | The manager: enable and idle auto-off, USB and saved-address probe, heartbeat, PIN snooze, Find Mac (probe, query, sweep) and its messages, manual connect, unpair, background and resume hooks, auto-accept, the Send to Mac worker and acks; the device name | `sync/manager.py`, `sync/send.py` | ✅ (wired into the app with e) |
-| d | Transfers onto the phone: the download queue for the `companion` source (`.part`, size check, no-overwrite names, `clean_filename`, NFC, `pick_download_dir`, features stored, one quiet scan after the queue drains, Android media scan) and the dock as far as transfers need it | `queue_controller.py`, `streamrip_api.download` (companion branch), `download_dock.py` | 🔨 |
+| d | Transfers onto the phone: the download queue for the `companion` source (`.part`, size check, no-overwrite names, `clean_filename`, NFC, `pick_download_dir`, features stored, one quiet scan after the queue drains, Android media scan) and the dock as far as transfers need it | `queue_controller.py`, `streamrip_api.download` (companion branch), `download_dock.py` | ✅ |
 | e | UI: Settings → Companion & Sync and the sync hub, the PIN and transfer dialogs, Send to Mac in the long-press, selection and album menus | `ui/views/sync_hub.py`, manager dialogs, `send.py` | 🔨 |
 | f | State bundles: export (Settings, and the boot auto-export to Downloads and the library folder), import (Settings, and `*_import.zip` at boot, with `.onboarded`), upload to the Mac | `state_export.py`, main.py `_heavy_init`, `_auto_export_state_snapshot` | 🔨 |
 | g | DSP offload and the acoustic build: features stored in batches, then `build_metadata_edges` and `build_acoustic_edges` (the SVD build, golden-tested against numpy), and the startup readiness build | sync_hub's offload, `track_graph.py`, `pca_engine.redundant_raw_features`, main.py `_ensure_graph_built_async` | 🔨 |
@@ -618,6 +620,38 @@ Flet's server: manual connect, a wrong and a right PIN over "USB",
 auto-accept, the stream URL, the ack reaching the Mac, and Send to Mac.
 `MaianNative` and discovery now ask `Platform.isAndroid`: widget tests
 report `defaultTargetPlatform` as Android.
+
+**Stage d.** `downloads/download_queue.dart` is queue_controller.py:
+jobs and their states, `enqueue_many` (the manager's `TransferQueue`),
+remove, retry, clear, the bounded history, the worker with its batch
+notification (`download`; summary, Retry for non-Mac failures, Cancel
+clears the queue), three attempts with 5 s and 10 s waits, cancel between
+chunks and during the waits, features stored with the file (NFC path;
+`data/feature_store.dart` `persistFeaturesJob`, server.py
+`persist_features`), the success haptic, each Mac transfer's outcome
+reported to the manager, and one quiet scan a second after the queue
+drains. `downloads/companion_download.dart` is `download`'s companion
+branch: the file name from the Mac's path (`.m4a` for AAC), `.part` then
+rename, the size check, "already on this device", no-overwrite names
+(`name (2).ext`), the 401/404 texts, a 120 s read stall and no total cap.
+`downloads/file_names.dart` holds `clean_filename` and `normalize_nfc`;
+`scan/storage_paths.dart` gained `pick_download_dir`. The dock
+(`downloads/download_dock.dart`) is the pill above the mini player and the
+sheet; `AppDownloadHost` connects the queue to the folders, the library,
+the haptics and (with stage e) the manager. The `downloads` notification
+target opens the sheet; `downloads:retry` re-queues the last batch's
+failures. `LibraryController.scan(quiet: true)` shows no banner and no
+snackbar, then posts library.py's "not analysed yet" card (without its
+Analyse button: decision B). `MainActivity` has `scanMediaFile`
+(MediaScannerConnection). Tests: `download_queue_test.dart` (Flet's
+test_download_queue.py and the workflow), `file_names_test.dart` (NFC,
+`clean_filename` and pathlib's name parts against Python),
+`storage_paths_test.dart` (Flet's pick tests), `download_dock_test.dart`,
+`scan_controller_test.dart` (the quiet scan, features round trip), and in
+`companion_protocol_test.dart` the download against Flet's server next
+to Python's own `download()` into a twin folder: same results, same files,
+same first and last progress reports, for an NFD name, illegal
+characters, a re-send, a taken name, no token and a file never queued.
 
 **How parity is proved (stage a).** `tool/companion_test_server.py` runs
 Flet's own `CompanionServer` hermetically (scratch feature cache and
@@ -732,6 +766,11 @@ uninstall and reinstall; the bundle export/import covers the data.
 | config.toml repair | `ensure_config_exists` fills sections and keys a newer template adds (`fill_missing`) and bumps `misc.version`, on every load | Only the missing-file case (template copy); a complete config is left as is, which is all the repair does today (golden-checked) | Port `fill_missing` the next time utils/config.toml gains keys. |
 | Send to Mac: non-ASCII file names | aiohttp's client percent-encodes `filename="…"` and its server never decodes it, so the Mac saves "Άλφα.flac" as "%CE%86%CE%BB%CF%86%CE%B1.flac" (confirmed against Flet's own server) | Sends the name as `filename*=utf-8''…`, which the server decodes: the Mac saves "Άλφα.flac" | Port is right. Flet fix (master): send the name in a form the server decodes (`filename*`, or `FormData(quote_fields=False)` in `push_track`); not made yet. |
 | The phone's own address (`resolve_local_ip`) | The kernel's route to 8.8.8.8 (a UDP "connect") | The active network's IPv4 link address (ConnectivityManager), the same answer; off Android, the first non-tunnel IPv4 address | dart:io can't connect a UDP socket. |
+| Success after a download | `play_success_notification`: the vibrate haptic, and a ringtone through pyjnius, which the APK doesn't have (it fails silently) | The vibrate haptic | Same on the phone. The Mac's sound comes with phase 8. |
+| A saved transfer on Android | chmod 666 (777 on the folder), `am broadcast MEDIA_SCANNER_SCAN_FILE` (ignored since Android 10) and `content insert` from the app's shell | MediaScannerConnection.scanFile, no chmod (shared storage's permissions are FUSE's, not the file's mode) | Port is right: the file reaches MediaStore. |
+| "Not analysed yet" card after a quiet scan | Analyse button (on-phone analysis) | The card without the button | Decision B. |
+| Quiet scan while the Library is hidden | The reload is deferred until the tab shows | Reloaded at once | Flutter rebuilds only what is visible; nothing to defer. |
+| Download errors from the network | aiohttp's text ("Cannot connect to host …") | dart:io's (`SocketException: …`) | Different words, same place (the dock's status line). |
 | Discovery on Android | Hears only the Mac's unicast replies to its query (no multicast lock without pyjnius) | Holds a MulticastLock while listening, so the Mac's 2 s broadcast beacons arrive as well | Intentional (§1 row 17): finds the Mac sooner on networks that pass broadcasts. |
 
 ---
@@ -769,7 +808,7 @@ uninstall and reinstall; the bundle export/import covers the data.
   exports need the APK's tinytag and tomlkit apart from the dev env (which
   has streamrip's tomlkit 0.7.2):
   `~/miniconda3/bin/pip install --target tool/.pydeps tinytag==2.3.2 tomlkit==0.15.2`
-  (gitignored). Generated tables: `tool/gen_nfkd_table.py`,
+  (gitignored). Generated tables: `tool/gen_nfkd_table.py`, `tool/gen_nfc_table.py`,
   `tool/gen_casefold_table.py` (`str.casefold`, `str.isdecimal`).
 
 ---
@@ -820,8 +859,8 @@ Python primitives, migrations and the ledger drain, the scan engine, the
 views' and playlists' queries, the library UI (views, scan UI, playlists,
 long-press menu, selection, delete), and the tab bar with the Search
 landing; then this plan; all pushed to origin. Then Settings (`e946579`)
-and the Network view, local. Then phase 4a (the Companion protocol), 4b (notifications) and 4c (the
-sync manager), local.
+and the Network view, local. Then phase 4a (the Companion protocol), 4b (notifications), 4c (the
+sync manager) and 4d (the download queue and dock), local.
 
 **Done**
 - [x] Phase 0: backbone (read-only DB isolate, tracks tab, sort, search,
@@ -881,6 +920,13 @@ sync manager), local.
       the Kotlin for the route address and the multicast lock. Found a
       Flet bug on the way: Send to Mac saves non-ASCII names
       percent-encoded (§7).
+- [x] Phase 4b (progress notifications, tap routing) and 4c (the sync
+      manager, on a virtual clock and against Flet's server).
+- [x] Phase 4d: the download queue and dock, the companion download
+      (identical files and results to Python's `download()` against
+      Flet's server), NFC from Python's tables, `pick_download_dir`, the
+      quiet scan and its "not analysed" card (§4, phase 4). Release APK:
+      26.1 MB.
 
 **To do, in order**
 1. [ ] Install the current build on the phone: `tool/install_phone.sh
@@ -932,10 +978,10 @@ sync manager), local.
        j. Phase 4 (sync, Android side) started 2026-11-24, before
           decisions A–C: none of its stages depends on them (transfers
           from the Mac matter more if A keeps downloads there). Stages a
-          (protocol), b (notifications) and c (the manager) done. Next: d
-          (transfers onto the phone: the download queue and dock), then
-          e (the UI, which also wires the manager into the app and its
-          lifecycle); the table in §4, phase 4 has the order. Stage f and g bring the
+          (protocol), b (notifications), c (the manager) and d (the
+          download queue and dock) done. Next: e (the UI, which also
+          wires the manager into the app and its lifecycle, and sets
+          `AppDownloadHost.sync`); the table in §4, phase 4 has the order. Stage f and g bring the
           first callers of `build_metadata_edges`.
 5. [ ] Decisions A, B, C (§6) before phase 6 is planned in detail.
 6. [ ] Flet, on master: the album menu's Play Album tuple,
@@ -959,7 +1005,7 @@ add its row here.
 Status: ✅ done · 🧪 written, not yet confirmed in use · 🔨 to build
 (phase) · ⚠️ depends on a decision (§6) · ✗ dropped.
 
-**Counts:** 39 of the 90 rows are ported (✅ or 🧪); 51 are to build or to decide. The ported rows are the player, the stations, the library views (the Acoustic Network included), playlists, the long-press menu and selection mode, the ledger drain, the scan, the tab bar, the Search landing's local cards, and Settings for all of these.
+**Counts:** 41 of the 90 rows are ported (✅ or 🧪); 49 are to build or to decide. The ported rows are the player, the stations, the library views (the Acoustic Network included), playlists, the long-press menu and selection mode, the ledger drain, the scan, the tab bar, the Search landing's local cards, the download dock, and Settings for all of these.
 
 ### App shell (`main.py`)
 
@@ -972,8 +1018,8 @@ Status: ✅ done · 🧪 written, not yet confirmed in use · 🔨 to build
 | Lifecycle: stop UI work when hidden, prefill auto-play | `_on_lifecycle` | 🧪 (§1 row 18) |
 | Tab bar (Jarvis optional, Search, Library), Settings as a pushed page, startup tab from `startup_page` | `_build_ui`, `_switch_tab` | 🧪 Search and Library, startup tab, fade, back, Settings (§7); Jarvis 🔨 5 |
 | Splash while the app loads | `_build_splash` | 🔨 3, only if startup is slow on the phone |
-| Notification taps routed to a screen (metadata sync, suggestions, download retry, transfers) | `_on_notification_navigate` | 🧪 the router and the Library; transfers and download retry 🔨 4; workbench 🔨 7 |
-| Success sound after a download | `play_success_notification` | 🔨 6 |
+| Notification taps routed to a screen (metadata sync, suggestions, download retry, transfers) | `_on_notification_navigate` | 🧪 the router, the Library, downloads and their Retry; transfers 🔨 4e; workbench 🔨 7 |
+| Success sound after a download | `play_success_notification` | 🧪 the haptic (Flet's Android sound never played, §7); Mac 🔨 8 |
 | Onboarding on first launch | `check_onboarding` | 🔨 7 |
 
 ### Startup and background jobs
@@ -1004,7 +1050,7 @@ Status: ✅ done · 🧪 written, not yet confirmed in use · 🔨 to build
 | Auto-play: chain toggle, AUTO-PLAY header, Auto-play sheet, refills, skip/listen feedback, background prefill | 🧪 |
 | Artwork from a URL (previews) | 🔨 6 |
 | Quality selector sheet (download quality) | ⚠️ A |
-| Download dock (progress of every download, from any tab) | ⚠️ A |
+| Download dock (progress of every download, from any tab) | 🧪 (Mac transfers; source downloads ⚠️ A) |
 
 ### Library tab (`ui/views/library.py`)
 
@@ -1022,7 +1068,7 @@ Status: ✅ done · 🧪 written, not yet confirmed in use · 🔨 to build
 | Playlists: create, rename and recolour, delete, reorder (drag), remove a track | 🧪 |
 | Acoustic Network: 2-D map of the coordinates; density and step chips; zoom; tap to select; walk from a node, reseed; play or queue the walk; now-playing pulse; list panel with its own menu | 🧪 (golden-tested layout; phone check pending) |
 | Which tabs show (Appearance setting) | 🧪 |
-| Scan the library folder: progress, summary, "n tracks not analysed yet" | 🧪 (the alert after automatic scans 🔨 4) |
+| Scan the library folder: progress, summary, "n tracks not analysed yet" | 🧪 (the alert follows the quiet scan after transfers, without Analyse: B) |
 | Compute DSP on the phone (cancellable, notification) | ⚠️ B |
 | Empty-library state with "enter paths" | 🧪 |
 
@@ -1054,7 +1100,7 @@ Status: ✅ done · 🧪 written, not yet confirmed in use · 🔨 to build
 | Feature | Port |
 |---|---|
 | Android: find the Mac (UDP beacon), pair, unpair, manual connect, diagnosis | 🔨 4 |
-| Android: check for and download transfers from the Mac | 🔨 4 |
+| Android: check for and download transfers from the Mac | 🔨 4 (the manager and the download queue are done; the UI and the wiring are stage e) |
 | Android: DSP offload to the Mac (progress notification, cancel from it) | 🔨 4 |
 | Android: upload a state bundle | 🔨 4 |
 | Mac: server toggle, LAN address, clear pending, reset pairing, open backups | Flet on the Mac until 8 |
@@ -1124,7 +1170,8 @@ code or a published template comes in, before it is committed.
 | tomlkit 0.15.2: `InlineTable.as_string`, translated; the rest of its editing behaviour reproduced from its outputs | `lib/core/config_file.dart` (licence text above `_InlineTable`) | https://github.com/python-poetry/tomlkit (PyPI `tomlkit==0.15.2`) | MIT, © 2018 Sébastien Eustace |
 | CPython's `math.hypot` (`vector_norm` in Modules/mathmodule.c: scaling, lossless squaring and summation, one differential correction), translated | `lib/core/py_num.dart` `pyHypot` | https://github.com/python/cpython (3.13) | PSF License v2 |
 | config.toml template: streamrip's `config.toml` plus the app's `[dsp]`, `[haptics]`, `[assistant]`, `[appearance]` sections (utils/config.toml, copied as is) | `assets/config_template.toml` | https://github.com/nathom/streamrip, via the Flet app | GPL-3.0 (streamrip). The Flet APK ships the same file; decide before release (§10 item 7) |
-| streamrip-derived helpers (filename cleaning; in the Flet app's `filepath_utils.py`, credited there) | not ported yet (phase 6) | https://github.com/nathom/streamrip | GPL-3.0: check before porting any of it |
+| streamrip-derived helpers (filename cleaning; in the Flet app's `filepath_utils.py`, credited there) | `clean_filename` only, written from its behaviour (drop `\/*?:"<>|`, cut at 255 UTF-8 bytes, strip, NFC), not translated: `lib/downloads/file_names.dart` | https://github.com/nathom/streamrip | GPL-3.0: no streamrip code copied; check before porting anything else from it |
+| Unicode canonical decompositions, combining classes and composition exclusions, generated from Python's `unicodedata` | `lib/core/nfc_table.dart` (with `lib/core/nfc.dart`) | Unicode Character Database 15.1, via CPython | Unicode License v3 (data) |
 
 **Templates and guidance adopted**
 
@@ -1142,6 +1189,5 @@ Settings → About opens it (Licenses).
 
 | Need | Candidate | Notes |
 |---|---|---|
-| NFC for paths the app names (sync 4, downloads 6) | [`unorm_dart`](https://pub.dev/packages/unorm_dart) 0.3.2 | MIT, pure Dart, Unicode 17, no dependencies. Golden-test against `unicodedata.normalize("NFC")` as py_text was. |
 | Tag writing (`tagger.py`, with downloads, 6) | [`metatagger`](https://pub.dev/packages/metatagger) (pure Dart: ID3v2, vorbis comments, iTunes ilst); [`metadata_god`](https://pub.dev/documentation/metadata_god/latest/) and [`haudiotagger`](https://pub.dev/packages/haudiotagger) (Rust lofty via flutter_rust_bridge); [`flutter_taglib`](https://pub.dev/documentation/flutter_taglib/1.3.2/) (TagLib over FFI) | Pure Dart keeps the build free of Rust (decision B's spirit). Whatever is chosen must leave tags that mutagen and tinytag read back the same. |
 

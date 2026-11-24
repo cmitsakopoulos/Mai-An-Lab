@@ -19,6 +19,12 @@ commands on stdin, one per line:
   {"cmd": "py_quote", "values": [...]}  urllib.parse.quote(v)
   {"cmd": "reset_cache"}                the feature cache back to its seed rows
   {"cmd": "rotate_pin"}                 as after five wrong PINs
+  {"cmd": "queue_files", "files": [{"name": n, "size": k, "fill": b}],
+   "quality": q}                        write files on the "Mac" and queue
+                                        them for the phone
+  {"cmd": "py_download", "url": u, "dir": d}   streamrip_api.download, the
+                                        companion branch (app-private check
+                                        off: the temp dir counts as private)
   {"cmd": "quit"}
 """
 from __future__ import annotations
@@ -216,6 +222,32 @@ async def main():
                 out = {"quoted": [quote(v) for v in msg["values"]]}
             elif cmd == "reset_cache":
                 seed_cache()
+            elif cmd == "queue_files":
+                qdir = os.path.join(SCRATCH, "mac", "queued")
+                os.makedirs(qdir, exist_ok=True)
+                batch = []
+                for f in msg["files"]:
+                    p = os.path.join(qdir, f["name"])
+                    with open(p, "wb") as fh:
+                        fh.write(bytes([f.get("fill", 7)]) * f["size"])
+                    batch.append({"path": p, "title": f["name"], "artist": "A"})
+                queued = await server.queue_tracks_for_transfer(
+                    batch, quality=msg.get("quality", "original"), precompute_dsp=False)
+                out = {"queued": [t["id"] for t in queued]}
+            elif cmd == "py_download":
+                import utils.storage_paths as sp
+                from utils.streamrip_api import download
+                orig = sp.is_app_private
+                sp.is_app_private = lambda _p: False
+                events = []
+                try:
+                    paths = await download(msg["url"], msg["dir"],
+                                           progress_callback=events.append)
+                    out = {"paths": paths, "events": events}
+                except Exception as ex:
+                    out = {"exc_type": type(ex).__name__, "exc": str(ex), "events": events}
+                finally:
+                    sp.is_app_private = orig
             elif cmd == "rotate_pin":
                 server._rotate_pin()
                 out = {"pin": server.pin}

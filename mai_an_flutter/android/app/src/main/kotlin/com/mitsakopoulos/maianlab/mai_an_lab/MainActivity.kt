@@ -1,6 +1,7 @@
 package com.mitsakopoulos.maianlab.mai_an_lab
 
 import android.content.Context
+import android.media.MediaScannerConnection
 import android.net.ConnectivityManager
 import android.net.wifi.WifiManager
 import com.ryanheise.audioservice.AudioServiceActivity
@@ -39,6 +40,16 @@ class MainActivity : AudioServiceActivity() {
                     }
                     "releaseMulticastLock" -> {
                         releaseMulticastLock()
+                        result.success(null)
+                    }
+                    // A file the app saved (a Mac transfer): index it in
+                    // MediaStore so other apps see it.
+                    "scanMediaFile" -> {
+                        val path = call.arguments as? String
+                        if (path != null) {
+                            MediaScannerConnection.scanFile(
+                                applicationContext, arrayOf(path), null, null)
+                        }
                         result.success(null)
                     }
                     else -> result.notImplemented()

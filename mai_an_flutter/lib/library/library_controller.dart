@@ -4,6 +4,7 @@ import 'dart:async';
 import 'dart:io';
 
 import '../core/db_worker.dart';
+import '../core/progress_notify.dart';
 import '../data/library_repository.dart';
 import '../data/play_ledger.dart';
 import '../player/autoplay.dart';
@@ -193,14 +194,21 @@ class LibraryController extends ChangeNotifier implements AutoPlayLibrary {
   /// library.py `start_scan` (a scan the user asked for): index the library
   /// folder, then reload every view. `_on_scan_complete`'s snackbar says
   /// how it went.
-  Future<void> scan() async {
+  ///
+  /// [quiet] is the scan nobody asked for, after downloads or Mac transfers
+  /// land: no banner and no snackbar. When it indexed anything, the "not
+  /// analysed yet" card follows (`_announce_unanalysed`).
+  Future<void> scan({bool quiet = false}) async {
     final repo = _repo;
     final folder = _libraryFolder;
-    if (scanning || repo == null || folder == null || !repo.writable) return;
-    scanning = true;
-    scanProgress = null;
-    scanStatus = 'Initializing active scan…';
-    notifyListeners();
+    if (_scanBusy || repo == null || folder == null || !repo.writable) return;
+    _scanBusy = true;
+    if (!quiet) {
+      scanning = true;
+      scanProgress = null;
+      scanStatus = 'Initializing active scan…';
+      notifyListeners();
+    }
     int? count;
     try {
       final target = await folder();
@@ -208,6 +216,7 @@ class LibraryController extends ChangeNotifier implements AutoPlayLibrary {
         targetFolder: target,
         repo: repo,
         onProgress: (percent, message) {
+          if (quiet) return;
           if (percent == -1) {
             scanProgress = null;
             scanStatus = 'Searching: $message';
@@ -223,16 +232,51 @@ class LibraryController extends ChangeNotifier implements AutoPlayLibrary {
       debugPrint('library scan failed: $e');
       _messages.add('Scan failed: ${e is DbWorkerException ? e.message : e}');
     }
+    _scanBusy = false;
     scanning = false;
     notifyListeners();
     await reload();
-    if (count != null) {
+    if (quiet) {
+      if ((count ?? 0) > 0) await _announceUnanalysed(repo);
+    } else if (count != null) {
       _messages.add(
         count > 0
             ? 'Scan complete. Indexed $count items.'
             : 'Library is up to date.',
       );
     }
+  }
+
+  /// A scan is running, the user's or a quiet one (library.py
+  /// `_is_scanning`).
+  bool _scanBusy = false;
+
+  /// library.py `_announce_unanalysed`: until new tracks are analysed,
+  /// auto-play and the similar-track picks can't use them, and nothing
+  /// outside the Library says so. Flet's card has an Analyse button (on-
+  /// phone analysis); the port's has none until decision B.
+  Future<void> _announceUnanalysed(LibraryRepository repo) async {
+    final int n;
+    try {
+      n = (await repo.featureCoverage()).$2;
+    } catch (e) {
+      debugPrint('unanalysed-track count failed: $e');
+      return;
+    }
+    if (n == 0) {
+      cancelAlert('scan');
+      return;
+    }
+    final many = n != 1;
+    postAlert(
+      'scan',
+      'New music in your library',
+      '$n track${many ? 's' : ''} ${many ? 'are' : 'is'} not analysed yet, '
+          "so auto-play and similar-track picks can't use "
+          '${many ? 'them' : 'it'}.',
+      navigateTo: 'library',
+      icon: 'dsp',
+    );
   }
 
   /// main.py `_delete_track`, after the player has let go of [path]: the

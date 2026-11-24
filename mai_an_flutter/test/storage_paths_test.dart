@@ -1,6 +1,5 @@
 // StreamripApp/tests/test_storage_paths.py, ported: user-facing folders
-// never resolve into the app's sandbox. (The pick_download_dir tests come
-// with downloads, phase 6.)
+// never resolve into the app's sandbox, and pick_download_dir.
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -117,5 +116,61 @@ void main() {
     expect(normpath('///a'), '/a');
     expect(normpath('/..'), '/');
     expect(normpath('a/../..'), '..');
+  });
+
+  group('pick_download_dir', () {
+    late String tmp, box;
+    late StoragePaths sp;
+    setUp(() {
+      tmp = Directory.systemTemp
+          .createTempSync('pick')
+          .resolveSymbolicLinksSync();
+      box = '$tmp/sandbox';
+      Directory(box).createSync();
+      // Python's fixture: the sandbox is private, public music is
+      // <tmp>/public_music (here realHome/Music).
+      sp = StoragePaths(
+        StoragePlatform(
+          isAndroid: false,
+          realHome: '$tmp/home',
+          privateRoots: [box],
+        ),
+      );
+    });
+    tearDown(() {
+      Process.runSync('chmod', ['-R', 'u+rwx', tmp]);
+      Directory(tmp).deleteSync(recursive: true);
+    });
+
+    test('uses the download folder when writable', () {
+      expect(sp.pickDownloadDir('$tmp/dl', '$tmp/lib'), '$tmp/dl');
+      // The probe file is cleaned up.
+      expect(Directory('$tmp/dl').listSync(), isEmpty);
+    });
+
+    test('falls back to the library when the download folder is '
+        'unwritable', () {
+      Directory('$tmp/ro').createSync();
+      Process.runSync('chmod', ['500', '$tmp/ro']);
+      expect(sp.pickDownloadDir('$tmp/ro/dl', '$tmp/lib'), '$tmp/lib');
+    });
+
+    test('never returns the sandbox', () {
+      expect(sp.pickDownloadDir('$box/Music', '$tmp/lib'), '$tmp/lib');
+      expect(sp.pickDownloadDir('$box/a', '$box/b'), '$tmp/home/Music');
+    });
+
+    test('throws rather than using the sandbox', () {
+      expect(
+        () => sp.pickDownloadDir('$tmp/dl', '$tmp/lib', writable: (_) => false),
+        throwsA(
+          isA<StoragePermissionError>().having(
+            (e) => e.message,
+            'message',
+            startsWith('No writable music folder.'),
+          ),
+        ),
+      );
+    });
   });
 }

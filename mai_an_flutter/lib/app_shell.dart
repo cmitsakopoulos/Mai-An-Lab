@@ -6,6 +6,8 @@ import 'package:flutter/services.dart';
 
 import 'core/haptics.dart';
 import 'core/notification_router.dart';
+import 'downloads/download_dock.dart';
+import 'downloads/download_queue.dart';
 import 'library/browse_controller.dart';
 import 'library/library_controller.dart';
 import 'library/library_screen.dart';
@@ -46,6 +48,7 @@ class AppShell extends StatefulWidget {
     this.startTab = AppTab.library,
     this.settings,
     this.router,
+    this.downloads,
   });
 
   final LibraryController library;
@@ -61,6 +64,9 @@ class AppShell extends StatefulWidget {
 
   /// Notification taps: the shell's screens register their targets.
   final NotificationRouter? router;
+
+  /// The download queue: the dock above the mini player.
+  final DownloadQueue? downloads;
 
   @override
   State<AppShell> createState() => AppShellState();
@@ -80,11 +86,42 @@ class AppShellState extends State<AppShell> {
     // library.py's "n tracks not analysed yet" card opens the Library
     // (its Analyse button waits for decision B).
     widget.router?.register('library', (_) => switchTab(AppTab.library));
+    if (widget.downloads case final q?) {
+      widget.router?.register(
+        'downloads',
+        (action) => _openDownloads(q, action),
+      );
+    }
+  }
+
+  /// main.py `_on_notification_navigate`, "downloads": the dock's sheet,
+  /// and for the summary card's Retry, the last batch's failures again.
+  void _openDownloads(DownloadQueue q, String action) {
+    // A cold-start tap arrives from initState, before there is a frame.
+    WidgetsBinding.instance
+      ..addPostFrameCallback((_) {
+        if (mounted) _openDownloadsNow(q, action);
+      })
+      ..ensureVisualUpdate();
+  }
+
+  void _openDownloadsNow(DownloadQueue q, String action) {
+    showDownloadSheet(context, q, _snack);
+    if (action == 'retry') {
+      final n = q.retryFailed();
+      _snack(
+        n > 0
+            ? 'Retrying $n download${n != 1 ? 's' : ''}.'
+            : 'Nothing to retry. The failed downloads are no longer in the '
+                  'list.',
+      );
+    }
   }
 
   @override
   void dispose() {
     widget.router?.unregister('library');
+    if (widget.downloads != null) widget.router?.unregister('downloads');
     selection.dispose();
     super.dispose();
   }
@@ -205,6 +242,8 @@ class AppShellState extends State<AppShell> {
         bottomNavigationBar: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
+            if (widget.downloads case final q?)
+              DownloadPill(queue: q, onSnack: _snack),
             ValueListenableBuilder(
               valueListenable: widget.player,
               builder: (context, player, _) => player == null
