@@ -92,6 +92,25 @@ class AppShellState extends State<AppShell> {
         (action) => _openDownloads(q, action),
       );
     }
+    if (widget.settings?.sync != null) {
+      widget.router?.register('sync', _openSync);
+    }
+  }
+
+  /// main.py `_on_notification_navigate`, "sync": Settings → Companion &
+  /// Sync, and for "transfers" (the background card) the dialog for what
+  /// the Mac sent.
+  void _openSync(String action) {
+    final deps = widget.settings!;
+    WidgetsBinding.instance
+      ..addPostFrameCallback((_) {
+        if (!mounted) return;
+        openSettings(context, deps, initial: SettingsPage.companion);
+        if (action == 'transfers') {
+          deps.sync!.checkPendingTransfers(promptUser: true).ignore();
+        }
+      })
+      ..ensureVisualUpdate();
   }
 
   /// main.py `_on_notification_navigate`, "downloads": the dock's sheet,
@@ -122,6 +141,7 @@ class AppShellState extends State<AppShell> {
   void dispose() {
     widget.router?.unregister('library');
     if (widget.downloads != null) widget.router?.unregister('downloads');
+    if (widget.settings?.sync != null) widget.router?.unregister('sync');
     selection.dispose();
     super.dispose();
   }
@@ -235,6 +255,7 @@ class AppShellState extends State<AppShell> {
                 haptics: widget.haptics,
                 selection: selection,
                 onOpenSettings: _openSettings,
+                sync: widget.settings?.sync,
               ),
             ),
           ],

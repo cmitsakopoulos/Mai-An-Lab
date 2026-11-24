@@ -12,14 +12,15 @@ the Search tab's local landing cards, Settings with the config.toml
 writer, and the Acoustic Network view (§4, phase 3). Phase 4 (sync,
 Android side) is under way: the Companion protocol and discovery, tested
 against Flet's own server, notifications, the sync manager, and the
-download queue and dock that bring the Mac's transfers onto the phone
+download queue and dock that bring the Mac's transfers onto the phone, and
+the Companion & Sync page, its dialogs and Send to Mac in the menus
 (§4, phase 4). Desktop
-tests pass (`flutter test`: 479, including the real-library golden tests
+tests pass (`flutter test`: 490, including the real-library golden tests
 that need the gitignored goldens; analyzer clean in Dart's strict modes);
 debug and release APKs build.
 It is installed on the phone (2026-11-24, with the 2026-11-02 library, an
 older build: no scan, no Settings yet). The user reports problems found in use; fix
-them, or record intended differences in §7. Nothing ships from this port yet. 41 of the 90 Flet features in §11
+them, or record intended differences in §7. Nothing ships from this port yet. 46 of the 90 Flet features in §11
 are ported. Third-party code the port uses or copies is listed in §12.*
 
 **Next session: start at §10 (open items). §11 lists every Flet feature and
@@ -108,7 +109,7 @@ Status key:
 | 15 | **Voice** | `flutter_tts`, `speech_to_text`, `RECORD_AUDIO`, `<queries>` for `RecognitionService` | Same plugins | 5 | ♻️ |
 | 16 | **Plain HTTP to the Mac** | `usesCleartextTraffic="true"` app-wide | Nothing to declare: dart:io sockets don't go through Android's cleartext policy (this SDK's dart:io has no such check). INTERNET is declared. Confirm on the phone with the first real pairing. | 4 | 🧪 |
 | 17 | **LAN discovery** | UDP query every 2 s on port 54545, answered by unicast; beacons dropped (no multicast lock: pyjnius isn't in the build) | `sync/discovery.dart` (`RawDatagramSocket`), with `MainActivity`'s `acquireMulticastLock` and `defaultRouteIpv4` (§4, phase 4a). ⚠️ Recheck local-network permission rules before raising targetSdk past 36. | 4 | 🧪⚠️ |
-| 18 | **Lifecycle** | `on_app_lifecycle_state_change`: suspend UI updates in the background, prefill the autoplay buffer on hide, run assistant and companion background hooks, pick up listens finished in the background | `AppLifecycleListener`. Flutter stops drawing frames by itself. Done: the position ticker stops, the position is saved and the auto-play buffer is topped up to 24 on hide. Listens reach auto-play in-process (§7), so there is no catch-up to do for it. The ledger drain runs on show, at start and 3 s after each listen (phase 3, 🧪). Still to come: assistant and companion hooks (4–5). | 1–4 | 🔨 |
+| 18 | **Lifecycle** | `on_app_lifecycle_state_change`: suspend UI updates in the background, prefill the autoplay buffer on hide, run assistant and companion background hooks, pick up listens finished in the background | `AppLifecycleListener`. Flutter stops drawing frames by itself. Done: the position ticker stops, the position is saved and the auto-play buffer is topped up to 24 on hide. Listens reach auto-play in-process (§7), so there is no catch-up to do for it. The ledger drain runs on show, at start and 3 s after each listen (phase 3, 🧪). The Companion manager's background and resume hooks (phase 4e, 🧪). Still to come: the assistant's (5). | 1–5 | 🔨 |
 | 19 | **Edge-to-edge, predictive back** | Flet/Flutter defaults | targetSdk 36 forces both. Back on the root screen calls `moveTaskToBack` (MainActivity channel `mai_an/app`); predictive back is enabled. Still to audit: edge-to-edge insets in the sheets. | 1 | 🧪 |
 | 20 | **16 KB memory pages** (Android 15+ devices) | Flet build | ✅ Checked: every `.so` in the port's APK has 16 KB LOAD alignment, and the zip is 16 KB-aligned | 0 | ✅ |
 | 21 | **Haptics, links, clipboard, file picker** | `HapticFeedback` (about 15 call sites, configurable intensity), `UrlLauncher`, `FilePicker` (1) | `core/haptics.dart` reads `[haptics]` (on/off, per-action intensity, main.py's defaults); used by the track menu (long_press, swipe_queue): 🧪. `url_launcher`, `file_selector` when needed: 🔨. | as needed | 🧪🔨 |
@@ -557,7 +558,7 @@ stays Python until phase 8). Stages, one commit each:
 | b | Progress and alert notifications: a Dart `ProgressNotifier` over the Kotlin `showProgressNotification` (throttle, summary, cancel and Retry buttons, the task service), `post_alert`, notification routing to the screens that exist | `progress_notify.py`, main.py `_on_notification_navigate` | ✅ |
 | c | The manager: enable and idle auto-off, USB and saved-address probe, heartbeat, PIN snooze, Find Mac (probe, query, sweep) and its messages, manual connect, unpair, background and resume hooks, auto-accept, the Send to Mac worker and acks; the device name | `sync/manager.py`, `sync/send.py` | ✅ (wired into the app with e) |
 | d | Transfers onto the phone: the download queue for the `companion` source (`.part`, size check, no-overwrite names, `clean_filename`, NFC, `pick_download_dir`, features stored, one quiet scan after the queue drains, Android media scan) and the dock as far as transfers need it | `queue_controller.py`, `streamrip_api.download` (companion branch), `download_dock.py` | ✅ |
-| e | UI: Settings → Companion & Sync and the sync hub, the PIN and transfer dialogs, Send to Mac in the long-press, selection and album menus | `ui/views/sync_hub.py`, manager dialogs, `send.py` | 🔨 |
+| e | UI: Settings → Companion & Sync and the sync hub, the PIN and transfer dialogs, Send to Mac in the long-press, selection and album menus | `ui/views/sync_hub.py`, manager dialogs, `send.py` | ✅ |
 | f | State bundles: export (Settings, and the boot auto-export to Downloads and the library folder), import (Settings, and `*_import.zip` at boot, with `.onboarded`), upload to the Mac | `state_export.py`, main.py `_heavy_init`, `_auto_export_state_snapshot` | 🔨 |
 | g | DSP offload and the acoustic build: features stored in batches, then `build_metadata_edges` and `build_acoustic_edges` (the SVD build, golden-tested against numpy), and the startup readiness build | sync_hub's offload, `track_graph.py`, `pca_engine.redundant_raw_features`, main.py `_ensure_graph_built_async` | 🔨 |
 
@@ -652,6 +653,42 @@ test_download_queue.py and the workflow), `file_names_test.dart` (NFC,
 to Python's own `download()` into a twin folder: same results, same files,
 same first and last progress reports, for an NFD name, illegal
 characters, a re-send, a taken name, no token and a file never queued.
+
+**Stage e.** `settings/sync_hub.dart` is sync_hub.py's Android view,
+its first two cards: Companion Sync (the switch and its snackbars, the
+status dot and line for off, asleep, searching with the last error, and
+connected with the USB/address and the analysis-version warning; Find Mac
+/ Test Connection / Searching…, Unpair, Manual IP with
+`_do_manual_connect`'s port parsing, and the diagnosis kept on screen,
+green when found; a failed Find opens Manual IP) and Transfers from Mac
+(the pending count re-asked on every manager change while connected, as
+Flet does; Download (n) from Mac; Check Pending; Ask before downloading).
+The DSP offload card comes with stage g and the backup card with f.
+`sync/sync_dialogs.dart` holds manager.py's PIN dialog (4 digits,
+masked with reveal, Pairing…, the two error texts, Not now / back / a tap
+outside snooze) and transfer dialog (the summary, the track list,
+Later / Download (n)). `sync/app_sync_host.dart` is the app as manager.py
+sees it: flet_prefs.json (a write doesn't hold the manager up, as Flet's
+synchronous `_save_pref` didn't), `is_background` from the lifecycle,
+snackbars with Flet's icons, the dialogs on the root navigator (closed
+from the manager when it stops or pairs), the download queue and the
+features lookup. `sync/send.dart` is send.py's phone half:
+`companion_target` (the Mac's name, paired or not), `_reach_mac` (not
+paired: say so; else wake the link and probe once, or say why not) and
+`send_tracks`. The track menu's Send to <Mac> (before Delete), the album
+menu's Send Album to <Mac> and the selection bar's send button are shown
+whenever the manager runs, as in Flet. `main.dart` builds the manager at
+start, starts it after the first frame when the switch was left on, sets
+`AppDownloadHost.sync`, and calls `handleAppBackground` / `handleAppResume`
+on hide and show. The `sync` notification target opens Settings →
+Companion & Sync, and `sync:transfers` (the background card) asks the Mac
+again with the dialog. The hub has its own Settings entry and search row
+(goldens re-exported with it). Tests: `sync_hub_test.dart` (the switch,
+connected state and both dialogs, auto-accept, PIN errors and the
+snooze, Find Mac's diagnosis and Manual IP, Send unpaired, unreachable
+and from the track menu, and in the shell: Send from the Library's
+long-press and the `sync:transfers` tap); the fakes moved to
+`sync_fakes.dart`, shared with `sync_manager_test.dart`.
 
 **How parity is proved (stage a).** `tool/companion_test_server.py` runs
 Flet's own `CompanionServer` hermetically (scratch feature cache and
@@ -771,6 +808,9 @@ uninstall and reinstall; the bundle export/import covers the data.
 | "Not analysed yet" card after a quiet scan | Analyse button (on-phone analysis) | The card without the button | Decision B. |
 | Quiet scan while the Library is hidden | The reload is deferred until the tab shows | Reloaded at once | Flutter rebuilds only what is visible; nothing to defer. |
 | Download errors from the network | aiohttp's text ("Cannot connect to host …") | dart:io's (`SocketException: …`) | Different words, same place (the dock's status line). |
+| Companion on desktop builds | The Mac shows the server view | Desktop dev runs act as the phone (client view) | Until phase 8 ports the Mac's server; nothing ships to the Mac before then. |
+| Companion & Sync page | Four cards (connection, transfers, DSP offload, backup) | The first two | Offload: stage g; backup: stage f. |
+| A `sync` notification tap with Settings open | Switches the Settings view to Companion & Sync | Pushes Settings at Companion & Sync over what is open | Back returns to where the user was; nothing to fix unless it bothers in use. |
 | Discovery on Android | Hears only the Mac's unicast replies to its query (no multicast lock without pyjnius) | Holds a MulticastLock while listening, so the Mac's 2 s broadcast beacons arrive as well | Intentional (§1 row 17): finds the Mac sooner on networks that pass broadcasts. |
 
 ---
@@ -860,7 +900,7 @@ views' and playlists' queries, the library UI (views, scan UI, playlists,
 long-press menu, selection, delete), and the tab bar with the Search
 landing; then this plan; all pushed to origin. Then Settings (`e946579`)
 and the Network view, local. Then phase 4a (the Companion protocol), 4b (notifications), 4c (the
-sync manager) and 4d (the download queue and dock), local.
+sync manager), 4d (the download queue and dock) and 4e (the Companion UI), local.
 
 **Done**
 - [x] Phase 0: backbone (read-only DB isolate, tracks tab, sort, search,
@@ -927,6 +967,10 @@ sync manager) and 4d (the download queue and dock), local.
       Flet's server), NFC from Python's tables, `pick_download_dir`, the
       quiet scan and its "not analysed" card (§4, phase 4). Release APK:
       26.1 MB.
+- [x] Phase 4e: Settings → Companion & Sync, the PIN and transfer
+      dialogs, Send to Mac in the track, album and selection menus, the
+      manager wired into the app, its lifecycle and the `sync`
+      notification target (§4, phase 4). Release APK: 26.4 MB.
 
 **To do, in order**
 1. [ ] Install the current build on the phone: `tool/install_phone.sh
@@ -978,11 +1022,14 @@ sync manager) and 4d (the download queue and dock), local.
        j. Phase 4 (sync, Android side) started 2026-11-24, before
           decisions A–C: none of its stages depends on them (transfers
           from the Mac matter more if A keeps downloads there). Stages a
-          (protocol), b (notifications), c (the manager) and d (the
-          download queue and dock) done. Next: e (the UI, which also
-          wires the manager into the app and its lifecycle, and sets
-          `AppDownloadHost.sync`); the table in §4, phase 4 has the order. Stage f and g bring the
-          first callers of `build_metadata_edges`.
+          (protocol), b (notifications), c (the manager), d (the
+          download queue and dock) and e (the UI and wiring) done.
+          Next: f (state bundles: export, import, upload; the hub's
+          backup card), then g (offload and the acoustic build; the
+          hub's offload card); the table in §4, phase 4 has the order.
+          Stages f and g bring the first callers of
+          `build_metadata_edges`. On the phone, check a real pairing
+          (§1 row 16: cleartext HTTP) and a transfer end to end.
 5. [ ] Decisions A, B, C (§6) before phase 6 is planned in detail.
 6. [ ] Flet, on master: the album menu's Play Album tuple,
        Appearance's sort writing `library_sort`, the Network view's
@@ -1005,7 +1052,7 @@ add its row here.
 Status: ✅ done · 🧪 written, not yet confirmed in use · 🔨 to build
 (phase) · ⚠️ depends on a decision (§6) · ✗ dropped.
 
-**Counts:** 41 of the 90 rows are ported (✅ or 🧪); 49 are to build or to decide. The ported rows are the player, the stations, the library views (the Acoustic Network included), playlists, the long-press menu and selection mode, the ledger drain, the scan, the tab bar, the Search landing's local cards, the download dock, and Settings for all of these.
+**Counts:** 46 of the 90 rows are ported (✅ or 🧪); 44 are to build or to decide. The ported rows are the player, the stations, the library views (the Acoustic Network included), playlists, the long-press menu and selection mode, the ledger drain, the scan, the tab bar, the Search landing's local cards, the download dock, Companion pairing, transfers and Send to Mac, and Settings for all of these.
 
 ### App shell (`main.py`)
 
@@ -1018,7 +1065,7 @@ Status: ✅ done · 🧪 written, not yet confirmed in use · 🔨 to build
 | Lifecycle: stop UI work when hidden, prefill auto-play | `_on_lifecycle` | 🧪 (§1 row 18) |
 | Tab bar (Jarvis optional, Search, Library), Settings as a pushed page, startup tab from `startup_page` | `_build_ui`, `_switch_tab` | 🧪 Search and Library, startup tab, fade, back, Settings (§7); Jarvis 🔨 5 |
 | Splash while the app loads | `_build_splash` | 🔨 3, only if startup is slow on the phone |
-| Notification taps routed to a screen (metadata sync, suggestions, download retry, transfers) | `_on_notification_navigate` | 🧪 the router, the Library, downloads and their Retry; transfers 🔨 4e; workbench 🔨 7 |
+| Notification taps routed to a screen (metadata sync, suggestions, download retry, transfers) | `_on_notification_navigate` | 🧪 the router, the Library, downloads and their Retry, sync and its transfers; workbench 🔨 7 |
 | Success sound after a download | `play_success_notification` | 🧪 the haptic (Flet's Android sound never played, §7); Mac 🔨 8 |
 | Onboarding on first launch | `check_onboarding` | 🔨 7 |
 
@@ -1033,7 +1080,7 @@ Status: ✅ done · 🧪 written, not yet confirmed in use · 🔨 to build
 | Cache pruning | `_prune_caches_async` | 🔨 3 (album art); 6 (previews). The manual clears are in Settings → Advanced 🧪 |
 | State bundle auto-export on every boot (Downloads and library folder) | `_auto_export_state_snapshot` | 🔨 4. The Mac offload and `fresh_build_android.sh` depend on it; Flet keeps doing it while installed |
 | State bundle auto-import (`*_import.zip`) on boot, then graph rebuild | `_heavy_init` | 🔨 4 |
-| Companion auto-discovery | `companion_manager.start` | 🔨 4 |
+| Companion auto-discovery | `companion_manager.start` | 🧪 |
 | Artist-metadata enrichment pass (MusicBrainz / Qobuz; after scans and once per launch; retries; notification) | `_enrich_metadata_async`, `metadata_enrich.enrich_pending` | 🔨 7. Stations read its `artist_enrichment`; until it runs, new artists borrow a profile from their sound neighbours |
 | New-releases refresh (daily gate) | `ensure_new_releases_refresh`, `new_releases.py` | 🔨 6 |
 
@@ -1059,10 +1106,10 @@ Status: ✅ done · 🧪 written, not yet confirmed in use · 🔨 to build
 | Tracks: rows, format badge, subtitle rules, sort modes, search, playing-row tint | ✅ / 🧪 |
 | Long-press: Play next, Add to queue, Start radio | 🧪 |
 | Long-press: Add to playlist (existing or new), Delete (file + database), Select multiple | 🧪 |
-| Long-press: Send to the Mac | 🔨 4 |
+| Long-press: Send to the Mac | 🧪 |
 | Long-press: Redownload | ⚠️ A |
-| Selection mode: play, queue, add to playlist, send | 🧪 (send 🔨 4) |
-| Albums: expandable rows; album menu (play, queue, send) | 🧪 (send 🔨 4) |
+| Selection mode: play, queue, add to playlist, send | 🧪 |
+| Albums: expandable rows; album menu (play, queue, send) | 🧪 |
 | Artists: artist → albums → tracks; edit-metadata button | 🧪 (editor 🔨 7) |
 | Genres: genre groups and colours, play a genre, curate in the workbench | 🧪 (curate 🔨 7) |
 | Playlists: create, rename and recolour, delete, reorder (drag), remove a track | 🧪 |
@@ -1099,8 +1146,8 @@ Status: ✅ done · 🧪 written, not yet confirmed in use · 🔨 to build
 
 | Feature | Port |
 |---|---|
-| Android: find the Mac (UDP beacon), pair, unpair, manual connect, diagnosis | 🔨 4 |
-| Android: check for and download transfers from the Mac | 🔨 4 (the manager and the download queue are done; the UI and the wiring are stage e) |
+| Android: find the Mac (UDP beacon), pair, unpair, manual connect, diagnosis | 🧪 |
+| Android: check for and download transfers from the Mac | 🧪 |
 | Android: DSP offload to the Mac (progress notification, cancel from it) | 🔨 4 |
 | Android: upload a state bundle | 🔨 4 |
 | Mac: server toggle, LAN address, clear pending, reset pairing, open backups | Flet on the Mac until 8 |
@@ -1110,7 +1157,7 @@ Status: ✅ done · 🧪 written, not yet confirmed in use · 🔨 to build
 | Group | Contents | Port |
 |---|---|---|
 | Hub | Groups list, fuzzy settings search | 🧪 (search golden-tested) |
-| Companion & Sync | Opens the sync hub | 🔨 4 |
+| Companion & Sync | Opens the sync hub | 🧪 (offload and backup cards 🔨 4f–g) |
 | Storage & Paths | Library folder, downloads folder, default download quality | 🧪 folders and the Android navigator; ⚠️ A (quality) |
 | Authentication | Qobuz (email/ID, password or token, app ID and secret), Deezer ARL | ⚠️ A |
 | AI Assistant | Enable, provider and API key, model list, test connection, personality presets (built-in and custom) | 🔨 5 |

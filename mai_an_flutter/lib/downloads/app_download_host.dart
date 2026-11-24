@@ -1,6 +1,6 @@
 import 'dart:io';
 
-import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../core/haptics.dart';
@@ -25,10 +25,9 @@ class AppDownloadHost implements DownloadHost {
   final String dataDir;
   final LibraryController library;
   final Haptics haptics;
-  final void Function(String text) onSnack;
+  final void Function(String text, {IconData? icon, Color? color}) onSnack;
 
-  /// Set once the Companion manager runs (phase 4e): it hears how each Mac
-  /// transfer ended.
+  /// The Companion manager: it hears how each Mac transfer ended.
   CompanionSyncManager? sync;
 
   @override

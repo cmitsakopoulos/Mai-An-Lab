@@ -153,9 +153,19 @@ Future<String> deviceName() async {
   return _deviceName = name.isEmpty ? 'Android Phone' : name;
 }
 
-/// Snackbar icons the manager asks for (Flet's ft.Icons in manager.py and
-/// send.py).
-enum SyncIcon { linkOff, check, download, error, upload, sync, wifiOff }
+/// Snackbar icons the manager asks for (Flet's ft.Icons in manager.py,
+/// send.py and sync_hub.py).
+enum SyncIcon {
+  linkOff,
+  check,
+  download,
+  error,
+  upload,
+  sync,
+  wifiOff,
+  radar,
+  stop,
+}
 
 /// The download queue's side of transfers (queue_controller.py
 /// `enqueue_many`). The port's queue arrives with phase 4d.
@@ -976,6 +986,9 @@ class CompanionSyncManager extends ChangeNotifier {
 
   /// The name the menus use (send.py `companion_target`).
   String macName([String fallback = 'Mac']) => _macName(fallback);
+
+  /// send.py `companion_target(...).paired`: a pairing token is saved.
+  bool get isPaired => _truthy(_pref('companion_paired_token', ''));
 
   /// Download what the paired Mac sent without asking: sending it was the
   /// decision. A transfer that keeps failing drops back to the dialog.

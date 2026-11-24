@@ -4,11 +4,13 @@ import 'package:flutter/material.dart';
 import '../core/haptics.dart';
 import '../library/library_controller.dart';
 import '../player/player_controller.dart';
+import '../sync/sync_manager.dart';
 import '../ui/tokens.dart';
 import 'audio_dsp.dart';
 import 'config_controller.dart';
 import 'groups.dart';
 import 'settings_search.dart';
+import 'sync_hub.dart';
 
 export 'settings_search.dart' show SettingsPage;
 
@@ -20,6 +22,7 @@ class SettingsDeps {
     required this.library,
     required this.player,
     required this.haptics,
+    this.sync,
   });
 
   final String dataDir;
@@ -27,6 +30,9 @@ class SettingsDeps {
   final LibraryController library;
   final ValueListenable<PlayerController?> player;
   final Haptics haptics;
+
+  /// The Companion manager; null leaves Companion & Sync out (tests).
+  final CompanionSyncManager? sync;
 }
 
 /// main.py's Settings tab as a pushed page (it sits outside the tab bar in
@@ -89,6 +95,7 @@ class SettingsScreenState extends State<SettingsScreen> {
                     key: const ValueKey('hub'),
                     search: _search,
                     onOpen: open,
+                    hasSync: widget.deps.sync != null,
                   )
                 : KeyedSubtree(key: ValueKey(page), child: _subpage(page!)),
           ),
@@ -100,6 +107,10 @@ class SettingsScreenState extends State<SettingsScreen> {
   Widget _subpage(SettingsPage p) {
     final d = widget.deps;
     final body = switch (p) {
+      SettingsPage.companion => switch (d.sync) {
+        final m? => SyncHubGroup(manager: m),
+        null => const Center(child: Dim('Companion & Sync is not running.')),
+      },
       SettingsPage.storage => StorageGroup(deps: d),
       SettingsPage.appearance => AppearanceGroup(deps: d),
       SettingsPage.audio => AudioDspGroup(deps: d),
@@ -364,10 +375,16 @@ void showSettingsSnack(BuildContext context, String text) {
 
 /// `_render_hub_or_search`.
 class _Hub extends StatefulWidget {
-  const _Hub({super.key, required this.search, required this.onOpen});
+  const _Hub({
+    super.key,
+    required this.search,
+    required this.onOpen,
+    required this.hasSync,
+  });
 
   final TextEditingController search;
   final ValueChanged<SettingsPage> onOpen;
+  final bool hasSync;
 
   @override
   State<_Hub> createState() => _HubState();
@@ -422,6 +439,7 @@ class _HubState extends State<_Hub> {
       const divider = Divider(color: Tokens.border, height: 30);
       children.addAll([
         section('GENERAL'),
+        if (widget.hasSync) _item(_entry(SettingsPage.companion)),
         _item(_entry(SettingsPage.storage)),
         divider,
         section('CUSTOMISATION'),
@@ -437,7 +455,10 @@ class _HubState extends State<_Hub> {
         _item(_entry(SettingsPage.about)),
       ]);
     } else {
-      final matches = searchSettings(query);
+      final matches = [
+        for (final e in searchSettings(query))
+          if (widget.hasSync || e.page != SettingsPage.companion) e,
+      ];
       if (matches.isNotEmpty) {
         children.add(
           Padding(

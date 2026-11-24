@@ -303,6 +303,7 @@
   {
    "query": "dsp",
    "titles": [
+    "Companion & Sync",
     "Audio & DSP",
     "Database Management"
    ]
@@ -343,7 +344,9 @@
   },
   {
    "query": "sync",
-   "titles": []
+   "titles": [
+    "Companion & Sync"
+   ]
   },
   {
    "query": "turn off haptics",
@@ -376,6 +379,7 @@
   {
    "query": "a",
    "titles": [
+    "Companion & Sync",
     "Storage & Paths",
     "Appearance",
     "Audio & DSP",
@@ -397,6 +401,7 @@
   {
    "query": "general",
    "titles": [
+    "Companion & Sync",
     "Storage & Paths"
    ]
   },
@@ -523,6 +528,55 @@
    "query": "lobotomize",
    "titles": [
     "Advanced"
+   ]
+  },
+  {
+   "query": "companion",
+   "titles": [
+    "Companion & Sync"
+   ]
+  },
+  {
+   "query": "pairing",
+   "titles": [
+    "Companion & Sync"
+   ]
+  },
+  {
+   "query": "pin",
+   "titles": [
+    "Companion & Sync"
+   ]
+  },
+  {
+   "query": "mac",
+   "titles": [
+    "Companion & Sync",
+    "Permissions"
+   ]
+  },
+  {
+   "query": "offload",
+   "titles": [
+    "Companion & Sync"
+   ]
+  },
+  {
+   "query": "wireless",
+   "titles": [
+    "Companion & Sync"
+   ]
+  },
+  {
+   "query": "server",
+   "titles": [
+    "Companion & Sync"
+   ]
+  },
+  {
+   "query": "pair with mac",
+   "titles": [
+    "Companion & Sync"
    ]
   }
  ]

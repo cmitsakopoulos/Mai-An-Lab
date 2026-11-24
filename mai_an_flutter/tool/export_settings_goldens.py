@@ -31,7 +31,7 @@ from ui.views import settings as S  # noqa: E402
 from ui.widgets import HubSettingItem  # noqa: E402
 
 PORTED = {
-    "Storage & Paths", "Appearance", "Audio & DSP", "Haptic Feedback",
+    "Companion & Sync", "Storage & Paths", "Appearance", "Audio & DSP", "Haptic Feedback",
     "Permissions", "Database Management", "Advanced", "About",
 }
 
@@ -50,6 +50,8 @@ QUERIES = [
     "developer tools", "DEVELOPER", "  Eq  ", "pca", "index", "sqlite",
     "notification", "audio", "sound", "volume", "preset", "curve", "tabs",
     "glow", "top artists", "onboarding", "demo", "lobotomize",
+    "companion", "pairing", "pin", "mac", "offload", "wireless", "server",
+    "pair with mac",
 ]
 
 

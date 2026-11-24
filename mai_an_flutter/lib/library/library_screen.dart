@@ -10,6 +10,8 @@ import '../data/library_repository.dart';
 import '../player/player_controller.dart';
 import '../player/ui/mini_player.dart';
 import '../settings/settings_search.dart';
+import '../sync/send.dart';
+import '../sync/sync_manager.dart';
 import '../ui/tokens.dart';
 import 'browse_controller.dart';
 import 'browse_view.dart';
@@ -34,6 +36,7 @@ class LibraryScreen extends StatefulWidget {
     this.unifiedPills = false,
     this.selection,
     this.onOpenSettings,
+    this.sync,
   });
 
   final LibraryController controller;
@@ -56,6 +59,10 @@ class LibraryScreen extends StatefulWidget {
   /// The header's settings button and the empty library's ENTER PATHS
   /// (main.py `switch_to_settings`); null leaves them out.
   final void Function([SettingsPage?])? onOpenSettings;
+
+  /// The Companion manager: Send to the Mac in the menus and the selection
+  /// bar. Null leaves them out.
+  final CompanionSyncManager? sync;
 
   @override
   State<LibraryScreen> createState() => _LibraryScreenState();
@@ -303,6 +310,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
                     onAddToPlaylist: () =>
                         _addToPlaylist(selection.tracks, fromSelection: true),
                     canWritePlaylists: controller.canWrite,
+                    sendTarget: widget.sync == null
+                        ? null
+                        : companionTarget(widget.sync!),
+                    onSend: () => _send(selection.tracks),
                   )
                 : const SizedBox.shrink(),
           ),
@@ -401,11 +412,13 @@ class _LibraryScreenState extends State<LibraryScreen> {
     };
   }
 
-  /// library.py `_open_album_context_menu`: Play Album, Add Album to Queue.
-  /// (Send Album arrives with sync, phase 4.)
+  /// library.py `_open_album_context_menu`: Play Album, Add Album to
+  /// Queue, Send Album to the Mac.
   void _albumMenu(AlbumRow a) {
     widget.haptics.trigger('long_press');
     final player = widget.player.value;
+    final sync = widget.sync;
+    final target = sync == null ? null : companionTarget(sync);
     showModalBottomSheet<void>(
       context: context,
       backgroundColor: Tokens.surface,
@@ -458,6 +471,20 @@ class _LibraryScreenState extends State<LibraryScreen> {
                 _snack('Added ${tracks.length} tracks to queue.');
               },
             ),
+            if (target != null)
+              ListTile(
+                leading: Icon(target.icon, color: Tokens.accentGreen),
+                title: Text('Send Album to ${target.name}'),
+                onTap: () async {
+                  Navigator.pop(sheet);
+                  final tracks = await browse.albumTracks(a);
+                  if (tracks.isEmpty) {
+                    _snack('No tracks found for this album.');
+                  } else {
+                    await sendTracks(sync!, tracks);
+                  }
+                },
+              ),
           ],
         ),
       ),
@@ -468,29 +495,50 @@ class _LibraryScreenState extends State<LibraryScreen> {
     widget.haptics.trigger('long_press');
     final player = widget.player.value;
     final writable = controller.canWrite;
-    showTrackMenu(context, t, (
-      select: () => selection.enable(t),
-      playNext: player == null
+    showTrackMenu(
+      context,
+      t,
+      (
+        select: () => selection.enable(t),
+        playNext: player == null
+            ? null
+            : () {
+                player.queueNext(t);
+                widget.haptics.trigger('swipe_queue');
+              },
+        addToQueue: player == null
+            ? null
+            : () {
+                player.queueLast(t);
+                widget.haptics.trigger('swipe_queue');
+              },
+        startRadio: player?.autoplay == null
+            ? null
+            : () {
+                player!.autoplay!.startRadio(t);
+                widget.haptics.trigger('swipe_queue');
+              },
+        addToPlaylist: writable ? () => _addToPlaylist([t]) : null,
+        delete: writable && t.path.isNotEmpty ? () => _deleteTrack(t) : null,
+      ),
+      sendLabel: widget.sync == null
           ? null
-          : () {
-              player.queueNext(t);
-              widget.haptics.trigger('swipe_queue');
-            },
-      addToQueue: player == null
-          ? null
-          : () {
-              player.queueLast(t);
-              widget.haptics.trigger('swipe_queue');
-            },
-      startRadio: player?.autoplay == null
-          ? null
-          : () {
-              player!.autoplay!.startRadio(t);
-              widget.haptics.trigger('swipe_queue');
-            },
-      addToPlaylist: writable ? () => _addToPlaylist([t]) : null,
-      delete: writable && t.path.isNotEmpty ? () => _deleteTrack(t) : null,
-    ));
+          : companionTarget(widget.sync!).label,
+      send: widget.sync == null ? null : () => _send([t]),
+    );
+  }
+
+  /// library.py `_send_tracks`: no dialog, the result is a snackbar; a
+  /// selection ends.
+  void _send(List<Track> tracks) {
+    final sync = widget.sync;
+    if (sync == null) return;
+    if (tracks.isEmpty) {
+      _snack('No tracks selected.');
+      return;
+    }
+    unawaited(sendTracks(sync, tracks));
+    if (selection.active) selection.exit();
   }
 
   /// library.py `_selection_play`: the selection, in the order it was
@@ -594,8 +642,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
 }
 
 /// library.py `_selection_bar`: cancel, the count, Play, Add to Queue, Add
-/// to Playlist (Send arrives with sync, phase 4). The actions are disabled
-/// while nothing is ticked.
+/// to Playlist and Send (when [sendTarget] is set). The actions are
+/// disabled while nothing is ticked.
 class _SelectionBar extends StatelessWidget {
   const _SelectionBar({
     required this.selection,
@@ -603,6 +651,8 @@ class _SelectionBar extends StatelessWidget {
     required this.onQueue,
     required this.onAddToPlaylist,
     required this.canWritePlaylists,
+    required this.onSend,
+    this.sendTarget,
   });
 
   final SelectionController selection;
@@ -610,6 +660,8 @@ class _SelectionBar extends StatelessWidget {
   final VoidCallback onQueue;
   final VoidCallback onAddToPlaylist;
   final bool canWritePlaylists;
+  final VoidCallback onSend;
+  final CompanionTarget? sendTarget;
 
   @override
   Widget build(BuildContext context) {
@@ -659,6 +711,13 @@ class _SelectionBar extends StatelessWidget {
             tooltip: 'Add to Playlist',
             onPressed: some && canWritePlaylists ? onAddToPlaylist : null,
           ),
+          if (sendTarget case final target?)
+            IconButton(
+              icon: Icon(target.icon),
+              color: Tokens.accentGreen,
+              tooltip: target.label,
+              onPressed: some ? onSend : null,
+            ),
         ],
       ),
     );

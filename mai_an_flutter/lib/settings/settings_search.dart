@@ -20,9 +20,10 @@ class SettingEntry {
 }
 
 /// The hub's groups the port has (settings.py `open_subpage` names). Those
-/// waiting on later phases (Companion & Sync, Authentication, AI Assistant,
-/// Metadata) are left out of the hub and the search alike.
+/// waiting on later phases (Authentication, AI Assistant, Metadata) are
+/// left out of the hub and the search alike.
 enum SettingsPage {
+  companion('Companion & Sync'),
   storage('Storage'),
   appearance('Appearance'),
   audio('Audio & DSP'),
@@ -40,6 +41,17 @@ enum SettingsPage {
 
 /// settings.py `_build_search_registry`, the ported entries, in hub order.
 const kSettingEntries = [
+  SettingEntry(
+    page: SettingsPage.companion,
+    title: 'Companion & Sync',
+    subtitle: 'Wireless feature offload and device transfers',
+    category: 'GENERAL',
+    icon: Icons.sync_rounded,
+    keywords: [
+      'companion', 'sync', 'offload', 'dsp', 'mac', 'android', 'wireless', //
+      'bluetooth', 'p2p', 'remote', 'pairing', 'pin', 'server',
+    ],
+  ),
   SettingEntry(
     page: SettingsPage.storage,
     title: 'Storage & Paths',

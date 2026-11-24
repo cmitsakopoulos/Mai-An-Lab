@@ -25,6 +25,8 @@ import 'scan/library_folder.dart';
 import 'search/landing_controller.dart';
 import 'settings/config_controller.dart';
 import 'settings/settings_page.dart';
+import 'sync/app_sync_host.dart';
+import 'sync/sync_manager.dart';
 import 'ui/tokens.dart';
 
 /// Override with: --dart-define=LIBRARY_DB=/path/library.db
@@ -49,12 +51,35 @@ Future<String> resolveDataDir() async {
   return dir.path;
 }
 
-/// Snackbars from outside the widget tree (the download queue).
+/// Snackbars from outside the widget tree (the download queue, the
+/// Companion manager).
 final _messenger = GlobalKey<ScaffoldMessengerState>();
 
-void _snack(String text) => _messenger.currentState
-  ?..hideCurrentSnackBar()
-  ..showSnackBar(SnackBar(content: Text(text)));
+/// The root navigator: the Companion manager's PIN and transfer dialogs.
+final _navigator = GlobalKey<NavigatorState>();
+
+/// main.py `show_snackbar(text, icon, color)`: the icon in [color] (the
+/// accent by default) before the text.
+void _snack(String text, {IconData? icon, Color? color}) {
+  final m = _messenger.currentState;
+  if (m == null) return;
+  final content = icon == null
+      ? Text(text)
+      : Row(
+          children: [
+            Icon(
+              icon,
+              size: 20,
+              color: color ?? Theme.of(m.context).colorScheme.primary,
+            ),
+            const SizedBox(width: 10),
+            Expanded(child: Text(text)),
+          ],
+        );
+  m
+    ..hideCurrentSnackBar()
+    ..showSnackBar(SnackBar(content: content));
+}
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -84,14 +109,27 @@ Future<void> main() async {
   final player = ValueNotifier<PlayerController?>(null);
   final haptics = Haptics(config.haptics);
   // queue_controller.py: Mac transfers now, the sources' downloads later.
-  final downloads = DownloadQueue(
-    AppDownloadHost(
-      dataDir: dataDir,
-      library: library,
-      haptics: haptics,
-      onSnack: _snack,
-    ),
+  final downloadHost = AppDownloadHost(
+    dataDir: dataDir,
+    library: library,
+    haptics: haptics,
+    onSnack: _snack,
   );
+  final downloads = DownloadQueue(downloadHost);
+  // main.py `initialize`: Companion auto-discovery (get_sync_manager, then
+  // start when the user left it on). Desktop runs act as the phone until
+  // the Mac side is ported (phase 8).
+  final syncPrefs = Prefs(dataDir);
+  await syncPrefs.load();
+  final syncHost = AppSyncHost(
+    prefs: syncPrefs,
+    navigator: _navigator,
+    onSnack: _snack,
+    library: library,
+    queue: downloads,
+  );
+  final sync = syncHost.manager = CompanionSyncManager(syncHost);
+  downloadHost.sync = sync;
   // Settings' writes reach the screens at once (Flet: restart_ui).
   settings.addListener(() {
     final c = settings.config;
@@ -110,15 +148,21 @@ Future<void> main() async {
       haptics: haptics,
       ledger: ledger,
       downloads: downloads,
+      syncHost: syncHost,
       settings: SettingsDeps(
         dataDir: dataDir,
         config: settings,
         library: library,
         player: player,
         haptics: haptics,
+        sync: sync,
       ),
     ),
   );
+  // After the first frame, so a PIN prompt has a navigator to open on.
+  if (sync.enabled) {
+    unawaited(WidgetsBinding.instance.endOfFrame.then((_) => sync.start()));
+  }
   player.value = await _startPlayer(dataDir, library, ledger);
   // on_native_ready: listens logged while the app was closed.
   await loaded;
@@ -187,6 +231,7 @@ class MaiAnApp extends StatefulWidget {
     this.startTab = AppTab.library,
     this.ledger,
     this.downloads,
+    this.syncHost,
   });
 
   final LibraryController library;
@@ -206,6 +251,9 @@ class MaiAnApp extends StatefulWidget {
   /// The download queue (the dock and the `downloads` notification target).
   final DownloadQueue? downloads;
 
+  /// The Companion manager's host: told when the app hides and shows.
+  final AppSyncHost? syncHost;
+
   @override
   State<MaiAnApp> createState() => _MaiAnAppState();
 }
@@ -222,11 +270,23 @@ class _MaiAnAppState extends State<MaiAnApp> {
     // Flutter stops drawing by itself; the player stops its position ticker
     // and saves where it is.
     _lifecycle = AppLifecycleListener(
-      onHide: () => widget.player.value?.setForeground(false),
+      onHide: () {
+        widget.player.value?.setForeground(false);
+        if (widget.syncHost case final h?) {
+          h.inBackground = true;
+          h.manager.handleAppBackground();
+        }
+      },
       onShow: () {
         widget.player.value?.setForeground(true);
         // Pick up listens that finished while in the background.
         widget.ledger?.schedule(Duration.zero);
+        // Re-checks a link that may have died while hidden, or re-probes
+        // and restarts discovery, and offers transfers queued meanwhile.
+        if (widget.syncHost case final h?) {
+          h.inBackground = false;
+          h.manager.handleAppResume();
+        }
       },
     );
     // Notification taps: routed to the screen they name (main.py
@@ -253,6 +313,7 @@ class _MaiAnAppState extends State<MaiAnApp> {
         title: 'Mai An Lab',
         debugShowCheckedModeBanner: false,
         scaffoldMessengerKey: _messenger,
+        navigatorKey: _navigator,
         theme: Tokens.theme(
           accentColor: widget.config.config.accent ?? Tokens.accent,
         ),

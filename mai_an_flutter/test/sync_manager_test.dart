@@ -8,119 +8,18 @@ import 'dart:io';
 
 import 'package:fake_async/fake_async.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:maian_native/maian_native.dart';
 import 'package:mai_an_lab/core/progress_notify.dart';
 import 'package:mai_an_lab/sync/companion_client.dart';
-import 'package:mai_an_lab/sync/discovery.dart';
 import 'package:mai_an_lab/sync/sync_manager.dart';
 
-/// The Mac, as the fake clients see it.
-class _Mac {
-  String name = 'Test Mac';
-  String token = 'tok';
-  String pin = '4321';
-  bool up = true;
-  String host = '192.168.1.7';
-  int port = 8945;
-  List<Map<String, Object?>> pending = [];
-  final acked = <String>[];
-  final pushed = <String>[];
-  final pushErrors = <String, Object>{};
-  final duplicates = <String>{};
-  int pings = 0;
-
-  bool reachable(String h, int p) => up && h == host && p == port;
-}
-
-class _FakeClient extends CompanionClient {
-  _FakeClient(this.mac, super.host, int port, String? token)
-    : super(port: port, authToken: token, deviceName: 'Pixel');
-  final _Mac mac;
-
-  void _reach() {
-    if (!mac.reachable(host, port)) {
-      throw const SocketException(
-        'refused',
-        osError: OSError('Connection refused', 61),
-      );
-    }
-  }
-
-  @override
-  Future<Map<String, Object?>> ping({Duration? timeout}) async {
-    mac.pings++;
-    _reach();
-    return {
-      'status': 'ok',
-      'name': mac.name,
-      'features_version': 5,
-      'authorized': authToken == mac.token,
-    };
-  }
-
-  @override
-  Future<String?> pair(String pin, {String? deviceName}) async {
-    _reach();
-    if (pin != mac.pin) throw const CompanionAuthError('Incorrect PIN');
-    return authToken = mac.token;
-  }
-
-  @override
-  Future<List<Map<String, Object?>>> getPendingTransfers() async {
-    _reach();
-    if (authToken != mac.token) {
-      throw const CompanionAuthError('Pending transfers: not paired');
-    }
-    return [for (final t in mac.pending) Map.of(t)];
-  }
-
-  @override
-  Future<bool> ackTransfers(List<String> ids) async {
-    _reach();
-    mac.acked.addAll(ids);
-    mac.pending.removeWhere((t) => ids.contains(t['id']));
-    return true;
-  }
-
-  @override
-  Future<Map<String, Object?>> pushTrack(
-    String path,
-    Map<String, Object?> meta,
-  ) async {
-    _reach();
-    if (mac.pushErrors[path] case final e?) throw e;
-    mac.pushed.add('$path|${meta['remaining']}|${meta['dsp_features']}');
-    return {'status': 'ok', 'duplicate': mac.duplicates.contains(path)};
-  }
-}
-
-class _Listener extends BeaconListener {
-  _Listener(DeviceFound f, this.log) : super(onDeviceFound: f);
-  final List<String> log;
-  @override
-  Future<void> start() async => log.add('start');
-  @override
-  void stop() => log.add('stop');
-}
-
-class _Queue implements TransferQueue {
-  final items = <Map<String, Object?>>[];
-  @override
-  void enqueueMany(
-    List<Map<String, Object?>> items, {
-    String qualityTier = 'mp3',
-  }) {
-    expect(qualityTier, 'original');
-    this.items.addAll(items);
-  }
-}
+import 'sync_fakes.dart';
 
 class _Host implements SyncHost {
   final prefs = <String, Object?>{};
   final snacks = <String>[];
   final pins = <PinPrompt>[];
   final transferPrompts = <TransferPrompt>[];
-  _Queue? q = _Queue();
+  FakeTransferQueue? q = FakeTransferQueue();
   bool background = false;
   late CompanionSyncManager manager;
 
@@ -149,39 +48,6 @@ class _Host implements SyncHost {
       path.endsWith('analysed.flac') ? {'bpm': 120.0} : null;
 }
 
-class _Bridge implements NotificationBridge {
-  final calls = <Map<String, Object?>>[];
-  @override
-  Stream<NotificationAction> get actions => const Stream.empty();
-  @override
-  Future<void> showProgress({
-    required String job,
-    required String title,
-    required String content,
-    required int progress,
-    required int total,
-    required bool done,
-    required bool cancellable,
-    String? actionLabel,
-    String? actionTarget,
-  }) async =>
-      calls.add({'job': job, 'title': title, 'content': content, 'done': done});
-  @override
-  Future<void> showAlert({
-    required String key,
-    required String title,
-    required String content,
-    String navigateTo = '',
-    String? actionLabel,
-    String? actionTarget,
-    bool urgent = false,
-    String icon = '',
-  }) async =>
-      calls.add({'alert': key, 'title': title, 'navigate_to': navigateTo});
-  @override
-  Future<void> cancelAlert(String key) async => calls.add({'cancel': key});
-}
-
 class _Clock extends Stopwatch {
   _Clock(this.async);
   final FakeAsync async;
@@ -205,16 +71,16 @@ Map<String, Object?> _t(
 };
 
 void main() {
-  late _Mac mac;
+  late FakeMac mac;
   late _Host host;
-  late _Bridge bridge;
+  late RecordingBridge bridge;
   late List<String> listenerLog;
   late List<String> sweeps;
 
   setUp(() {
-    mac = _Mac();
+    mac = FakeMac();
     host = _Host();
-    bridge = _Bridge();
+    bridge = RecordingBridge();
     NotificationBridge.instance = bridge;
     listenerLog = [];
     sweeps = [];
@@ -223,8 +89,8 @@ void main() {
   CompanionSyncManager make(FakeAsync async, {List<String>? sweepFinds}) {
     final m = CompanionSyncManager(
       host,
-      clientFactory: (h, p, t, n) => _FakeClient(mac, h, p, t),
-      listenerFactory: (f) => _Listener(f, listenerLog),
+      clientFactory: (h, p, t, n) => FakeCompanionClient(mac, h, p, t),
+      listenerFactory: (f) => FakeListener(f, listenerLog),
       localIp: () async => '192.168.1.20',
       sweep: (ip, port) async {
         sweeps.add('$ip:$port');
