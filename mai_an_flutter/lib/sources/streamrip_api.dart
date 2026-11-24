@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import '../downloads/companion_download.dart' show JobCancelled;
 import '../downloads/file_names.dart';
 import 'deezer_client.dart';
 import 'downloadable.dart';
@@ -220,10 +221,14 @@ Future<List<String>> downloadFromSource({
     await Future.wait([
       for (var i = 0; i < activeJobs.length; i++)
         () async {
-          if (isCancelled != null && isCancelled()) return;
+          if (isCancelled != null && isCancelled()) {
+            throw const JobCancelled();
+          }
           final (trackMeta, downloadable) = activeJobs[i];
           await dlSem.run(() async {
-            if (isCancelled != null && isCancelled()) return;
+            if (isCancelled != null && isCancelled()) {
+              throw const JobCancelled();
+            }
             final trackId = '${trackMeta['id']}';
             final norm = normalizeTrack(parsed.source, trackMeta, i + 1);
             final albumNorm = norm['album']! as Map<String, Object?>;
@@ -244,7 +249,11 @@ Future<List<String>> downloadFromSource({
                 },
                 isCancelled: isCancelled,
               );
-              if (isCancelled != null && isCancelled()) return;
+              if (isCancelled != null && isCancelled()) {
+                final partial = File(destPath);
+                if (partial.existsSync()) partial.deleteSync();
+                throw const JobCancelled();
+              }
 
               triggerUpdate('Tagging', true);
 

@@ -8,6 +8,7 @@ import 'assistant/assistant_controller.dart';
 import 'assistant/assistant_screen.dart';
 import 'core/haptics.dart';
 import 'core/notification_router.dart';
+import 'data/library_repository.dart';
 import 'downloads/download_dock.dart';
 import 'downloads/download_queue.dart';
 import 'library/browse_controller.dart';
@@ -17,6 +18,7 @@ import 'library/selection.dart';
 import 'player/player_controller.dart';
 import 'player/ui/mini_player.dart';
 import 'search/landing_controller.dart';
+import 'search/search_controller.dart';
 import 'search/search_history.dart';
 import 'search/search_screen.dart';
 import 'settings/settings_page.dart';
@@ -58,6 +60,7 @@ class AppShell extends StatefulWidget {
     this.settings,
     this.router,
     this.downloads,
+    this.searchController,
     this.searchHistory,
   });
 
@@ -79,6 +82,9 @@ class AppShell extends StatefulWidget {
 
   /// The download queue: the dock above the mini player.
   final DownloadQueue? downloads;
+
+  /// Full Search tab controller (Qobuz/Deezer remote search, previews, multi-select).
+  final SearchTabController? searchController;
 
   /// Persisted recent search queries (`recent_searches.json`).
   final SearchHistoryStore? searchHistory;
@@ -244,6 +250,22 @@ class AppShellState extends State<AppShell> {
     browse.setView(view);
   }
 
+  /// library.py `_redownload`: switch to Search tab on Tracks with `"<title> <artist>"`.
+  void _redownloadTrack(Track t) {
+    final parts = <String>[
+      if (t.title.trim().isNotEmpty) t.title.trim(),
+      if (t.artist.trim().isNotEmpty && t.artist.trim() != 'Unknown')
+        t.artist.trim(),
+    ];
+    final query = parts.join(' ').trim();
+    if (query.isEmpty) return;
+    switchTab(AppTab.search);
+    final sc = widget.searchController;
+    if (sc != null) {
+      unawaited(sc.startRedownloadSearch(query));
+    }
+  }
+
   /// main.py `switch_to_settings(subpage)`.
   void Function([SettingsPage?])? get _openSettings {
     final deps = widget.settings;
@@ -264,6 +286,11 @@ class AppShellState extends State<AppShell> {
           selection.exit();
           return;
         }
+        if (tab == AppTab.search &&
+            (widget.searchController?.selectionMode ?? false)) {
+          widget.searchController!.exitSelection();
+          return;
+        }
         _appChannel.invokeMethod('moveTaskToBack').ignore();
       },
       child: Scaffold(
@@ -282,6 +309,9 @@ class AppShellState extends State<AppShell> {
               active: tab == AppTab.search,
               child: SearchScreen(
                 landing: widget.landing,
+                controller: widget.searchController,
+                downloads: widget.downloads,
+                unifiedPills: widget.unifiedPills,
                 onPlayTrack: _playPath,
                 onOpenInLibrary: openInLibrary,
                 searchHistory: widget.searchHistory,
@@ -299,6 +329,8 @@ class AppShellState extends State<AppShell> {
                 selection: selection,
                 onOpenSettings: _openSettings,
                 sync: widget.settings?.sync,
+                onRedownloadTrack:
+                    widget.searchController == null ? null : _redownloadTrack,
               ),
             ),
           ],

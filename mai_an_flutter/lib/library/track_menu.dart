@@ -18,14 +18,14 @@ typedef TrackMenuActions = ({
 });
 
 /// library.py `_open_track_context_menu`: the track card, then Select…,
-/// Play Next, Add to Queue, Start Radio, Add to Playlist, Send to the Mac
-/// and Delete Track. Each action runs after the sheet has closed. The Send
-/// row is shown when [send] is set (the Companion manager runs), named
-/// [sendLabel]. Redownload waits for decision A.
+/// Play Next, Add to Queue, Start Radio, Add to Playlist, Redownload
+/// (Different Quality), Send to the Mac and Delete Track. Each action runs
+/// after the sheet has closed.
 Future<void> showTrackMenu(
   BuildContext context,
   Track t,
   TrackMenuActions a, {
+  VoidCallback? redownload,
   String? sendLabel,
   VoidCallback? send,
 }) async {
@@ -87,6 +87,14 @@ Future<void> showTrackMenu(
                 a.addToPlaylist,
                 iconColor: Tokens.libPlaylist,
               ),
+              if (redownload != null)
+                item(
+                  Icons.download_rounded,
+                  'Redownload (Different Quality)',
+                  redownload,
+                  subtitle: 'Select alternate quality tier',
+                  iconColor: Tokens.dim,
+                ),
               if (send != null)
                 item(
                   Icons.laptop_mac_rounded,

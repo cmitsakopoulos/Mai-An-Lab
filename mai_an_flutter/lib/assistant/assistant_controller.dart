@@ -12,6 +12,7 @@ import 'adapters.dart';
 import 'chat_memory.dart';
 import 'intent.dart';
 import 'runner.dart';
+import 'tool_executor.dart';
 import 'voice_service.dart';
 
 /// State and lifecycle of `ui/views/assistant.py` (`AssistantView`).
@@ -26,6 +27,7 @@ class AssistantController extends ChangeNotifier {
     this.library,
     this.player,
     this.loadAssistantConfig,
+    this.onlineSearchHandler,
     AssistantRunner? runner,
     this.voice,
     this.onSpeak,
@@ -47,6 +49,7 @@ class AssistantController extends ChangeNotifier {
   final LibraryController? library;
   final ValueListenable<PlayerController?>? player;
   final FutureOr<AssistantConfig?> Function()? loadAssistantConfig;
+  final ToolHandler? onlineSearchHandler;
   final AssistantRunner? _customRunner;
 
   /// Voice backend (stage g): TTS + push-to-talk STT + RECORD_AUDIO.
@@ -120,6 +123,7 @@ class AssistantController extends ChangeNotifier {
       library: RepoAssistantLibrary(repo, stations: lib!.stations),
       player: ControllerAssistantPlayer(pl),
       loadAssistantConfig: loadAssistantConfig,
+      onlineSearchHandler: onlineSearchHandler,
     );
     return _runner;
   }

@@ -26,6 +26,7 @@ Code the port copies, translates, or depends on, for attribution in Settings →
 | Cyclic Jacobi eigenvalue method (Jacobi 1846; Press et al., *Numerical Recipes* §11.1) | `lib/stations/acoustic_geometry.dart` `_symmetricEigen` | Textbook algorithm | Algorithm only; no code copied |
 | SVD sign convention (`svd_flip`, `u_based_decision=False`) | `lib/stations/acoustic_geometry.dart` | scikit-learn docs | BSD-3-Clause; convention only |
 | Blowfish block cipher (Schneier 1993) & AES-128 block cipher (FIPS 197) for Deezer CDN stream decryption and fallback URL encryption | `lib/sources/deezer_crypto.dart` | Standard published specifications (public domain / NIST FIPS 197) | Specifications only; clean-room pure Dart, bit-verified against `pycryptodomex` |
+| FLAC Vorbis Comment/PICTURE, ID3v2.3, and ISO BMFF MP4 `ilst`/`covr` container tag writing | `lib/sources/tagger.dart` | Standard container specs (Xiph FLAC/Vorbis, ID3v2.3, ISO/IEC 14496-12) | Specifications only; clean-room pure Dart (no external tagging package needed), round-trip verified against `tinytag` and `mutagen` |
 
 ## pub.dev dependencies
 
@@ -36,5 +37,4 @@ Licences ship via Flutter's `LicenseRegistry` (`showLicensePage` in Settings →
 
 | Need | Phase | Candidates | Notes |
 |---|---|---|---|
-| Tag writing (`tagger.py`) | 6c | [`metatagger`](https://pub.dev/packages/metatagger) (pure Dart: ID3v2, Vorbis comments, iTunes `ilst`); [`metadata_god`](https://pub.dev/documentation/metadata_god/latest/) / [`haudiotagger`](https://pub.dev/packages/haudiotagger) (Rust `lofty`); [`flutter_taglib`](https://pub.dev/documentation/flutter_taglib/1.3.2/) (TagLib FFI) | Prefer pure Dart (`metatagger`) if it round-trips identically through `tinytag` and `mutagen` to keep the build free of Rust/native toolchains. |
 | On-phone DSP math (`dsp.py`) | 6d | Pure Dart FFT/STFT (e.g. [`fftea`](https://pub.dev/packages/fftea)) vs native C/FFI | Evaluate pure Dart first (`fftea` / typed `Float64List` / `Float32List` on an isolate) against Python's `dsp.py` accuracy and phone runtime before considering native code. |

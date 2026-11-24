@@ -9,6 +9,7 @@ import 'package:permission_handler/permission_handler.dart';
 import 'app_shell.dart';
 import 'assistant/assistant_controller.dart';
 import 'assistant/chat_memory.dart';
+import 'assistant/online_search.dart';
 import 'assistant/voice_service.dart';
 import 'core/app_config.dart';
 import 'core/cache_pruner.dart';
@@ -18,6 +19,7 @@ import 'core/notification_router.dart';
 import 'data/library_repository.dart';
 import 'data/play_ledger.dart';
 import 'downloads/app_download_host.dart';
+import 'downloads/download_history.dart';
 import 'downloads/download_queue.dart';
 import 'library/browse_controller.dart';
 import 'library/library_controller.dart';
@@ -28,9 +30,11 @@ import 'player/queue_store.dart';
 import 'scan/library_folder.dart';
 import 'search/landing_controller.dart';
 import 'search/new_releases.dart';
+import 'search/search_controller.dart';
 import 'search/search_history.dart';
 import 'settings/config_controller.dart';
 import 'settings/settings_page.dart';
+import 'sources/streamrip_search.dart';
 import 'sync/app_sync_host.dart';
 import 'sync/state_bundles.dart';
 import 'sync/sync_manager.dart';
@@ -136,21 +140,18 @@ Future<void> main() async {
         : null,
   );
   final player = ValueNotifier<PlayerController?>(null);
-  final assistant = AssistantController(
-    memory: ChatMemory(dataDir),
-    library: library,
-    player: player,
-    loadAssistantConfig: () => settings.config.assistant,
-    voice: FlutterVoiceBackend(),
-    onSnack: _snack,
-  );
   final haptics = Haptics(config.haptics);
-  // queue_controller.py: Mac transfers now, the sources' downloads later.
+  final downloadHistory = DownloadHistoryStore(dataDir);
+  final searcher = StreamripSearcher(
+    readConfig: () async => settings.config.sources,
+  );
   final downloadHost = AppDownloadHost(
     dataDir: dataDir,
     library: library,
     haptics: haptics,
     onSnack: _snack,
+    config: settings,
+    history: downloadHistory,
   );
   final downloads = DownloadQueue(downloadHost);
   // main.py `initialize`: Companion auto-discovery (get_sync_manager, then
@@ -158,6 +159,42 @@ Future<void> main() async {
   // the Mac side is ported (phase 8).
   final syncPrefs = Prefs(dataDir);
   await syncPrefs.load();
+  final searchController = SearchTabController(
+    repository: () => library.repository,
+    searcher: searcher,
+    config: settings,
+    prefs: syncPrefs,
+    searchHistory: searchHistory,
+    player: player,
+    haptics: haptics,
+    dataDir: dataDir,
+    onSnack: (m) => _snack(m),
+  );
+  final assistant = AssistantController(
+    memory: ChatMemory(dataDir),
+    library: library,
+    player: player,
+    loadAssistantConfig: () => settings.config.assistant,
+    onlineSearchHandler: buildOnlineSearchHandler(
+      searcher: searcher,
+      readConfig: () async => settings.config.sources,
+      onDownloadItem: (item) async {
+        final tier = settings.config.sources.defaultQuality;
+        downloads.enqueue(
+          {
+            'source': 'qobuz',
+            'media_type': item['type'] ?? 'track',
+            'name': item['title'] ?? 'Unknown',
+            'artist': item['artist'] ?? '',
+            'url': item['url'] ?? '',
+          },
+          qualityTier: tier.isEmpty ? 'cd' : tier,
+        );
+      },
+    ),
+    voice: FlutterVoiceBackend(),
+    onSnack: _snack,
+  );
   final syncHost = AppSyncHost(
     prefs: syncPrefs,
     navigator: _navigator,
@@ -199,6 +236,7 @@ Future<void> main() async {
       ledger: ledger,
       downloads: downloads,
       syncHost: syncHost,
+      searchController: searchController,
       searchHistory: searchHistory,
       cachePruner: cachePruner,
       settings: SettingsDeps(
@@ -306,6 +344,7 @@ class MaiAnApp extends StatefulWidget {
     this.ledger,
     this.downloads,
     this.syncHost,
+    this.searchController,
     this.searchHistory,
     this.cachePruner,
   });
@@ -330,6 +369,9 @@ class MaiAnApp extends StatefulWidget {
 
   /// The Companion manager's host: told when the app hides and shows.
   final AppSyncHost? syncHost;
+
+  /// Full Search tab controller (Qobuz/Deezer search, previews, multi-select).
+  final SearchTabController? searchController;
 
   /// Persisted recent searches for the Search tab.
   final SearchHistoryStore? searchHistory;
@@ -416,6 +458,7 @@ class _MaiAnAppState extends State<MaiAnApp> {
           settings: widget.settings,
           router: _router,
           downloads: widget.downloads,
+          searchController: widget.searchController,
           searchHistory: widget.searchHistory,
         ),
       ),

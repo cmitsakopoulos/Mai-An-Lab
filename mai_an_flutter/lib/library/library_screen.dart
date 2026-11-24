@@ -37,6 +37,7 @@ class LibraryScreen extends StatefulWidget {
     this.selection,
     this.onOpenSettings,
     this.sync,
+    this.onRedownloadTrack,
   });
 
   final LibraryController controller;
@@ -63,6 +64,10 @@ class LibraryScreen extends StatefulWidget {
   /// The Companion manager: Send to the Mac in the menus and the selection
   /// bar. Null leaves them out.
   final CompanionSyncManager? sync;
+
+  /// Long-press → Redownload (Different Quality): opens Search tab on Tracks
+  /// with `"<title> <artist>"`.
+  final ValueChanged<Track>? onRedownloadTrack;
 
   @override
   State<LibraryScreen> createState() => _LibraryScreenState();
@@ -521,6 +526,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
         addToPlaylist: writable ? () => _addToPlaylist([t]) : null,
         delete: writable && t.path.isNotEmpty ? () => _deleteTrack(t) : null,
       ),
+      redownload:
+          widget.onRedownloadTrack == null
+              ? null
+              : () => widget.onRedownloadTrack!(t),
       sendLabel: widget.sync == null
           ? null
           : companionTarget(widget.sync!).label,

@@ -3,6 +3,8 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../data/library_repository.dart';
+import '../downloads/download_queue.dart';
+import '../downloads/quality_selector.dart';
 import '../library/browse_controller.dart';
 import '../player/ui/artwork.dart';
 import '../settings/settings_search.dart';
@@ -10,21 +12,27 @@ import '../ui/tokens.dart';
 import 'landing_controller.dart';
 import 'local_search.dart';
 import 'new_releases.dart';
+import 'search_cards.dart';
+import 'search_controller.dart';
 import 'search_history.dart';
 
-/// ui/views/search.py: header with history & settings shortcuts, search bar
-/// with local-library hits, recent searches sheet, and the landing page
-/// (New From Your Artists, Most Listened cards, and Library at a Glance).
-/// Remote source search (Qobuz & Deezer), previews, and downloads plug in
-/// during Phase 6b/6c.
+/// ui/views/search.py: Qobuz / Deezer source switch, connection signal, search
+/// bar with local-library hits & ownership badges, unified All view (hero,
+/// top songs, album/artist shelves), paginated typed views with expandable
+/// artist/album trees, multi-select batch download, stream previews, recent
+/// searches sheet, and the landing page.
 class SearchScreen extends StatefulWidget {
   const SearchScreen({
     super.key,
     required this.landing,
     required this.onPlayTrack,
     required this.onOpenInLibrary,
+    this.controller,
+    this.downloads,
     this.searchHistory,
     this.onOpenSettings,
+    this.unifiedPills = false,
+    this.onSnack,
   });
 
   final LandingController landing;
@@ -36,11 +44,24 @@ class SearchScreen extends StatefulWidget {
   /// filtered to [name] ("" for none).
   final void Function(LibraryView view, String name) onOpenInLibrary;
 
+  /// Full remote + local search state controller (optional; when omitted, a
+  /// local-only controller is created so lightweight tests keep working).
+  final SearchTabController? controller;
+
+  /// App-wide download queue for single & batch quality-sheet enqueues.
+  final DownloadQueue? downloads;
+
   /// `utils/search_history.py`: persisted recent searches (`recent_searches.json`).
   final SearchHistoryStore? searchHistory;
 
   /// The header's settings shortcut (search.py: `_switch_tab(3)`).
   final void Function([SettingsPage?])? onOpenSettings;
+
+  /// `appearance.pill_style = "unified"`.
+  final bool unifiedPills;
+
+  /// Optional app-level snackbar helper.
+  final void Function(String text, {IconData? icon})? onSnack;
 
   @override
   State<SearchScreen> createState() => _SearchScreenState();
@@ -48,19 +69,82 @@ class SearchScreen extends StatefulWidget {
 
 class _SearchScreenState extends State<SearchScreen> {
   final _queryController = TextEditingController();
-  int _searchId = 0;
-  String _activeQuery = '';
-  SearchViewMode _viewMode = SearchViewMode.all;
-  LocalMatches _localMatches = LocalMatches.empty;
-  bool _localExpanded = false;
-  bool _searchingLocal = false;
+  final _resultsScroll = ScrollController();
+  SearchTabController? _ownedController;
 
-  bool get _hasActiveQuery => _activeQuery.isNotEmpty;
+  SearchTabController get _ctrl => widget.controller ?? _ownedController!;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.controller == null) {
+      _ownedController = SearchTabController(
+        repository: () => widget.landing.library.repository,
+        searchHistory: widget.searchHistory,
+      );
+    }
+    _ctrl.addListener(_syncQueryText);
+    _syncQueryText();
+  }
+
+  @override
+  void didUpdateWidget(SearchScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.controller != widget.controller) {
+      (oldWidget.controller ?? _ownedController)?.removeListener(_syncQueryText);
+      if (widget.controller == null && _ownedController == null) {
+        _ownedController = SearchTabController(
+          repository: () => widget.landing.library.repository,
+          searchHistory: widget.searchHistory,
+        );
+      }
+      _ctrl.addListener(_syncQueryText);
+      _syncQueryText();
+    }
+  }
+
+  void _syncQueryText() {
+    final active = _ctrl.activeQuery;
+    if (active.isNotEmpty && _queryController.text != active) {
+      _queryController.text = active;
+      _queryController.selection = TextSelection.collapsed(
+        offset: active.length,
+      );
+    }
+  }
 
   @override
   void dispose() {
+    _ctrl.removeListener(_syncQueryText);
+    _ownedController?.dispose();
     _queryController.dispose();
+    _resultsScroll.dispose();
     super.dispose();
+  }
+
+  void _snack(String message, {IconData? icon}) {
+    if (widget.onSnack != null) {
+      widget.onSnack!(message, icon: icon);
+      return;
+    }
+    if (!mounted) return;
+    final accent = Theme.of(context).colorScheme.primary;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content:
+              icon == null
+                  ? Text(message)
+                  : Row(
+                    children: [
+                      Icon(icon, size: 18, color: accent),
+                      const SizedBox(width: 8),
+                      Expanded(child: Text(message)),
+                    ],
+                  ),
+        ),
+      );
   }
 
   Future<void> _submitSearch(String raw, {SearchViewMode? mode}) async {
@@ -69,63 +153,30 @@ class _SearchScreenState extends State<SearchScreen> {
       _clearSearch();
       return;
     }
-    final id = ++_searchId;
-    setState(() {
-      _activeQuery = query;
-      if (mode != null) _viewMode = mode;
-      _localMatches = LocalMatches.empty;
-      _localExpanded = true;
-      _searchingLocal = true;
-    });
     if (_queryController.text != query) {
       _queryController.text = query;
       _queryController.selection = TextSelection.collapsed(
         offset: query.length,
       );
     }
-    unawaited(widget.searchHistory?.add(query));
-    final repo = widget.landing.library.repository;
-    if (repo == null) {
-      if (!mounted || _searchId != id) return;
-      setState(() => _searchingLocal = false);
-      return;
-    }
-    try {
-      final matches = await loadLocalMatches(repo, query);
-      if (!mounted || _searchId != id) return;
-      setState(() {
-        _localMatches = matches;
-        _searchingLocal = false;
-      });
-    } catch (e) {
-      debugPrint('Library half of the search failed: $e');
-      if (!mounted || _searchId != id) return;
-      setState(() => _searchingLocal = false);
-    }
+    await _ctrl.search(query, mode: mode);
   }
 
   void _clearSearch() {
-    _searchId++;
     _queryController.clear();
-    setState(() {
-      _activeQuery = '';
-      _localMatches = LocalMatches.empty;
-      _localExpanded = false;
-      _searchingLocal = false;
-    });
+    _ctrl.clearSearch();
     widget.landing.onShow();
   }
 
   void _searchRelease(ReleaseItem rel) {
     final query = '${rel.artist} ${rel.title}'.trim();
-    final mode = rel.type == 'single'
-        ? SearchViewMode.tracks
-        : SearchViewMode.albums;
-    _submitSearch(query, mode: mode);
+    final mode =
+        rel.type == 'single' ? SearchViewMode.tracks : SearchViewMode.albums;
+    unawaited(_submitSearch(query, mode: mode));
   }
 
   Future<void> _openRecentSearches() async {
-    final store = widget.searchHistory;
+    final store = widget.searchHistory ?? _ctrl.searchHistory;
     if (store == null) return;
     final searches = await store.load();
     if (!mounted || searches.isEmpty) return;
@@ -134,145 +185,497 @@ class _SearchScreenState extends State<SearchScreen> {
     await _submitSearch(picked);
   }
 
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        SafeArea(
-          bottom: false,
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(16, 20, 8, 8),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Row(
-                  children: [
-                    const Expanded(
-                      child: Text(
-                        'Streamrip',
-                        style: TextStyle(
-                          color: Tokens.text,
-                          fontSize: 26,
-                          fontWeight: FontWeight.w800,
-                        ),
-                      ),
-                    ),
-                    if (widget.searchHistory != null)
-                      IconButton(
-                        icon: const Icon(Icons.history_rounded, size: 22),
-                        color: Tokens.dim,
-                        tooltip: 'Recent Searches',
-                        onPressed: _openRecentSearches,
-                      ),
-                    if (widget.onOpenSettings case final open?)
-                      IconButton(
-                        icon: const Icon(Icons.settings_outlined, size: 22),
-                        color: Tokens.dim,
-                        tooltip: 'Settings',
-                        onPressed: () => open(),
-                      ),
-                  ],
-                ),
-                const SizedBox(height: 10),
-                Padding(
-                  padding: const EdgeInsets.only(right: 8),
-                  child: _SearchBarField(
-                    controller: _queryController,
-                    onChanged: (_) => setState(() {}),
-                    onSubmitted: _submitSearch,
-                    onClear: _clearSearch,
-                  ),
-                ),
-                if (_hasActiveQuery) ...[
-                  const SizedBox(height: 10),
-                  Padding(
-                    padding: const EdgeInsets.only(right: 8),
-                    child: _SearchModeBar(
-                      selected: _viewMode,
-                      onSelect: (m) => setState(() => _viewMode = m),
-                    ),
-                  ),
-                ],
-              ],
-            ),
-          ),
-        ),
-        Expanded(
-          child: _hasActiveQuery
-              ? _buildSearchResults(context)
-              : ListenableBuilder(
-                  listenable: widget.landing,
-                  builder: (context, _) => ListView(
-                    padding: const EdgeInsets.fromLTRB(16, 10, 16, 100),
-                    children: _cards(context),
-                  ),
-                ),
-        ),
-      ],
+  void _downloadOne(Map<String, Object?> record) {
+    final queue = widget.downloads;
+    if (queue == null) {
+      _snack('Downloads are unavailable right now.');
+      return;
+    }
+    unawaited(
+      showQualitySelector(
+        context,
+        record: record,
+        queue: queue,
+        defaultQuality: _ctrl.sourceConfig.defaultQuality,
+        onSnack: _snack,
+      ),
     );
   }
 
-  Widget _buildSearchResults(BuildContext context) {
-    final hasLocalForMode = switch (_viewMode) {
-      SearchViewMode.all => _localMatches.isNotEmpty,
-      SearchViewMode.tracks => _localMatches.tracks.isNotEmpty,
-      SearchViewMode.albums => _localMatches.albums.isNotEmpty,
-      SearchViewMode.artists => _localMatches.artists.isNotEmpty,
-    };
-    return ListView(
-      padding: const EdgeInsets.fromLTRB(16, 8, 16, 100),
-      children: [
-        if (_searchingLocal)
-          const Padding(
-            padding: EdgeInsets.symmetric(vertical: 20),
-            child: Center(
-              child: SizedBox(
-                width: 20,
-                height: 20,
-                child: CircularProgressIndicator(strokeWidth: 2),
+  void _downloadSelection() {
+    final queue = widget.downloads;
+    final records = _ctrl.selectedRecords;
+    if (records.isEmpty) return;
+    if (queue == null) {
+      _snack('Downloads are unavailable right now.');
+      return;
+    }
+    unawaited(
+      showQualitySelectorBatch(
+        context,
+        records: records,
+        queue: queue,
+        defaultQuality: _ctrl.sourceConfig.defaultQuality,
+        onSnack: _snack,
+        onDone: _ctrl.exitSelection,
+      ),
+    );
+  }
+
+  void _changePage(int newPage) {
+    _ctrl.setPage(newPage);
+    if (_resultsScroll.hasClients) {
+      _resultsScroll.jumpTo(0);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final hasHistory = (widget.searchHistory ?? _ctrl.searchHistory) != null;
+    return ListenableBuilder(
+      listenable: _ctrl,
+      builder: (context, _) {
+        final ctrl = _ctrl;
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            SafeArea(
+              bottom: false,
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(16, 20, 8, 8),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.center,
+                      children: [
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Text(
+                                'Streamrip',
+                                style: TextStyle(
+                                  color: Tokens.text,
+                                  fontSize: 26,
+                                  fontWeight: FontWeight.w800,
+                                ),
+                              ),
+                              if (ctrl.remoteEnabled) ...[
+                                const SizedBox(height: 6),
+                                Row(
+                                  children: [
+                                    SourceSegmentedBar(
+                                      selected: ctrl.selectedSource,
+                                      onChanged:
+                                          (s) => unawaited(ctrl.setSource(s)),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    ConnectionSignal(state: ctrl.signal),
+                                  ],
+                                ),
+                              ],
+                            ],
+                          ),
+                        ),
+                        if (hasHistory)
+                          IconButton(
+                            icon: const Icon(Icons.history_rounded, size: 22),
+                            color: Tokens.dim,
+                            tooltip: 'Recent Searches',
+                            onPressed: _openRecentSearches,
+                          ),
+                        if (widget.onOpenSettings case final open?)
+                          IconButton(
+                            icon: const Icon(Icons.settings_outlined, size: 22),
+                            color: Tokens.dim,
+                            tooltip: 'Settings',
+                            onPressed: () => open(),
+                          ),
+                      ],
+                    ),
+                    const SizedBox(height: 10),
+                    Padding(
+                      padding: const EdgeInsets.only(right: 8),
+                      child: _SearchBarField(
+                        controller: _queryController,
+                        searching: ctrl.remotePending,
+                        onChanged: (_) => setState(() {}),
+                        onSubmitted: _submitSearch,
+                        onClear: _clearSearch,
+                      ),
+                    ),
+                    if (ctrl.hasActiveQuery || ctrl.selectionMode) ...[
+                      const SizedBox(height: 10),
+                      Padding(
+                        padding: const EdgeInsets.only(right: 8),
+                        child: AnimatedSwitcher(
+                          duration: const Duration(milliseconds: 160),
+                          child:
+                              ctrl.selectionMode
+                                  ? SearchSelectionBar(
+                                    key: const ValueKey('sel_bar'),
+                                    count: ctrl.selectedCount,
+                                    onExit: ctrl.exitSelection,
+                                    onSelectAll: ctrl.selectAllOnPage,
+                                    onDownload: _downloadSelection,
+                                  )
+                                  : _SearchModeBar(
+                                    key: const ValueKey('mode_bar'),
+                                    selected: ctrl.viewMode,
+                                    unifiedPills: widget.unifiedPills,
+                                    onSelect: ctrl.setViewMode,
+                                  ),
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
               ),
             ),
-          )
-        else if (hasLocalForMode)
-          LocalLibrarySection(
-            query: _activeQuery,
-            matches: _localMatches,
-            mode: _viewMode,
-            expanded: _localExpanded,
-            onToggle: () => setState(() => _localExpanded = !_localExpanded),
-            onPlayTrack: widget.onPlayTrack,
-            onOpenInLibrary: widget.onOpenInLibrary,
-          )
-        else
+            Expanded(
+              child: Stack(
+                children: [
+                  Positioned.fill(
+                    child:
+                        ctrl.hasActiveQuery
+                            ? _buildSearchResults(context, ctrl)
+                            : ListenableBuilder(
+                              listenable: widget.landing,
+                              builder:
+                                  (context, _) => ListView(
+                                    padding: const EdgeInsets.fromLTRB(
+                                      16,
+                                      10,
+                                      16,
+                                      100,
+                                    ),
+                                    children: _cards(context, ctrl),
+                                  ),
+                            ),
+                  ),
+                  if (ctrl.searchProgressVisible || ctrl.previewCardVisible)
+                    Positioned(
+                      top: 4,
+                      left: 0,
+                      right: 0,
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          if (ctrl.searchProgressVisible)
+                            SearchOverlayCard(
+                              status: ctrl.searchProgressStatus,
+                              detail: ctrl.searchProgressDetail,
+                            ),
+                          if (ctrl.previewCardVisible)
+                            SearchOverlayCard(
+                              status: ctrl.previewStatus,
+                              detail: ctrl.previewDetail,
+                              onCancel: ctrl.cancelPreview,
+                            ),
+                        ],
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            if (ctrl.hasActiveQuery &&
+                ctrl.viewMode != SearchViewMode.all &&
+                ctrl.totalPages > 1)
+              SearchPaginationBar(
+                currentPage: ctrl.currentPage,
+                totalPages: ctrl.totalPages,
+                onChangePage: _changePage,
+              ),
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _buildSearchResults(BuildContext context, SearchTabController ctrl) {
+    final openAuth =
+        widget.onOpenSettings == null
+            ? null
+            : () => widget.onOpenSettings!(SettingsPage.account);
+    final hasLocalForMode = switch (ctrl.viewMode) {
+      SearchViewMode.all => ctrl.localMatches.isNotEmpty,
+      SearchViewMode.tracks => ctrl.localMatches.tracks.isNotEmpty,
+      SearchViewMode.albums => ctrl.localMatches.albums.isNotEmpty,
+      SearchViewMode.artists => ctrl.localMatches.artists.isNotEmpty,
+    };
+
+    // Pending remote search: spacer for overlay card, local hits if ready,
+    // then skeleton rows.
+    if (ctrl.remotePending) {
+      return ListView(
+        controller: _resultsScroll,
+        padding: const EdgeInsets.fromLTRB(12, 76, 12, 100),
+        children: [
+          if (hasLocalForMode)
+            LocalLibrarySection(
+              query: ctrl.activeQuery,
+              matches: ctrl.localMatches,
+              mode: ctrl.viewMode,
+              expanded: ctrl.localExpanded,
+              onToggle: ctrl.toggleLocalExpanded,
+              onPlayTrack: widget.onPlayTrack,
+              onOpenInLibrary: widget.onOpenInLibrary,
+            ),
+          for (var i = 0; i < 8; i++) const SearchSkeletonRow(),
+        ],
+      );
+    }
+
+    // Remote failed and there are no local matches at all: full error view.
+    if (ctrl.remoteError != null && !ctrl.localMatches.isNotEmpty) {
+      return SearchErrorState(
+        message: ctrl.remoteError!,
+        onSettings: openAuth,
+        onRetry: () => unawaited(ctrl.search(ctrl.activeQuery)),
+      );
+    }
+
+    final children = <Widget>[];
+    if (ctrl.previewCardVisible) {
+      children.add(const SizedBox(height: 68));
+    }
+
+    if (ctrl.remoteError != null) {
+      children.add(
+        SearchErrorBanner(
+          sourceLabel: ctrl.sourceLabel,
+          message: ctrl.remoteError!,
+          onSettings: openAuth,
+          onRetry: () => unawaited(ctrl.search(ctrl.activeQuery)),
+        ),
+      );
+    }
+
+    if (ctrl.searchingLocal && !ctrl.remoteEnabled) {
+      children.add(
+        const Padding(
+          padding: EdgeInsets.symmetric(vertical: 20),
+          child: Center(
+            child: SizedBox(
+              width: 20,
+              height: 20,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            ),
+          ),
+        ),
+      );
+    } else if (hasLocalForMode) {
+      children.add(
+        LocalLibrarySection(
+          query: ctrl.activeQuery,
+          matches: ctrl.localMatches,
+          mode: ctrl.viewMode,
+          expanded: ctrl.localExpanded,
+          onToggle: ctrl.toggleLocalExpanded,
+          onPlayTrack: widget.onPlayTrack,
+          onOpenInLibrary: widget.onOpenInLibrary,
+        ),
+      );
+    }
+
+    if (ctrl.viewMode == SearchViewMode.all) {
+      _appendUnifiedResults(context, ctrl, children, hasLocal: hasLocalForMode);
+    } else {
+      _appendTypedResults(context, ctrl, children, hasLocal: hasLocalForMode);
+    }
+
+    return ListView(
+      controller: _resultsScroll,
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 100),
+      children: children,
+    );
+  }
+
+  void _appendUnifiedResults(
+    BuildContext context,
+    SearchTabController ctrl,
+    List<Widget> out, {
+    required bool hasLocal,
+  }) {
+    if (!ctrl.hasRemoteResults) {
+      if (ctrl.remoteError == null && !hasLocal && !ctrl.searchingLocal) {
+        out.add(
           Padding(
-            padding: const EdgeInsets.symmetric(vertical: 24),
+            padding: const EdgeInsets.symmetric(vertical: 28, horizontal: 16),
             child: Column(
               children: [
                 const Icon(
                   Icons.search_off_rounded,
                   color: Tokens.dim,
-                  size: 36,
+                  size: 40,
                 ),
                 const SizedBox(height: 8),
                 Text(
-                  'No matches in your library for "$_activeQuery".',
+                  ctrl.remoteEnabled
+                      ? 'No results found for "${ctrl.activeQuery}"'
+                      : 'No matches in your library for "${ctrl.activeQuery}".',
                   textAlign: TextAlign.center,
-                  style: const TextStyle(color: Tokens.dim, fontSize: 13),
+                  style: const TextStyle(
+                    color: Tokens.text,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                  ),
                 ),
+                if (ctrl.remoteEnabled) ...[
+                  const SizedBox(height: 4),
+                  const Text(
+                    'Try checking the spelling or searching for another artist, album, or track.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: Tokens.dim, fontSize: 12),
+                  ),
+                ],
               ],
             ),
           ),
-      ],
+        );
+      }
+      return;
+    }
+
+    final hero = ctrl.heroResult;
+    if (hero != null) {
+      final mType = '${hero['media_type'] ?? 'track'}';
+      out.add(
+        HeroResultCard(
+          hero: hero,
+          onTapCard:
+              () => ctrl.setViewMode(switch (mType) {
+                'artist' => SearchViewMode.artists,
+                'album' => SearchViewMode.albums,
+                _ => SearchViewMode.tracks,
+              }),
+          onDownload: () => _downloadOne(hero),
+        ),
+      );
+    }
+
+    if (ctrl.tracks.isNotEmpty) {
+      out.add(
+        SearchSectionHeader(
+          title: 'Top Songs',
+          count: ctrl.tracks.length,
+          icon: Icons.music_note_rounded,
+          onSeeAll: () => ctrl.setViewMode(SearchViewMode.tracks),
+        ),
+      );
+      for (final (i, trk) in ctrl.tracks.take(4).indexed) {
+        out.add(_buildResultRow(ctrl, i, trk, depth: 0));
+      }
+    }
+
+    if (ctrl.albums.isNotEmpty) {
+      out.add(
+        UnifiedAlbumShelf(
+          albums: ctrl.albums,
+          totalCount: ctrl.albums.length,
+          onSeeAll: () => ctrl.setViewMode(SearchViewMode.albums),
+          onDownload: _downloadOne,
+        ),
+      );
+    }
+
+    final otherArtists =
+        (hero != null && hero['media_type'] == 'artist')
+            ? [for (final a in ctrl.artists) if (!identical(a, hero)) a]
+            : ctrl.artists;
+    if (otherArtists.isNotEmpty) {
+      out.add(
+        UnifiedArtistShelf(
+          artists: otherArtists,
+          totalCount: ctrl.artists.length,
+          onSeeAll: () => ctrl.setViewMode(SearchViewMode.artists),
+        ),
+      );
+    }
+  }
+
+  void _appendTypedResults(
+    BuildContext context,
+    SearchTabController ctrl,
+    List<Widget> out, {
+    required bool hasLocal,
+  }) {
+    final rows = ctrl.currentPageRows();
+    if (rows.isEmpty) {
+      if (ctrl.remoteError == null && !ctrl.searchingLocal) {
+        out.add(
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 8),
+            child: Text(
+              hasLocal
+                  ? 'No ${ctrl.sourceLabel} results for this search.'
+                  : ctrl.remoteEnabled
+                  ? 'No results found for "${ctrl.activeQuery}".'
+                  : 'No matches in your library for "${ctrl.activeQuery}".',
+              textAlign: hasLocal ? TextAlign.start : TextAlign.center,
+              style: const TextStyle(color: Tokens.dim, fontSize: 12),
+            ),
+          ),
+        );
+      }
+      return;
+    }
+
+    final startIndex = ctrl.currentPage * kSearchItemsPerPage;
+    for (final (i, row) in rows.indexed) {
+      out.add(_buildResultRow(ctrl, startIndex + i, row.item, depth: row.depth));
+    }
+  }
+
+  Widget _buildResultRow(
+    SearchTabController ctrl,
+    int index,
+    Map<String, Object?> item, {
+    required int depth,
+  }) {
+    final mType = '${item['media_type'] ?? 'track'}';
+    return SearchResultRow(
+      item: item,
+      depth: depth,
+      selectionMode: ctrl.selectionMode,
+      selected: ctrl.isSelected(item),
+      expanded: ctrl.isNodeExpanded(item),
+      loadingChildren: ctrl.isNodeLoading(item),
+      loadingMore: ctrl.isLoadingMore(item),
+      playing: mType == 'track' && ctrl.isRowPlaying(item),
+      previewState: ctrl.previewStateFor(item),
+      onTap: () {
+        if (ctrl.selectionMode) {
+          ctrl.toggleSelection(item);
+          return;
+        }
+        if (mType == 'track') {
+          unawaited(ctrl.togglePreview(index, item));
+        } else if (mType == 'artist' || mType == 'album') {
+          unawaited(ctrl.toggleNode(item));
+        }
+      },
+      onLongPress: () => ctrl.enterSelection(item),
+      onDownload: () => _downloadOne(item),
+      onPreview: () => unawaited(ctrl.togglePreview(index, item)),
+      onLoadMore: () => unawaited(ctrl.loadMoreArtistAlbums(item)),
     );
   }
 
-  /// `_refresh_landing_page`'s order: New From Your Artists, what you play,
-  /// then the stats.
-  List<Widget> _cards(BuildContext context) {
+  /// `_refresh_landing_page`'s order: missing-credentials banner (when remote
+  /// search is enabled but no account is linked yet), New From Your Artists,
+  /// what you play, then the stats.
+  List<Widget> _cards(BuildContext context, SearchTabController ctrl) {
     final landing = widget.landing;
     final newReleasesCard = _buildNewReleasesCard(context);
     return [
+      if (ctrl.remoteEnabled &&
+          !ctrl.hasAnyCredentials &&
+          widget.onOpenSettings != null)
+        MissingCredentialsBanner(
+          onConnect: () => widget.onOpenSettings!(SettingsPage.account),
+        ),
       ?newReleasesCard,
       if (landing.mostPlayed.isNotEmpty)
         LandingCard(
@@ -566,33 +969,59 @@ Future<String?> showRecentSearchesSheet(
 class _SearchBarField extends StatelessWidget {
   const _SearchBarField({
     required this.controller,
+    required this.searching,
     required this.onChanged,
     required this.onSubmitted,
     required this.onClear,
   });
 
   final TextEditingController controller;
+  final bool searching;
   final ValueChanged<String> onChanged;
   final ValueChanged<String> onSubmitted;
   final VoidCallback onClear;
 
   @override
   Widget build(BuildContext context) {
+    final accent = Theme.of(context).colorScheme.primary;
     final hasText = controller.text.isNotEmpty;
     return TextField(
       controller: controller,
       textInputAction: TextInputAction.search,
       style: const TextStyle(color: Tokens.text, fontSize: 14),
       decoration: InputDecoration(
-        hintText: 'Search tracks, albums, artists…',
+        hintText: 'Artist, album or track…',
         prefixIcon: const Icon(Icons.search_rounded, color: Tokens.dim, size: 20),
-        suffixIcon: hasText
-            ? IconButton(
-                icon: const Icon(Icons.close_rounded, color: Tokens.dim, size: 18),
-                tooltip: 'Clear search',
-                onPressed: onClear,
-              )
-            : null,
+        suffixIcon:
+            (searching || hasText)
+                ? Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (searching)
+                      Padding(
+                        padding: const EdgeInsets.only(right: 4),
+                        child: SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: accent,
+                          ),
+                        ),
+                      ),
+                    if (hasText)
+                      IconButton(
+                        icon: const Icon(
+                          Icons.close_rounded,
+                          color: Tokens.dim,
+                          size: 18,
+                        ),
+                        tooltip: 'Clear search',
+                        onPressed: onClear,
+                      ),
+                  ],
+                )
+                : null,
         isDense: true,
         contentPadding: const EdgeInsets.symmetric(vertical: 10, horizontal: 14),
       ),
@@ -603,40 +1032,67 @@ class _SearchBarField extends StatelessWidget {
 }
 
 class _SearchModeBar extends StatelessWidget {
-  const _SearchModeBar({required this.selected, required this.onSelect});
+  const _SearchModeBar({
+    super.key,
+    required this.selected,
+    required this.unifiedPills,
+    required this.onSelect,
+  });
 
   final SearchViewMode selected;
+  final bool unifiedPills;
   final ValueChanged<SearchViewMode> onSelect;
+
+  Color _accentFor(SearchViewMode mode, Color primary) {
+    if (unifiedPills || mode == SearchViewMode.all) return primary;
+    return switch (mode) {
+      SearchViewMode.artists => Tokens.libArtist,
+      SearchViewMode.albums => Tokens.libAlbum,
+      SearchViewMode.tracks => Tokens.libTrack,
+      SearchViewMode.all => primary,
+    };
+  }
 
   @override
   Widget build(BuildContext context) {
-    final accent = Theme.of(context).colorScheme.primary;
+    final primary = Theme.of(context).colorScheme.primary;
+    const order = [
+      SearchViewMode.all,
+      SearchViewMode.artists,
+      SearchViewMode.albums,
+      SearchViewMode.tracks,
+    ];
     return Row(
       children: [
-        for (final mode in SearchViewMode.values) ...[
+        for (final mode in order) ...[
           if (mode != SearchViewMode.all) const SizedBox(width: 6),
           Expanded(
             child: InkWell(
               borderRadius: BorderRadius.circular(Tokens.radiusPill),
               onTap: () => onSelect(mode),
               child: Container(
-                height: 32,
+                height: 36,
                 alignment: Alignment.center,
                 decoration: BoxDecoration(
-                  color: mode == selected
-                      ? accent.withValues(alpha: 0.16)
-                      : Tokens.surface2,
+                  color:
+                      mode == selected
+                          ? _accentFor(mode, primary).withValues(alpha: 0.16)
+                          : Tokens.surface2,
                   borderRadius: BorderRadius.circular(Tokens.radiusPill),
                   border: Border.all(
-                    color: mode == selected
-                        ? accent.withValues(alpha: 0.45)
-                        : Tokens.borderSubtle,
+                    color:
+                        mode == selected
+                            ? _accentFor(mode, primary).withValues(alpha: 0.45)
+                            : Tokens.borderSubtle,
                   ),
                 ),
                 child: Text(
                   mode.label,
                   style: TextStyle(
-                    color: mode == selected ? accent : Tokens.dim,
+                    color:
+                        mode == selected
+                            ? _accentFor(mode, primary)
+                            : Tokens.dim,
                     fontSize: 12,
                     fontWeight: FontWeight.w600,
                   ),

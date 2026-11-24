@@ -1,0 +1,214 @@
+{
+  "hires_subtitle": [
+    {
+      "name": "qobuz_only",
+      "records": [
+        {
+          "source": "qobuz"
+        }
+      ],
+      "expected": "24-bit FLAC"
+    },
+    {
+      "name": "deezer_only",
+      "records": [
+        {
+          "source": "deezer"
+        }
+      ],
+      "expected": "16-bit FLAC (Deezer's best)"
+    },
+    {
+      "name": "mixed",
+      "records": [
+        {
+          "source": "qobuz"
+        },
+        {
+          "source": "deezer"
+        }
+      ],
+      "expected": "24-bit FLAC (Deezer items: 16-bit)"
+    },
+    {
+      "name": "missing_source_defaults_qobuz",
+      "records": [
+        {}
+      ],
+      "expected": "24-bit FLAC"
+    },
+    {
+      "name": "deezer_uppercase",
+      "records": [
+        {
+          "source": "DEEZER"
+        }
+      ],
+      "expected": "16-bit FLAC (Deezer's best)"
+    }
+  ],
+  "flac_tag_pairs": [
+    [
+      "TITLE",
+      "Archangel"
+    ],
+    [
+      "ARTIST",
+      "Burial"
+    ],
+    [
+      "ALBUM",
+      "Untrue"
+    ],
+    [
+      "ALBUMARTIST",
+      "Burial"
+    ],
+    [
+      "COMPOSER",
+      "William Bevan"
+    ],
+    [
+      "YEAR",
+      "2007"
+    ],
+    [
+      "GENRE",
+      "Electronic, UK Garage"
+    ],
+    [
+      "LYRICS",
+      "Holding you"
+    ],
+    [
+      "COPYRIGHT",
+      "(P) 2007 Hyperdub"
+    ],
+    [
+      "TRACKNUMBER",
+      "02"
+    ],
+    [
+      "DISCNUMBER",
+      "01"
+    ],
+    [
+      "TRACKTOTAL",
+      "13"
+    ],
+    [
+      "DISCTOTAL",
+      "01"
+    ],
+    [
+      "ISRC",
+      "GBHYP0700002"
+    ]
+  ],
+  "hero_result": [
+    {
+      "name": "exact_artist_beats_exact_track_and_album",
+      "query": "Burial",
+      "tracks": [
+        {
+          "id": "t1",
+          "media_type": "track",
+          "ui_title": "Burial"
+        }
+      ],
+      "albums": [
+        {
+          "id": "a1",
+          "media_type": "album",
+          "ui_title": "Burial"
+        }
+      ],
+      "artists": [
+        {
+          "id": "ar1",
+          "media_type": "artist",
+          "name": "Burial"
+        }
+      ],
+      "expected_id": "ar1"
+    },
+    {
+      "name": "exact_track_beats_exact_album",
+      "query": "Untrue",
+      "tracks": [
+        {
+          "id": "t1",
+          "media_type": "track",
+          "ui_title": "Untrue"
+        }
+      ],
+      "albums": [
+        {
+          "id": "a1",
+          "media_type": "album",
+          "ui_title": "Untrue"
+        }
+      ],
+      "artists": [],
+      "expected_id": "t1"
+    },
+    {
+      "name": "shorter_prefix_wins_by_ratio",
+      "query": "arch",
+      "tracks": [
+        {
+          "id": "t1",
+          "media_type": "track",
+          "ui_title": "Archangel (Extended Mix)"
+        },
+        {
+          "id": "t2",
+          "media_type": "track",
+          "ui_title": "Archangel"
+        }
+      ],
+      "albums": [],
+      "artists": [],
+      "expected_id": "t2"
+    },
+    {
+      "name": "word_boundary_beats_substring",
+      "query": "dark",
+      "tracks": [
+        {
+          "id": "t1",
+          "media_type": "track",
+          "ui_title": "Darkness Falls"
+        },
+        {
+          "id": "t2",
+          "media_type": "track",
+          "ui_title": "Near Dark"
+        }
+      ],
+      "albums": [],
+      "artists": [],
+      "expected_id": "t1"
+    },
+    {
+      "name": "fallback_order_track_then_album_then_artist",
+      "query": "zzzz",
+      "tracks": [],
+      "albums": [
+        {
+          "id": "a1",
+          "media_type": "album",
+          "ui_title": "Geogaddi"
+        }
+      ],
+      "artists": [
+        {
+          "id": "ar1",
+          "media_type": "artist",
+          "name": "Boards of Canada"
+        }
+      ],
+      "expected_id": "a1"
+    }
+  ]
+}
