@@ -17,8 +17,10 @@ the Companion & Sync page, its dialogs and Send to Mac in the menus,
 state bundles (export, import, the boot snapshot and import, backup to the
 Mac), and the DSP offload with the acoustic build (the SVD geometry and the
 genre model, identical in effect to Python's: the same stations on all 20
-golden seeds) (§4, phase 4). Desktop
-tests pass (`flutter test`: 556, including the real-library golden tests
+golden seeds) (§4, phase 4). Phase 5 (the assistant) is planned in seven
+stages; stage a (the intent parser and text helpers, identical to Python on
+4,961 utterances) is done (§4, phase 5). Desktop
+tests pass (`flutter test`: 571, including the real-library golden tests
 that need the gitignored goldens; analyzer clean in Dart's strict modes);
 debug and release APKs build.
 It is installed on the phone (2026-11-24, with the 2026-11-02 library, an
@@ -137,6 +139,7 @@ The port reuses each file's exact format, so a cutover install inherits it.
 | `companion_transfers.json` | sync | 4 | 4 |
 | `.onboarded` | onboarding | 7 | 4 ✅ (written by the boot import, as Flet does); 7 (the wizard) |
 | `recent_searches.json` | search | 4 | 4 |
+| `chat_history.json` (the Jarvis conversation, 15-minute expiry), `graph_state.json` (the assistant's last graph check) | `chat_memory.py` | 5 ✅ (`assistant/chat_memory.dart`) | 5 ✅ (byte for byte as `json.dump(indent=4)`; used from stage f) |
 | `downloads.db`, `failed_downloads.db` | streamrip layer | 6 | 6 |
 | `temp/` (artwork cache, `.nomedia`) | `filepath_utils` | not needed ✅ | not needed ✅ (on Android Flet already used the Kotlin cache, `cacheDir/np_art`, which the port shares) |
 | `mai_an_lab_state_*.zip` (export bundle, written to `/sdcard/Download`) | `state_export.py` | 4 ✅ (`data/state_export.dart`; Flet's bundles import and the other way round, tested against Python) | 4 ✅ (the boot snapshot and boot import under the port's own names until cutover, §5) |
@@ -200,7 +203,7 @@ Verdicts:
 | `ui/views/sync_hub.py` | 1,012 | Rewrite ✅ (`settings/sync_hub.dart`: the Android view's four cards; the Mac's server view with phase 8) | 4 |
 | `state_export.py` | 294 | Port ✅ (`data/state_export.dart`, `core/zip_archive.dart`, `sync/state_bundles.dart`) | 4 |
 | `llm_engine.py` (Gemini/Ollama over an OpenAI-compatible API) | 231 | Port: plain HTTP + JSON | 5 |
-| `llm_tools.py`, `assistant_runner.py`, `assistant_intent.py`, `chat_memory.py`, `web_research.py` | ~4,500 | Port, with golden intent and tool-call tests | 5 |
+| `llm_tools.py`, `assistant_runner.py`, `assistant_intent.py`, `chat_memory.py`, `web_research.py` | ~4,500 | Port, with golden intent and tool-call tests (§4, phase 5). `assistant_intent` ✅ (`assistant/intent.dart`), `chat_memory` ✅, `llm_tools`' text helpers and `names_mentioned` ✅ (`assistant/agent_text.dart`, `assistant/web_text.dart`), over `core/py_re.dart` (Python's `re` semantics) | 5 |
 | `ui/views/assistant.py` | 861 | Rewrite | 5 |
 | `qobuz.py`, `deezer.py`, `streamrip_api.py`, `streamrip_search.py`, `downloadable.py`, `search_results.py`, `source_metadata.py`, `new_releases.py` + deezer-py, streamrip, pycryptodomex | ~3,000 + libraries | ⚠️ Port or keep on Mac (§6, decision A) | 6 |
 | `ui/views/search.py`, `ui/player/download_dock.py` | 3,806 | Rewrite. The landing's local cards ✅ (`search/`, `data/landing_queries.dart`, golden-tested); the dock ✅ (`downloads/download_dock.dart`, 4d); the rest with the sources | 3, 4, 6 |
@@ -803,6 +806,111 @@ undecodable file, missing file, a batch of 10), cancel, bundle upload,
 discovery by query, the sweep, and `quote` on 6 strings.
 `test/discovery_test.dart`: which datagrams the listener takes.
 
+### Phase 5: the assistant
+
+The Jarvis tab: `assistant_intent.py` (417 lines), `assistant_runner.py`
+(2,620), `llm_engine.py` (231), `llm_tools.py` (1,144), `chat_memory.py`
+(120), `web_research.py` (233), `ui/views/assistant.py` (861), Settings →
+AI Assistant, and voice through the extension's `flutter_tts` and
+`speech_to_text`. It needs none of decisions A–C. Stages, one commit each:
+
+| | Stage | Flet source | |
+|---|---|---|---|
+| a | The intent parser and text helpers: `parse` (Python `re` → Dart `RegExp`), `strip_markdown`, `_slim_track`, `ChatMemoryManager` (`chat_history.json`, `graph_state.json`), `names_mentioned` | `assistant_intent.py`, `llm_tools.py` (helpers), `chat_memory.py`, `web_research.py` (`_fold`, `names_mentioned`) | ✅ |
+| b | The LLM client and the tool declarations: one OpenAI-compatible request (Gemini and Ollama URLs, headers, timeouts, the retry after a connection failure), `_parse_tool_calls`, the raw message kept for the echo, `list_gemini_models`; `get_agent_tools()` | `llm_engine.py`, `llm_tools.get_agent_tools` | 🔨 |
+| c | The runner's deterministic half: dispatch, the pending confirmation and choice, anaphora, every `_handle_*`, `_resolve_queries` (with difflib's `SequenceMatcher` ported), the avoid set, over an interface the player controller implements | `assistant_runner.py` | 🔨 |
+| d | The agent: `_dispatch_llm`'s loop and prompt, `execute_tool` for the library, playback and status tools | `assistant_runner._dispatch_llm`, `llm_tools.execute_tool` | 🔨 |
+| e | The web tools: `ask` (DuckDuckGo Lite, Wikipedia, Google grounding), `learn_about`, `find_related_artists` | `web_research.py`, `metadata_ai`'s search half | 🔨 |
+| f | The Jarvis tab and Settings → AI Assistant | `ui/views/assistant.py`, `settings.py` (AI Assistant), main.py's tab and lifecycle hooks | 🔨 |
+| g | Voice: replies spoken, push-to-talk, the microphone permission | the extension's `tts_*`/`stt_*`, `assistant.py` | 🔨 |
+
+**Stage a.** Pure functions, no UI. `assistant/intent.dart` is
+`assistant_intent.py`: Flet's 41 patterns character for character, the
+filler loops, `_clean_query` and the greeting pre-check. They run through
+`core/py_re.dart`, which rewrites a Python pattern so Dart's RegExp
+(JavaScript's) matches what Python's `re` matches: `\s` as `str.isspace`
+(JavaScript adds U+FEFF and leaves out U+001C–U+001F and U+0085), `\w` and
+`\b` Unicode-aware from Python's own tables (`core/py_re_tables.dart`,
+`tool/gen_py_re_tables.py`), `re.IGNORECASE` as sre applies it ('i' also
+takes İ and ı, 's' takes ſ, 'k' the Kelvin sign), `.` stopping only at
+`\n`, `$` also before a final `\n`, and `re.MULTILINE` seeing only `\n`;
+syntax it doesn't convert throws. `assistant/agent_text.dart` holds
+`strip_markdown` and `_slim_track`, `assistant/web_text.dart`
+`names_mentioned` and `_fold` (`nfkdCasefoldStrip`, with
+`core/nfkd_casefold_table.dart` for U+0345 and the planes beyond the
+BMP), and `assistant/chat_memory.dart` is `ChatMemoryManager`
+(`chat_history.json` and `graph_state.json` as `json.dump(indent=4)`
+writes them: `pyJsonDumps` gained `indent` and `ensureAscii`). On the way,
+`pyLower` and `pyCasefold` moved to tables generated from Python
+(`tool/gen_casefold_table.py`): Dart's toLowerCase is from older Unicode
+data and missed ~300 letters (Georgian Mtavruli, Cyrillic and others).
+
+**How parity is proved (stage a).** `tool/export_assistant_goldens.py`
+writes `test/goldens/assistant_text.json`; `test/assistant_text_test.dart`
+checks: `parse` on 4,961 utterances (every short string in Flet's
+assistant tests, a grid of verbs, fillers, queries and tails, and edge
+cases: Greek, accents, Turkish i, ſ, the Kelvin sign, NBSP, U+FEFF, U+001C,
+U+0085, `\r`, a final `\n`, emoji), name, query, raw and extras all
+equal; `_clean_query` on 32 strings; Python's own match, search, findall
+and sub for 66 subject × pattern cases of the constructs `py_re` rewrites;
+`strip_markdown` on 16 texts; `_slim_track`; `names_mentioned` on 9
+pages; `_fold`, `str.lower` and `str.casefold` on every code point (hashed
+per 4,096); `save_session` and `save_graph_state` byte for byte with a
+fixed clock, and `load_session` at 900 s (kept, 50 messages) and 900.5 s
+(expired, file deleted).
+
+**Stage b.** `get_agent_tools()` is sent as Python builds it, so the model
+sees the same tool list (§7 for the tools whose features come later).
+Proved with a local HTTP server that records requests: Python's
+`LLMEngine` and the port send the same bodies and headers for the same
+messages, and parse the same scripted replies alike (tool calls as a JSON
+string, as an object, without ids, malformed; HTTP errors; empty choices).
+
+**Stage c.** The runner drives the player through an interface
+(queue, `set_queue`, add last/next/many, remove, move, transport,
+shuffle) that `PlayerController` implements, as the audio engine does for
+Flet. Its phrases come from `random.choice`; the port draws through an
+injected chooser, and the goldens run Python's runner with the same
+scripted chooser on a synthetic library and recorded conversations
+(Flet's test conversations included), recording each response (spoken,
+displayed, extras, deferred play), the player calls and the pending
+state. Deferred play stays the view's job (f).
+
+**Stage d.** The loop as Flet runs it: at most 6 tool rounds, the
+provider's raw assistant message echoed, a tool's confirmation or choice
+ending the turn, one last request without tools when the steps run out.
+Tool results go to the model as `json.dumps(…, ensure_ascii=False,
+default=str)` writes them (`core/py_json.dart`). Proved by running
+Python's loop and the port's against the same scripted replies from the
+recording server: the messages sent at every step equal byte for byte.
+`search_online` (Qobuz, decision A) and the metadata tools (phase 7) stay
+declared; until their phase they return an error the model can read
+(§7). The read-only metadata tools may come here if their queries are
+cheap to port.
+
+**Stage e.** Replayed responses (DuckDuckGo Lite HTML, Wikipedia JSON,
+Gemini grounding JSON) give the same results from Python and the port,
+including the 30-minute cache and Google switching itself off after a
+quota or capability error.
+
+**Stage f.** The tab returns to the bar (`appearance.show_jarvis`); the
+chat view keeps Flet's bubbles (user text; assistant Markdown, GitHub
+flavoured, links opened outside), the option buttons, the thinking
+bubble, the empty state's four prompts, the 50-message cap, Clear, the
+init flow (graph status, the edge builds, `graph_state.json`, the
+empty-library line), the entities stored with each reply for anaphora,
+deferred play, and the background and resume hooks (session touch, the
+15-minute expiry). Settings → AI Assistant: enable, provider, key, the
+model list, research mode, the local server, personality presets, Test
+Connection. A Markdown renderer from pub.dev is chosen here (§12).
+
+**Stage g.** Phone checks only: the voice choice (Google engine, en-GB,
+the extension's selection rules, rate and pitch 0.75), hold-to-talk (60 s
+cap, 4 s after release), RECORD_AUDIO asked on the first press (§1 row
+9), `<queries>` for RecognitionService, music paused while Jarvis speaks
+and resumed after, speech stopped when the tab closes or voice is turned
+off.
+
 ---
 
 ## 5. Cutover (Android)
@@ -963,7 +1071,10 @@ uninstall and reinstall; the bundle export/import covers the data.
   has streamrip's tomlkit 0.7.2):
   `~/miniconda3/bin/pip install --target tool/.pydeps tinytag==2.3.2 tomlkit==0.15.2`
   (gitignored). Generated tables: `tool/gen_nfkd_table.py`, `tool/gen_nfc_table.py`,
-  `tool/gen_casefold_table.py` (`str.casefold`, `str.isdecimal`).
+  `tool/gen_casefold_table.py` (`str.lower`, `str.casefold`, `str.isdecimal`),
+  `tool/gen_py_re_tables.py` (`re`'s `\w` and IGNORECASE letters),
+  `tool/gen_fold_casefold_table.py` (NFKD + casefold exceptions; run it
+  after `gen_casefold_table.py`).
 
 ---
 
@@ -1016,6 +1127,7 @@ landing; then this plan; all pushed to origin. Then Settings (`e946579`)
 and the Network view, local. Then phase 4a (the Companion protocol), 4b (notifications), 4c (the
 sync manager), 4d (the download queue and dock), 4e (the Companion UI),
 4f (state bundles) and 4g (the DSP offload and the acoustic build), local.
+Then the phase 5 plan and stage a (the intent parser), local.
 
 **Done**
 - [x] Phase 0: backbone (read-only DB isolate, tracks tab, sort, search,
@@ -1098,6 +1210,11 @@ sync manager), 4d (the download queue and dock), 4e (the Companion UI),
       the real library the port's coordinates give Python's stations on
       all 20 golden seeds (§4, phase 4g). Phase 4's code is complete.
       Release APK: 26.6 MB.
+- [x] Phase 5 planned in seven stages (§4, phase 5). Stage a: the intent
+      parser over `core/py_re.dart` (Python's `re` semantics on Dart's
+      RegExp), `strip_markdown`, `_slim_track`, `names_mentioned`, the chat
+      memory files; identical to Python on 4,961 utterances. `pyLower` and
+      `pyCasefold` now table-driven, equal to Python on every code point.
 
 **To do, in order**
 1. [ ] Install the current build on the phone: `tool/install_phone.sh
@@ -1154,10 +1271,10 @@ sync manager), 4d (the download queue and dock), 4e (the Companion UI),
           and an offload end to end (the `sync` notification and its
           Cancel with the screen off; the graph rebuilt after; Settings →
           Database Management → Recompute PCA).
-       k. Next: phase 5 (the assistant: `llm_engine`, `llm_tools`,
-          `assistant_*`, `chat_memory`, `web_research`, the Jarvis tab and
-          voice; §3), planned in stages like phase 4, with golden intent
-          and tool-call tests. It needs none of decisions A–C.
+       k. Phase 5 (the assistant), planned 2026-11-24 in seven stages
+          (§4, phase 5). Stage a done (the intent parser and text
+          helpers). Next: stage b (the LLM client and the tool
+          declarations).
 5. [ ] Decisions A, B, C (§6) before phase 6 is planned in detail.
 6. [ ] Flet, on master: the album menu's Play Album tuple,
        Appearance's sort writing `library_sort`, the Network view's
@@ -1347,6 +1464,8 @@ code or a published template comes in, before it is committed.
 | CPython's `math.hypot` (`vector_norm` in Modules/mathmodule.c: scaling, lossless squaring and summation, one differential correction), translated | `lib/core/py_num.dart` `pyHypot` | https://github.com/python/cpython (3.13) | PSF License v2 |
 | config.toml template: streamrip's `config.toml` plus the app's `[dsp]`, `[haptics]`, `[assistant]`, `[appearance]` sections (utils/config.toml, copied as is) | `assets/config_template.toml` | https://github.com/nathom/streamrip, via the Flet app | GPL-3.0 (streamrip). The Flet APK ships the same file; decide before release (§10 item 7) |
 | streamrip-derived helpers (filename cleaning; in the Flet app's `filepath_utils.py`, credited there) | `clean_filename` only, written from its behaviour (drop `\/*?:"<>|`, cut at 255 UTF-8 bytes, strip, NFC), not translated: `lib/downloads/file_names.dart` | https://github.com/nathom/streamrip | GPL-3.0: no streamrip code copied; check before porting anything else from it |
+| Python's `re` semantics for `\s`, `\w`, `\b`, `re.IGNORECASE`, `.`, `$` and `re.MULTILINE`, reproduced from its behaviour (the tables generated by asking Python), not translated | `lib/core/py_re.dart`, `lib/core/py_re_tables.dart` | CPython `re` / sre | PSF License v2; no code copied |
+| Unicode lower-case and case-folding mappings, and NFKD + casefold for the characters py_text's pieces don't cover, generated from Python's `str.lower`, `str.casefold` and `unicodedata` | `lib/core/py_unicode_tables.dart`, `lib/core/nfkd_casefold_table.dart` | Unicode Character Database 15.1, via CPython | Unicode License v3 (data) |
 | Unicode canonical decompositions, combining classes and composition exclusions, generated from Python's `unicodedata` | `lib/core/nfc_table.dart` (with `lib/core/nfc.dart`) | Unicode Character Database 15.1, via CPython | Unicode License v3 (data) |
 | numpy's float32 reduction order (`mean`/`std` down axis 0 as one sequential float32 sum per column) and `np.corrcoef`'s arithmetic, reproduced from their behaviour (checked bit for bit), not translated | `lib/stations/acoustic_geometry.dart` | https://github.com/numpy/numpy (2.4) | BSD-3-Clause; no numpy code copied |
 | Python's `json.dumps` defaults (separators, `ensure_ascii`, float `repr`), written from its documented behaviour | `lib/core/py_json.dart` | CPython `json` | PSF License v2; no code copied |

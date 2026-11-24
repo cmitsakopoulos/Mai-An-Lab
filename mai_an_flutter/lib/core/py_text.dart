@@ -1,5 +1,6 @@
 import 'dart:convert' show utf8;
 
+import 'nfkd_casefold_table.dart';
 import 'nfkd_fold_table.dart';
 import 'py_unicode_tables.dart';
 
@@ -30,21 +31,26 @@ String alnumOnly(String s) {
   return out.toString();
 }
 
-/// `str.lower()`. Dart's toLowerCase maps every Σ to σ; Python applies the
-/// Final_Sigma rule (ς at the end of a word).
+/// `str.lower()`: Python's full lower-case mappings (Dart's toLowerCase is
+/// from older Unicode data), with the Final_Sigma rule (ς at the end of a
+/// word).
 String pyLower(String s) {
-  final lower = s.toLowerCase();
-  if (!s.contains('Σ')) return lower;
   final src = s.runes.toList();
-  final out = lower.runes.toList();
-  // toLowerCase is length-preserving for the scripts that contain Σ; if it
-  // ever isn't, keep Dart's result rather than misalign.
-  if (src.length != out.length) return lower;
+  final out = StringBuffer();
   for (var i = 0; i < src.length; i++) {
-    if (src[i] != 0x3a3) continue;
-    if (_finalSigma(src, i)) out[i] = 0x3c2;
+    final r = src[i];
+    if (r == 0x3a3 && _finalSigma(src, i)) {
+      out.writeCharCode(0x3c2);
+      continue;
+    }
+    final m = kPyLower[r];
+    if (m != null) {
+      out.write(m);
+    } else {
+      out.writeCharCode(r);
+    }
   }
-  return String.fromCharCodes(out);
+  return out.toString();
 }
 
 /// Unicode Final_Sigma: preceded by a cased letter (skipping case-ignorable
@@ -83,7 +89,7 @@ String pyTitle(String s) {
     } else if (r == 0x3a3) {
       out.writeCharCode(_finalSigma(src, i) ? 0x3c2 : 0x3c3);
     } else {
-      out.write(c.toLowerCase());
+      out.write(kPyLower[r] ?? c);
     }
     prevCased = isCased;
   }
@@ -131,6 +137,24 @@ String nfkdStrip(String s) {
   return out.toString();
 }
 
+/// `"".join(c for c in unicodedata.normalize("NFKD", s).casefold() if not
+/// unicodedata.combining(c))` (web_research._fold): every plane, and
+/// U+0345 kept as the ι it casefolds to.
+String nfkdCasefoldStrip(String s) {
+  final out = StringBuffer();
+  for (final r in s.runes) {
+    final ex = kNfkdCasefoldExceptions[r];
+    if (ex != null) {
+      out.write(ex);
+      continue;
+    }
+    for (final c in pyCasefold(nfkdStrip(String.fromCharCode(r))).runes) {
+      if (!_isCombining(c)) out.writeCharCode(c);
+    }
+  }
+  return out.toString();
+}
+
 int _decimalValue(int rune) {
   if (rune >= 0x30 && rune <= 0x39) return rune - 0x30;
   if (rune < 0x660) return -1;
@@ -154,16 +178,15 @@ int pyDecimalInt(String s) {
   return v;
 }
 
-/// `str.casefold()`: lower case, plus Unicode full case folding where it
-/// differs (ß is ss, final ς is σ).
+/// `str.casefold()`: Unicode full case folding (ß is ss, final ς is σ).
 String pyCasefold(String s) {
   final out = StringBuffer();
   for (final r in s.runes) {
-    final m = kCasefoldExtra[r];
+    final m = kPyCasefold[r];
     if (m != null) {
       out.write(m);
     } else {
-      out.write(String.fromCharCode(r).toLowerCase());
+      out.writeCharCode(r);
     }
   }
   return out.toString();
