@@ -85,12 +85,24 @@ String anyPcaPathJob(Database db) {
   return rows.isEmpty ? '' : rows.first.values.first as String;
 }
 
-/// `get_neighbors(track_path, k)` with no edge kind: the [k] heaviest edges
-/// across every tier.
-DbJob<List<NeighborRow>> neighborsJob(String path, int k) =>
-    (db) => [
-      for (final r in db.select(
-        '''
+/// `get_neighbors(track_path, k, edge_kind)`: the [k] heaviest edges, either
+/// across every tier (`edgeKind == null`) or restricted to one tier.
+DbJob<List<NeighborRow>> neighborsJob(String path, int k, {String? edgeKind}) =>
+    (db) {
+      final hasKind = edgeKind != null && edgeKind.isNotEmpty;
+      final sql = hasKind
+          ? '''
+                SELECT n.neighbor_path AS path, n.weight, n.edge_kind,
+                       t.title, ar.name AS artist, al.title AS album
+                FROM track_neighbors n
+                LEFT JOIN tracks  t  ON t.path     = n.neighbor_path
+                LEFT JOIN albums  al ON al.id      = t.album_id
+                LEFT JOIN artists ar ON ar.id      = al.artist_id
+                WHERE n.track_path = ? AND n.edge_kind = ?
+                ORDER BY n.weight DESC
+                LIMIT ?
+            '''
+          : '''
                 SELECT n.neighbor_path AS path, n.weight, n.edge_kind,
                        t.title, ar.name AS artist, al.title AS album
                 FROM track_neighbors n
@@ -100,18 +112,20 @@ DbJob<List<NeighborRow>> neighborsJob(String path, int k) =>
                 WHERE n.track_path = ?
                 ORDER BY n.weight DESC
                 LIMIT ?
-            ''',
-        [path, k],
-      ))
-        NeighborRow(
-          path: r['path'] as String,
-          weight: (r['weight'] as num).toDouble(),
-          edgeKind: r['edge_kind'] as String,
-          title: r['title'] as String?,
-          artist: r['artist'] as String?,
-          album: r['album'] as String?,
-        ),
-    ];
+            ''';
+      final args = hasKind ? [path, edgeKind, k] : [path, k];
+      return [
+        for (final r in db.select(sql, args))
+          NeighborRow(
+            path: r['path'] as String,
+            weight: (r['weight'] as num).toDouble(),
+            edgeKind: r['edge_kind'] as String,
+            title: r['title'] as String?,
+            artist: r['artist'] as String?,
+            album: r['album'] as String?,
+          ),
+      ];
+    };
 
 /// `get_tracks_pca_coords_for_paths`: coordinates and tags for [paths]
 /// (duplicates allowed, as Python passes them), analysed tracks only.

@@ -8,6 +8,7 @@ import '../core/db_worker.dart';
 import '../core/py_text.dart';
 import '../player/dsp.dart';
 import '../stations/station.dart';
+import 'assistant_queries.dart';
 import 'browse_queries.dart';
 import '../sync/companion_client.dart' show FeatureRow;
 import 'feature_store.dart';
@@ -246,10 +247,32 @@ class LibraryRepository {
   // The Acoustic Network view (network_queries.dart).
   Future<bool> hasPcaCoords() => _db.run(hasPcaCoordsJob);
   Future<String> anyPcaPath() => _db.run(anyPcaPathJob);
-  Future<List<NeighborRow>> networkNeighbors(String path, int k) =>
-      _db.run(neighborsJob(path, k));
+  Future<List<NeighborRow>> networkNeighbors(
+    String path,
+    int k, {
+    String? edgeKind,
+  }) => _db.run(neighborsJob(path, k, edgeKind: edgeKind));
   Future<List<NetworkTrackRow>> pcaCoordsForPaths(List<String> paths) =>
       _db.run(pcaCoordsForPathsJob(paths));
+
+  // The assistant's queries and writes (assistant_queries.dart).
+  Future<List<Map<String, Object?>>> searchTracksSimple(
+    String query, {
+    int limit = 5,
+  }) => _db.run(searchTracksSimpleJob(query, limit));
+  Future<List<Map<String, Object?>>> allTracksRaw() => _db.run(allTracksRawJob);
+  Future<Map<String, Object?>?> trackFull(String path) =>
+      _db.run(trackFullJob(path));
+  Future<List<Map<String, Object?>>> mostPlayedFull(int limit) =>
+      _db.run(mostPlayedFullJob(limit));
+  Future<Set<String>> recentPlayedPaths({int windowSeconds = 7 * 86400}) =>
+      _db.run(recentPlayedPathsJob(windowSeconds));
+  Future<void> recordPlayback(String path, String event, {String? seedPath}) =>
+      _write(recordPlaybackJob(path, event, seedPath: seedPath));
+  Future<List<String>> searchArtistNames(String query) =>
+      _db.run(searchArtistNamesJob(query));
+  Future<String?> firstTrackPathByArtist(String name) =>
+      _db.run(firstTrackPathByArtistJob(name));
 
   /// `track_graph.build_metadata_edges`: rewrites the artist tier of
   /// `track_neighbors`. Returns the edge count.

@@ -1,0 +1,1018 @@
+{
+ "fixture": {
+  "artists": [
+   [
+    1,
+    "Pink Floyd"
+   ],
+   [
+    2,
+    "Radiohead"
+   ],
+   [
+    3,
+    "Young the Giant"
+   ],
+   [
+    4,
+    "The Beatles"
+   ],
+   [
+    5,
+    "Sigur Rós"
+   ],
+   [
+    6,
+    "Αλέξης"
+   ]
+  ],
+  "albums": [
+   [
+    1,
+    1,
+    "Meddle",
+    1971,
+    "Progressive Rock"
+   ],
+   [
+    2,
+    1,
+    "The Dark Side of the Moon",
+    1973,
+    "Rock"
+   ],
+   [
+    3,
+    2,
+    "OK Computer",
+    1997,
+    "Alternative Rock"
+   ],
+   [
+    4,
+    3,
+    "Home of the Strange",
+    2016,
+    "Indie Rock"
+   ],
+   [
+    5,
+    4,
+    "Of The Night",
+    1968,
+    "Rock"
+   ],
+   [
+    6,
+    5,
+    "Ágætis byrjun",
+    1999,
+    "Post-Rock"
+   ],
+   [
+    7,
+    6,
+    "Μόνος",
+    2020,
+    "Acoustic"
+   ]
+  ],
+  "tracks": [
+   [
+    1,
+    1,
+    "Echoes",
+    "/m/echoes_pf.flac",
+    1412.0,
+    "flac",
+    1000.0,
+    68.0,
+    0.35,
+    0.3
+   ],
+   [
+    2,
+    2,
+    "Time",
+    "/m/time_pf.flac",
+    413.0,
+    "flac",
+    1010.0,
+    120.0,
+    0.55,
+    0.5
+   ],
+   [
+    3,
+    2,
+    "Money",
+    "/m/money_pf.flac",
+    382.0,
+    "flac",
+    1020.0,
+    124.0,
+    0.65,
+    0.6
+   ],
+   [
+    4,
+    3,
+    "Paranoid Android",
+    "/m/paranoid.flac",
+    387.0,
+    "flac",
+    1030.0,
+    84.0,
+    0.6,
+    0.45
+   ],
+   [
+    5,
+    3,
+    "Karma Police",
+    "/m/karma.flac",
+    264.0,
+    "flac",
+    1040.0,
+    75.0,
+    0.4,
+    0.4
+   ],
+   [
+    6,
+    4,
+    "Echoes",
+    "/m/echoes_ytg.flac",
+    225.0,
+    "mp3",
+    1050.0,
+    122.0,
+    0.72,
+    0.65
+   ],
+   [
+    7,
+    5,
+    "The",
+    "/m/the.mp3",
+    180.0,
+    "mp3",
+    1060.0,
+    100.0,
+    0.5,
+    0.5
+   ],
+   [
+    8,
+    6,
+    "Svefn-g-englar",
+    "/m/svefn.flac",
+    604.0,
+    "flac",
+    1070.0,
+    70.0,
+    0.25,
+    0.2
+   ],
+   [
+    9,
+    7,
+    "Pink Moon",
+    "/m/pink_moon.mp3",
+    125.0,
+    "mp3",
+    1080.0,
+    90.0,
+    0.3,
+    0.3
+   ]
+  ],
+  "play_counts": [
+   [
+    "/m/echoes_pf.flac",
+    12,
+    "2026-11-20 10:00:00",
+    5,
+    [
+     1,
+     2,
+     3,
+     4
+    ],
+    [
+     1.0,
+     0.0,
+     0.0,
+     0.0
+    ]
+   ],
+   [
+    "/m/time_pf.flac",
+    12,
+    "2026-11-22 10:00:00",
+    5,
+    [
+     5,
+     6,
+     7,
+     8
+    ],
+    [
+     0.9,
+     0.4,
+     0.0,
+     0.0
+    ]
+   ],
+   [
+    "/m/money_pf.flac",
+    5,
+    "2026-11-21 10:00:00",
+    4,
+    [
+     9,
+     10,
+     11,
+     12
+    ],
+    [
+     0.8,
+     0.5,
+     0.1,
+     0.0
+    ]
+   ],
+   [
+    "/m/paranoid.flac",
+    8,
+    "2026-11-19 10:00:00",
+    5,
+    [
+     13,
+     14,
+     15,
+     16
+    ],
+    [
+     0.6,
+     0.8,
+     0.0,
+     0.0
+    ]
+   ],
+   [
+    "/m/karma.flac",
+    0,
+    "2026-11-18 10:00:00",
+    5,
+    null,
+    null
+   ],
+   [
+    "/m/svefn.flac",
+    3,
+    "2026-11-17 10:00:00",
+    5,
+    [
+     17,
+     18,
+     19,
+     20
+    ],
+    [
+     0.2,
+     0.9,
+     0.3,
+     0.0
+    ]
+   ]
+  ],
+  "neighbors": [
+   [
+    "/m/echoes_pf.flac",
+    "/m/paranoid.flac",
+    0.99,
+    "acoustic"
+   ],
+   [
+    "/m/echoes_pf.flac",
+    "/m/money_pf.flac",
+    1.0,
+    "artist"
+   ],
+   [
+    "/m/echoes_pf.flac",
+    "/m/time_pf.flac",
+    0.8,
+    "artist"
+   ],
+   [
+    "/m/echoes_pf.flac",
+    "/m/karma.flac",
+    0.5,
+    "artist"
+   ]
+  ],
+  "history": [
+   [
+    "/m/echoes_pf.flac",
+    120,
+    "played",
+    null
+   ],
+   [
+    "/m/time_pf.flac",
+    3600,
+    "played",
+    "/m/echoes_pf.flac"
+   ],
+   [
+    "/m/money_pf.flac",
+    864000,
+    "played",
+    null
+   ],
+   [
+    "/m/paranoid.flac",
+    60,
+    "completed",
+    null
+   ],
+   [
+    "/m/karma.flac",
+    60,
+    "skipped_early",
+    null
+   ]
+  ]
+ },
+ "search_tracks_simple": [
+  {
+   "query": "",
+   "limit": 5,
+   "result": []
+  },
+  {
+   "query": "   ",
+   "limit": 5,
+   "result": []
+  },
+  {
+   "query": "echoes by pink floyd",
+   "limit": 5,
+   "result": [
+    {
+     "path": "/m/echoes_pf.flac",
+     "title": "Echoes",
+     "duration": 1412.0,
+     "artist": "Pink Floyd",
+     "album": "Meddle"
+    }
+   ]
+  },
+  {
+   "query": "pink floyd by echoes",
+   "limit": 5,
+   "result": [
+    {
+     "path": "/m/echoes_pf.flac",
+     "title": "Echoes",
+     "duration": 1412.0,
+     "artist": "Pink Floyd",
+     "album": "Meddle"
+    }
+   ]
+  },
+  {
+   "query": "time from dark side",
+   "limit": 5,
+   "result": [
+    {
+     "path": "/m/time_pf.flac",
+     "title": "Time",
+     "duration": 413.0,
+     "artist": "Pink Floyd",
+     "album": "The Dark Side of the Moon"
+    }
+   ]
+  },
+  {
+   "query": "karma from radiohead",
+   "limit": 5,
+   "result": [
+    {
+     "path": "/m/karma.flac",
+     "title": "Karma Police",
+     "duration": 264.0,
+     "artist": "Radiohead",
+     "album": "OK Computer"
+    }
+   ]
+  },
+  {
+   "query": "the dark moon",
+   "limit": 5,
+   "result": [
+    {
+     "path": "/m/money_pf.flac",
+     "title": "Money",
+     "duration": 382.0,
+     "artist": "Pink Floyd",
+     "album": "The Dark Side of the Moon"
+    },
+    {
+     "path": "/m/time_pf.flac",
+     "title": "Time",
+     "duration": 413.0,
+     "artist": "Pink Floyd",
+     "album": "The Dark Side of the Moon"
+    }
+   ]
+  },
+  {
+   "query": "pink",
+   "limit": 5,
+   "result": [
+    {
+     "path": "/m/pink_moon.mp3",
+     "title": "Pink Moon",
+     "duration": 125.0,
+     "artist": "Αλέξης",
+     "album": "Μόνος"
+    },
+    {
+     "path": "/m/money_pf.flac",
+     "title": "Money",
+     "duration": 382.0,
+     "artist": "Pink Floyd",
+     "album": "The Dark Side of the Moon"
+    },
+    {
+     "path": "/m/time_pf.flac",
+     "title": "Time",
+     "duration": 413.0,
+     "artist": "Pink Floyd",
+     "album": "The Dark Side of the Moon"
+    },
+    {
+     "path": "/m/echoes_pf.flac",
+     "title": "Echoes",
+     "duration": 1412.0,
+     "artist": "Pink Floyd",
+     "album": "Meddle"
+    }
+   ]
+  },
+  {
+   "query": "pink",
+   "limit": 2,
+   "result": [
+    {
+     "path": "/m/pink_moon.mp3",
+     "title": "Pink Moon",
+     "duration": 125.0,
+     "artist": "Αλέξης",
+     "album": "Μόνος"
+    },
+    {
+     "path": "/m/money_pf.flac",
+     "title": "Money",
+     "duration": 382.0,
+     "artist": "Pink Floyd",
+     "album": "The Dark Side of the Moon"
+    }
+   ]
+  },
+  {
+   "query": "of the",
+   "limit": 5,
+   "result": [
+    {
+     "path": "/m/the.mp3",
+     "title": "The",
+     "duration": 180.0,
+     "artist": "The Beatles",
+     "album": "Of The Night"
+    },
+    {
+     "path": "/m/echoes_ytg.flac",
+     "title": "Echoes",
+     "duration": 225.0,
+     "artist": "Young the Giant",
+     "album": "Home of the Strange"
+    },
+    {
+     "path": "/m/money_pf.flac",
+     "title": "Money",
+     "duration": 382.0,
+     "artist": "Pink Floyd",
+     "album": "The Dark Side of the Moon"
+    },
+    {
+     "path": "/m/time_pf.flac",
+     "title": "Time",
+     "duration": 413.0,
+     "artist": "Pink Floyd",
+     "album": "The Dark Side of the Moon"
+    }
+   ]
+  },
+  {
+   "query": "android radiohead",
+   "limit": 5,
+   "result": [
+    {
+     "path": "/m/paranoid.flac",
+     "title": "Paranoid Android",
+     "duration": 387.0,
+     "artist": "Radiohead",
+     "album": "OK Computer"
+    }
+   ]
+  },
+  {
+   "query": "ok computer",
+   "limit": 5,
+   "result": [
+    {
+     "path": "/m/karma.flac",
+     "title": "Karma Police",
+     "duration": 264.0,
+     "artist": "Radiohead",
+     "album": "OK Computer"
+    },
+    {
+     "path": "/m/paranoid.flac",
+     "title": "Paranoid Android",
+     "duration": 387.0,
+     "artist": "Radiohead",
+     "album": "OK Computer"
+    }
+   ]
+  },
+  {
+   "query": "nonexistent xyz",
+   "limit": 5,
+   "result": []
+  }
+ ],
+ "get_all_tracks": [
+  {
+   "id": 9,
+   "album_id": 7,
+   "title": "Pink Moon",
+   "track_num": null,
+   "duration": 125.0,
+   "path": "/m/pink_moon.mp3",
+   "format": "mp3",
+   "added_date": 1080.0,
+   "bitrate": null,
+   "bpm": 90.0,
+   "energy": 0.3,
+   "brightness": 0.3,
+   "artist_tag": null,
+   "album": "Μόνος",
+   "artist": "Αλέξης",
+   "year": "2020",
+   "genre": "Acoustic"
+  },
+  {
+   "id": 8,
+   "album_id": 6,
+   "title": "Svefn-g-englar",
+   "track_num": null,
+   "duration": 604.0,
+   "path": "/m/svefn.flac",
+   "format": "flac",
+   "added_date": 1070.0,
+   "bitrate": null,
+   "bpm": 70.0,
+   "energy": 0.25,
+   "brightness": 0.2,
+   "artist_tag": null,
+   "album": "Ágætis byrjun",
+   "artist": "Sigur Rós",
+   "year": "1999",
+   "genre": "Post-Rock"
+  },
+  {
+   "id": 7,
+   "album_id": 5,
+   "title": "The",
+   "track_num": null,
+   "duration": 180.0,
+   "path": "/m/the.mp3",
+   "format": "mp3",
+   "added_date": 1060.0,
+   "bitrate": null,
+   "bpm": 100.0,
+   "energy": 0.5,
+   "brightness": 0.5,
+   "artist_tag": null,
+   "album": "Of The Night",
+   "artist": "The Beatles",
+   "year": "1968",
+   "genre": "Rock"
+  },
+  {
+   "id": 6,
+   "album_id": 4,
+   "title": "Echoes",
+   "track_num": null,
+   "duration": 225.0,
+   "path": "/m/echoes_ytg.flac",
+   "format": "mp3",
+   "added_date": 1050.0,
+   "bitrate": null,
+   "bpm": 122.0,
+   "energy": 0.72,
+   "brightness": 0.65,
+   "artist_tag": null,
+   "album": "Home of the Strange",
+   "artist": "Young the Giant",
+   "year": "2016",
+   "genre": "Indie Rock"
+  },
+  {
+   "id": 5,
+   "album_id": 3,
+   "title": "Karma Police",
+   "track_num": null,
+   "duration": 264.0,
+   "path": "/m/karma.flac",
+   "format": "flac",
+   "added_date": 1040.0,
+   "bitrate": null,
+   "bpm": 75.0,
+   "energy": 0.4,
+   "brightness": 0.4,
+   "artist_tag": null,
+   "album": "OK Computer",
+   "artist": "Radiohead",
+   "year": "1997",
+   "genre": "Alternative Rock"
+  },
+  {
+   "id": 4,
+   "album_id": 3,
+   "title": "Paranoid Android",
+   "track_num": null,
+   "duration": 387.0,
+   "path": "/m/paranoid.flac",
+   "format": "flac",
+   "added_date": 1030.0,
+   "bitrate": null,
+   "bpm": 84.0,
+   "energy": 0.6,
+   "brightness": 0.45,
+   "artist_tag": null,
+   "album": "OK Computer",
+   "artist": "Radiohead",
+   "year": "1997",
+   "genre": "Alternative Rock"
+  },
+  {
+   "id": 3,
+   "album_id": 2,
+   "title": "Money",
+   "track_num": null,
+   "duration": 382.0,
+   "path": "/m/money_pf.flac",
+   "format": "flac",
+   "added_date": 1020.0,
+   "bitrate": null,
+   "bpm": 124.0,
+   "energy": 0.65,
+   "brightness": 0.6,
+   "artist_tag": null,
+   "album": "The Dark Side of the Moon",
+   "artist": "Pink Floyd",
+   "year": "1973",
+   "genre": "Rock"
+  },
+  {
+   "id": 2,
+   "album_id": 2,
+   "title": "Time",
+   "track_num": null,
+   "duration": 413.0,
+   "path": "/m/time_pf.flac",
+   "format": "flac",
+   "added_date": 1010.0,
+   "bitrate": null,
+   "bpm": 120.0,
+   "energy": 0.55,
+   "brightness": 0.5,
+   "artist_tag": null,
+   "album": "The Dark Side of the Moon",
+   "artist": "Pink Floyd",
+   "year": "1973",
+   "genre": "Rock"
+  },
+  {
+   "id": 1,
+   "album_id": 1,
+   "title": "Echoes",
+   "track_num": null,
+   "duration": 1412.0,
+   "path": "/m/echoes_pf.flac",
+   "format": "flac",
+   "added_date": 1000.0,
+   "bitrate": null,
+   "bpm": 68.0,
+   "energy": 0.35,
+   "brightness": 0.3,
+   "artist_tag": null,
+   "album": "Meddle",
+   "artist": "Pink Floyd",
+   "year": "1971",
+   "genre": "Progressive Rock"
+  }
+ ],
+ "get_track_full": {
+  "/m/echoes_pf.flac": {
+   "path": "/m/echoes_pf.flac",
+   "title": "Echoes",
+   "duration": 1412.0,
+   "format": "flac",
+   "bpm": 68.0,
+   "energy": 0.35,
+   "brightness": 0.3,
+   "artist": "Pink Floyd",
+   "album": "Meddle",
+   "year": "1971",
+   "genre": "Progressive Rock",
+   "timbre": {
+    "__bytes__": [
+     1,
+     2,
+     3,
+     4
+    ]
+   }
+  },
+  "/m/echoes_ytg.flac": {
+   "path": "/m/echoes_ytg.flac",
+   "title": "Echoes",
+   "duration": 225.0,
+   "format": "mp3",
+   "bpm": 122.0,
+   "energy": 0.72,
+   "brightness": 0.65,
+   "artist": "Young the Giant",
+   "album": "Home of the Strange",
+   "year": "2016",
+   "genre": "Indie Rock",
+   "timbre": null
+  },
+  "/m/missing.flac": null
+ },
+ "has_current_features": {
+  "/m/echoes_pf.flac": true,
+  "/m/money_pf.flac": false,
+  "/m/karma.flac": false,
+  "/m/echoes_ytg.flac": false,
+  "/m/missing.flac": false
+ },
+ "get_most_played": {
+  "2": [
+   {
+    "id": 2,
+    "album_id": 2,
+    "title": "Time",
+    "track_num": null,
+    "duration": 413.0,
+    "path": "/m/time_pf.flac",
+    "format": "flac",
+    "added_date": 1010.0,
+    "bitrate": null,
+    "bpm": 120.0,
+    "energy": 0.55,
+    "brightness": 0.5,
+    "artist_tag": null,
+    "album": "The Dark Side of the Moon",
+    "artist": "Pink Floyd",
+    "count": 12
+   },
+   {
+    "id": 1,
+    "album_id": 1,
+    "title": "Echoes",
+    "track_num": null,
+    "duration": 1412.0,
+    "path": "/m/echoes_pf.flac",
+    "format": "flac",
+    "added_date": 1000.0,
+    "bitrate": null,
+    "bpm": 68.0,
+    "energy": 0.35,
+    "brightness": 0.3,
+    "artist_tag": null,
+    "album": "Meddle",
+    "artist": "Pink Floyd",
+    "count": 12
+   }
+  ],
+  "10": [
+   {
+    "id": 2,
+    "album_id": 2,
+    "title": "Time",
+    "track_num": null,
+    "duration": 413.0,
+    "path": "/m/time_pf.flac",
+    "format": "flac",
+    "added_date": 1010.0,
+    "bitrate": null,
+    "bpm": 120.0,
+    "energy": 0.55,
+    "brightness": 0.5,
+    "artist_tag": null,
+    "album": "The Dark Side of the Moon",
+    "artist": "Pink Floyd",
+    "count": 12
+   },
+   {
+    "id": 1,
+    "album_id": 1,
+    "title": "Echoes",
+    "track_num": null,
+    "duration": 1412.0,
+    "path": "/m/echoes_pf.flac",
+    "format": "flac",
+    "added_date": 1000.0,
+    "bitrate": null,
+    "bpm": 68.0,
+    "energy": 0.35,
+    "brightness": 0.3,
+    "artist_tag": null,
+    "album": "Meddle",
+    "artist": "Pink Floyd",
+    "count": 12
+   },
+   {
+    "id": 4,
+    "album_id": 3,
+    "title": "Paranoid Android",
+    "track_num": null,
+    "duration": 387.0,
+    "path": "/m/paranoid.flac",
+    "format": "flac",
+    "added_date": 1030.0,
+    "bitrate": null,
+    "bpm": 84.0,
+    "energy": 0.6,
+    "brightness": 0.45,
+    "artist_tag": null,
+    "album": "OK Computer",
+    "artist": "Radiohead",
+    "count": 8
+   },
+   {
+    "id": 3,
+    "album_id": 2,
+    "title": "Money",
+    "track_num": null,
+    "duration": 382.0,
+    "path": "/m/money_pf.flac",
+    "format": "flac",
+    "added_date": 1020.0,
+    "bitrate": null,
+    "bpm": 124.0,
+    "energy": 0.65,
+    "brightness": 0.6,
+    "artist_tag": null,
+    "album": "The Dark Side of the Moon",
+    "artist": "Pink Floyd",
+    "count": 5
+   },
+   {
+    "id": 8,
+    "album_id": 6,
+    "title": "Svefn-g-englar",
+    "track_num": null,
+    "duration": 604.0,
+    "path": "/m/svefn.flac",
+    "format": "flac",
+    "added_date": 1070.0,
+    "bitrate": null,
+    "bpm": 70.0,
+    "energy": 0.25,
+    "brightness": 0.2,
+    "artist_tag": null,
+    "album": "Ágætis byrjun",
+    "artist": "Sigur Rós",
+    "count": 3
+   },
+   {
+    "id": 5,
+    "album_id": 3,
+    "title": "Karma Police",
+    "track_num": null,
+    "duration": 264.0,
+    "path": "/m/karma.flac",
+    "format": "flac",
+    "added_date": 1040.0,
+    "bitrate": null,
+    "bpm": 75.0,
+    "energy": 0.4,
+    "brightness": 0.4,
+    "artist_tag": null,
+    "album": "OK Computer",
+    "artist": "Radiohead",
+    "count": 0
+   }
+  ]
+ },
+ "recent_played_paths": {
+  "600": [
+   "/m/echoes_pf.flac"
+  ],
+  "604800": [
+   "/m/echoes_pf.flac",
+   "/m/time_pf.flac"
+  ],
+  "2592000": [
+   "/m/echoes_pf.flac",
+   "/m/money_pf.flac",
+   "/m/time_pf.flac"
+  ]
+ },
+ "search_artist_names": [
+  {
+   "query": "",
+   "result": [
+    "Pink Floyd",
+    "Radiohead",
+    "Sigur Rós",
+    "The Beatles",
+    "Young the Giant",
+    "Αλέξης"
+   ]
+  },
+  {
+   "query": "pink",
+   "result": [
+    "Pink Floyd",
+    "Αλέξης"
+   ]
+  },
+  {
+   "query": "radio",
+   "result": [
+    "Radiohead"
+   ]
+  },
+  {
+   "query": "paranoid",
+   "result": [
+    "Radiohead"
+   ]
+  },
+  {
+   "query": "radiohed",
+   "result": [
+    "Radiohead"
+   ]
+  },
+  {
+   "query": "sigur",
+   "result": [
+    "Sigur Rós"
+   ]
+  },
+  {
+   "query": "zzzzzz",
+   "result": []
+  }
+ ],
+ "first_track_path_by_artist": {
+  "pink floyd": "/m/echoes_pf.flac",
+  "PINK FLOYD": "/m/echoes_pf.flac",
+  "Radiohead": "/m/paranoid.flac",
+  "Αλέξης": "/m/pink_moon.mp3",
+  "Nobody": null
+ },
+ "artist_neighbors": {
+  "2": [
+   "/m/money_pf.flac",
+   "/m/time_pf.flac"
+  ],
+  "10": [
+   "/m/money_pf.flac",
+   "/m/time_pf.flac",
+   "/m/karma.flac"
+  ]
+ },
+ "walk": {
+  "plain": [
+   "/m/paranoid.flac",
+   "/m/svefn.flac",
+   "/m/money_pf.flac"
+  ],
+  "avoid": [
+   "/m/svefn.flac",
+   "/m/money_pf.flac"
+  ]
+ }
+}

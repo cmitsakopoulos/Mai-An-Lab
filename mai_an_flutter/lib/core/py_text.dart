@@ -85,7 +85,7 @@ String pyTitle(String s) {
     if (!isCased) {
       out.write(c);
     } else if (!prevCased) {
-      out.write(c.toUpperCase());
+      out.write(kPyTitle[r] ?? c);
     } else if (r == 0x3a3) {
       out.writeCharCode(_finalSigma(src, i) ? 0x3c2 : 0x3c3);
     } else {
@@ -94,6 +94,15 @@ String pyTitle(String s) {
     prevCased = isCased;
   }
   return out.toString();
+}
+
+/// `str.capitalize()`: the first character title-cased, the rest
+/// lower-cased (in the context of the whole string, for final sigma).
+String pyCapitalize(String s) {
+  if (s.isEmpty) return s;
+  final first = String.fromCharCode(s.runes.first);
+  final lowered = pyLower(s);
+  return pyTitle(first) + lowered.substring(pyLower(first).length);
 }
 
 bool _isCombining(int r) {
@@ -168,6 +177,12 @@ int _decimalValue(int rune) {
 /// any script.
 bool pyIsDecimal(String s) =>
     s.isNotEmpty && s.runes.every((r) => _decimalValue(r) >= 0);
+
+/// `str.isdigit()`: [pyIsDecimal]'s digits plus superscripts, circled
+/// digits and the like, which `int()` rejects.
+bool pyIsDigit(String s) =>
+    s.isNotEmpty &&
+    s.runes.every((r) => _decimalValue(r) >= 0 || kDigitNotDecimal.contains(r));
 
 /// `int(s)` for a string [pyIsDecimal] accepted.
 int pyDecimalInt(String s) {

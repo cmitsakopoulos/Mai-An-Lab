@@ -19,10 +19,12 @@ Mac), and the DSP offload with the acoustic build (the SVD geometry and the
 genre model, identical in effect to Python's: the same stations on all 20
 golden seeds) (§4, phase 4). Phase 5 (the assistant) is planned in seven
 stages; stages a (the intent parser and text helpers, identical to Python
-on 4,961 utterances) and b (the LLM client) are done (§4, phase 5). Desktop
-tests pass (`flutter test`: 591, including the real-library golden tests
-that need the gitignored goldens; analyzer clean in Dart's strict modes);
-debug and release APKs build.
+on 4,961 utterances), b (the LLM client and tool declarations) and c (the
+runner's deterministic half and its database and player adapters, identical
+to Python across 14 conversations / 124 turns) are done (§4, phase 5).
+Desktop tests pass (`flutter test`: 622, including the real-library golden
+tests that need the gitignored goldens; analyzer clean in Dart's strict
+modes); debug and release APKs build.
 It is installed on the phone (2026-11-24, with the 2026-11-02 library, an
 older build: no scan, no Settings yet). The user reports problems found in use; fix
 them, or record intended differences in §7. Nothing ships from this port yet. 54 of the 91 Flet features in §11
@@ -203,7 +205,7 @@ Verdicts:
 | `ui/views/sync_hub.py` | 1,012 | Rewrite ✅ (`settings/sync_hub.dart`: the Android view's four cards; the Mac's server view with phase 8) | 4 |
 | `state_export.py` | 294 | Port ✅ (`data/state_export.dart`, `core/zip_archive.dart`, `sync/state_bundles.dart`) | 4 |
 | `llm_engine.py` (Gemini/Ollama over an OpenAI-compatible API) | 231 | Port ✅ (`assistant/llm_engine.dart`, golden-tested) | 5 |
-| `llm_tools.py`, `assistant_runner.py`, `assistant_intent.py`, `chat_memory.py`, `web_research.py` | ~4,500 | Port, with golden intent and tool-call tests (§4, phase 5). `assistant_intent` ✅ (`assistant/intent.dart`), `chat_memory` ✅, `llm_tools`' text helpers and `names_mentioned` ✅ (`assistant/agent_text.dart`, `assistant/web_text.dart`), over `core/py_re.dart` (Python's `re` semantics) | 5 |
+| `llm_tools.py`, `assistant_runner.py`, `assistant_intent.py`, `chat_memory.py`, `web_research.py` | ~4,500 | Port, with golden intent and tool-call tests (§4, phase 5). `assistant_intent` ✅ (`assistant/intent.dart`), `chat_memory` ✅, `llm_tools`' text helpers and `names_mentioned` ✅ (`assistant/agent_text.dart`, `assistant/web_text.dart`), over `core/py_re.dart` (Python's `re` semantics); `assistant_runner`'s deterministic half ✅ (`assistant/runner.dart`, `assistant/runner_phrases.dart`, `assistant/adapters.dart`, `data/assistant_queries.dart`, `core/py_difflib.dart`, `core/py_values.dart`) | 5 |
 | `ui/views/assistant.py` | 861 | Rewrite | 5 |
 | `qobuz.py`, `deezer.py`, `streamrip_api.py`, `streamrip_search.py`, `downloadable.py`, `search_results.py`, `source_metadata.py`, `new_releases.py` + deezer-py, streamrip, pycryptodomex | ~3,000 + libraries | ⚠️ Port or keep on Mac (§6, decision A) | 6 |
 | `ui/views/search.py`, `ui/player/download_dock.py` | 3,806 | Rewrite. The landing's local cards ✅ (`search/`, `data/landing_queries.dart`, golden-tested); the dock ✅ (`downloads/download_dock.dart`, 4d); the rest with the sources | 3, 4, 6 |
@@ -818,7 +820,7 @@ AI Assistant, and voice through the extension's `flutter_tts` and
 |---|---|---|---|
 | a | The intent parser and text helpers: `parse` (Python `re` → Dart `RegExp`), `strip_markdown`, `_slim_track`, `ChatMemoryManager` (`chat_history.json`, `graph_state.json`), `names_mentioned` | `assistant_intent.py`, `llm_tools.py` (helpers), `chat_memory.py`, `web_research.py` (`_fold`, `names_mentioned`) | ✅ |
 | b | The LLM client and the tool declarations: one OpenAI-compatible request (Gemini and Ollama URLs, headers, timeouts, the retry after a connection failure), `_parse_tool_calls`, the raw message kept for the echo, `list_gemini_models`; `get_agent_tools()` | `llm_engine.py`, `llm_tools.get_agent_tools` | ✅ |
-| c | The runner's deterministic half: dispatch, the pending confirmation and choice, anaphora, every `_handle_*`, `_resolve_queries` (with difflib's `SequenceMatcher` ported), the avoid set, over an interface the player controller implements | `assistant_runner.py` | 🔨 |
+| c | The runner's deterministic half: dispatch, the pending confirmation and choice, anaphora, every `_handle_*`, `_resolve_queries` (with difflib's `SequenceMatcher` ported), the avoid set, and its database and player adapters | `assistant_runner.py`, `db_manager.py` (assistant queries) | ✅ |
 | d | The agent: `_dispatch_llm`'s loop and prompt, `execute_tool` for the library, playback and status tools | `assistant_runner._dispatch_llm`, `llm_tools.execute_tool` | 🔨 |
 | e | The web tools: `ask` (DuckDuckGo Lite, Wikipedia, Google grounding), `learn_about`, `find_related_artists` | `web_research.py`, `metadata_ai`'s search half | 🔨 |
 | f | The Jarvis tab and Settings → AI Assistant | `ui/views/assistant.py`, `settings.py` (AI Assistant), main.py's tab and lifecycle hooks | 🔨 |
@@ -889,15 +891,46 @@ filtering, duplicates and a token with `+/=`, HTTP 403, no key, an empty
 reply); `get_agent_tools()` byte for byte. Also: a refused connection is
 retried once, a stalled server ends in `Network error: `.
 
-**Stage c.** The runner drives the player through an interface
-(queue, `set_queue`, add last/next/many, remove, move, transport,
-shuffle) that `PlayerController` implements, as the audio engine does for
-Flet. Its phrases come from `random.choice`; the port draws through an
-injected chooser, and the goldens run Python's runner with the same
-scripted chooser on a synthetic library and recorded conversations
-(Flet's test conversations included), recording each response (spoken,
-displayed, extras, deferred play), the player calls and the pending
-state. Deferred play stays the view's job (f).
+**Stage c.** `assistant/runner.dart` is `assistant_runner.py`'s
+deterministic half (`AssistantRunner`, `AssistantResponse`,
+`PendingConfirmation`, `ChoiceOption`, `PendingChoice`, `toEngineTrack`):
+dispatch, pending choice and confirmation (including relaxed yes/no),
+anaphora (recency + intent weights, ambiguity runner-up swap on "no",
+far-back confirmation, legacy bold fallback, implicit `play_similar` /
+`play_more_by`, `_announce_anaphora`), every `_handle_*`, `_resolve_queries`
+over `core/py_difflib.dart` (`SequenceMatcher.ratio`, autojunk included),
+the avoid set and `assistant/runner_phrases.dart` (`kJarvisPhrases`).
+Python value/string semantics live in `core/py_values.dart` (`pyTruthy`,
+`pyOr`, `pyStr`, `pyFormat`, `pyGet`, `PyValueError`) and `core/py_text.dart`
+(`pyIsDigit`, `pyCapitalize`, plus `kPyTitle` and `kDigitNotDecimal` from
+`tool/gen_casefold_table.py`). `assistant/adapters.dart` wires the two
+interfaces onto the port: `RepoAssistantLibrary` over `LibraryRepository`
+and `StationSource` (with `data/assistant_queries.dart` porting
+`search_tracks_simple`, `get_all_tracks`, `get_track_full`,
+`get_most_played`, `recent_played_paths`, `record_playback`,
+`get_all_artists(search_query)` and the NOCASE artist seed SQL; `neighborsJob`
+gained `edgeKind`), and `ControllerAssistantPlayer` over `PlayerController`
+(`setShuffleOrder(bool)` beside `disableShuffleOrder`, plus `play`, `pause`,
+entry queue setters and `removeAt`). `llm` is the stage d hook; deferred
+play stays the view's job (f).
+
+**How parity is proved (stage c).** `tool/export_runner_goldens.py` runs
+Flet's `AssistantRunner` with a scripted 64-bit LCG random, fixed UTC clock
+and identical fakes (`test/goldens/assistant_runner.json`,
+`test/assistant_runner_test.dart`): `kJarvisPhrases` whole, 40 `difflib`
+ratios (including the autojunk boundary at 199/200), `isdigit` hashed over
+every Unicode code point, `capitalize` (including `ß` and Greek final sigma),
+and 14 scenarios (124 turns covering easter eggs, transport, play now,
+disambiguation, fuzzy fallback, queue add/next/remove/move/save with name
+collision and `²`, random, usual, greet confirmations, moods, track info
+fallbacks with timbre stripped, similar, more by, and all anaphora paths),
+comparing response, intent, call log, pending/choice state, recent and queue
+as sorted JSON. `tool/export_assistant_db_goldens.py` runs Python's
+`DatabaseManager` and `track_graph` on a synthetic SQLite database
+(`test/goldens/assistant_db.json`, `test/assistant_adapters_test.dart`),
+verifying every `RepoAssistantLibrary` query and `walk`, plus
+`ControllerAssistantPlayer` and an end-to-end `AssistantRunner` run over
+both real adapters. All identical.
 
 **Stage d.** The loop as Flet runs it: at most 6 tool rounds, the
 provider's raw assistant message echoed, a tool's confirmation or choice
@@ -1151,8 +1184,8 @@ landing; then this plan; all pushed to origin. Then Settings (`e946579`)
 and the Network view, local. Then phase 4a (the Companion protocol), 4b (notifications), 4c (the
 sync manager), 4d (the download queue and dock), 4e (the Companion UI),
 4f (state bundles) and 4g (the DSP offload and the acoustic build), local.
-Then the phase 5 plan, stage a (the intent parser) and b (the LLM
-client), local.
+Then the phase 5 plan, stages a (the intent parser), b (the LLM
+client) and c (the assistant runner and adapters), local.
 
 **Done**
 - [x] Phase 0: backbone (read-only DB isolate, tracks tab, sort, search,
@@ -1243,6 +1276,11 @@ client), local.
 - [x] Phase 5b: the LLM client (`llm_engine.py`) and the tool
       declarations; requests and parsed replies identical to Python's in
       16 recorded scenarios.
+- [x] Phase 5c: `AssistantRunner`'s deterministic half (`runner.dart`,
+      `runner_phrases.dart`, `py_difflib.dart`, `py_values.dart`) and its
+      adapters (`adapters.dart`, `assistant_queries.dart`,
+      `PlayerController.setShuffleOrder`); identical to Python across 14
+      scenarios (124 turns) and on every synthetic-DB query and walk.
 
 **To do, in order**
 1. [ ] Install the current build on the phone: `tool/install_phone.sh
@@ -1300,9 +1338,12 @@ client), local.
           Cancel with the screen off; the graph rebuilt after; Settings →
           Database Management → Recompute PCA).
        k. Phase 5 (the assistant), planned 2026-11-24 in seven stages
-          (§4, phase 5). Stages a (the intent parser and text helpers)
-          and b (the LLM client and the tool declarations) done. Next:
-          stage c (the runner's deterministic half).
+          (§4, phase 5). Stages a (the intent parser and text helpers),
+          b (the LLM client and the tool declarations) and c (the runner's
+          deterministic half and its database and player adapters) done.
+          Next: stage d (`_dispatch_llm`'s tool-calling loop, prompt,
+          agent runner bridges, and `execute_tool` for the library,
+          playback and status tools).
 5. [ ] Decisions A, B, C (§6) before phase 6 is planned in detail.
 6. [ ] Flet, on master: the album menu's Play Album tuple,
        Appearance's sort writing `library_sort`, the Network view's
@@ -1493,10 +1534,11 @@ code or a published template comes in, before it is committed.
 | config.toml template: streamrip's `config.toml` plus the app's `[dsp]`, `[haptics]`, `[assistant]`, `[appearance]` sections (utils/config.toml, copied as is) | `assets/config_template.toml` | https://github.com/nathom/streamrip, via the Flet app | GPL-3.0 (streamrip). The Flet APK ships the same file; decide before release (§10 item 7) |
 | streamrip-derived helpers (filename cleaning; in the Flet app's `filepath_utils.py`, credited there) | `clean_filename` only, written from its behaviour (drop `\/*?:"<>|`, cut at 255 UTF-8 bytes, strip, NFC), not translated: `lib/downloads/file_names.dart` | https://github.com/nathom/streamrip | GPL-3.0: no streamrip code copied; check before porting anything else from it |
 | Python's `re` semantics for `\s`, `\w`, `\b`, `re.IGNORECASE`, `.`, `$` and `re.MULTILINE`, reproduced from its behaviour (the tables generated by asking Python), not translated | `lib/core/py_re.dart`, `lib/core/py_re_tables.dart` | CPython `re` / sre | PSF License v2; no code copied |
-| Unicode lower-case and case-folding mappings, and NFKD + casefold for the characters py_text's pieces don't cover, generated from Python's `str.lower`, `str.casefold` and `unicodedata` | `lib/core/py_unicode_tables.dart`, `lib/core/nfkd_casefold_table.dart` | Unicode Character Database 15.1, via CPython | Unicode License v3 (data) |
+| Unicode lower-case, title-case, case-folding and non-decimal digit mappings, and NFKD + casefold for the characters py_text's pieces don't cover, generated from Python's `str.lower`, `str.title`, `str.casefold`, `str.isdigit` and `unicodedata` | `lib/core/py_unicode_tables.dart`, `lib/core/nfkd_casefold_table.dart` | Unicode Character Database 15.1, via CPython | Unicode License v3 (data) |
 | Unicode canonical decompositions, combining classes and composition exclusions, generated from Python's `unicodedata` | `lib/core/nfc_table.dart` (with `lib/core/nfc.dart`) | Unicode Character Database 15.1, via CPython | Unicode License v3 (data) |
 | numpy's float32 reduction order (`mean`/`std` down axis 0 as one sequential float32 sum per column) and `np.corrcoef`'s arithmetic, reproduced from their behaviour (checked bit for bit), not translated | `lib/stations/acoustic_geometry.dart` | https://github.com/numpy/numpy (2.4) | BSD-3-Clause; no numpy code copied |
 | Python's `json.dumps` defaults (separators, `ensure_ascii`, float `repr`), written from its documented behaviour | `lib/core/py_json.dart` | CPython `json` | PSF License v2; no code copied |
+| CPython's `difflib.SequenceMatcher.ratio` (b2j index with autojunk rule, `find_longest_match`, matching blocks), translated | `lib/core/py_difflib.dart` | https://github.com/python/cpython (3.13, `Lib/difflib.py`) | PSF License v2 |
 
 **Templates and guidance adopted**
 

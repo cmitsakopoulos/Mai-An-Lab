@@ -223,6 +223,21 @@ class PlayerController extends ChangeNotifier {
   void toggle() {
     if (queue.isEmpty) return;
     if (_completedTerminal || _needsPush || stopped) {
+      play();
+      return;
+    }
+    if (playing) {
+      pause();
+    } else {
+      play();
+    }
+  }
+
+  /// `audio_engine.play()`: resume playback, or push the queue if stopped,
+  /// completed or never loaded.
+  void play() {
+    if (queue.isEmpty) return;
+    if (_completedTerminal || _needsPush || stopped) {
       // A finished queue replays from the top; a stopped or never-loaded one
       // loads where it is.
       final start = _completedTerminal ? 0 : queue.currentIndex;
@@ -233,12 +248,11 @@ class PlayerController extends ChangeNotifier {
       _push(start, autoplay: true, seekTo: seekTo);
       return;
     }
-    if (playing) {
-      _op(backend.pause);
-    } else {
-      _op(backend.play);
-    }
+    _op(backend.play);
   }
+
+  /// `audio_engine.pause()`.
+  void pause() => _op(backend.pause);
 
   void next() {
     if (queue.isEmpty) return;
@@ -311,6 +325,23 @@ class PlayerController extends ChangeNotifier {
     queue.queueLastMany([for (final t in ts) QueueEntry.fromTrack(t)]),
   );
 
+  // Entry-level queue edits (`audio_engine.set_queue`, `queue_last`,
+  // `queue_next`, `queue_last_many`, `remove_from_queue`), for callers
+  // (e.g. AssistantPlayer) that already hold engine-shaped rows.
+  void setQueueEntries(List<QueueEntry> rows, {int startIndex = 0}) =>
+      _setQueue(rows, startIndex);
+  void queueNextEntry(QueueEntry row) => _apply(queue.queueNext(row));
+  void queueLastEntry(QueueEntry row) => _apply(queue.queueLast(row));
+  void queueLastEntries(List<QueueEntry> rows) =>
+      _apply(queue.queueLastMany(rows));
+
+  void removeAt(int index) {
+    if (index < 0 || index >= queue.length) return;
+    final row = queue.entries[index];
+    _apply(queue.removeAt(index));
+    if (row.autoplay) autoplay?.reject(row.path);
+  }
+
   /// library.py `_enqueue_network_tracks` (the selection bar's Play and Add
   /// to Queue): an ordered block. [replace] plays it now, non-destructively:
   /// shuffle order off, the block right after the playing row and a jump to
@@ -379,16 +410,19 @@ class PlayerController extends ChangeNotifier {
   /// A one-line message for the snackbar.
   void say(String message) => _messages.add(message);
 
-  /// `audio_engine.is_shuffle = False`: play order back to queue order,
-  /// keeping the queue (auto-play turning on). Not the shuffle toggle, which
-  /// also swaps the library queue for the set-aside one.
-  void disableShuffleOrder() {
-    if (!queue.shuffle) return;
-    queue.shuffle = false;
-    unawaited(prefs.set('is_shuffle', false));
-    _op(() => backend.setShuffle(false));
+  /// `audio_engine.is_shuffle = value`: switch play order in place without
+  /// swapping the library queue for the set-aside one (unlike [toggleShuffle]).
+  void setShuffleOrder(bool value) {
+    if (queue.shuffle == value) return;
+    queue.shuffle = value;
+    unawaited(prefs.set('is_shuffle', value));
+    _op(() => backend.setShuffle(value));
     notifyListeners();
   }
+
+  /// `audio_engine.is_shuffle = False`: play order back to queue order,
+  /// keeping the queue (auto-play turning on).
+  void disableShuffleOrder() => setShuffleOrder(false);
 
   void moveRow(int from, int to) => _apply(queue.move(from, to));
 
