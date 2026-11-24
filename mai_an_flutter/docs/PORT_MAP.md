@@ -12,15 +12,16 @@ the Search tab's local landing cards, Settings with the config.toml
 writer, and the Acoustic Network view (§4, phase 3). Phase 4 (sync,
 Android side) is under way: the Companion protocol and discovery, tested
 against Flet's own server, notifications, the sync manager, and the
-download queue and dock that bring the Mac's transfers onto the phone, and
-the Companion & Sync page, its dialogs and Send to Mac in the menus
-(§4, phase 4). Desktop
-tests pass (`flutter test`: 490, including the real-library golden tests
+download queue and dock that bring the Mac's transfers onto the phone,
+the Companion & Sync page, its dialogs and Send to Mac in the menus, and
+state bundles (export, import, the boot snapshot and import, backup to the
+Mac) (§4, phase 4). Desktop
+tests pass (`flutter test`: 524, including the real-library golden tests
 that need the gitignored goldens; analyzer clean in Dart's strict modes);
 debug and release APKs build.
 It is installed on the phone (2026-11-24, with the 2026-11-02 library, an
 older build: no scan, no Settings yet). The user reports problems found in use; fix
-them, or record intended differences in §7. Nothing ships from this port yet. 46 of the 90 Flet features in §11
+them, or record intended differences in §7. Nothing ships from this port yet. 51 of the 90 Flet features in §11
 are ported. Third-party code the port uses or copies is listed in §12.*
 
 **Next session: start at §10 (open items). §11 lists every Flet feature and
@@ -132,11 +133,11 @@ The port reuses each file's exact format, so a cutover install inherits it.
 | `flet_prefs.json` (`_save_pref`; shuffle, repeat, similar-play prefs) | main.py | 1 ✅ | 1–2 ✅ (`is_shuffle`, `repeat_mode`, `play_similar_mode`; merge-write as in Flet) |
 | `play_ledger.jsonl` (one line per finished listen, written by the audio handler) | handler; drained by `play_ledger.py` | 3 (drain) | 1 ✅ (same format and ids). Drained into `play_counts` / `playback_history` by `data/play_ledger.dart` (3 ✅, on the phone too). |
 | `companion_transfers.json` | sync | 4 | 4 |
-| `.onboarded` | onboarding | 7 | 7 |
+| `.onboarded` | onboarding | 7 | 4 ✅ (written by the boot import, as Flet does); 7 (the wizard) |
 | `recent_searches.json` | search | 4 | 4 |
 | `downloads.db`, `failed_downloads.db` | streamrip layer | 6 | 6 |
 | `temp/` (artwork cache, `.nomedia`) | `filepath_utils` | not needed ✅ | not needed ✅ (on Android Flet already used the Kotlin cache, `cacheDir/np_art`, which the port shares) |
-| `mai_an_lab_state_*.zip` (export bundle, written to `/sdcard/Download`) | `state_export.py` | dev tool ✅ (`tool/push_db.sh`) | 4 |
+| `mai_an_lab_state_*.zip` (export bundle, written to `/sdcard/Download`) | `state_export.py` | 4 ✅ (`data/state_export.dart`; Flet's bundles import and the other way round, tested against Python) | 4 ✅ (the boot snapshot and boot import under the port's own names until cutover, §5) |
 
 **`library.db` schema version.** `PRAGMA user_version` holds
 `GEOMETRY_VERSION` (currently 2). When the stored value is older, Python clears
@@ -194,7 +195,7 @@ Verdicts:
 | `sync/client`, `discovery`, `send`, parts of `manager` | ~1,900 | Port (Android side). Client and listener ✅ (`sync/companion_client.dart`, `sync/discovery.dart`; tested against Flet's own server); the manager ✅ (`sync/sync_manager.dart`); its UI and `send.py`'s menu entry with stage e (§4, phase 4) | 4 |
 | `sync/server.py`, `transcoder.py` (ffmpeg) | ~1,340 | Keep on Mac until phase 8 | 8 |
 | `ui/views/sync_hub.py` | 1,012 | Rewrite | 4 |
-| `state_export.py` | 294 | Port (bundle import/export) | 4 |
+| `state_export.py` | 294 | Port ✅ (`data/state_export.dart`, `core/zip_archive.dart`, `sync/state_bundles.dart`) | 4 |
 | `llm_engine.py` (Gemini/Ollama over an OpenAI-compatible API) | 231 | Port: plain HTTP + JSON | 5 |
 | `llm_tools.py`, `assistant_runner.py`, `assistant_intent.py`, `chat_memory.py`, `web_research.py` | ~4,500 | Port, with golden intent and tool-call tests | 5 |
 | `ui/views/assistant.py` | 861 | Rewrite | 5 |
@@ -202,7 +203,7 @@ Verdicts:
 | `ui/views/search.py`, `ui/player/download_dock.py` | 3,806 | Rewrite. The landing's local cards ✅ (`search/`, `data/landing_queries.dart`, golden-tested); the dock ✅ (`downloads/download_dock.dart`, 4d); the rest with the sources | 3, 4, 6 |
 | `dsp.py`, `pca_engine.py` | 1,044 | ⚠️ Port to Dart, or keep on Mac (§6, decision B) | 6 |
 | `metadata_enrich`, `metadata_ai`, `metadata_audit`, `metadata_qobuz`, `ui/player/metadata_workbench.py` | ~5,000 | Port last (desktop-heavy) | 7 |
-| `ui/views/settings.py` | 3,932 | Rewrite, spread across phases (rule 4). Phase 3 ✅ (`settings/`): the hub and its search, Storage, Appearance, Audio & DSP (curve, presets), Haptics, Permissions, Database Management, Advanced (caches, raw TOML), About. The other groups with their phases (§11). | all |
+| `ui/views/settings.py` | 3,932 | Rewrite, spread across phases (rule 4). Phase 3 ✅ (`settings/`): the hub and its search, Storage, Appearance, Audio & DSP (curve, presets), Haptics, Permissions, Database Management, Advanced (caches, raw TOML; state export and import with phase 4f), About. The other groups with their phases (§11). | all |
 | `ui/player/onboarding_modal.py` | 895 | Rewrite, smaller | 7 |
 | `ui/widgets.py`, `ui/tokens.py` | 769 | Rewrite (tokens ✅) | as needed |
 | `audio_engine_macos.py` (pyobjc / AVFoundation) | 1,311 | Rewrite for the Mac | 8 |
@@ -214,7 +215,7 @@ Verdicts:
 | streamrip-derived helpers: `client.py`, `metadata_objects.py`, `ssl_utils.py`, `exceptions.py`, `filepath_utils.py` | ~330 | Go with the source clients (decision A) | 6 |
 | `mock_search.py`, `genre_eval.py`, `error_boundary.py` | ~400 | Drop or fold in (Flutter has `ErrorWidget` and zones). Demo search mode depends on `mock_search` (decision C). | n/a |
 | Dev scripts: `check_spoofer.py`, `configure_paths.py`, `scratch_test_search.py`, `tools/*.py` (enrich_artists, dev_fake_features, eval_ai_metadata, eval_metadata_fusion, simulate_notifications_live) | ~1,000 | Keep on Mac: they read `library.db` or call Python modules directly; none ships in the APK | n/a |
-| Build and device scripts: `build_android.sh`, `fresh_build_android.sh` (+ `.ps1`), `_adb_common.sh`, `usb_probe.sh` | n/a | Replaced by `flutter build` + `tool/install_phone.sh`; `push_db.sh` stands in for the state reinject. A bundle-based reinstall (fresh_build's flow) comes with bundle import (4). | 1 ✅, 4 |
+| Build and device scripts: `build_android.sh`, `fresh_build_android.sh` (+ `.ps1`), `_adb_common.sh`, `usb_probe.sh` | n/a | Replaced by `flutter build` + `tool/install_phone.sh`; `push_db.sh` stands in for the state reinject. A bundle-based reinstall works by hand: put a bundle at `/sdcard/Download/mai_an_lab_port_state_import.zip` and start the port (§4, phase 4f). | 1 ✅, 4 ✅ |
 | `StreamripApp/tests/` | 16,879 | The reference behaviour: each module's tests are ported with it (as `queue_store`, `dsp` and `autoplay` were), or replaced by goldens | all |
 
 ---
@@ -559,7 +560,7 @@ stays Python until phase 8). Stages, one commit each:
 | c | The manager: enable and idle auto-off, USB and saved-address probe, heartbeat, PIN snooze, Find Mac (probe, query, sweep) and its messages, manual connect, unpair, background and resume hooks, auto-accept, the Send to Mac worker and acks; the device name | `sync/manager.py`, `sync/send.py` | ✅ (wired into the app with e) |
 | d | Transfers onto the phone: the download queue for the `companion` source (`.part`, size check, no-overwrite names, `clean_filename`, NFC, `pick_download_dir`, features stored, one quiet scan after the queue drains, Android media scan) and the dock as far as transfers need it | `queue_controller.py`, `streamrip_api.download` (companion branch), `download_dock.py` | ✅ |
 | e | UI: Settings → Companion & Sync and the sync hub, the PIN and transfer dialogs, Send to Mac in the long-press, selection and album menus | `ui/views/sync_hub.py`, manager dialogs, `send.py` | ✅ |
-| f | State bundles: export (Settings, and the boot auto-export to Downloads and the library folder), import (Settings, and `*_import.zip` at boot, with `.onboarded`), upload to the Mac | `state_export.py`, main.py `_heavy_init`, `_auto_export_state_snapshot` | 🔨 |
+| f | State bundles: export (Settings, and the boot auto-export to Downloads and the library folder), import (Settings, and `*_import.zip` at boot, with `.onboarded`), upload to the Mac | `state_export.py`, main.py `_heavy_init`, `_auto_export_state_snapshot` | ✅ |
 | g | DSP offload and the acoustic build: features stored in batches, then `build_metadata_edges` and `build_acoustic_edges` (the SVD build, golden-tested against numpy), and the startup readiness build | sync_hub's offload, `track_graph.py`, `pca_engine.redundant_raw_features`, main.py `_ensure_graph_built_async` | 🔨 |
 
 **Stage a.** `sync/companion_client.dart` is client.py call for call:
@@ -690,6 +691,44 @@ and from the track menu, and in the shell: Send from the Library's
 long-press and the `sync:transfers` tap); the fakes moved to
 `sync_fakes.dart`, shared with `sync_manager_test.dart`.
 
+**Stage f.** `data/state_export.dart` is state_export.py: `export_state`
+(timestamped, the folder pruned to the newest five), `export_state_snapshot`
+(a fixed name, written to a unique temp file and renamed over; refuses to
+publish a bundle whose database snapshot failed), `inspect_bundle` and
+`import_state` (the version gate and its texts, each member written beside
+its target and renamed over, library.db's stale `-wal`/`-shm` deleted).
+The database copy is SQLite's online backup (the `sqlite3` package's
+`backup`, every page in one step, as Python's `backup()`), so the live
+connection stays open. `core/zip_archive.dart` is the part of `zipfile`
+this needs, over dart:io's raw deflate (no new dependency): members stream
+in and out, CRC-checked, no ZIP64. `sync/state_bundles.dart` is the app's
+side: export and import on a background isolate; import closes the
+library, swaps the files, reopens it (migrations run) and re-reads
+config.toml (`LibraryController.replaceDatabase`; Flet asks for a
+relaunch, §7); `_auto_export_state_snapshot` after start (one at a time,
+then a copy in the library folder; Android only, §7); and `_heavy_init`'s
+boot import before the library and config are read, which deletes the
+bundle, writes `.onboarded`, and after the first load rebuilds the
+artist tier (`build_metadata_edges`; the acoustic tier with stage g).
+Until cutover the boot files carry the port's own names,
+`mai_an_lab_port_state_latest.zip` and `mai_an_lab_port_state_import.zip`,
+so the two apps on one phone never overwrite or swallow each other's
+(§5 step 6). Settings → Advanced has the State Backup & Migration section
+(the bundle browser `showBundleBrowser`: bookmarks with App Storage,
+"Export here", .zip files with Python's half-even KB, then folders; on
+desktop, export goes to ~/Downloads and import shows Flet's message). The
+hub's Library State Backup card sends a fresh bundle to the Mac with the
+link held awake, deletes it here on success, and reports through the
+`sync` notification. Tests: `state_export_test.dart` (Flet's
+test_state_export.py ported; the ZIP code; a WAL-only change caught by the
+backup; the manifest byte for byte; pruning; Python importing the port's
+bundle and the port importing Python's, and every kept phone bundle in
+`tools/state_backups` read exactly as Python's `zipfile` reads it),
+`state_bundles_test.dart` (the import reopening a live library and its
+config, a failed import leaving it as it was, the boot snapshot and its
+fallback, the boot import's three cases, and Settings → Advanced through
+the browser), and the hub's backup card in `sync_hub_test.dart`.
+
 **How parity is proved (stage a).** `tool/companion_test_server.py` runs
 Flet's own `CompanionServer` hermetically (scratch feature cache and
 bundle folder, beacon on loopback and a private UDP port, a deterministic
@@ -719,7 +758,11 @@ The port is built to replace the Flet app in place, keeping all user data.
 4. On first launch the port finds `files/data/library.db`, config, queue and
    prefs exactly where Flet left them (§2), so no migration step is needed.
 5. Fallback: a state bundle export and import (`state_export.py` format).
-6. Branches swap (rule 1): `flutter-port` becomes master, the Flet code
+6. Give the boot bundles Flet's names again (`kSnapshotName`,
+   `kAutoImportName` in `sync/state_bundles.dart`): the Mac offload and
+   `fresh_build_android.sh` look for `mai_an_lab_state_latest.zip` and
+   `mai_an_lab_state_import.zip`.
+7. Branches swap (rule 1): `flutter-port` becomes master, the Flet code
    continues on `flet`.
 
 Moving to a real release keystore is a separate, later decision. It forces one
@@ -809,7 +852,11 @@ uninstall and reinstall; the bundle export/import covers the data.
 | Quiet scan while the Library is hidden | The reload is deferred until the tab shows | Reloaded at once | Flutter rebuilds only what is visible; nothing to defer. |
 | Download errors from the network | aiohttp's text ("Cannot connect to host …") | dart:io's (`SocketException: …`) | Different words, same place (the dock's status line). |
 | Companion on desktop builds | The Mac shows the server view | Desktop dev runs act as the phone (client view) | Until phase 8 ports the Mac's server; nothing ships to the Mac before then. |
-| Companion & Sync page | Four cards (connection, transfers, DSP offload, backup) | The first two | Offload: stage g; backup: stage f. |
+| Companion & Sync page | Four cards (connection, transfers, DSP offload, backup) | Connection, transfers, backup | Offload: stage g. |
+| State bundle import from Settings | Closes the database and asks to force-close and relaunch | Reopens the library (migrated) and re-reads config.toml; "Imported …. Library reloaded." | Intentional: no relaunch needed. |
+| Boot snapshot and boot import file names | `mai_an_lab_state_latest.zip`, `mai_an_lab_state_import.zip` | `mai_an_lab_port_state_latest.zip`, `mai_an_lab_port_state_import.zip` | Until cutover (§5 step 6): with both apps installed, the port would overwrite Flet's snapshot and take Flet's import. |
+| Boot snapshot on desktop | Written to ~/Downloads on every start | Not written | Desktop runs are development until phase 8. |
+| Export State on desktop | A native folder picker (~/Downloads when cancelled) | ~/Downloads | No native picker in the port yet; desktop isn't shipped. |
 | A `sync` notification tap with Settings open | Switches the Settings view to Companion & Sync | Pushes Settings at Companion & Sync over what is open | Back returns to where the user was; nothing to fix unless it bothers in use. |
 | Discovery on Android | Hears only the Mac's unicast replies to its query (no multicast lock without pyjnius) | Holds a MulticastLock while listening, so the Mac's 2 s broadcast beacons arrive as well | Intentional (§1 row 17): finds the Mac sooner on networks that pass broadcasts. |
 
@@ -900,7 +947,8 @@ views' and playlists' queries, the library UI (views, scan UI, playlists,
 long-press menu, selection, delete), and the tab bar with the Search
 landing; then this plan; all pushed to origin. Then Settings (`e946579`)
 and the Network view, local. Then phase 4a (the Companion protocol), 4b (notifications), 4c (the
-sync manager), 4d (the download queue and dock) and 4e (the Companion UI), local.
+sync manager), 4d (the download queue and dock), 4e (the Companion UI)
+and 4f (state bundles), local.
 
 **Done**
 - [x] Phase 0: backbone (read-only DB isolate, tracks tab, sort, search,
@@ -971,6 +1019,10 @@ sync manager), 4d (the download queue and dock) and 4e (the Companion UI), local
       dialogs, Send to Mac in the track, album and selection menus, the
       manager wired into the app, its lifecycle and the `sync`
       notification target (§4, phase 4). Release APK: 26.4 MB.
+- [x] Phase 4f: state bundles: export and import in Settings → Advanced,
+      the boot snapshot and boot import, Send Backup to Mac; tested both
+      ways against Flet's state_export.py (§4, phase 4). Release APK:
+      26.5 MB.
 
 **To do, in order**
 1. [ ] Install the current build on the phone: `tool/install_phone.sh
@@ -1023,13 +1075,14 @@ sync manager), 4d (the download queue and dock) and 4e (the Companion UI), local
           decisions A–C: none of its stages depends on them (transfers
           from the Mac matter more if A keeps downloads there). Stages a
           (protocol), b (notifications), c (the manager), d (the
-          download queue and dock) and e (the UI and wiring) done.
-          Next: f (state bundles: export, import, upload; the hub's
-          backup card), then g (offload and the acoustic build; the
-          hub's offload card); the table in §4, phase 4 has the order.
-          Stages f and g bring the first callers of
-          `build_metadata_edges`. On the phone, check a real pairing
-          (§1 row 16: cleartext HTTP) and a transfer end to end.
+          download queue and dock), e (the UI and wiring) and f (state
+          bundles) done. Next: g (offload and the acoustic build; the
+          hub's offload card), the last stage; the table in §4, phase 4
+          has it. The boot import already calls `build_metadata_edges`;
+          g adds `build_acoustic_edges` there and after an offload. On
+          the phone, check a real pairing (§1 row 16: cleartext HTTP), a
+          transfer end to end, and a bundle round trip (export, then
+          import it as `mai_an_lab_port_state_import.zip`).
 5. [ ] Decisions A, B, C (§6) before phase 6 is planned in detail.
 6. [ ] Flet, on master: the album menu's Play Album tuple,
        Appearance's sort writing `library_sort`, the Network view's
@@ -1052,7 +1105,7 @@ add its row here.
 Status: ✅ done · 🧪 written, not yet confirmed in use · 🔨 to build
 (phase) · ⚠️ depends on a decision (§6) · ✗ dropped.
 
-**Counts:** 46 of the 90 rows are ported (✅ or 🧪); 44 are to build or to decide. The ported rows are the player, the stations, the library views (the Acoustic Network included), playlists, the long-press menu and selection mode, the ledger drain, the scan, the tab bar, the Search landing's local cards, the download dock, Companion pairing, transfers and Send to Mac, and Settings for all of these.
+**Counts:** 51 of the 90 rows are ported (✅ or 🧪); 39 are to build or to decide. The ported rows are the player, the stations, the library views (the Acoustic Network included), playlists, the long-press menu and selection mode, the ledger drain, the scan, the tab bar, the Search landing's local cards, the download dock, Companion pairing, transfers and Send to Mac, state bundles, and Settings for all of these.
 
 ### App shell (`main.py`)
 
@@ -1078,8 +1131,8 @@ Status: ✅ done · 🧪 written, not yet confirmed in use · 🔨 to build
 | Ledger drain into `play_counts` / `playback_history` (track change, resume) | `_schedule_ledger_drain`, `play_ledger.py` | 🧪 |
 | Similarity-graph readiness build (edges, coordinates) | `_ensure_graph_built_async`, `track_graph` builders | 🔨 4: it fires only when features exist without coordinates, i.e. after an offload or import; until then the port reads Python-built coordinates |
 | Cache pruning | `_prune_caches_async` | 🔨 3 (album art); 6 (previews). The manual clears are in Settings → Advanced 🧪 |
-| State bundle auto-export on every boot (Downloads and library folder) | `_auto_export_state_snapshot` | 🔨 4. The Mac offload and `fresh_build_android.sh` depend on it; Flet keeps doing it while installed |
-| State bundle auto-import (`*_import.zip`) on boot, then graph rebuild | `_heavy_init` | 🔨 4 |
+| State bundle auto-export on every boot (Downloads and library folder) | `_auto_export_state_snapshot` | 🧪 under the port's own name until cutover (§7). The Mac offload and `fresh_build_android.sh` depend on Flet's, which Flet keeps writing while installed |
+| State bundle auto-import (`*_import.zip`) on boot, then graph rebuild | `_heavy_init` | 🧪 (the port's own name until cutover; the artist tier rebuilt, the acoustic tier 🔨 4g) |
 | Companion auto-discovery | `companion_manager.start` | 🧪 |
 | Artist-metadata enrichment pass (MusicBrainz / Qobuz; after scans and once per launch; retries; notification) | `_enrich_metadata_async`, `metadata_enrich.enrich_pending` | 🔨 7. Stations read its `artist_enrichment`; until it runs, new artists borrow a profile from their sound neighbours |
 | New-releases refresh (daily gate) | `ensure_new_releases_refresh`, `new_releases.py` | 🔨 6 |
@@ -1149,7 +1202,7 @@ Status: ✅ done · 🧪 written, not yet confirmed in use · 🔨 to build
 | Android: find the Mac (UDP beacon), pair, unpair, manual connect, diagnosis | 🧪 |
 | Android: check for and download transfers from the Mac | 🧪 |
 | Android: DSP offload to the Mac (progress notification, cancel from it) | 🔨 4 |
-| Android: upload a state bundle | 🔨 4 |
+| Android: upload a state bundle | 🧪 |
 | Mac: server toggle, LAN address, clear pending, reset pairing, open backups | Flet on the Mac until 8 |
 
 ### Settings (`ui/views/settings.py`), built with each phase (rule 4)
@@ -1169,7 +1222,7 @@ Status: ✅ done · 🧪 written, not yet confirmed in use · 🔨 to build
 | Database Management | Wipe database, clear index, clear DSP | 🧪 |
 | Database Management | Compute / recompute DSP, recompute PCA | ⚠️ B |
 | Advanced | Raw TOML editor, preview and album-art cache clear | 🧪 |
-| Advanced | State export / import | 🔨 4 |
+| Advanced | State export / import | 🧪 |
 | Advanced | Demo search, debug play counts, fresh-install reset | ⚠️ C |
 | About | Version, credits, links | 🧪 (GitHub link copied, §7; licence page) |
 

@@ -12,6 +12,8 @@ import '../library/library_dialogs.dart';
 import '../library/track_query.dart';
 import '../player/queue_store.dart';
 import '../scan/library_folder.dart';
+import '../data/state_export.dart' show defaultBundleDir;
+import '../sync/state_bundles.dart' show kSnapshotName;
 import '../ui/tokens.dart';
 import 'folder_browser.dart';
 import 'settings_page.dart';
@@ -1077,9 +1079,9 @@ class _DatabaseGroupState extends State<DatabaseGroup> {
 // ---------------------------------------------------------------------------
 // Advanced
 
-/// settings.py `_build_advanced_group`: cache maintenance and the raw TOML
-/// editor. State export/import comes with phase 4; demo search, the
-/// play-count debug button and the fresh-install reset with decision C.
+/// settings.py `_build_advanced_group`: state bundle export and import,
+/// cache maintenance and the raw TOML editor. Demo search, the play-count
+/// debug button and the fresh-install reset wait for decision C.
 class AdvancedGroup extends StatefulWidget {
   const AdvancedGroup({super.key, required this.deps});
 
@@ -1147,6 +1149,88 @@ class _AdvancedGroupState extends State<AdvancedGroup> {
     }
   }
 
+  /// `_on_export_state_click`: on Android the bundle browser picks the
+  /// folder; elsewhere ~/Downloads (Flet's fallback when no folder is
+  /// picked; the port has no native picker).
+  Future<void> _exportClick() async {
+    if (defaultTargetPlatform != TargetPlatform.android) {
+      return _export(defaultBundleDir());
+    }
+    final dir = await showBundleBrowser(
+      context,
+      import: false,
+      appStorage: d.dataDir,
+    );
+    if (dir != null) await _export(dir);
+  }
+
+  /// `_on_import_state_click`.
+  Future<void> _importClick() async {
+    if (defaultTargetPlatform != TargetPlatform.android) {
+      showSnackOn(
+        ScaffoldMessenger.of(context),
+        'Desktop import: drop a bundle into ~/Downloads and use Android.',
+        color: _red,
+      );
+      return;
+    }
+    final zip = await showBundleBrowser(
+      context,
+      import: true,
+      appStorage: d.dataDir,
+    );
+    if (zip != null) await _import(zip);
+  }
+
+  static const _red = Color(0xFFFF4444);
+
+  /// `_do_export_state`.
+  Future<void> _export(String outDir) async {
+    final bundles = d.bundles;
+    if (bundles == null) return;
+    final m = ScaffoldMessenger.of(context);
+    final accent = Theme.of(context).colorScheme.primary;
+    showSnackOn(m, 'Exporting state...', icon: Icons.ios_share_rounded);
+    try {
+      final out = await bundles.export(outDir: outDir);
+      showSnackOn(
+        m,
+        'Exported to $out',
+        icon: Icons.check_circle,
+        color: accent,
+      );
+    } catch (e) {
+      debugPrint('state export failed: $e');
+      showSnackOn(m, 'Export failed: $e', color: _red);
+    }
+  }
+
+  /// `_do_import_state`. Flet closes the database and asks for a relaunch;
+  /// the port reopens the library and re-reads config.toml (§7).
+  Future<void> _import(String zipPath) async {
+    final bundles = d.bundles;
+    if (bundles == null) return;
+    final m = ScaffoldMessenger.of(context);
+    final accent = Theme.of(context).colorScheme.primary;
+    showSnackOn(m, 'Importing state...', icon: Icons.file_download_rounded);
+    try {
+      final result = await bundles.import(zipPath);
+      final replaced = result.replaced.keys.join(', ');
+      showSnackOn(
+        m,
+        'Imported ${replaced.isEmpty ? 'nothing' : replaced}. '
+        'Library reloaded.',
+        icon: Icons.check_circle,
+        color: accent,
+      );
+      final text = await d.config.readText();
+      if (mounted) _editor.text = text;
+    } catch (e) {
+      debugPrint('state import failed: $e');
+      showSnackOn(m, 'Import failed: $e', color: _red);
+    }
+  }
+
   Future<void> _snackOf(Future<String> Function() job) async {
     final text = await job();
     if (mounted) showSettingsSnack(context, text);
@@ -1165,9 +1249,70 @@ class _AdvancedGroupState extends State<AdvancedGroup> {
   @override
   Widget build(BuildContext context) {
     const heading = TextStyle(color: Tokens.dim, fontWeight: FontWeight.bold);
+    final accent = Theme.of(context).colorScheme.primary;
     return GroupBody(
       spacing: 15,
       children: [
+        if (d.bundles != null) ...[
+          Text(
+            'State Backup & Migration (Import / Export)',
+            style: heading.copyWith(color: accent),
+          ),
+          SettingsCard(
+            padding: 12,
+            radius: 8,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Icon(Icons.lock_person_rounded, color: accent, size: 20),
+                    const SizedBox(width: 6),
+                    const Expanded(
+                      child: Text(
+                        'Android Release Build Sandbox Security',
+                        style: TextStyle(
+                          color: Tokens.text,
+                          fontSize: 13,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 6),
+                const Dim(
+                  'Because this application runs as a secure production '
+                  'release build, Android isolates all internal databases, '
+                  'config profiles, and search histories inside a restricted '
+                  'sandbox (/data/data/...).\n\n'
+                  'On every startup the app automatically writes a snapshot '
+                  '($kSnapshotName) to your library folder, keeping it in '
+                  'sync with your current state. The desktop offload script '
+                  'picks this up automatically — no manual export required.'
+                  '\n\n'
+                  'You can still manually Export/Import below for ad-hoc use '
+                  'or to restore from a specific point-in-time backup.',
+                ),
+              ],
+            ),
+          ),
+          Wrap(
+            children: [
+              TextButton.icon(
+                icon: const Icon(Icons.ios_share_rounded),
+                label: const Text('Export State'),
+                onPressed: _exportClick,
+              ),
+              TextButton.icon(
+                icon: const Icon(Icons.file_download_rounded),
+                label: const Text('Import State'),
+                onPressed: _importClick,
+              ),
+            ],
+          ),
+          const Divider(color: Tokens.border, height: 40),
+        ],
         const Text('Cache Maintenance', style: heading),
         Wrap(
           spacing: 10,

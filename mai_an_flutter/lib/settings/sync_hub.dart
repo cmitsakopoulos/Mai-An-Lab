@@ -1,20 +1,26 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 
+import '../core/progress_notify.dart';
 import '../data/library_repository.dart' show kFeaturesVersion;
 import '../sync/companion_client.dart' show defaultCompanionPort;
+import '../sync/state_bundles.dart';
 import '../sync/sync_manager.dart';
 import '../ui/tokens.dart';
 import 'settings_page.dart';
 
 /// ui/views/sync_hub.py, the Android view: Settings → Companion & Sync.
 /// The connection card (the switch, its status, Find Mac / Test
-/// Connection, Unpair, Manual IP and the last diagnosis) and Transfers
-/// from Mac. The DSP offload and backup cards come with stages g and f.
+/// Connection, Unpair, Manual IP and the last diagnosis), Transfers from
+/// Mac, and Library State Backup. The DSP offload card comes with stage g.
 class SyncHubGroup extends StatefulWidget {
-  const SyncHubGroup({super.key, required this.manager});
+  const SyncHubGroup({super.key, required this.manager, this.bundles});
   final CompanionSyncManager manager;
+
+  /// The backup card's bundle; null leaves the card out (tests).
+  final StateBundles? bundles;
 
   @override
   State<SyncHubGroup> createState() => SyncHubGroupState();
@@ -98,6 +104,60 @@ class SyncHubGroupState extends State<SyncHubGroup> {
       _transfersText = 'Queued $noun to Download Dock.';
       _pending = 0;
     });
+  }
+
+  bool _uploading = false;
+
+  /// `_do_upload_bundle`: a fresh timestamped bundle, sent to the Mac with
+  /// the link held awake, then deleted here (the Mac has it). The `sync`
+  /// notification follows it. A second tap while one runs does nothing.
+  Future<void> uploadBundle() async {
+    final bundles = widget.bundles;
+    final client = m.client;
+    final messenger = ScaffoldMessenger.of(context);
+    if (bundles == null || _uploading) return;
+    if (client == null || !m.isConnected) {
+      showSnackOn(messenger, 'Connect to Mac first', color: Tokens.amber);
+      return;
+    }
+    _uploading = true;
+    final notifier = ProgressNotifier('sync', 'State Backup Upload')
+      ..stage('Creating snapshot bundle…');
+    showSnackOn(
+      messenger,
+      'Creating snapshot bundle...',
+      icon: Icons.ios_share_rounded,
+    );
+    var summary = '';
+    try {
+      await m.activity(() async {
+        try {
+          final path = await bundles.export();
+          notifier.stage('Transmitting bundle to Mac…');
+          showSnackOn(
+            messenger,
+            'Transmitting bundle to Mac...',
+            icon: Icons.cloud_upload_rounded,
+          );
+          final res = await client.uploadStateBundle(path);
+          final saved = '${res['saved_path'] ?? 'mai_an_lab_state.zip'}';
+          summary = 'Backup saved on Mac: ${saved.split('/').last}';
+          showSnackOn(messenger, summary, icon: Icons.check_circle);
+          try {
+            File(path).deleteSync();
+          } on FileSystemException {
+            // Already gone.
+          }
+        } catch (e) {
+          summary = 'Backup upload failed: $e';
+          showSnackOn(messenger, 'Backup failed: $e', color: Tokens.accentRed);
+        } finally {
+          notifier.finish(summary);
+        }
+      });
+    } finally {
+      _uploading = false;
+    }
   }
 
   void _showDiagnosis(String text, {bool ok = false}) => setState(() {
@@ -405,9 +465,31 @@ class SyncHubGroupState extends State<SyncHubGroup> {
       ),
     ]);
 
+    final backup = card([
+      head(Icons.archive_rounded, accent, 'Library State Backup'),
+      const Dim(
+        'Back up your library database, playback history, and similarity '
+        'graph to your Mac.',
+      ),
+      Wrap(
+        children: [
+          TextButton.icon(
+            icon: const Icon(Icons.cloud_upload_rounded, size: 18),
+            label: const Text('Send Backup to Mac'),
+            onPressed: linked ? uploadBundle : null,
+          ),
+        ],
+      ),
+    ]);
+
     return ListView(
       padding: const EdgeInsets.fromLTRB(28, 0, 28, 100),
-      children: [connection, const SizedBox(height: 16), transfers],
+      children: [
+        connection,
+        const SizedBox(height: 16),
+        transfers,
+        if (widget.bundles != null) ...[const SizedBox(height: 16), backup],
+      ],
     );
   }
 }

@@ -23,7 +23,9 @@ import 'package:mai_an_lab/settings/config_controller.dart';
 import 'package:mai_an_lab/settings/settings_page.dart';
 import 'package:mai_an_lab/settings/sync_hub.dart';
 import 'package:mai_an_lab/sync/app_sync_host.dart';
+import 'package:mai_an_lab/sync/companion_client.dart' show CompanionHttpError;
 import 'package:mai_an_lab/sync/send.dart';
+import 'package:mai_an_lab/sync/state_bundles.dart';
 import 'package:mai_an_lab/sync/sync_manager.dart';
 import 'package:mai_an_lab/ui/tokens.dart';
 
@@ -58,6 +60,28 @@ const _track = Track(
   duration: 200,
   format: 'flac',
 );
+
+/// export_state without the isolate: a file in [dir], as the real one
+/// leaves in Downloads.
+class _Bundles extends StateBundles {
+  _Bundles(String dir)
+    : super(
+        dataDir: dir,
+        dbPath: '$dir/library.db',
+        library: LibraryController(() => throw UnimplementedError()),
+        config: ConfigController(ConfigStore(dir)),
+      );
+
+  final exported = <String>[];
+
+  @override
+  Future<String> export({String? outDir}) async {
+    final f = File('$dataDir/mai_an_lab_state_${exported.length}.zip')
+      ..writeAsStringSync('zip');
+    exported.add(f.path);
+    return f.path;
+  }
+}
 
 void main() {
   late Directory dir;
@@ -110,7 +134,7 @@ void main() {
       ..savePref('companion_paired_name', mac.name);
   }
 
-  Future<void> pumpHub(WidgetTester tester) async {
+  Future<void> pumpHub(WidgetTester tester, {StateBundles? bundles}) async {
     tester.view.physicalSize = const Size(390 * 3, 844 * 3);
     tester.view.devicePixelRatio = 3;
     addTearDown(tester.view.reset);
@@ -118,7 +142,9 @@ void main() {
       MaterialApp(
         navigatorKey: nav,
         theme: Tokens.theme(),
-        home: Scaffold(body: SyncHubGroup(manager: m)),
+        home: Scaffold(
+          body: SyncHubGroup(manager: m, bundles: bundles),
+        ),
       ),
     );
   }
@@ -481,5 +507,92 @@ void main() {
     await tester.runAsync(
       () => Future<void>.delayed(const Duration(milliseconds: 50)),
     );
+  });
+
+  group('Library State Backup', () {
+    testWidgets('off: the card is there, its button disabled', (tester) async {
+      make(tester);
+      await pumpHub(tester, bundles: _Bundles(dir.path));
+      expect(find.text('Library State Backup'), findsOneWidget);
+      final button = tester.widget<TextButton>(
+        find.ancestor(
+          of: find.text('Send Backup to Mac'),
+          matching: find.byWidgetPredicate((w) => w is TextButton),
+        ),
+      );
+      expect(button.onPressed, isNull);
+    });
+
+    testWidgets('no bundles: no card', (tester) async {
+      make(tester);
+      await pumpHub(tester);
+      expect(find.text('Library State Backup'), findsNothing);
+    });
+
+    testWidgets('connected: the bundle goes to the Mac and is deleted here, '
+        'the sync notification says where it went', (tester) async {
+      make(tester, enabled: true);
+      pair();
+      final bundles = _Bundles(dir.path);
+      final bridge = NotificationBridge.instance as RecordingBridge;
+      await pumpHub(tester, bundles: bundles);
+      await connect(tester);
+      await tester.scrollUntilVisible(
+        find.text('Send Backup to Mac'),
+        200,
+        scrollable: find.byType(Scrollable).first,
+      );
+      // The connection's snackbar leaves first (it covers the card).
+      await tester.pump(const Duration(seconds: 5));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Send Backup to Mac'));
+      await tester.pumpAndSettle();
+      expect(mac.uploads, bundles.exported);
+      expect(File(bundles.exported.single).existsSync(), isFalse);
+      expect(
+        find.text('Backup saved on Mac: mai_an_lab_state_0.zip'),
+        findsOneWidget,
+      );
+      final sync = [
+        for (final c in bridge.calls)
+          if (c['job'] == 'sync') '${c['done']} ${c['content']}',
+      ];
+      expect(sync, [
+        'false Creating snapshot bundle…',
+        'false Transmitting bundle to Mac…',
+        'true Backup saved on Mac: mai_an_lab_state_0.zip',
+      ]);
+      expect(bridge.calls.map((c) => c['title']).toSet(), {
+        'State Backup Upload',
+      });
+      await drain(tester);
+    });
+
+    testWidgets('a failed upload says why and keeps the bundle', (
+      tester,
+    ) async {
+      make(tester, enabled: true);
+      pair();
+      mac.uploadError = const CompanionHttpError('Upload failed: HTTP 500');
+      final bundles = _Bundles(dir.path);
+      await pumpHub(tester, bundles: bundles);
+      await connect(tester);
+      await tester.scrollUntilVisible(
+        find.text('Send Backup to Mac'),
+        200,
+        scrollable: find.byType(Scrollable).first,
+      );
+      // The connection's snackbar leaves first (it covers the card).
+      await tester.pump(const Duration(seconds: 5));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Send Backup to Mac'));
+      await tester.pumpAndSettle();
+      expect(find.text('Backup failed: ${mac.uploadError}'), findsOneWidget);
+      expect(File(bundles.exported.single).existsSync(), isTrue);
+      final last = (NotificationBridge.instance as RecordingBridge).calls.last;
+      expect(last['content'], 'Backup upload failed: ${mac.uploadError}');
+      expect(last['done'], isTrue);
+      await drain(tester);
+    });
   });
 }

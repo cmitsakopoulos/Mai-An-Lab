@@ -331,6 +331,29 @@ class LibraryController extends ChangeNotifier implements AutoPlayLibrary {
     unawaited(_rebuildGraph(repo));
   }
 
+  /// A state bundle import: the database closed (jobs already queued
+  /// finish first), [swap] run while nothing holds the file, then the
+  /// database opened again (migrated) and every view reloaded. Reads in
+  /// between see no library, as before the first load.
+  Future<T> replaceDatabase<T>(Future<T> Function() swap) async {
+    final old = _repo;
+    _repo = null;
+    _graphGen++;
+    await old?.close();
+    try {
+      return await swap();
+    } finally {
+      try {
+        _repo = await _open();
+      } catch (e) {
+        state = LoadState.error;
+        error = '$e';
+        notifyListeners();
+      }
+      await reload();
+    }
+  }
+
   int _graphGen = 0;
   bool _disposed = false;
 

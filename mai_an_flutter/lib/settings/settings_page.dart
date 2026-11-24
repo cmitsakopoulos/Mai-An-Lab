@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import '../core/haptics.dart';
 import '../library/library_controller.dart';
 import '../player/player_controller.dart';
+import '../sync/state_bundles.dart';
 import '../sync/sync_manager.dart';
 import '../ui/tokens.dart';
 import 'audio_dsp.dart';
@@ -23,6 +24,7 @@ class SettingsDeps {
     required this.player,
     required this.haptics,
     this.sync,
+    this.bundles,
   });
 
   final String dataDir;
@@ -33,6 +35,10 @@ class SettingsDeps {
 
   /// The Companion manager; null leaves Companion & Sync out (tests).
   final CompanionSyncManager? sync;
+
+  /// State bundles (export, import, the backup upload); null leaves them
+  /// out (tests).
+  final StateBundles? bundles;
 }
 
 /// main.py's Settings tab as a pushed page (it sits outside the tab bar in
@@ -108,7 +114,7 @@ class SettingsScreenState extends State<SettingsScreen> {
     final d = widget.deps;
     final body = switch (p) {
       SettingsPage.companion => switch (d.sync) {
-        final m? => SyncHubGroup(manager: m),
+        final m? => SyncHubGroup(manager: m, bundles: d.bundles),
         null => const Center(child: Dim('Companion & Sync is not running.')),
       },
       SettingsPage.storage => StorageGroup(deps: d),
@@ -365,10 +371,36 @@ class AccentLabel extends StatelessWidget {
   );
 }
 
-void showSettingsSnack(BuildContext context, String text) {
-  ScaffoldMessenger.of(context)
+void showSettingsSnack(BuildContext context, String text) =>
+    showSnackOn(ScaffoldMessenger.of(context), text);
+
+/// main.py `show_snackbar(text, icon, color)` on [m]: the icon in [color]
+/// (the accent by default) before the text; a colour alone gets Flet's
+/// default bell. Takes the messenger, so a job that outlives its page can
+/// still report.
+void showSnackOn(
+  ScaffoldMessengerState m,
+  String text, {
+  IconData? icon,
+  Color? color,
+}) {
+  icon ??= color == null ? null : Icons.notifications_rounded;
+  final Widget content = icon == null
+      ? Text(text)
+      : Row(
+          children: [
+            Icon(
+              icon,
+              size: 20,
+              color: color ?? Theme.of(m.context).colorScheme.primary,
+            ),
+            const SizedBox(width: 10),
+            Expanded(child: Text(text)),
+          ],
+        );
+  m
     ..hideCurrentSnackBar()
-    ..showSnackBar(SnackBar(content: Text(text)));
+    ..showSnackBar(SnackBar(content: content));
 }
 
 // ---------------------------------------------------------------------------

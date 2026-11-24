@@ -26,6 +26,7 @@ import 'search/landing_controller.dart';
 import 'settings/config_controller.dart';
 import 'settings/settings_page.dart';
 import 'sync/app_sync_host.dart';
+import 'sync/state_bundles.dart';
 import 'sync/sync_manager.dart';
 import 'ui/tokens.dart';
 
@@ -84,16 +85,23 @@ void _snack(String text, {IconData? icon, Color? color}) {
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   final dataDir = await resolveDataDir();
-  // main.py loads config.toml first, creating it from the template when
-  // missing (ensure_config_exists).
-  final settings = await ConfigController.load(ConfigStore(dataDir));
-  final config = settings.config;
   final dbPath = _dbOverride.isNotEmpty
       ? _dbOverride
       : '$dataDir${Platform.pathSeparator}library.db';
   // The port's own database is migrated and written (the ledger drain); an
   // override (e.g. the Flet app's live database on the Mac) is only read.
   final writable = _dbOverride.isEmpty;
+  // main.py `_heavy_init`: a state bundle left in Downloads replaces the
+  // state before the library opens. Here before config.toml is read too,
+  // so the restored settings apply from the first frame.
+  final imported =
+      writable &&
+      Platform.isAndroid &&
+      await StateBundles.bootImport(dataDir: dataDir, dbPath: dbPath);
+  // main.py loads config.toml first, creating it from the template when
+  // missing (ensure_config_exists).
+  final settings = await ConfigController.load(ConfigStore(dataDir));
+  final config = settings.config;
   final library = LibraryController(
     () => LibraryRepository.open(dbPath, writable: writable),
     sort: config.librarySort,
@@ -130,6 +138,15 @@ Future<void> main() async {
   );
   final sync = syncHost.manager = CompanionSyncManager(syncHost);
   downloadHost.sync = sync;
+  final bundles = writable
+      ? StateBundles(
+          dataDir: dataDir,
+          dbPath: dbPath,
+          library: library,
+          config: settings,
+          libraryFolder: () => resolveLibraryFolder(dataDir),
+        )
+      : null;
   // Settings' writes reach the screens at once (Flet: restart_ui).
   settings.addListener(() {
     final c = settings.config;
@@ -156,6 +173,7 @@ Future<void> main() async {
         player: player,
         haptics: haptics,
         sync: sync,
+        bundles: bundles,
       ),
     ),
   );
@@ -167,6 +185,19 @@ Future<void> main() async {
   // on_native_ready: listens logged while the app was closed.
   await loaded;
   ledger?.schedule(Duration.zero);
+  // After an auto-import Flet rebuilds the similarity graph: the artist
+  // tier here; the acoustic tier comes with phase 4g.
+  if (imported) {
+    try {
+      await library.repository?.buildMetadataEdges();
+      await library.reload();
+    } catch (e) {
+      debugPrint('Auto-import: graph rebuild failed: $e');
+    }
+  }
+  // main.py `_auto_export_state_snapshot`, fire and forget. On the phone
+  // only: desktop runs are development until phase 8 (§7).
+  if (Platform.isAndroid) unawaited(bundles?.autoExport());
 }
 
 /// Permissions first, as the Flet extension did (`_requestRuntimePermissions`

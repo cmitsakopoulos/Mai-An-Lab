@@ -25,6 +25,10 @@ class FakeMac {
   final duplicates = <String>{};
   int pings = 0;
 
+  /// Bundles received ("Send Backup to Mac"), and an error to answer with.
+  final uploads = <String>[];
+  Object? uploadError;
+
   bool reachable(String h, int p) => up && h == host && p == port;
 }
 
@@ -76,6 +80,18 @@ class FakeCompanionClient extends CompanionClient {
     mac.acked.addAll(ids);
     mac.pending.removeWhere((t) => ids.contains(t['id']));
     return true;
+  }
+
+  @override
+  Future<Map<String, Object?>> uploadStateBundle(String bundlePath) async {
+    _reach();
+    if (mac.uploadError case final e?) throw e;
+    if (!File(bundlePath).existsSync()) throw StateError('no bundle');
+    mac.uploads.add(bundlePath);
+    return {
+      'status': 'ok',
+      'saved_path': '/Users/me/backups/${bundlePath.split('/').last}',
+    };
   }
 
   @override
