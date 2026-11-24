@@ -1,4 +1,5 @@
 import 'nfkd_fold_table.dart';
+import 'py_unicode_tables.dart';
 
 /// Python's string primitives that the ported code depends on and Dart lacks
 /// or does differently: `str.lower` (final sigma), `str.isalnum`, `str.title`,
@@ -63,14 +64,25 @@ bool _finalSigma(List<int> s, int i) {
 }
 
 /// `str.title()`: a cased character is upper-cased after an uncased one and
-/// lower-cased after a cased one.
+/// lower-cased after a cased one. The lower-casing sees the whole string, so
+/// Σ at the end of a word becomes ς ('ΟΔΟΣ' → 'Οδος').
 String pyTitle(String s) {
   final out = StringBuffer();
+  final src = s.runes.toList();
   var prevCased = false;
-  for (final r in s.runes) {
+  for (var i = 0; i < src.length; i++) {
+    final r = src[i];
     final c = String.fromCharCode(r);
     final isCased = _cased.hasMatch(c);
-    out.write(isCased ? (prevCased ? pyLower(c) : c.toUpperCase()) : c);
+    if (!isCased) {
+      out.write(c);
+    } else if (!prevCased) {
+      out.write(c.toUpperCase());
+    } else if (r == 0x3a3) {
+      out.writeCharCode(_finalSigma(src, i) ? 0x3c2 : 0x3c3);
+    } else {
+      out.write(c.toLowerCase());
+    }
     prevCased = isCased;
   }
   return out.toString();
@@ -115,4 +127,69 @@ String nfkdStrip(String s) {
     }
   }
   return out.toString();
+}
+
+int _decimalValue(int rune) {
+  if (rune >= 0x30 && rune <= 0x39) return rune - 0x30;
+  if (rune < 0x660) return -1;
+  for (final z in kDecimalZeros) {
+    if (rune >= z && rune <= z + 9) return rune - z;
+  }
+  return -1;
+}
+
+/// `str.isdecimal()`: non-empty, every character a decimal digit (Nd), in
+/// any script.
+bool pyIsDecimal(String s) =>
+    s.isNotEmpty && s.runes.every((r) => _decimalValue(r) >= 0);
+
+/// `int(s)` for a string [pyIsDecimal] accepted.
+int pyDecimalInt(String s) {
+  var v = 0;
+  for (final r in s.runes) {
+    v = v * 10 + _decimalValue(r);
+  }
+  return v;
+}
+
+/// `str.casefold()`: lower case, plus Unicode full case folding where it
+/// differs (ß is ss, final ς is σ).
+String pyCasefold(String s) {
+  final out = StringBuffer();
+  for (final r in s.runes) {
+    final m = kCasefoldExtra[r];
+    if (m != null) {
+      out.write(m);
+    } else {
+      out.write(String.fromCharCode(r).toLowerCase());
+    }
+  }
+  return out.toString();
+}
+
+/// `str.isspace()` for one code point.
+bool pyIsSpace(int r) =>
+    (r >= 0x09 && r <= 0x0d) ||
+    (r >= 0x1c && r <= 0x20) ||
+    r == 0x85 ||
+    r == 0xa0 ||
+    r == 0x1680 ||
+    (r >= 0x2000 && r <= 0x200a) ||
+    r == 0x2028 ||
+    r == 0x2029 ||
+    r == 0x202f ||
+    r == 0x205f ||
+    r == 0x3000;
+
+/// `str.strip()`. Dart's trim also strips U+FEFF and keeps U+001C–U+001F.
+String pyStrip(String s) {
+  final r = s.runes.toList();
+  var a = 0, b = r.length;
+  while (a < b && pyIsSpace(r[a])) {
+    a++;
+  }
+  while (b > a && pyIsSpace(r[b - 1])) {
+    b--;
+  }
+  return String.fromCharCodes(r, a, b);
 }
