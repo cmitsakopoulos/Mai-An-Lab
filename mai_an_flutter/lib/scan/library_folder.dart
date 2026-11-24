@@ -11,11 +11,28 @@ import 'storage_paths.dart';
 /// `library_path` and config.toml's `[downloads] folder`; a stored path
 /// that is empty or app-private falls back (never written back).
 Future<String> resolveLibraryFolder(String dataDir) async {
+  final (library, target, sp) = await resolveFolders(dataDir);
+  return sp.resolveLibraryDir(library, target);
+}
+
+/// main.py `sync_config_to_ui`: the effective library and download
+/// folders (`library_folder`, `target_folder`), in memory only; and the
+/// rules they were resolved with (`is_app_private` for Settings).
+Future<(String library, String download, StoragePaths paths)> resolveFolders(
+  String dataDir,
+) async {
   final config = await AppConfig.load(dataDir);
   final prefs = Prefs(dataDir);
   await prefs.load();
+  final sp = await storagePathsFor(dataDir);
+  final dl = config.downloadsFolder;
+  final library = sp.resolveLibraryDir(prefs.getString('library_path', ''), dl);
+  return (library, sp.resolveDownloadDir(dl, library), sp);
+}
+
+Future<StoragePaths> storagePathsFor(String dataDir) async {
   final support = await getApplicationSupportDirectory();
-  final sp = StoragePaths(
+  return StoragePaths(
     StoragePlatform.current(
       dataDir: dataDir,
       privateRoots: [
@@ -24,8 +41,4 @@ Future<String> resolveLibraryFolder(String dataDir) async {
       ],
     ),
   );
-  final dl = config.downloadsFolder;
-  final library = sp.resolveLibraryDir(prefs.getString('library_path', ''), dl);
-  final target = sp.resolveDownloadDir(dl, library);
-  return sp.resolveLibraryDir(library, target);
 }

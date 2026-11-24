@@ -141,6 +141,19 @@ class LandingSections {
   final bool topGenres;
   final bool stats;
 
+  @override
+  bool operator ==(Object other) =>
+      other is LandingSections &&
+      other.newReleases == newReleases &&
+      other.mostListened == mostListened &&
+      other.topArtists == topArtists &&
+      other.topGenres == topGenres &&
+      other.stats == stats;
+
+  @override
+  int get hashCode =>
+      Object.hash(newReleases, mostListened, topArtists, topGenres, stats);
+
   static LandingSections fromToml(Object? landing) {
     final l = landing is Map ? landing : const <String, Object?>{};
     bool on(String key) => switch (l[key]) {

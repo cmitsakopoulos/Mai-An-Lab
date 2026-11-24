@@ -13,6 +13,7 @@ import 'player/player_controller.dart';
 import 'player/ui/mini_player.dart';
 import 'search/landing_controller.dart';
 import 'search/search_screen.dart';
+import 'settings/settings_page.dart';
 import 'ui/tokens.dart';
 
 const _appChannel = MethodChannel('mai_an/app');
@@ -42,6 +43,7 @@ class AppShell extends StatefulWidget {
     required this.haptics,
     this.unifiedPills = false,
     this.startTab = AppTab.library,
+    this.settings,
   });
 
   final LibraryController library;
@@ -51,6 +53,9 @@ class AppShell extends StatefulWidget {
   final Haptics haptics;
   final bool unifiedPills;
   final AppTab startTab;
+
+  /// What the Settings page acts on; null leaves its buttons out (tests).
+  final SettingsDeps? settings;
 
   @override
   State<AppShell> createState() => AppShellState();
@@ -139,6 +144,13 @@ class AppShellState extends State<AppShell> {
     browse.setView(view);
   }
 
+  /// main.py `switch_to_settings(subpage)`.
+  void Function([SettingsPage?])? get _openSettings {
+    final deps = widget.settings;
+    if (deps == null) return null;
+    return ([SettingsPage? page]) => openSettings(context, deps, initial: page);
+  }
+
   @override
   Widget build(BuildContext context) {
     // Back on a main tab sends the app to the background (like Home)
@@ -164,6 +176,7 @@ class AppShellState extends State<AppShell> {
                 landing: widget.landing,
                 onPlayTrack: _playPath,
                 onOpenInLibrary: openInLibrary,
+                onOpenSettings: _openSettings,
               ),
             ),
             _FadeTab(
@@ -175,6 +188,7 @@ class AppShellState extends State<AppShell> {
                 player: widget.player,
                 haptics: widget.haptics,
                 selection: selection,
+                onOpenSettings: _openSettings,
               ),
             ),
           ],

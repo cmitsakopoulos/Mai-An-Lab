@@ -88,7 +88,15 @@ abstract interface class PlaybackBackend {
   /// Gain of EQ band [index] (0–4) in dB (Flet `set_eq_band_gain`).
   Future<void> setEqBandGain(int index, double gainDb);
 
+  /// The device equalizer's bands and range (Flet `get_equalizer_bands`),
+  /// or null where there is none (desktop) or it is not ready.
+  Future<EqualizerInfo?> equalizerInfo();
+
   /// Where the handler appends finished listens and writes its resume
   /// record (Flet: `set_play_log_path`).
   void setPaths({required String ledgerPath, required String resumePath});
 }
+
+/// `get_equalizer_bands`: each band's centre frequency (Hz) and the gain
+/// range (dB).
+typedef EqualizerInfo = ({List<double> centerHz, double minDb, double maxDb});

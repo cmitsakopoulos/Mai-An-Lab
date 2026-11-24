@@ -3,18 +3,19 @@ import 'package:flutter/material.dart';
 import '../data/library_repository.dart';
 import '../library/browse_controller.dart';
 import '../ui/tokens.dart';
+import '../settings/settings_search.dart';
 import 'landing_controller.dart';
 
 /// ui/views/search.py, the landing page only: the title and the cards built
 /// from local data. The source search, its results, recent searches and New
-/// From Your Artists come with phase 6 (decision A); the settings shortcut
-/// with Settings.
+/// From Your Artists come with phase 6 (decision A).
 class SearchScreen extends StatelessWidget {
   const SearchScreen({
     super.key,
     required this.landing,
     required this.onPlayTrack,
     required this.onOpenInLibrary,
+    this.onOpenSettings,
   });
 
   final LandingController landing;
@@ -26,22 +27,38 @@ class SearchScreen extends StatelessWidget {
   /// filtered to [name] ("" for none).
   final void Function(LibraryView view, String name) onOpenInLibrary;
 
+  /// The header's settings shortcut (search.py: `_switch_tab(3)`).
+  final void Function([SettingsPage?])? onOpenSettings;
+
   @override
   Widget build(BuildContext context) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        const SafeArea(
+        SafeArea(
           bottom: false,
           child: Padding(
-            padding: EdgeInsets.fromLTRB(16, 20, 16, 8),
-            child: Text(
-              'Streamrip',
-              style: TextStyle(
-                color: Tokens.text,
-                fontSize: 26,
-                fontWeight: FontWeight.w800,
-              ),
+            padding: const EdgeInsets.fromLTRB(16, 20, 8, 8),
+            child: Row(
+              children: [
+                const Expanded(
+                  child: Text(
+                    'Streamrip',
+                    style: TextStyle(
+                      color: Tokens.text,
+                      fontSize: 26,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ),
+                if (onOpenSettings case final open?)
+                  IconButton(
+                    icon: const Icon(Icons.settings_outlined, size: 22),
+                    color: Tokens.dim,
+                    tooltip: 'Settings',
+                    onPressed: () => open(),
+                  ),
+              ],
             ),
           ),
         ),

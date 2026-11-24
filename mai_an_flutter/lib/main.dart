@@ -8,6 +8,7 @@ import 'package:permission_handler/permission_handler.dart';
 
 import 'app_shell.dart';
 import 'core/app_config.dart';
+import 'core/config_file.dart';
 import 'core/haptics.dart';
 import 'data/library_repository.dart';
 import 'data/play_ledger.dart';
@@ -19,6 +20,8 @@ import 'player/player_controller.dart';
 import 'player/queue_store.dart';
 import 'scan/library_folder.dart';
 import 'search/landing_controller.dart';
+import 'settings/config_controller.dart';
+import 'settings/settings_page.dart';
 import 'ui/tokens.dart';
 
 /// Override with: --dart-define=LIBRARY_DB=/path/library.db
@@ -46,7 +49,10 @@ Future<String> resolveDataDir() async {
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   final dataDir = await resolveDataDir();
-  final config = await AppConfig.load(dataDir);
+  // main.py loads config.toml first, creating it from the template when
+  // missing (ensure_config_exists).
+  final settings = await ConfigController.load(ConfigStore(dataDir));
+  final config = settings.config;
   final dbPath = _dbOverride.isNotEmpty
       ? _dbOverride
       : '$dataDir${Platform.pathSeparator}library.db';
@@ -66,17 +72,31 @@ Future<void> main() async {
   );
   final landing = LandingController(library, sections: config.landing);
   final player = ValueNotifier<PlayerController?>(null);
+  final haptics = Haptics(config.haptics);
+  // Settings' writes reach the screens at once (Flet: restart_ui).
+  settings.addListener(() {
+    final c = settings.config;
+    browse.setViews(LibraryView.fromConfig(c.libraryTabs.visible));
+    landing.setSections(c.landing);
+    haptics.config = c.haptics;
+  });
   runApp(
     MaiAnApp(
       library: library,
       browse: browse,
       landing: landing,
       startTab: AppTab.fromStartupPage(config.startupPage),
-      unifiedPills: config.libraryTabs.unified,
       player: player,
-      accent: config.accent ?? Tokens.accent,
-      haptics: Haptics(config.haptics),
+      config: settings,
+      haptics: haptics,
       ledger: ledger,
+      settings: SettingsDeps(
+        dataDir: dataDir,
+        config: settings,
+        library: library,
+        player: player,
+        haptics: haptics,
+      ),
     ),
   );
   player.value = await _startPlayer(dataDir, library, ledger);
@@ -141,9 +161,9 @@ class MaiAnApp extends StatefulWidget {
     required this.browse,
     required this.landing,
     required this.player,
-    required this.accent,
+    required this.config,
     required this.haptics,
-    this.unifiedPills = false,
+    required this.settings,
     this.startTab = AppTab.library,
     this.ledger,
   });
@@ -152,10 +172,12 @@ class MaiAnApp extends StatefulWidget {
   final BrowseController browse;
   final LandingController landing;
   final AppTab startTab;
-  final bool unifiedPills;
   final ValueNotifier<PlayerController?> player;
-  final Color accent;
+
+  /// config.toml: the accent and the pill style follow it.
+  final ConfigController config;
   final Haptics haptics;
+  final SettingsDeps settings;
 
   /// Null while the database is opened read-only.
   final LedgerDrain? ledger;
@@ -200,18 +222,24 @@ class _MaiAnAppState extends State<MaiAnApp> {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'Mai An Lab',
-      debugShowCheckedModeBanner: false,
-      theme: Tokens.theme(accentColor: widget.accent),
-      home: AppShell(
-        library: widget.library,
-        browse: widget.browse,
-        landing: widget.landing,
-        unifiedPills: widget.unifiedPills,
-        player: widget.player,
-        haptics: widget.haptics,
-        startTab: widget.startTab,
+    return ListenableBuilder(
+      listenable: widget.config,
+      builder: (context, _) => MaterialApp(
+        title: 'Mai An Lab',
+        debugShowCheckedModeBanner: false,
+        theme: Tokens.theme(
+          accentColor: widget.config.config.accent ?? Tokens.accent,
+        ),
+        home: AppShell(
+          library: widget.library,
+          browse: widget.browse,
+          landing: widget.landing,
+          unifiedPills: widget.config.config.libraryTabs.unified,
+          player: widget.player,
+          haptics: widget.haptics,
+          startTab: widget.startTab,
+          settings: widget.settings,
+        ),
       ),
     );
   }

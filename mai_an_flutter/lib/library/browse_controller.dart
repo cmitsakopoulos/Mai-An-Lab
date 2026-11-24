@@ -157,8 +157,21 @@ class BrowseController extends ChangeNotifier {
   final LibraryController library;
 
   /// The views the bar shows.
-  final List<LibraryView> views;
+  List<LibraryView> views;
   LibraryView view;
+
+  /// Settings → Appearance changed which views show (Flet rebuilds the UI,
+  /// `restart_ui`). The open view stays when it is still shown.
+  void setViews(List<LibraryView> shown) {
+    if (listEquals(shown, views)) return;
+    views = shown;
+    if (views.contains(view)) {
+      notifyListeners();
+    } else {
+      view = LibraryView.initial(views);
+      _reset();
+    }
+  }
 
   ArtistSort artistSort = ArtistSort.name;
   GenreSort genreSort = GenreSort.name;

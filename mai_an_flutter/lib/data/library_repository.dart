@@ -13,6 +13,7 @@ import 'landing_queries.dart';
 import 'library_schema.dart';
 import 'play_ledger.dart';
 import 'playlists.dart';
+import 'maintenance.dart';
 import 'scan_writes.dart';
 
 export 'library_schema.dart' show kGeometryVersion;
@@ -128,6 +129,11 @@ class LibraryRepository {
   Future<void> pruneOrphans() => _write(pruneOrphansJob);
   Future<void> checkpoint() => _write(checkpointJob);
 
+  // Settings → Database Management (maintenance.dart).
+  Future<void> clearLibraryIndex() => _write(clearLibraryIndexJob);
+  Future<void> clearDspFeatures() => _write(clearDspFeaturesJob);
+  Future<void> wipeDatabase() => _write(wipeDatabaseJob);
+
   /// Raw statements, for tests that set up rows the app makes elsewhere.
   @visibleForTesting
   Future<void> debugExecute(List<(String, List<Object?>)> statements) =>
@@ -159,6 +165,11 @@ class LibraryRepository {
 
   /// `has_current_features`: the track has DSP features a station can seed
   /// from.
+  /// Settings → Audio & DSP's Dynamism check: the track count, and how
+  /// many lack current features (`get_tracks_missing_features`).
+  Future<(int total, int missing)> featureCoverage() =>
+      _db.run(_featureCoverageJob);
+
   Future<bool> hasCurrentFeatures(String path) =>
       _db.run(_hasFeaturesJob(path));
 
@@ -389,6 +400,20 @@ Map<String, Track> _selectTracksBrief(Database db, List<String> paths) {
 
 /// `dsp.FEATURES_VERSION`.
 const kFeaturesVersion = 5;
+
+(int, int) _featureCoverageJob(Database db) {
+  final total = db.select('SELECT COUNT(*) AS n FROM tracks').first['n'] as int;
+  final missing =
+      db.select(
+            'SELECT COUNT(*) AS n FROM tracks t '
+            'LEFT JOIN play_counts pc ON pc.track_path = t.path '
+            'WHERE pc.timbre IS NULL '
+            '   OR COALESCE(pc.features_version, 0) < ?',
+            [kFeaturesVersion],
+          ).first['n']
+          as int;
+  return (total, missing);
+}
 
 DbJob<bool> _hasFeaturesJob(String path) =>
     (db) => db.select(

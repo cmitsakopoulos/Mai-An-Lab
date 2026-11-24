@@ -250,6 +250,7 @@ Future<bool> confirmDelete(
   BuildContext context, {
   required String title,
   required String message,
+  String confirmLabel = 'Delete',
 }) async =>
     await showDialog<bool>(
       context: context,
@@ -271,7 +272,7 @@ Future<bool> confirmDelete(
               foregroundColor: Tokens.text,
             ),
             onPressed: () => Navigator.pop(dialog, true),
-            child: const Text('Delete'),
+            child: Text(confirmLabel),
           ),
         ],
       ),

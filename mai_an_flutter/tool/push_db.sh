@@ -13,8 +13,10 @@
 # Lands at files/data/library.db: the same place the Flet app keeps it
 # (FLET_APP_STORAGE_DATA), so the port reads it exactly as it will at cutover.
 # It replaces the port's copy, discarding what the port wrote into it (the
-# ledger drain's play counts). The app is stopped first: it holds the file
-# open read-write. Start it again afterwards.
+# ledger drain's play counts). A bundle's config.toml comes too, to
+# files/data/.config/streamrip/config.toml (where utils/config.py keeps it on
+# Android), replacing what the port's Settings wrote. The app is stopped
+# first: it holds the database open read-write. Start it again afterwards.
 set -euo pipefail
 
 PKG=com.mitsakopoulos.maianlab.mai_an_lab.port
@@ -42,9 +44,13 @@ SRC="${1:-$(ls -t "$REPO"/tools/state_backups/mai_an_lab_state_*.zip 2>/dev/null
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
+CONFIG=""
 if [[ $SRC == *.zip ]]; then
   unzip -q -o "$SRC" library.db -d "$TMP/bundle"
   SRC_DB="$TMP/bundle/library.db"
+  if unzip -q -o "$SRC" config.toml -d "$TMP/bundle" 2>/dev/null; then
+    CONFIG="$TMP/bundle/config.toml"
+  fi
 else
   SRC_DB="$SRC"
 fi
@@ -64,3 +70,9 @@ echo "Snapshot: $(sqlite3 "$TMP/library.db" 'SELECT count(*) FROM tracks') track
 "$ADB" shell "run-as $PKG sh -c 'mkdir -p files/data && cp /data/local/tmp/maian_library.db files/data/library.db && rm -f files/data/library.db-wal files/data/library.db-shm'"
 "$ADB" shell rm -f /data/local/tmp/maian_library.db
 echo "Pushed to $PKG:files/data/library.db"
+if [[ -n $CONFIG ]]; then
+  "$ADB" push "$CONFIG" /data/local/tmp/maian_config.toml >/dev/null
+  "$ADB" shell "run-as $PKG sh -c 'mkdir -p files/data/.config/streamrip && cp /data/local/tmp/maian_config.toml files/data/.config/streamrip/config.toml'"
+  "$ADB" shell rm -f /data/local/tmp/maian_config.toml
+  echo "Pushed to $PKG:files/data/.config/streamrip/config.toml"
+fi

@@ -211,6 +211,9 @@ class FakeBackend implements PlaybackBackend {
       eq[index] = gainDb;
 
   @override
+  Future<EqualizerInfo?> equalizerInfo() async => null;
+
+  @override
   Future<void> skipToNext() async => advance();
   @override
   Future<void> skipToPrevious() async => advance(-1);

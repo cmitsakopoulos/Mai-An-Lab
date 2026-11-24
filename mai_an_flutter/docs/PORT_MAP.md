@@ -6,14 +6,15 @@ done. Phase 1 (phone player) is written and audited against the Flet sources
 a real library (§4, phase 2). Phase 3 is under way: the Genres, Artists and
 Albums views, the migrations the port now owns, the play-ledger drain, the
 library scan (with tinytag ported to Dart), playlists, the full
-long-press menu, selection mode and Delete Track, and the tab bar with
-the Search tab's local landing cards (§4, phase 3). Desktop
-tests pass (`flutter test`: 264, including the real-library golden tests
+long-press menu, selection mode and Delete Track, the tab bar with
+the Search tab's local landing cards, and Settings with the config.toml
+writer (§4, phase 3). Desktop
+tests pass (`flutter test`: 383, including the real-library golden tests
 that need the gitignored goldens; analyzer clean in Dart's strict modes);
 debug and release APKs build.
 It is installed on the phone (2026-11-24, with the 2026-11-02 library, an
-older build: no scan yet). The user reports problems found in use; fix
-them, or record intended differences in §7. Nothing ships from this port yet. 29 of the 90 Flet features in §11
+older build: no scan, no Settings yet). The user reports problems found in use; fix
+them, or record intended differences in §7. Nothing ships from this port yet. 38 of the 90 Flet features in §11
 are ported. Third-party code the port uses or copies is listed in §12.*
 
 **Next session: start at §10 (open items). §11 lists every Flet feature and
@@ -119,7 +120,7 @@ The port reuses each file's exact format, so a cutover install inherits it.
 | File | Owner today | Port reads | Port writes |
 |---|---|---|---|
 | `library.db` (main database; schema below) | `db_manager.py` | phase 0 ✅ | phase 3: migrations and the ledger drain ✅ (desktop and phone) |
-| `.config/streamrip/config.toml` (Android; on the Mac it is under `Library/Application Support/streamrip/`). Holds `general.library_sort`, `appearance.accent_color`, `[dsp]`, `[haptics]`, `[downloads] folder` and credentials. | `config.py` | phase 1 ✅ (sort, accent, `[dsp]`, `[haptics]`: `core/app_config.dart`); 3 (`[downloads] folder`, for the scan folder) | the phase that owns each setting |
+| `.config/streamrip/config.toml` (Android; on the Mac it is under `Library/Application Support/streamrip/`). Holds `general.library_sort`, `appearance.accent_color`, `[dsp]`, `[haptics]`, `[downloads] folder` and credentials. | `config.py`, `streamrip_api.update_config_params` | phase 1 ✅ (sort, accent, `[dsp]`, `[haptics]`: `core/app_config.dart`); 3 ✅ (`[downloads] folder`, `[landing]`, `appearance.show_*`) | 3 ✅: created from the template when missing, and Settings' writes, byte for byte as tomlkit 0.15.2 leaves them (`core/config_file.dart`, golden-tested); the rest of the keys with the settings that own them |
 | `queue_state.json`, `queue_pos.json`, `native_resume.json` | main.py, engine | 1 ✅ | 1 ✅ (`autoplay_held`, the queue auto-play set aside: 2 ✅) |
 | `.cache/queue_regular.json`, `.cache/queue_shuffle.json` (the queue set aside while shuffling the library) | main.py | 1 ✅ | 1 ✅ |
 | `flet_prefs.json` (`_save_pref`; shuffle, repeat, similar-play prefs) | main.py | 1 ✅ | 1–2 ✅ (`is_shuffle`, `repeat_mode`, `play_similar_mode`; merge-write as in Flet) |
@@ -195,12 +196,12 @@ Verdicts:
 | `ui/views/search.py`, `ui/player/download_dock.py` | 3,806 | Rewrite. The landing's local cards ✅ (`search/`, `data/landing_queries.dart`, golden-tested); the rest with the sources | 3, 6 |
 | `dsp.py`, `pca_engine.py` | 1,044 | ⚠️ Port to Dart, or keep on Mac (§6, decision B) | 6 |
 | `metadata_enrich`, `metadata_ai`, `metadata_audit`, `metadata_qobuz`, `ui/player/metadata_workbench.py` | ~5,000 | Port last (desktop-heavy) | 7 |
-| `ui/views/settings.py` | 3,932 | Rewrite, spread across phases (rule 4) | all |
+| `ui/views/settings.py` | 3,932 | Rewrite, spread across phases (rule 4). Phase 3 ✅ (`settings/`): the hub and its search, Storage, Appearance, Audio & DSP (curve, presets), Haptics, Permissions, Database Management, Advanced (caches, raw TOML), About. The other groups with their phases (§11). | all |
 | `ui/player/onboarding_modal.py` | 895 | Rewrite, smaller | 7 |
 | `ui/widgets.py`, `ui/tokens.py` | 769 | Rewrite (tokens ✅) | as needed |
 | `audio_engine_macos.py` (pyobjc / AVFoundation) | 1,311 | Rewrite for the Mac | 8 |
-| main.py, the app shell (everything but playback): splash, tab bar and startup tab ✅ (`app_shell.dart`: Search and Library), back navigation and confirm-pop, Settings as a pushed page, startup jobs (state-zip auto-import, state auto-export, enrichment pass, new-releases refresh, graph readiness build, cache pruning, companion start), maintenance actions (wipe, fresh-install reset, clear index/DSP/caches), delete track/playlist ✅, notification routing, success sound | ~2,500 | Rewrite, each piece with the feature behind it (§11) | 3–7 |
-| `config.py` (streamrip config: load, defaults, `repair_config`) | 552 | Read half ported for the keys in use (`core/app_config.dart`). Writes and `repair_config` with the settings that need them. | 1, then all |
+| main.py, the app shell (everything but playback): splash, tab bar and startup tab ✅ (`app_shell.dart`: Search and Library), back navigation and confirm-pop, Settings as a pushed page ✅ (`settings/settings_page.dart`), startup jobs (state-zip auto-import, state auto-export, enrichment pass, new-releases refresh, graph readiness build, cache pruning, companion start), maintenance actions (wipe, clear index/DSP, caches ✅ `data/maintenance.dart`; fresh-install reset: decision C), delete track/playlist ✅, notification routing, success sound | ~2,500 | Rewrite, each piece with the feature behind it (§11) | 3–7 |
+| `config.py` (streamrip config: load, defaults, `repair_config`) + `streamrip_api.py`'s `load_config`, `update_config_params`, `ensure_config_exists` | 552 | Read half for the keys in use (`core/app_config.dart`). Writes ✅ (`core/config_file.dart`: `update_config_params` as tomlkit edits the text, the template copy of `ensure_config_exists`). Its repair half (`fill_missing` from a newer template) when the template next changes (§7). | 1, 3, then all |
 | `progress_notify.py` (job notifications: progress, summary text, retry action, task-service start/stop) | 239 | Port: a Dart wrapper over the Kotlin `showProgressNotification` (not wrapped yet), with the summary and retry rules. A scan the user starts posts nothing (in-app banner only); the scan's alert ("n tracks not analysed yet") follows only the automatic scan after a download or transfer. First users: sync (4), then downloads (6), analysis (B), metadata (7). | 4 |
 | `ui/player/dialogs.py` (confirm and text-input dialogs) | 100 | Rewrite ✅ (`library/library_dialogs.dart`: playlist editor, name dialog, delete confirmations) | 3 |
 | `search_history.py` (`recent_searches.json`), `text_match.py` | 81 | Port with Search | 6 |
@@ -438,6 +439,59 @@ real bundle (`library_views.json`; `library_views_golden_test.dart`).
 All identical. `test/app_shell_test.dart` covers the refresh rule, the
 config keys and the links into the Library.
 
+### Phase 3: Settings
+
+Step 4h of §10. `settings/` is settings.py for the groups whose features
+the port has, pushed over the tabs from the gear in the Library and Search
+headers, or from the empty library's ENTER PATHS (Storage). Back goes from
+a group to the hub, then out. The hub keeps Flet's sections and its
+search (direct matches, then the weighted cosine with one-edit typos);
+Companion & Sync, Authentication, AI Assistant and Metadata come with
+their phases and are left out of both.
+
+- **Storage & Paths**: the resolved folders (`sync_config_to_ui`), SAVE
+  PATHS when edited (empty and app-private paths refused; then a scan),
+  and Flet's Android folder navigator (saved at once, no scan). Default
+  Download Quality waits for decision A; its value is written back as read.
+- **Appearance**: startup page, sort, pill style, the five landing
+  switches, the library tabs, twelve accents; SAVE when anything differs
+  from the file. Changes reach the running app at once (Flet restarts the
+  UI): view bar, landing cards, accent, pills, haptics.
+- **Audio & DSP**: Dynamism (greyed when nothing is analysed, the boost
+  card from the player), the EQ switch, system and custom presets, the
+  curve, sliders and gain fields, saving, applying and deleting presets.
+  Gains reach the player as they move. The device's EQ bands come from the
+  handler (`equalizerInfo`).
+- **Haptic Feedback**, **Permissions** (statuses, refreshed on return from
+  the system page), **Database Management** (clear index, clear DSP, wipe;
+  the compute pipeline waits for decision B), **Advanced** (album-art and
+  preview caches, the raw TOML editor; export/import with phase 4, the
+  developer switches with decision C), **About** (with the licence page).
+
+**config.toml.** Every write is `update_config_params`, which re-reads the
+file, sets the keys with tomlkit and dumps it, keeping comments, spacing
+and order. `core/config_file.dart` makes the same edits to the text:
+values replaced in place, new keys after a table's last key, new tables at
+the end, and `custom_presets` in whichever form the file has it (an inline
+table, rendered by a translation of tomlkit's `InlineTable.as_string`, a
+`[dsp.custom_presets]` table, or a new one). A missing file starts as the
+template (`assets/config_template.toml`, utils/config.toml). Writes go
+through one queue and the file is re-read after each (`ConfigController`).
+
+**How parity is proved.** `tool/export_config_goldens.py` (tomlkit 0.15.2
+pinned in `tool/.pydeps`) runs Flet's own `update_config_params` through
+Settings' write sequences (settings.py's appearance, general, paths, DSP,
+preset save/pick/delete, haptics and demo-search writes) on the template
+and on the newest phone bundle's config with its credentials blanked, and
+through 103 small edge files (comments, CRLF, missing newlines, multi-line
+values, quoted keys, sub-tables, inline and table presets, escapes,
+floats). `test/goldens/config_synthetic.json` (committed); 192 writes,
+`test/config_file_test.dart`: every file identical, byte for byte.
+`tool/export_settings_goldens.py` runs settings.py's search on 86 queries
+(`test/goldens/settings_search.json`, `test/settings_search_test.dart`):
+identical. `test/settings_test.dart` covers each group's writes, the
+maintenance actions on a real schema, and the changes reaching the app.
+
 ---
 
 ## 5. Cutover (Android)
@@ -506,9 +560,9 @@ uninstall and reinstall; the bundle export/import covers the data.
 | Scan: a row with `added_date` NULL | `abs(None - mtime)` raises and the scan dies | Treated as changed: the file is reread | Intentional. Only very old databases have such rows. |
 | Scan: ASF/AIFF content in an `.aac` file | tinytag's ASF or AIFF parser | Skipped as unreadable | Not ported (§4, the scan); never seen in a library. |
 | Search tab without source credentials | "Setup Required" prompt; no landing cards (they show only once Qobuz or Deezer is set up, or demo mode is on) | The landing cards always | Intentional: the port has no source search yet (decision A), and the cards only read the library. |
-| Search tab header | Title, source switch, connection signal, recent searches, settings shortcut, search box, result tabs | The title only | The rest with the sources (6) and Settings (3h). |
-| Startup tab | `general.startup_page`: Jarvis, Search, Library or Settings | Search, else Library | Jarvis (5) and Settings (3h) aren't ported. |
-| Empty library | "ENTER PATHS" opens Settings → Storage | No button (Settings isn't ported); the scan button works | Until Settings (3h). |
+| Search tab header | Title, source switch, connection signal, recent searches, settings shortcut, search box, result tabs | The title and the settings shortcut | The rest with the sources (6). |
+| Startup tab | `general.startup_page`: Jarvis, Search, Library or Settings | Search, else Library | Jarvis (5) isn't ported; Settings is a pushed page, not a tab. Settings' dropdown offers Search and Library, as Flet's does. |
+| Empty library | "ENTER PATHS" opens Settings → Storage | The same | Fixed in phase 3 (Settings). |
 | Untagged files on every scan | Never get a row, so each scan rereads them and counts them in "Indexed n items." | The same | Kept for parity. |
 | Playlist search | `LIKE` on the name (ASCII case only), then closest match | The other views' semantics: every word, accent- and case-blind for every script; same closest-match scoring | Intentional, as for Tracks. Golden-tested on ASCII queries, where both agree. |
 | Playlist rows after a reload | Opened by a tap: drag handle and remove button. Re-opened by `load_library` (after an add): plain rows, no handle | Always the handle and the remove button | Port is right; Flet's generator omits `playlist_id`. |
@@ -518,6 +572,18 @@ uninstall and reinstall; the bundle export/import covers the data.
 | Back in selection mode | Leaves the app (only Search's selection mode is closed by back) | Leaves selection mode | Intentional: back closes the innermost state, as Flet does for Search. |
 | Writes on a read-only library (`LIBRARY_DB` override) | n/a (Flet always owns its database) | Add to Playlist and Delete Track are disabled | Dev-only case. |
 | Library reload after a scan or delete | The snackbar follows `load_library` (no graph rebuild there) | Rows reload, the snackbar shows, the station graphs rebuild behind | Same order as Flet. |
+| Settings → Appearance's Default Library Sort | The dropdown shows `library_sort` but saves `general.default_sort`, which nothing reads, so the sort never changes | Writes `default_sort` as Flet does, plus `library_sort`, and re-sorts the Library at once | Port is right. The Flet fix: write `library_sort` in `_save_appearance_settings`; not made on master yet. |
+| Applying Settings | Appearance restarts the UI (`restart_ui`); a raw TOML save applies at the next start | Any config change (Settings or the raw editor) reaches the view bar, landing cards, accent, pills and haptics at once | Intentional. |
+| Settings hub | Twelve groups | The eight whose features exist (§4, Settings); Companion & Sync, Authentication, AI Assistant and Metadata with phases 4, A, 5 and 7 | Until then. |
+| Settings rows waiting on features | Default Download Quality, the Jarvis and Acoustic Network tab switches, compute DSP/PCA, export/import, demo search, debug play counts, fresh-install reset | Not shown; values the hidden rows would save are written back as read | With decisions A, B, C and phases 3i, 4, 5. |
+| EQ drag and slider writes | `update_config_params` on every drag event of the curve and the sliders | The player gets each step; the file is written when the drag ends | Intentional: same file afterwards, without a write per frame. |
+| EQ curve and slider haptics | `trigger_haptic("light")` on every event | On each 0.1 dB step (slider: each value change, as Flet) | Same feel without a buzz per pixel. |
+| Settings labels | Only the switch toggles | Tapping a switch's label toggles it too | Small usability fix. |
+| Permissions page | Statuses; its text points at an OPEN SYSTEM SETTINGS button that isn't there (and the GRANT buttons never show) | Statuses, refreshed on return, and the OPEN SYSTEM SETTINGS button the text describes | Port is right. |
+| Album Cache button | Clears Python's `temp/` and in-memory cache; on Android the Kotlin artwork cache (`cacheDir/np_art`) stays | Clears `temp/` and `np_art` | Port is right: `np_art` is the cache Android uses. |
+| About | GitHub opens in the browser; credits Flet | The link is copied (no `url_launcher` yet); credits Flutter; a Licenses button (`showLicensePage`) | Until a browser hand-off is needed elsewhere. |
+| Folder pickers off Android | macOS/Linux native picker, Windows FilePicker | Type the path (the browse button is Android only) | Phase 8 (macOS). |
+| config.toml repair | `ensure_config_exists` fills sections and keys a newer template adds (`fill_missing`) and bumps `misc.version`, on every load | Only the missing-file case (template copy); a complete config is left as is, which is all the repair does today (golden-checked) | Port `fill_missing` the next time utils/config.toml gains keys. |
 
 ---
 
@@ -538,7 +604,8 @@ uninstall and reinstall; the bundle export/import covers the data.
   For hot reload, `flutter run` in `mai_an_flutter/` (`r` reload, `R`
   restart).
 - **Data:** `tool/push_db.sh` copies the newest phone state bundle from
-  `tools/state_backups/` into the port. Its paths are Android paths, so tracks
+  `tools/state_backups/` into the port: its `library.db`, and its
+  `config.toml` (replacing what the port's Settings wrote). Its paths are Android paths, so tracks
   resolve on the phone. Pass a `library.db` or `.zip` path to use another one.
   The Mac's live database is `StreamripApp/.flet/storage/data/library.db`
   (Mac paths: browsable, not playable).
@@ -549,9 +616,10 @@ uninstall and reinstall; the bundle export/import covers the data.
 - **Desktop tests:** `flutter test`. Add `LIBRARY_DB=… flutter test
   test/real_library_test.dart` to run against a real database.
 - **Goldens:** each `tool/export_*_goldens.py` runs with
-  `~/miniconda3/bin/python` from `mai_an_flutter/`. The scan export needs
-  tinytag 2.3.2 apart from the dev env:
-  `~/miniconda3/bin/pip install --target tool/.pydeps tinytag==2.3.2`
+  `~/miniconda3/bin/python` from `mai_an_flutter/`. The scan and config
+  exports need the APK's tinytag and tomlkit apart from the dev env (which
+  has streamrip's tomlkit 0.7.2):
+  `~/miniconda3/bin/pip install --target tool/.pydeps tinytag==2.3.2 tomlkit==0.15.2`
   (gitignored). Generated tables: `tool/gen_nfkd_table.py`,
   `tool/gen_casefold_table.py` (`str.casefold`, `str.isdecimal`).
 
@@ -602,7 +670,8 @@ Phase 3 so far is seven commits, one per stage: strict analyzer and format,
 Python primitives, migrations and the ledger drain, the scan engine, the
 views' and playlists' queries, the library UI (views, scan UI, playlists,
 long-press menu, selection, delete), and the tab bar with the Search
-landing; then this plan. `flutter-port` is pushed to origin.
+landing; then this plan. `flutter-port` is pushed to origin. Settings
+(4h) is written and tested, not yet committed.
 
 **Done**
 - [x] Phase 0: backbone (read-only DB isolate, tracks tab, sort, search,
@@ -646,11 +715,18 @@ landing; then this plan. `flutter-port` is pushed to origin.
       no graph rebuild after a scan exist there (4d, 4f).
 - [x] Phase 3g: tab bar (Search, Library) and the Search landing's local
       cards; queries identical to Python (§4, phase 3, the tab bar).
+- [x] Phase 3h: Settings (hub, search, Storage, Appearance, Audio & DSP,
+      Haptics, Permissions, Database Management, Advanced, About) and the
+      config.toml writer, byte-identical to tomlkit on 192 writes (§4,
+      phase 3, Settings). `push_db.sh` brings the bundle's config.toml.
+      Release APK builds (25.7 MB).
 
 **To do, in order**
-1. [ ] Install the current build on the phone: `tool/install_phone.sh`
-       (the database is already in; `--db` resets it). The user reports
-       problems found in use.
+1. [ ] Install the current build on the phone: `tool/install_phone.sh
+       --db` (now also brings the bundle's config.toml, so the accent, EQ
+       and tabs match the Flet app). The user reports problems found in
+       use. Check on the phone: the EQ curve and sliders, the folder
+       navigator, Permissions after the system page, Clear Index.
 2. [ ] Back up `~/.android/debug.keystore` (§5) somewhere off this Mac.
 3. [ ] Push `master` (one commit ahead of origin: `2ec2865`, already in
        `flutter-port`'s history). ~~`flutter-port`~~ pushed 2026-11-24.
@@ -685,14 +761,17 @@ landing; then this plan. `flutter-port` is pushed to origin.
           with enrichment (7).
        g. ~~Search-tab landing cards from local data~~ (done, with the tab
           bar: §4, phase 3, the tab bar and Search landing).
-       h. Settings as a pushed page (the Search header's shortcut, the
-          empty library's ENTER PATHS) and its rows for all of the above
-          (rule 4), incl. the EQ, Dynamism and haptics UI.
+       h. ~~Settings as a pushed page and its rows for all of the above~~
+          (done: §4, phase 3, Settings).
        i. The Network view (library.py's Acoustic Network: map, walk,
           list panel; ~2,000 Flet lines) with `build_metadata_edges`, which
           writes the `track_neighbors` it reads (4f).
 5. [ ] Decisions A, B, C (§6) before phase 6 is planned in detail.
-6. [ ] Flet, on master: the album menu's Play Album tuple (§7).
+6. [ ] Flet, on master: the album menu's Play Album tuple, and
+       Appearance's sort writing `library_sort` (§7).
+7. [ ] Decide on `assets/config_template.toml`: it is streamrip's
+       GPL-3.0 template plus the app's sections (§12). The Flet APK already
+       ships it; keep it, or write the port's own template.
 
 **Waiting on a later phase** (not gaps): see §11, every 🔨 row.
 
@@ -708,7 +787,7 @@ add its row here.
 Status: ✅ done · 🧪 written, not yet confirmed in use · 🔨 to build
 (phase) · ⚠️ depends on a decision (§6) · ✗ dropped.
 
-**Counts:** 29 of the 90 rows are ported (✅ or 🧪); 61 are to build or to decide. The ported rows are the player, the stations, the library views, playlists, the long-press menu and selection mode, the ledger drain, the scan, the tab bar and the Search landing's local cards.
+**Counts:** 38 of the 90 rows are ported (✅ or 🧪); 52 are to build or to decide. The ported rows are the player, the stations, the library views, playlists, the long-press menu and selection mode, the ledger drain, the scan, the tab bar, the Search landing's local cards, and Settings for all of these.
 
 ### App shell (`main.py`)
 
@@ -717,9 +796,9 @@ Status: ✅ done · 🧪 written, not yet confirmed in use · 🔨 to build
 | Accent colour from config | `_apply_accent` | ✅ |
 | Haptic feedback, per-action intensity | `trigger_haptic` | 🧪 |
 | Playback-error snackbar or notification card | `_on_playback_error_toast` | 🧪 |
-| Back: close the open sheet, leave Settings, then to the background | `navigate_back`, `_on_confirm_pop` | 🧪 root screen and selection mode; grows with each screen |
+| Back: close the open sheet, leave Settings, then to the background | `navigate_back`, `_on_confirm_pop` | 🧪 root screen, selection mode, Settings group → hub → out; grows with each screen |
 | Lifecycle: stop UI work when hidden, prefill auto-play | `_on_lifecycle` | 🧪 (§1 row 18) |
-| Tab bar (Jarvis optional, Search, Library), Settings as a pushed page, startup tab from `startup_page` | `_build_ui`, `_switch_tab` | 🧪 Search and Library, startup tab, fade, back (§7); Settings 🔨 3h, Jarvis 🔨 5 |
+| Tab bar (Jarvis optional, Search, Library), Settings as a pushed page, startup tab from `startup_page` | `_build_ui`, `_switch_tab` | 🧪 Search and Library, startup tab, fade, back, Settings (§7); Jarvis 🔨 5 |
 | Splash while the app loads | `_build_splash` | 🔨 3, only if startup is slow on the phone |
 | Notification taps routed to a screen (metadata sync, suggestions, download retry, transfers) | `_on_notification_navigate` | 🔨 with each target screen |
 | Success sound after a download | `play_success_notification` | 🔨 6 |
@@ -733,7 +812,7 @@ Status: ✅ done · 🧪 written, not yet confirmed in use · 🔨 to build
 | Auto-play history from recent plays | `autoplay.load_history` | 🧪 |
 | Ledger drain into `play_counts` / `playback_history` (track change, resume) | `_schedule_ledger_drain`, `play_ledger.py` | 🧪 |
 | Similarity-graph readiness build (edges, coordinates) | `_ensure_graph_built_async`, `track_graph` builders | 🔨 4: it fires only when features exist without coordinates, i.e. after an offload or import; until then the port reads Python-built coordinates |
-| Cache pruning | `_prune_caches_async` | 🔨 3 (album art); 6 (previews) |
+| Cache pruning | `_prune_caches_async` | 🔨 3 (album art); 6 (previews). The manual clears are in Settings → Advanced 🧪 |
 | State bundle auto-export on every boot (Downloads and library folder) | `_auto_export_state_snapshot` | 🔨 4. The Mac offload and `fresh_build_android.sh` depend on it; Flet keeps doing it while installed |
 | State bundle auto-import (`*_import.zip`) on boot, then graph rebuild | `_heavy_init` | 🔨 4 |
 | Companion auto-discovery | `companion_manager.start` | 🔨 4 |
@@ -770,10 +849,10 @@ Status: ✅ done · 🧪 written, not yet confirmed in use · 🔨 to build
 | Genres: genre groups and colours, play a genre, curate in the workbench | 🧪 (curate 🔨 7) |
 | Playlists: create, rename and recolour, delete, reorder (drag), remove a track | 🧪 |
 | Acoustic Network: 2-D map of the coordinates; density and step chips; zoom; tap to select; walk from a node, reseed; play or queue the walk; now-playing pulse; list panel with its own menu | 🔨 3. Read-only (coordinates and `walk`), so it could come before the writes |
-| Which tabs show (Appearance setting) | 🧪 read from config (the setting row 🔨 3) |
+| Which tabs show (Appearance setting) | 🧪 |
 | Scan the library folder: progress, summary, "n tracks not analysed yet" | 🧪 (the alert after automatic scans 🔨 4) |
 | Compute DSP on the phone (cancellable, notification) | ⚠️ B |
-| Empty-library state with "enter paths" | 🧪 (the button 🔨 with Settings) |
+| Empty-library state with "enter paths" | 🧪 |
 
 ### Search tab (`ui/views/search.py`)
 
@@ -812,22 +891,22 @@ Status: ✅ done · 🧪 written, not yet confirmed in use · 🔨 to build
 
 | Group | Contents | Port |
 |---|---|---|
-| Hub | Groups list, fuzzy settings search | 🔨 3 |
+| Hub | Groups list, fuzzy settings search | 🧪 (search golden-tested) |
 | Companion & Sync | Opens the sync hub | 🔨 4 |
-| Storage & Paths | Library folder, downloads folder, default download quality | 🔨 3 (folders); ⚠️ A (quality) |
+| Storage & Paths | Library folder, downloads folder, default download quality | 🧪 folders and the Android navigator; ⚠️ A (quality) |
 | Authentication | Qobuz (email/ID, password or token, app ID and secret), Deezer ARL | ⚠️ A |
 | AI Assistant | Enable, provider and API key, model list, test connection, personality presets (built-in and custom) | 🔨 5 |
-| Appearance | Accent colour, startup page, Jarvis tab, library tab visibility, landing sections | 🔨 3 (accent is read ✅) |
-| Audio & DSP | EQ on/off, presets, five bands, Dynamism | 🔨 3 (Flet's values are honoured 🧪) |
-| Haptic Feedback | On/off, per-action intensity | 🔨 3 (honoured 🧪) |
+| Appearance | Accent colour, startup page, Jarvis tab, library tab visibility, landing sections | 🧪 (the Jarvis and Network switches 🔨 5, 3i) |
+| Audio & DSP | EQ on/off, presets, five bands, Dynamism | 🧪 |
+| Haptic Feedback | On/off, per-action intensity | 🧪 |
 | Metadata | Opens the workbench | 🔨 7 |
-| Permissions | Status and grant buttons, how-to | 🔨 3 |
-| Database Management | Wipe database, clear index, clear DSP | 🔨 3 |
+| Permissions | Status and grant buttons, how-to | 🧪 (statuses, the system-settings button) |
+| Database Management | Wipe database, clear index, clear DSP | 🧪 |
 | Database Management | Compute / recompute DSP, recompute PCA | ⚠️ B |
-| Advanced | Raw TOML editor, preview and album-art cache clear | 🔨 3 |
+| Advanced | Raw TOML editor, preview and album-art cache clear | 🧪 |
 | Advanced | State export / import | 🔨 4 |
 | Advanced | Demo search, debug play counts, fresh-install reset | ⚠️ C |
-| About | Version, credits, links | 🔨 3 |
+| About | Version, credits, links | 🧪 (GitHub link copied, §7; licence page) |
 
 ### Metadata tools (phase 7)
 
@@ -870,6 +949,8 @@ code or a published template comes in, before it is committed.
 | tinytag 2.3.2: the ID3, MPEG, FLAC, Ogg, WAVE and MP4 parsers, translated line by line | `lib/scan/tinytag.dart` (licence text in the header) | https://github.com/tinytag/tinytag (PyPI `tinytag==2.3.2`) | MIT, © 2014-2026 Tom Wallroth, Mat (mathiascode) et al. |
 | `flet_audio_service` extension (audio handler, Kotlin notifications, artwork, PCM decoder) | `lib/player/audio_handler.dart`, `packages/maian_native` | This repository (the Flet app's own extension) | the project's |
 | Unicode data tables (NFKD fold, casefold, decimal digits) generated from Python's `unicodedata` | `lib/core/nfkd_fold_table.dart`, `lib/core/py_unicode_tables.dart` | Unicode Character Database 15.1, via CPython | Unicode License v3 (data) |
+| tomlkit 0.15.2: `InlineTable.as_string`, translated; the rest of its editing behaviour reproduced from its outputs | `lib/core/config_file.dart` (licence text above `_InlineTable`) | https://github.com/python-poetry/tomlkit (PyPI `tomlkit==0.15.2`) | MIT, © 2018 Sébastien Eustace |
+| config.toml template: streamrip's `config.toml` plus the app's `[dsp]`, `[haptics]`, `[assistant]`, `[appearance]` sections (utils/config.toml, copied as is) | `assets/config_template.toml` | https://github.com/nathom/streamrip, via the Flet app | GPL-3.0 (streamrip). The Flet APK ships the same file; decide before release (§10 item 7) |
 | streamrip-derived helpers (filename cleaning; in the Flet app's `filepath_utils.py`, credited there) | not ported yet (phase 6) | https://github.com/nathom/streamrip | GPL-3.0: check before porting any of it |
 
 **Templates and guidance adopted**
@@ -882,7 +963,7 @@ code or a published template comes in, before it is committed.
 **Dependencies (pub.dev)**: `sqlite3`, `path_provider`, `audio_service`,
 `just_audio`, `audio_session`, `permission_handler`, `toml`. Their licences
 ship in the app through Flutter's `LicenseRegistry` (`showLicensePage`), so
-the About page (3h) only needs to open it.
+Settings → About opens it (Licenses).
 
 **Candidates for coming steps** (found 2026-11-24, not yet evaluated)
 

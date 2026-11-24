@@ -290,6 +290,22 @@ class AudioPlayerHandler extends BaseAudioHandler
     await bands[index].setGain(gainDb);
   }
 
+  @override
+  Future<EqualizerInfo?> equalizerInfo() async {
+    if (!Platform.isAndroid) return null;
+    try {
+      final p = await _equalizer.parameters;
+      return (
+        centerHz: [for (final b in p.bands) b.centerFrequency],
+        minDb: p.minDecibels,
+        maxDb: p.maxDecibels,
+      );
+    } catch (e) {
+      debugPrint('AudioPlayerHandler: equalizer parameters failed: $e');
+      return null;
+    }
+  }
+
   // ── MediaItem ─────────────────────────────────────────────────────────────
 
   /// `AudioEngine._track_to_playlist_item` + the extension's

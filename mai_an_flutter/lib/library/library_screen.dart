@@ -9,6 +9,7 @@ import '../data/browse_queries.dart';
 import '../data/library_repository.dart';
 import '../player/player_controller.dart';
 import '../player/ui/mini_player.dart';
+import '../settings/settings_search.dart';
 import '../ui/tokens.dart';
 import 'browse_controller.dart';
 import 'browse_view.dart';
@@ -30,6 +31,7 @@ class LibraryScreen extends StatefulWidget {
     required this.haptics,
     this.unifiedPills = false,
     this.selection,
+    this.onOpenSettings,
   });
 
   final LibraryController controller;
@@ -48,6 +50,10 @@ class LibraryScreen extends StatefulWidget {
   /// Null when the screen stands alone (tests): then it owns both, and the
   /// mini player.
   final SelectionController? selection;
+
+  /// The header's settings button and the empty library's ENTER PATHS
+  /// (main.py `switch_to_settings`); null leaves them out.
+  final void Function([SettingsPage?])? onOpenSettings;
 
   @override
   State<LibraryScreen> createState() => _LibraryScreenState();
@@ -181,6 +187,13 @@ class _LibraryScreenState extends State<LibraryScreen> {
                   )
                 : const SizedBox.shrink(),
           ),
+          if (widget.onOpenSettings case final open?)
+            IconButton(
+              icon: const Icon(Icons.settings_outlined, size: 22),
+              color: Tokens.dim,
+              tooltip: 'Settings',
+              onPressed: () => open(),
+            ),
         ],
       ),
       body: Column(
@@ -232,7 +245,13 @@ class _LibraryScreenState extends State<LibraryScreen> {
                         listenable: Listenable.merge([browse, controller]),
                         builder: (context, _) =>
                             controller.total == 0 && !controller.scanning
-                            ? const _EmptyLibrary()
+                            ? _EmptyLibrary(
+                                onEnterPaths: widget.onOpenSettings == null
+                                    ? null
+                                    : () => widget.onOpenSettings!(
+                                        SettingsPage.storage,
+                                      ),
+                              )
                             : browse.view == LibraryView.tracks
                             ? _tracksList()
                             : BrowseList(
@@ -718,10 +737,11 @@ class _ScanBanner extends StatelessWidget {
   }
 }
 
-/// library.py `_empty_label`. Flet's ENTER PATHS button opens Settings →
-/// Storage, which isn't ported yet; the scan button above works meanwhile.
+/// library.py `_empty_label`, with ENTER PATHS (Settings → Storage).
 class _EmptyLibrary extends StatelessWidget {
-  const _EmptyLibrary();
+  const _EmptyLibrary({this.onEnterPaths});
+
+  final VoidCallback? onEnterPaths;
 
   @override
   Widget build(BuildContext context) {
@@ -750,6 +770,15 @@ class _EmptyLibrary extends StatelessWidget {
             textAlign: TextAlign.center,
             style: TextStyle(color: Tokens.dim, fontSize: 14),
           ),
+          if (onEnterPaths != null) ...[
+            const SizedBox(height: 20),
+            TextButton.icon(
+              style: TextButton.styleFrom(foregroundColor: accent),
+              icon: const Icon(Icons.settings_rounded, size: 16),
+              label: const Text('ENTER PATHS', style: TextStyle(fontSize: 13)),
+              onPressed: onEnterPaths,
+            ),
+          ],
         ],
       ),
     );

@@ -723,6 +723,14 @@ class PlayerController extends ChangeNotifier {
   String? _dspPath;
   int _dspGen = 0;
 
+  /// Flet `audio_engine.reapply_dsp()` from Settings (the Dynamism
+  /// switch): the playing track's settings again, from the config as it
+  /// now is.
+  void reapplyDsp() {
+    _dspPath = null;
+    _applyDsp();
+  }
+
   /// `reapply_dsp`, run when the playing row changes (Flet: from
   /// `_sync_metadata_for_current`). Here it also follows background
   /// auto-advance, which the Flet session missed while torn down.

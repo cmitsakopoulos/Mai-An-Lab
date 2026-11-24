@@ -69,6 +69,11 @@ flutter:
   # the material Icons class.
   uses-material-design: true
 
+  assets:
+    # utils/config.toml: ensure_config_exists writes it when config.toml is
+    # missing (streamrip's template plus the app's sections; §12).
+    - assets/config_template.toml
+
   # To add assets to your application, add an assets section, like this:
   # assets:
   #   - images/a_dot_burr.jpeg

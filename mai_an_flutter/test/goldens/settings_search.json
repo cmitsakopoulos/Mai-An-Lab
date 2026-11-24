@@ -1,0 +1,529 @@
+{
+ "queries": [
+  {
+   "query": "eq",
+   "titles": [
+    "Audio & DSP"
+   ]
+  },
+  {
+   "query": "equalizer",
+   "titles": [
+    "Audio & DSP"
+   ]
+  },
+  {
+   "query": "equaliser",
+   "titles": [
+    "Audio & DSP"
+   ]
+  },
+  {
+   "query": "bass",
+   "titles": [
+    "Audio & DSP"
+   ]
+  },
+  {
+   "query": "eq bass",
+   "titles": [
+    "Audio & DSP"
+   ]
+  },
+  {
+   "query": "wipe",
+   "titles": [
+    "Haptic Feedback",
+    "Database Management"
+   ]
+  },
+  {
+   "query": "wipe db",
+   "titles": [
+    "Audio & DSP",
+    "Haptic Feedback",
+    "Database Management"
+   ]
+  },
+  {
+   "query": "folder",
+   "titles": [
+    "Storage & Paths"
+   ]
+  },
+  {
+   "query": "music folder",
+   "titles": [
+    "Storage & Paths"
+   ]
+  },
+  {
+   "query": "path",
+   "titles": [
+    "Storage & Paths"
+   ]
+  },
+  {
+   "query": "download",
+   "titles": [
+    "Storage & Paths",
+    "Database Management"
+   ]
+  },
+  {
+   "query": "libary",
+   "titles": []
+  },
+  {
+   "query": "library path",
+   "titles": [
+    "Storage & Paths"
+   ]
+  },
+  {
+   "query": "accent",
+   "titles": [
+    "Appearance"
+   ]
+  },
+  {
+   "query": "colour",
+   "titles": [
+    "Appearance"
+   ]
+  },
+  {
+   "query": "color",
+   "titles": [
+    "Appearance"
+   ]
+  },
+  {
+   "query": "theme",
+   "titles": [
+    "Appearance"
+   ]
+  },
+  {
+   "query": "dark mode",
+   "titles": [
+    "Appearance"
+   ]
+  },
+  {
+   "query": "startup",
+   "titles": [
+    "Appearance"
+   ]
+  },
+  {
+   "query": "sort",
+   "titles": [
+    "Appearance"
+   ]
+  },
+  {
+   "query": "pill",
+   "titles": [
+    "Appearance"
+   ]
+  },
+  {
+   "query": "landing",
+   "titles": [
+    "Appearance"
+   ]
+  },
+  {
+   "query": "most played",
+   "titles": [
+    "Appearance"
+   ]
+  },
+  {
+   "query": "haptic",
+   "titles": [
+    "Haptic Feedback"
+   ]
+  },
+  {
+   "query": "haptics",
+   "titles": [
+    "Haptic Feedback"
+   ]
+  },
+  {
+   "query": "vibration",
+   "titles": [
+    "Haptic Feedback"
+   ]
+  },
+  {
+   "query": "vibraton",
+   "titles": [
+    "Haptic Feedback"
+   ]
+  },
+  {
+   "query": "intensity",
+   "titles": [
+    "Haptic Feedback"
+   ]
+  },
+  {
+   "query": "drag",
+   "titles": [
+    "Haptic Feedback"
+   ]
+  },
+  {
+   "query": "permission",
+   "titles": [
+    "Permissions"
+   ]
+  },
+  {
+   "query": "permissions",
+   "titles": [
+    "Permissions"
+   ]
+  },
+  {
+   "query": "microphone",
+   "titles": [
+    "Permissions"
+   ]
+  },
+  {
+   "query": "mic",
+   "titles": [
+    "Permissions"
+   ]
+  },
+  {
+   "query": "storage",
+   "titles": [
+    "Storage & Paths",
+    "Permissions"
+   ]
+  },
+  {
+   "query": "database",
+   "titles": [
+    "Database Management"
+   ]
+  },
+  {
+   "query": "databse",
+   "titles": [
+    "Appearance",
+    "Database Management"
+   ]
+  },
+  {
+   "query": "clear",
+   "titles": [
+    "Database Management"
+   ]
+  },
+  {
+   "query": "cache",
+   "titles": [
+    "Database Management"
+   ]
+  },
+  {
+   "query": "clear cache",
+   "titles": [
+    "Database Management"
+   ]
+  },
+  {
+   "query": "reset",
+   "titles": [
+    "Audio & DSP",
+    "Database Management",
+    "Advanced"
+   ]
+  },
+  {
+   "query": "toml",
+   "titles": [
+    "Advanced"
+   ]
+  },
+  {
+   "query": "config",
+   "titles": [
+    "Advanced"
+   ]
+  },
+  {
+   "query": "raw config",
+   "titles": [
+    "Advanced"
+   ]
+  },
+  {
+   "query": "export",
+   "titles": [
+    "Advanced"
+   ]
+  },
+  {
+   "query": "import",
+   "titles": [
+    "Advanced"
+   ]
+  },
+  {
+   "query": "about",
+   "titles": [
+    "About"
+   ]
+  },
+  {
+   "query": "version",
+   "titles": [
+    "About"
+   ]
+  },
+  {
+   "query": "github",
+   "titles": [
+    "About"
+   ]
+  },
+  {
+   "query": "credits",
+   "titles": [
+    "About"
+   ]
+  },
+  {
+   "query": "dsp",
+   "titles": [
+    "Audio & DSP",
+    "Database Management"
+   ]
+  },
+  {
+   "query": "dynamism",
+   "titles": [
+    "Audio & DSP"
+   ]
+  },
+  {
+   "query": "boost",
+   "titles": [
+    "Audio & DSP"
+   ]
+  },
+  {
+   "query": "loudness",
+   "titles": [
+    "Audio & DSP"
+   ]
+  },
+  {
+   "query": "jarvis",
+   "titles": []
+  },
+  {
+   "query": "qobuz",
+   "titles": []
+  },
+  {
+   "query": "token",
+   "titles": []
+  },
+  {
+   "query": "metadata",
+   "titles": []
+  },
+  {
+   "query": "sync",
+   "titles": []
+  },
+  {
+   "query": "turn off haptics",
+   "titles": [
+    "Haptic Feedback"
+   ]
+  },
+  {
+   "query": "enable eq",
+   "titles": [
+    "Audio & DSP"
+   ]
+  },
+  {
+   "query": "disable",
+   "titles": []
+  },
+  {
+   "query": "change folder",
+   "titles": [
+    "Storage & Paths"
+   ]
+  },
+  {
+   "query": "set path",
+   "titles": [
+    "Storage & Paths"
+   ]
+  },
+  {
+   "query": "a",
+   "titles": [
+    "Storage & Paths",
+    "Appearance",
+    "Audio & DSP",
+    "Haptic Feedback",
+    "Permissions",
+    "Database Management",
+    "Advanced",
+    "About"
+   ]
+  },
+  {
+   "query": "zz",
+   "titles": []
+  },
+  {
+   "query": "xyzzy",
+   "titles": []
+  },
+  {
+   "query": "general",
+   "titles": [
+    "Storage & Paths"
+   ]
+  },
+  {
+   "query": "customisation",
+   "titles": [
+    "Appearance",
+    "Audio & DSP",
+    "Haptic Feedback"
+   ]
+  },
+  {
+   "query": "developer tools",
+   "titles": [
+    "Permissions",
+    "Database Management",
+    "Advanced",
+    "About"
+   ]
+  },
+  {
+   "query": "DEVELOPER",
+   "titles": [
+    "Permissions",
+    "Database Management",
+    "Advanced",
+    "About"
+   ]
+  },
+  {
+   "query": "  Eq  ",
+   "titles": [
+    "Audio & DSP"
+   ]
+  },
+  {
+   "query": "pca",
+   "titles": [
+    "Database Management"
+   ]
+  },
+  {
+   "query": "index",
+   "titles": [
+    "Database Management"
+   ]
+  },
+  {
+   "query": "sqlite",
+   "titles": [
+    "Database Management"
+   ]
+  },
+  {
+   "query": "notification",
+   "titles": [
+    "Permissions"
+   ]
+  },
+  {
+   "query": "audio",
+   "titles": [
+    "Audio & DSP",
+    "Permissions"
+   ]
+  },
+  {
+   "query": "sound",
+   "titles": [
+    "Audio & DSP"
+   ]
+  },
+  {
+   "query": "volume",
+   "titles": [
+    "Audio & DSP"
+   ]
+  },
+  {
+   "query": "preset",
+   "titles": [
+    "Audio & DSP",
+    "Database Management",
+    "Advanced"
+   ]
+  },
+  {
+   "query": "curve",
+   "titles": [
+    "Audio & DSP"
+   ]
+  },
+  {
+   "query": "tabs",
+   "titles": [
+    "Appearance"
+   ]
+  },
+  {
+   "query": "glow",
+   "titles": [
+    "Appearance"
+   ]
+  },
+  {
+   "query": "top artists",
+   "titles": [
+    "Appearance"
+   ]
+  },
+  {
+   "query": "onboarding",
+   "titles": [
+    "Advanced"
+   ]
+  },
+  {
+   "query": "demo",
+   "titles": [
+    "Advanced"
+   ]
+  },
+  {
+   "query": "lobotomize",
+   "titles": [
+    "Advanced"
+   ]
+  }
+ ]
+}

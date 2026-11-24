@@ -21,7 +21,16 @@ class LandingController extends ChangeNotifier {
   }
 
   final LibraryController library;
-  final LandingSections sections;
+  LandingSections sections;
+
+  /// Settings → Appearance's landing switches: the cards again
+  /// (`refresh_setup_state`).
+  void setSections(LandingSections s) {
+    if (s == sections) return;
+    sections = s;
+    refresh();
+  }
+
   final DateTime Function() _clock;
 
   /// search.py `_LANDING_TTL_S`.
