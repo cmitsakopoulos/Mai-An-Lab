@@ -4,6 +4,8 @@ import 'dart:ui';
 import 'package:flutter/foundation.dart';
 import 'package:toml/toml.dart';
 
+import '../assistant/llm_engine.dart'
+    show defaultGeminiModel, defaultOllamaEndpoint, defaultOllamaModel;
 import '../library/track_query.dart';
 import '../player/dsp.dart';
 import 'haptics.dart';
@@ -21,6 +23,7 @@ class AppConfig {
     this.downloadsFolder = '',
     this.startupPage = 'Library',
     this.landing = const LandingSections(),
+    this.assistant = const AssistantConfig(),
   });
 
   /// `general.library_sort` (Flet library.py: the initial sort).
@@ -48,6 +51,9 @@ class AppConfig {
 
   /// `[landing]`: which Search landing cards show.
   final LandingSections landing;
+
+  /// `[assistant]`: Jarvis LLM settings (utils/config.py `AssistantConfig`).
+  final AssistantConfig assistant;
 
   /// Where utils/config.py puts it. The Flet app points HOME at the data dir
   /// first (main.py), so `Path.home()` is `<data>`:
@@ -93,6 +99,7 @@ class AppConfig {
         _ => 'Library',
       },
       landing: LandingSections.fromToml(doc['landing']),
+      assistant: AssistantConfig.fromToml(doc['assistant']),
     );
   }
 
@@ -227,4 +234,76 @@ class LibraryTabs {
     num n => n != 0,
     _ => true,
   };
+}
+
+/// `[assistant]` in config.toml (`utils/config.py` `AssistantConfig`).
+class AssistantConfig {
+  const AssistantConfig({
+    this.llmEnabled = true,
+    this.llmProvider = 'gemini',
+    this.geminiApiKey = '',
+    this.geminiModel = defaultGeminiModel,
+    this.researchMode = 'hybrid',
+    this.ollamaEndpoint = defaultOllamaEndpoint,
+    this.ollamaModel = defaultOllamaModel,
+    this.personalityPrompt = '',
+  });
+
+  final bool llmEnabled;
+  final String llmProvider;
+  final String geminiApiKey;
+  final String geminiModel;
+  final String researchMode;
+  final String ollamaEndpoint;
+  final String ollamaModel;
+  final String personalityPrompt;
+
+  static AssistantConfig fromToml(Object? section) {
+    final a = section is Map ? section : const <String, Object?>{};
+    String str(String key, String fallback) => switch (a[key]) {
+      String s => s,
+      final Object v => '$v',
+      null => fallback,
+    };
+    return AssistantConfig(
+      llmEnabled: switch (a['llm_enabled']) {
+        null => true,
+        bool b => b,
+        num n => n != 0,
+        String s => s.isNotEmpty,
+        _ => true,
+      },
+      llmProvider: str('llm_provider', 'gemini'),
+      geminiApiKey: str('gemini_api_key', ''),
+      geminiModel: str('gemini_model', defaultGeminiModel),
+      researchMode: str('research_mode', 'hybrid'),
+      ollamaEndpoint: str('ollama_endpoint', defaultOllamaEndpoint),
+      ollamaModel: str('ollama_model', defaultOllamaModel),
+      personalityPrompt: str('personality_prompt', ''),
+    );
+  }
+
+  @override
+  bool operator ==(Object other) =>
+      other is AssistantConfig &&
+      other.llmEnabled == llmEnabled &&
+      other.llmProvider == llmProvider &&
+      other.geminiApiKey == geminiApiKey &&
+      other.geminiModel == geminiModel &&
+      other.researchMode == researchMode &&
+      other.ollamaEndpoint == ollamaEndpoint &&
+      other.ollamaModel == ollamaModel &&
+      other.personalityPrompt == personalityPrompt;
+
+  @override
+  int get hashCode => Object.hash(
+    llmEnabled,
+    llmProvider,
+    geminiApiKey,
+    geminiModel,
+    researchMode,
+    ollamaEndpoint,
+    ollamaModel,
+    personalityPrompt,
+  );
 }

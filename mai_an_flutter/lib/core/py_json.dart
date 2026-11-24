@@ -10,17 +10,25 @@ import 'py_num.dart';
 /// between items (Python drops the space after the comma when indenting).
 /// [ensureAscii] false writes non-ASCII characters as they are, escaping
 /// only `"`, `\` and the control characters below U+0020.
-String pyJsonDumps(Object? value, {int? indent, bool ensureAscii = true}) {
+/// [defaultEncoder] mirrors `json.dumps(…, default=…)`: called for values
+/// that aren't native JSON types and its result is encoded instead.
+String pyJsonDumps(
+  Object? value, {
+  int? indent,
+  bool ensureAscii = true,
+  Object? Function(Object)? defaultEncoder,
+}) {
   final out = StringBuffer();
-  _Writer(out, indent, ensureAscii).write(value, 0);
+  _Writer(out, indent, ensureAscii, defaultEncoder).write(value, 0);
   return out.toString();
 }
 
 class _Writer {
-  _Writer(this.out, this.indent, this.ensureAscii);
+  _Writer(this.out, this.indent, this.ensureAscii, this.defaultEncoder);
   final StringBuffer out;
   final int? indent;
   final bool ensureAscii;
+  final Object? Function(Object)? defaultEncoder;
 
   void _newline(int level) {
     out.write('\n');
@@ -79,6 +87,11 @@ class _Writer {
         if (indent != null) _newline(level);
         out.write(']');
       default:
+        final enc = defaultEncoder;
+        if (enc != null) {
+          write(enc(v), level);
+          return;
+        }
         throw ArgumentError(
           'Object of type ${v.runtimeType} is not JSON '
           'serializable',

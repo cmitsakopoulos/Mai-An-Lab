@@ -279,9 +279,58 @@ class _FakeLibrary implements AssistantLibrary {
   }
 
   @override
-  Future<List<Row>> getAllTracks() async => [
+  Future<int> getTotalTracks() async => _tracks.length;
+
+  @override
+  Future<List<Row>> getAllTracks({String searchQuery = ''}) async => [
     for (final t in _tracks) _hydrate(t),
   ];
+
+  @override
+  Future<List<Row>> getAllArtists({String searchQuery = ''}) async => [
+    for (final name in await searchArtistNames(searchQuery))
+      {'name': name, 'track_count': 0, 'album_count': 0},
+  ];
+
+  @override
+  Future<List<Row>> getAllAlbums({String searchQuery = ''}) async => const [];
+
+  @override
+  Future<List<Row>> getAlbumsByArtist(String artist) async => const [];
+
+  @override
+  Future<List<Row>> getTracksByAlbum(String album, String artist) async =>
+      const [];
+
+  @override
+  Future<List<Row>> getAllPlaylists({String searchQuery = ''}) async =>
+      const [];
+
+  @override
+  Future<List<Row>> getTracksInPlaylist(int playlistId) async => const [];
+
+  @override
+  Future<List<Row>> getRecentTracks({required int limit}) async => const [];
+
+  @override
+  Future<Row?> getArtistEnrichment(String name) async => null;
+
+  @override
+  Future<Row?> getAiResearch(String artistName) async => null;
+
+  @override
+  Future<Map<String, Object?>> getPendingAiResearch() async => const {};
+
+  @override
+  Future<List<String>> getArtistSourceGenres(String artistName) async =>
+      const [];
+
+  @override
+  Future<List<Row>> getMetadataGapArtists({required int limit}) async =>
+      const [];
+
+  @override
+  Future<Row> getMetadataCoverage({List<Row>? gaps}) async => const {};
 
   @override
   Future<Row?> getTrackFull(String path) async {

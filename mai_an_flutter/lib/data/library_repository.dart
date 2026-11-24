@@ -256,11 +256,13 @@ class LibraryRepository {
       _db.run(pcaCoordsForPathsJob(paths));
 
   // The assistant's queries and writes (assistant_queries.dart).
+  Future<int> totalTracks() => _db.run(totalTracksJob);
   Future<List<Map<String, Object?>>> searchTracksSimple(
     String query, {
     int limit = 5,
   }) => _db.run(searchTracksSimpleJob(query, limit));
-  Future<List<Map<String, Object?>>> allTracksRaw() => _db.run(allTracksRawJob);
+  Future<List<Map<String, Object?>>> allTracksRaw({String searchQuery = ''}) =>
+      _db.run(allTracksRawJob(searchQuery));
   Future<Map<String, Object?>?> trackFull(String path) =>
       _db.run(trackFullJob(path));
   Future<List<Map<String, Object?>>> mostPlayedFull(int limit) =>
@@ -269,10 +271,40 @@ class LibraryRepository {
       _db.run(recentPlayedPathsJob(windowSeconds));
   Future<void> recordPlayback(String path, String event, {String? seedPath}) =>
       _write(recordPlaybackJob(path, event, seedPath: seedPath));
+  Future<List<Map<String, Object?>>> allArtistsRaw({String searchQuery = ''}) =>
+      _db.run(allArtistsRawJob(searchQuery));
   Future<List<String>> searchArtistNames(String query) =>
       _db.run(searchArtistNamesJob(query));
+  Future<List<Map<String, Object?>>> allAlbumsRaw({String searchQuery = ''}) =>
+      _db.run(allAlbumsRawJob(searchQuery));
+  Future<List<Map<String, Object?>>> albumsByArtistRaw(String artistName) =>
+      _db.run(albumsByArtistRawJob(artistName));
+  Future<List<Map<String, Object?>>> tracksByAlbumRaw(
+    String albumTitle,
+    String artistName,
+  ) => _db.run(tracksByAlbumRawJob(albumTitle, artistName));
+  Future<List<Map<String, Object?>>> allPlaylistsRaw({
+    String searchQuery = '',
+  }) => _db.run(allPlaylistsRawJob(searchQuery));
+  Future<List<Map<String, Object?>>> tracksInPlaylistRaw(int playlistId) =>
+      _db.run(tracksInPlaylistRawJob(playlistId));
+  Future<List<Map<String, Object?>>> recentTracksRaw(int limit) =>
+      _db.run(recentTracksRawJob(limit));
   Future<String?> firstTrackPathByArtist(String name) =>
       _db.run(firstTrackPathByArtistJob(name));
+  Future<Map<String, Object?>?> artistEnrichment(String name) =>
+      _db.run(artistEnrichmentJob(name));
+  Future<Map<String, Object?>?> aiResearch(String artistName) =>
+      _db.run(aiResearchJob(artistName));
+  Future<Map<String, Object?>> pendingAiResearch() =>
+      _db.run(pendingAiResearchJob);
+  Future<List<String>> artistSourceGenres(String artistName) =>
+      _db.run(artistSourceGenresJob(artistName));
+  Future<List<Map<String, Object?>>> metadataGapArtists({int limit = 2000}) =>
+      _db.run(metadataGapArtistsJob(limit));
+  Future<Map<String, Object?>> metadataCoverage({
+    List<Map<String, Object?>>? gaps,
+  }) => _db.run(metadataCoverageJob(gaps));
 
   /// `track_graph.build_metadata_edges`: rewrites the artist tier of
   /// `track_neighbors`. Returns the edge count.

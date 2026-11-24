@@ -1,18 +1,22 @@
 import 'dart:async';
 import 'dart:math' as math;
 
+import '../core/app_config.dart';
 import '../core/py_difflib.dart';
+import '../core/py_json.dart';
 import '../core/py_re.dart';
 import '../core/py_text.dart';
 import '../core/py_values.dart';
+import 'agent_text.dart';
+import 'agent_tools.dart';
 import 'intent.dart';
+import 'llm_engine.dart';
 import 'runner_phrases.dart';
+import 'tool_executor.dart';
 
-/// `assistant_runner.py`'s deterministic half (phase 5, stage c): dispatch,
-/// the pending confirmation and choice, anaphora, and every `_handle_*`.
-/// The LLM branch (`_dispatch_llm`) is stage d: until then [llm] is unset
-/// and requests run their handler directly, as Flet does with the agent
-/// off.
+/// `assistant_runner.py` (phase 5, stages c and d): dispatch, the pending
+/// confirmation and choice, anaphora, every `_handle_*`, and `_dispatch_llm`'s
+/// tool-calling loop with its `agent_*` bridges.
 ///
 /// Tracks travel as Flet's dicts (`Map<String, Object?>`): library rows
 /// keyed `title`/`artist`/`album`, engine rows keyed `track_title`/
@@ -52,8 +56,9 @@ abstract class AssistantPlayer {
 /// What the runner reads and writes: the `db_manager` methods and
 /// `track_graph` calls it makes. Rows are db_manager's dicts.
 abstract class AssistantLibrary {
+  Future<int> getTotalTracks();
   Future<List<Row>> searchTracksSimple(String query, {required int limit});
-  Future<List<Row>> getAllTracks();
+  Future<List<Row>> getAllTracks({String searchQuery = ''});
   Future<Row?> getTrackFull(String path);
 
   /// `has_current_features(path, track_graph.FEATURES_VERSION)`.
@@ -62,14 +67,46 @@ abstract class AssistantLibrary {
   Future<void> recordPlayback(String path, String event, {String? seedPath});
   Future<List<Row>> getMostPlayed({required int limit});
 
+  /// `get_all_artists(search_query=query)` rows (`id`, `name`, `album_count`,
+  /// `track_count`).
+  Future<List<Row>> getAllArtists({String searchQuery = ''});
+
   /// The names `get_all_artists(search_query=query)` lists, in its order.
   Future<List<String>> searchArtistNames(String query);
+
+  /// `get_all_albums(search_query=query)`.
+  Future<List<Row>> getAllAlbums({String searchQuery = ''});
+
+  /// `get_albums_by_artist(artist)`.
+  Future<List<Row>> getAlbumsByArtist(String artist);
+
+  /// `get_tracks_by_album(album, artist)`.
+  Future<List<Row>> getTracksByAlbum(String album, String artist);
+
+  /// `get_all_playlists(search_query=query)`.
+  Future<List<Row>> getAllPlaylists({String searchQuery = ''});
+
+  /// `get_tracks_in_playlist(playlistId)`.
+  Future<List<Row>> getTracksInPlaylist(int playlistId);
+
+  /// `get_recent_tracks(limit=limit)`.
+  Future<List<Row>> getRecentTracks({required int limit});
 
   /// The path of the first track whose artist is [name] (`COLLATE
   /// NOCASE`), as `_apply_anaphora_resolution`'s query finds it.
   Future<String?> firstTrackPathByArtist(String name);
   Future<int> createPlaylist(String name);
   Future<void> addTrackToPlaylist(int playlistId, String path);
+
+  /// Read-only metadata queries (`get_artist_enrichment`, `get_ai_research`,
+  /// `get_pending_ai_research`, `get_artist_source_genres`,
+  /// `get_metadata_gap_artists`, `get_metadata_coverage`).
+  Future<Row?> getArtistEnrichment(String name);
+  Future<Row?> getAiResearch(String artistName);
+  Future<Map<String, Object?>> getPendingAiResearch();
+  Future<List<String>> getArtistSourceGenres(String artistName);
+  Future<List<Row>> getMetadataGapArtists({required int limit});
+  Future<Row> getMetadataCoverage({List<Row>? gaps});
 
   /// `track_graph.walk(db, seed, length=length, avoid=avoid)`.
   Future<List<String>> walk(
@@ -518,6 +555,62 @@ const _helpDisplayed =
     '• `system status` | `what time is it` | `who made you` | '
     '`give me a quote`';
 
+const _agentMaxSteps = 6;
+
+const _defaultPersona =
+    'You are Jarvis, a concise, sophisticated AI assistant embedded in the '
+    'Mai An Lab high-fidelity music app. Address the user as \'sir\'.';
+
+const _toolDirectives =
+    'You can both KNOW and ACT on the '
+    'user\'s library via tools: read tools (library overview & stats, '
+    'search_by_acoustic_profile, top-played, artists, '
+    'an artist\'s albums, an album\'s tracks, playlists and their contents, '
+    'recently played, '
+    'and rich per-track details incl. bpm/energy) and action tools (search, '
+    'play/enqueue/'
+    'play-next, play whole albums or playlists, the DSP similarity walk, mood '
+    'steering (steer_mood), '
+    'transport control, saving playlists, and Qobuz online search), plus '
+    'metadata curation (metadata status, '
+    'an artist\'s stored genre/country, web research of an artist with '
+    'sources, and applying genres/country — '
+    'research only ever creates a suggestion; applying always asks the user '
+    'first), and the web: '
+    'web_search for any fact beyond the library (artist stories, song '
+    'meanings, release dates, '
+    'credits, new releases, tours), learn_about for \'tell me about this '
+    'song/artist/album\', and '
+    'find_related_artists for \'who sounds like this\' — it says which of '
+    'those artists the user '
+    'already owns, so you can play or enqueue them. Never guess a fact you '
+    'can look up; name the '
+    'source briefly. '
+    'When users ask for specific acoustic properties (energy, brightness, '
+    'tempo) or vibe requests, '
+    'use search_by_acoustic_profile or steer_mood. Answer library questions '
+    'by calling the read tools and '
+    'reasoning over the results — e.g. counts, \'most played\', \'how many by '
+    'X\', \'what\'s on this album\'. '
+    'Chain tools when needed (look up, then act). Only reference tracks the '
+    'tools actually return — never '
+    'invent library paths. When a tool reports it is awaiting the user\'s '
+    'confirmation or choice, '
+    'stop and let the user answer. Keep spoken replies short and natural '
+    '(read aloud by text-to-speech).';
+
+typedef LlmEngineFactory = LlmEngine Function(AssistantConfig? config);
+
+LlmEngine _defaultEngineFactory(AssistantConfig? acfg) => LlmEngine(
+  provider: acfg?.llmProvider ?? 'gemini',
+  apiKey: acfg?.geminiApiKey ?? '',
+  model: (acfg != null && acfg.geminiModel.isNotEmpty)
+      ? acfg.geminiModel
+      : defaultGeminiModel,
+  ollamaEndpoint: acfg?.ollamaEndpoint ?? defaultOllamaEndpoint,
+  ollamaModel: acfg?.ollamaModel ?? defaultOllamaModel,
+);
+
 class AssistantRunner {
   AssistantRunner({
     required this.library,
@@ -525,10 +618,18 @@ class AssistantRunner {
     AssistantRandom? random,
     DateTime Function()? now,
     Future<List<Object?>> Function()? loadHistory,
+    this.loadAssistantConfig,
+    LlmEngineFactory? engineFactory,
     this.llm,
+    this.webToolHandler,
+    this.onlineSearchHandler,
+    this.metadataWriteHandler,
+    bool Function()? researchAvailable,
   }) : random = random ?? SystemAssistantRandom(),
        now = now ?? DateTime.now,
-       _loadHistory = loadHistory ?? (() async => const []);
+       _loadHistory = loadHistory ?? (() async => const []),
+       _engineFactory = engineFactory ?? _defaultEngineFactory,
+       researchAvailable = researchAvailable ?? (() => false);
 
   final AssistantLibrary library;
   final AssistantPlayer player;
@@ -542,8 +643,26 @@ class AssistantRunner {
   /// provider was passed to [dispatch].
   final Future<List<Object?>> Function() _loadHistory;
 
-  /// `_dispatch_llm` (stage d). Unset: the handler runs directly.
+  /// Returns the current `[assistant]` config, or null if unavailable. When
+  /// this callback itself is null (and [llm] is null), non-fast intents run
+  /// their deterministic handler directly.
+  final FutureOr<AssistantConfig?> Function()? loadAssistantConfig;
+
+  /// Builds the [LlmEngine] for a turn; tests override this to aim at a local
+  /// recording server.
+  final LlmEngineFactory _engineFactory;
+
+  /// Optional override for `_dispatch_llm`.
   Future<AssistantResponse> Function(Intent intent)? llm;
+
+  /// Stage e / phase 6 / phase 7 tool hooks.
+  final ToolHandler? webToolHandler;
+  final ToolHandler? onlineSearchHandler;
+  final ToolHandler? metadataWriteHandler;
+
+  /// `metadata_ai.research_available()`: false until phase 7 wires AI
+  /// artist research.
+  final bool Function() researchAvailable;
 
   final List<String> _recent = [];
   static const _recentCap = 50;
@@ -552,15 +671,35 @@ class AssistantRunner {
   List<Object?>? _historyCache;
   HistoryProvider? _historyProvider;
 
+  // Per-turn agent-loop state (reset by [agentReset]).
+  bool _agentDeferredPlay = false;
+  AssistantResponse? _agentInterrupt;
+  Map<String, Object?> _agentLastExtras = {};
+  List<String> _agentToolsUsed = [];
+
   List<String> get recent => List.unmodifiable(_recent);
   PendingConfirmation? get pending => _pending;
   PendingChoice? get pendingChoice => _pendingChoice;
+  bool get agentDeferredPlay => _agentDeferredPlay;
+  AssistantResponse? get agentInterrupt => _agentInterrupt;
+  List<String> get agentToolsUsed => List.unmodifiable(_agentToolsUsed);
 
   /// Stage a yes/no for the next turn; replaces any open question.
   void queueConfirmation(PendingConfirmation prompt) => _pending = prompt;
 
   /// Stage a multi-option choice for the next turn.
   void queueChoice(PendingChoice choice) => _pendingChoice = choice;
+
+  /// `agent_reset`: clear per-turn agent-loop state before an LLM pass.
+  void agentReset() {
+    _agentDeferredPlay = false;
+    _agentInterrupt = null;
+    _agentLastExtras = {};
+    _agentToolsUsed = [];
+  }
+
+  /// Record a tool name for agent provenance (`runner._agent_tools_used`).
+  void recordAgentToolUsed(String toolName) => _agentToolsUsed.add(toolName);
 
   /// `_say`: a random phrase of [category], formatted with [kwargs].
   String say(String category, [Map<String, Object?> kwargs = const {}]) {
@@ -773,8 +912,10 @@ class AssistantRunner {
       if (_fastIntents.contains(resolved.name)) {
         return await executeIntent(resolved);
       }
-      final llm = this.llm;
-      return llm != null ? await llm(resolved) : await executeIntent(resolved);
+      final llmOverride = llm;
+      if (llmOverride != null) return await llmOverride(resolved);
+      if (loadAssistantConfig != null) return await dispatchLlm(resolved);
+      return await executeIntent(resolved);
     } catch (e) {
       return AssistantResponse(
         spoken: say('error'),
@@ -782,6 +923,308 @@ class AssistantRunner {
         success: false,
       );
     }
+  }
+
+  // ── AI agent (in-process LLM tool-calling) ──────────────────────────────
+
+  void _absorbAgentResponse(AssistantResponse resp) {
+    if (resp.deferredPlay) _agentDeferredPlay = true;
+    if (resp.extras.isNotEmpty) _agentLastExtras = resp.extras;
+    if (_pendingChoice != null || _pending != null) {
+      _agentInterrupt = resp;
+    }
+  }
+
+  /// `agent_run_intent`: bridge an agent tool call to a deterministic handler,
+  /// absorb its side effects, and return a compact JSON-safe dict.
+  Future<Map<String, Object?>> agentRunIntent(
+    String intentName, {
+    String? query,
+    Map<String, Object?>? extras,
+  }) async {
+    final intent = Intent(
+      intentName,
+      query: query,
+      raw: query ?? '',
+      extras: extras != null ? Map.of(extras) : null,
+    );
+    final resp = await executeIntent(intent);
+    _absorbAgentResponse(resp);
+    final result = <String, Object?>{
+      'success': resp.success,
+      'message': stripMarkdown(resp.displayed),
+    };
+    if (pyTruthy(resp.extras['options'])) {
+      result['options'] = resp.extras['options'];
+      result['awaiting_choice'] = true;
+    }
+    return result;
+  }
+
+  /// `_stage_tracks`: replace the queue with an explicit ordered track list.
+  AssistantResponse stageTracks(List<Row> tracks, String label) {
+    final engineTracks = [for (final t in tracks) toEngineTrack(t)];
+    player.setQueue(engineTracks, startIndex: 0);
+    if (engineTracks.isNotEmpty) _remember(engineTracks.first['path']);
+    return AssistantResponse(
+      spoken: "${say('affirmative')} Playing $label.",
+      displayed: 'Playing **$label** (${engineTracks.length} tracks).',
+      extras: {
+        'track': tracks.isNotEmpty ? tracks.first : null,
+        'queued': engineTracks.length,
+      },
+      deferredPlay: true,
+    );
+  }
+
+  /// `agent_play_tracks`: stage an explicit list now and absorb deferred play.
+  Future<Map<String, Object?>> agentPlayTracks(
+    List<Row> tracks,
+    String label,
+  ) async {
+    if (tracks.isEmpty) {
+      return {'success': false, 'message': 'No tracks found for $label.'};
+    }
+    final resp = stageTracks(tracks, label);
+    _absorbAgentResponse(resp);
+    return {'success': true, 'message': stripMarkdown(resp.displayed)};
+  }
+
+  /// `agent_request_confirmation`: arm a yes/no confirmation and stop the
+  /// agent loop so the prompt is surfaced deterministically.
+  Map<String, Object?> agentRequestConfirmation({
+    required String spoken,
+    required String displayed,
+    required ResponseCallback onYes,
+  }) {
+    _pending = PendingConfirmation(
+      prompt: spoken,
+      onYesMsg: spoken,
+      onNoMsg: 'Understood, sir. Cancelled.',
+      onYes: onYes,
+    );
+    _agentInterrupt = AssistantResponse(spoken: spoken, displayed: displayed);
+    return {
+      'success': true,
+      'awaiting_confirmation': true,
+      'message': stripMarkdown(displayed),
+    };
+  }
+
+  Future<List<Object?>> _historySnapshot() async {
+    if (_historyProvider != null) {
+      try {
+        return List<Object?>.of(_historyProvider!());
+      } catch (_) {}
+    }
+    try {
+      return await _loadHistory();
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  Future<String> _agentContextLine() async {
+    final parts = <String>[];
+    try {
+      final path = player.currentPath;
+      if (path.isNotEmpty) {
+        final t = await library.getTrackFull(path);
+        if (t != null && t.isNotEmpty) {
+          final headParts = [
+            for (final b in [t['title'], t['artist']])
+              if (pyTruthy(b)) pyStr(b),
+          ];
+          final head = headParts.join(' — ');
+          if (head.isNotEmpty) {
+            final extra = [
+              for (final x in [t['album'], t['genre']])
+                if (pyTruthy(x)) pyStr(x),
+            ];
+            final suffix = extra.isNotEmpty ? ' (${extra.join(', ')})' : '';
+            parts.add('Now playing: $head$suffix.');
+          }
+        }
+      }
+    } catch (_) {}
+    try {
+      final total = await library.getTotalTracks();
+      if (total != 0) {
+        parts.add('Local library holds $total tracks.');
+      }
+    } catch (_) {}
+    return parts.join(' ');
+  }
+
+  AssistantResponse _finalizeAgent(String replyMarkdown) {
+    final spoken = stripMarkdown(replyMarkdown);
+    final resp = AssistantResponse(
+      spoken: spoken.isNotEmpty ? spoken : 'At your service, sir.',
+      displayed: replyMarkdown,
+      deferredPlay: _agentDeferredPlay,
+    );
+    resp.extras = Map<String, Object?>.of(_agentLastExtras);
+    resp.extras['agent'] = {
+      'used_llm': true,
+      'tools': List<String>.of(_agentToolsUsed),
+    };
+    return resp;
+  }
+
+  AssistantResponse _finalizeAgentInterrupt() {
+    final resp = _agentInterrupt!;
+    resp.extras.putIfAbsent(
+      'agent',
+      () => {'used_llm': true, 'tools': List<String>.of(_agentToolsUsed)},
+    );
+    return resp;
+  }
+
+  /// `_dispatch_llm`: the in-process LLM tool-calling loop. Falls back to the
+  /// deterministic handler whenever the agent is disabled, unconfigured, or
+  /// errors on a known intent.
+  Future<AssistantResponse> dispatchLlm(Intent intent) async {
+    final acfg = await loadAssistantConfig?.call();
+    if (acfg != null && !acfg.llmEnabled) {
+      return await executeIntent(intent);
+    }
+
+    final provider = acfg?.llmProvider ?? 'gemini';
+    final engine = _engineFactory(acfg);
+
+    if (!engine.isConfigured) {
+      if (intent.name != intentUnknown) {
+        return await executeIntent(intent);
+      }
+      return AssistantResponse(
+        spoken:
+            'Please configure your free Gemini API key in Settings, AI '
+            'Assistant, to activate my full intelligence, sir.',
+        displayed:
+            '**AI Agent unconfigured**: paste your free API key from '
+            '[Google AI Studio](https://aistudio.google.com/) under '
+            '**Settings → AI Assistant** to enable conversational AI & smart '
+            'curation.',
+        success: false,
+      );
+    }
+
+    agentReset();
+
+    final customPersona = acfg != null ? pyStrip(acfg.personalityPrompt) : '';
+    final persona = customPersona.isNotEmpty ? customPersona : _defaultPersona;
+
+    var systemPrompt = '$persona\n\n$_toolDirectives';
+    final ctx = await _agentContextLine();
+    if (ctx.isNotEmpty) {
+      systemPrompt = '$systemPrompt\n\nLive context — $ctx';
+    }
+
+    final messages = <Map<String, Object?>>[
+      {'role': 'system', 'content': systemPrompt},
+    ];
+    final history = await _historySnapshot();
+    final recentHistory = history.length > 10
+        ? history.sublist(history.length - 10)
+        : history;
+    for (final raw in recentHistory) {
+      if (raw is! Map<String, Object?>) continue;
+      final role = raw['sender'] == 'user' ? 'user' : 'assistant';
+      final content = raw.containsKey('text') ? raw['text'] : '';
+      messages.add({'role': role, 'content': content});
+    }
+
+    final rawQuery = pyStrip(_text(pyOr([intent.raw, intent.query, ''])));
+    if (!(messages.length > 1 &&
+        messages.last['role'] == 'user' &&
+        pyStrip(_text(messages.last['content'])) == rawQuery)) {
+      messages.add({'role': 'user', 'content': rawQuery});
+    }
+
+    final tools = agentTools();
+    LlmResponse? res;
+    var usedTools = false;
+    for (var step = 0; step < _agentMaxSteps; step++) {
+      res = await engine.chatCompletion(messages, tools: tools);
+      if (!res.success) {
+        if (intent.name != intentUnknown) {
+          return await executeIntent(intent);
+        }
+        return AssistantResponse(
+          spoken: 'My apologies, sir. The connection to $provider failed.',
+          displayed:
+              'Error connecting to AI provider ($provider): '
+              '${pyStr(res.errorMessage)}',
+          success: false,
+        );
+      }
+
+      if (res.toolCalls.isEmpty) {
+        return _finalizeAgent(
+          res.content.isNotEmpty ? res.content : 'At your service, sir.',
+        );
+      }
+
+      // Echo the provider's raw assistant message verbatim so Gemini thinking
+      // models get their thought_signature back.
+      final Map<String, Object?> assistantMsg;
+      if (res.rawMessage != null && res.rawMessage!.isNotEmpty) {
+        assistantMsg = Map<String, Object?>.of(res.rawMessage!);
+        assistantMsg.putIfAbsent('role', () => 'assistant');
+      } else {
+        assistantMsg = {
+          'role': 'assistant',
+          'content': res.content,
+          'tool_calls': [
+            for (final tc in res.toolCalls)
+              {
+                'id': tc.id,
+                'type': 'function',
+                'function': {
+                  'name': tc.name,
+                  'arguments': pyJsonDumps(tc.args),
+                },
+              },
+          ],
+        };
+      }
+      messages.add(assistantMsg);
+
+      usedTools = true;
+      for (final tc in res.toolCalls) {
+        final toolRes = await executeTool(tc.name, tc.args, this);
+        messages.add({
+          'role': 'tool',
+          'tool_call_id': tc.id,
+          'content': pyJsonDumps(
+            toolRes,
+            ensureAscii: false,
+            defaultEncoder: (o) => '$o',
+          ),
+        });
+      }
+
+      if (_agentInterrupt != null) {
+        return _finalizeAgentInterrupt();
+      }
+    }
+
+    if (usedTools && (res == null || res.content.isEmpty)) {
+      messages.add({
+        'role': 'user',
+        'content':
+            'Answer my request now from the tool results above, briefly.',
+      });
+      final finalRes = await engine.chatCompletion(messages, tools: null);
+      if (finalRes.success && finalRes.content.isNotEmpty) {
+        return _finalizeAgent(finalRes.content);
+      }
+    }
+    return _finalizeAgent(
+      (res != null && res.content.isNotEmpty)
+          ? res.content
+          : 'Task executed successfully, sir.',
+    );
   }
 
   /// `_execute_intent`: one intent through its handler, bypassing the LLM

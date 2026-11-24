@@ -19,11 +19,15 @@ class RepoAssistantLibrary implements AssistantLibrary {
   final Future<StationSource?> Function() _stations;
 
   @override
+  Future<int> getTotalTracks() => repo.totalTracks();
+
+  @override
   Future<List<Row>> searchTracksSimple(String query, {required int limit}) =>
       repo.searchTracksSimple(query, limit: limit);
 
   @override
-  Future<List<Row>> getAllTracks() => repo.allTracksRaw();
+  Future<List<Row>> getAllTracks({String searchQuery = ''}) =>
+      repo.allTracksRaw(searchQuery: searchQuery);
 
   @override
   Future<Row?> getTrackFull(String path) => repo.trackFull(path);
@@ -44,8 +48,36 @@ class RepoAssistantLibrary implements AssistantLibrary {
       repo.mostPlayedFull(limit);
 
   @override
+  Future<List<Row>> getAllArtists({String searchQuery = ''}) =>
+      repo.allArtistsRaw(searchQuery: searchQuery);
+
+  @override
   Future<List<String>> searchArtistNames(String query) =>
       repo.searchArtistNames(query);
+
+  @override
+  Future<List<Row>> getAllAlbums({String searchQuery = ''}) =>
+      repo.allAlbumsRaw(searchQuery: searchQuery);
+
+  @override
+  Future<List<Row>> getAlbumsByArtist(String artist) =>
+      repo.albumsByArtistRaw(artist);
+
+  @override
+  Future<List<Row>> getTracksByAlbum(String album, String artist) =>
+      repo.tracksByAlbumRaw(album, artist);
+
+  @override
+  Future<List<Row>> getAllPlaylists({String searchQuery = ''}) =>
+      repo.allPlaylistsRaw(searchQuery: searchQuery);
+
+  @override
+  Future<List<Row>> getTracksInPlaylist(int playlistId) =>
+      repo.tracksInPlaylistRaw(playlistId);
+
+  @override
+  Future<List<Row>> getRecentTracks({required int limit}) =>
+      repo.recentTracksRaw(limit);
 
   @override
   Future<String?> firstTrackPathByArtist(String name) =>
@@ -57,6 +89,28 @@ class RepoAssistantLibrary implements AssistantLibrary {
   @override
   Future<void> addTrackToPlaylist(int playlistId, String path) =>
       repo.addTracksToPlaylist(playlistId, [path]);
+
+  @override
+  Future<Row?> getArtistEnrichment(String name) => repo.artistEnrichment(name);
+
+  @override
+  Future<Row?> getAiResearch(String artistName) => repo.aiResearch(artistName);
+
+  @override
+  Future<Map<String, Object?>> getPendingAiResearch() =>
+      repo.pendingAiResearch();
+
+  @override
+  Future<List<String>> getArtistSourceGenres(String artistName) =>
+      repo.artistSourceGenres(artistName);
+
+  @override
+  Future<List<Row>> getMetadataGapArtists({required int limit}) =>
+      repo.metadataGapArtists(limit: limit);
+
+  @override
+  Future<Row> getMetadataCoverage({List<Row>? gaps}) =>
+      repo.metadataCoverage(gaps: gaps);
 
   @override
   Future<List<String>> walk(
