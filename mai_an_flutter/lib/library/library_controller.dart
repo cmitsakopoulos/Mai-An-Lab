@@ -4,6 +4,7 @@ import 'dart:async';
 
 import '../core/db_worker.dart';
 import '../data/library_repository.dart';
+import '../data/play_ledger.dart';
 import '../player/autoplay.dart';
 import '../player/dsp.dart';
 import '../stations/station.dart';
@@ -168,6 +169,14 @@ class LibraryController extends ChangeNotifier implements AutoPlayLibrary {
   /// sound settings; null when the track has none or the library isn't open.
   Future<DspFeatures?> dspFeatures(String path) async =>
       _repo?.dspFeatures(path);
+
+  /// The ledger drain's write. Throws until the library is open (writable),
+  /// which keeps the ledger file for the next drain.
+  Future<int> recordListens(List<LedgerEntry> entries) {
+    final repo = _repo;
+    if (repo == null) throw StateError('library not open yet');
+    return repo.recordListens(entries);
+  }
 
   @override
   void dispose() {

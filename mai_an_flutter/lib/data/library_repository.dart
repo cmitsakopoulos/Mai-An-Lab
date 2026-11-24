@@ -1,13 +1,17 @@
 import 'dart:convert';
 import 'dart:isolate';
-import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:sqlite3/sqlite3.dart';
 
 import '../core/db_worker.dart';
 import '../core/py_text.dart';
 import '../player/dsp.dart';
 import '../stations/station.dart';
+import 'library_schema.dart';
+import 'play_ledger.dart';
+
+export 'library_schema.dart' show kGeometryVersion;
 
 class Track {
   const Track({
@@ -54,17 +58,55 @@ class Track {
   }
 }
 
-/// Read access to the library database that the Python app writes
-/// (`library.db`, schema owned by `utils/db_manager.py`). It opens the file
-/// READ-ONLY, so the Flutter app can't corrupt or migrate the database while
-/// both apps exist side by side.
+/// The library database (`library.db`, the schema of
+/// `utils/db_manager.py`).
+///
+/// Read-only by default. With [open]'s `writable`, the file is opened
+/// read-write and migrated exactly as the Flet app migrates it on start
+/// (library_schema.dart); only the port's own copy is ever opened that way
+/// (PORT_MAP §10 step 4a), never the Flet app's live database.
 class LibraryRepository {
-  LibraryRepository._(this._db);
+  LibraryRepository._(this._db, {required this.writable});
 
   final DbWorker _db;
+  final bool writable;
 
-  static Future<LibraryRepository> open(String path) async =>
-      LibraryRepository._(await DbWorker.open(path));
+  static Future<LibraryRepository> open(
+    String path, {
+    bool writable = false,
+  }) async {
+    final db = await DbWorker.open(path, readOnly: !writable);
+    if (writable) {
+      try {
+        await db.run(migrateLibrary);
+      } catch (_) {
+        await db.close();
+        rethrow;
+      }
+    }
+    return LibraryRepository._(db, writable: writable);
+  }
+
+  /// `record_listens`: one ledger batch, in one transaction. Returns how
+  /// many listens counted toward play_counts.
+  Future<int> recordListens(List<LedgerEntry> entries) {
+    if (!writable) throw StateError('library opened read-only');
+    return _db.run(recordListensJob(entries));
+  }
+
+  /// Raw statements, for tests that set up rows the app makes elsewhere.
+  @visibleForTesting
+  Future<void> debugExecute(List<(String, List<Object?>)> statements) =>
+      _write((db) {
+        for (final (sql, args) in statements) {
+          db.execute(sql, args);
+        }
+      });
+
+  Future<void> _write(void Function(Database) job) {
+    if (!writable) throw StateError('library opened read-only');
+    return _db.run(job);
+  }
 
   Future<List<Track>> allTracks() => _db.run(_selectAllTracks);
 
@@ -130,10 +172,6 @@ List<Track> _selectAllTracks(Database db) {
       ),
   ];
 }
-
-/// `DatabaseManager.GEOMETRY_VERSION`, stored in `PRAGMA user_version`.
-/// Bump together with the Python constant.
-const kGeometryVersion = 2;
 
 /// The database's coordinates were built by an older geometry pipeline. The
 /// Flet app NULLs them on its next open and rebuilds; until then nothing may

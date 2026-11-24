@@ -1,0 +1,4628 @@
+{
+ "geometry_version": 2,
+ "schema": [
+  {
+   "name": "fresh",
+   "sql": [],
+   "opens": 1,
+   "result": {
+    "user_version": 2,
+    "master": [
+     [
+      "index",
+      "idx_albums_artist_id",
+      "albums",
+      "CREATE INDEX idx_albums_artist_id ON albums(artist_id)"
+     ],
+     [
+      "index",
+      "idx_albums_title",
+      "albums",
+      "CREATE INDEX idx_albums_title ON albums(title COLLATE NOCASE)"
+     ],
+     [
+      "index",
+      "idx_history_listen_uniq",
+      "playback_history",
+      "CREATE UNIQUE INDEX idx_history_listen_uniq ON playback_history(track_path, played_at, event) WHERE event IN ('completed', 'skipped_early')"
+     ],
+     [
+      "index",
+      "idx_history_recent",
+      "playback_history",
+      "CREATE INDEX idx_history_recent ON playback_history(played_at DESC)"
+     ],
+     [
+      "index",
+      "idx_history_track",
+      "playback_history",
+      "CREATE INDEX idx_history_track ON playback_history(track_path, event)"
+     ],
+     [
+      "index",
+      "idx_neighbors_track",
+      "track_neighbors",
+      "CREATE INDEX idx_neighbors_track ON track_neighbors(track_path, edge_kind, weight DESC)"
+     ],
+     [
+      "index",
+      "idx_pt_playlist_id",
+      "playlist_tracks",
+      "CREATE INDEX idx_pt_playlist_id ON playlist_tracks(playlist_id, order_index)"
+     ],
+     [
+      "index",
+      "idx_release_sync_log_date",
+      "release_sync_log",
+      "CREATE INDEX idx_release_sync_log_date ON release_sync_log (sync_date, status)"
+     ],
+     [
+      "index",
+      "idx_tp_islet_id",
+      "track_partitions",
+      "CREATE INDEX idx_tp_islet_id ON track_partitions(islet_id)"
+     ],
+     [
+      "index",
+      "idx_tp_mood",
+      "track_partitions",
+      "CREATE INDEX idx_tp_mood ON track_partitions(mood)"
+     ],
+     [
+      "index",
+      "idx_tracks_added_date",
+      "tracks",
+      "CREATE INDEX idx_tracks_added_date ON tracks(added_date)"
+     ],
+     [
+      "index",
+      "idx_tracks_album_id",
+      "tracks",
+      "CREATE INDEX idx_tracks_album_id ON tracks(album_id)"
+     ],
+     [
+      "index",
+      "idx_tracks_title",
+      "tracks",
+      "CREATE INDEX idx_tracks_title ON tracks(title COLLATE NOCASE)"
+     ],
+     [
+      "index",
+      "sqlite_autoindex_albums_1",
+      "albums",
+      null
+     ],
+     [
+      "index",
+      "sqlite_autoindex_artist_ai_research_1",
+      "artist_ai_research",
+      null
+     ],
+     [
+      "index",
+      "sqlite_autoindex_artist_alias_rejections_1",
+      "artist_alias_rejections",
+      null
+     ],
+     [
+      "index",
+      "sqlite_autoindex_artist_aliases_1",
+      "artist_aliases",
+      null
+     ],
+     [
+      "index",
+      "sqlite_autoindex_artist_enrichment_1",
+      "artist_enrichment",
+      null
+     ],
+     [
+      "index",
+      "sqlite_autoindex_artist_releases_1",
+      "artist_releases",
+      null
+     ],
+     [
+      "index",
+      "sqlite_autoindex_artists_1",
+      "artists",
+      null
+     ],
+     [
+      "index",
+      "sqlite_autoindex_metadata_audit_dismissed_1",
+      "metadata_audit_dismissed",
+      null
+     ],
+     [
+      "index",
+      "sqlite_autoindex_play_counts_1",
+      "play_counts",
+      null
+     ],
+     [
+      "index",
+      "sqlite_autoindex_playlist_tracks_1",
+      "playlist_tracks",
+      null
+     ],
+     [
+      "index",
+      "sqlite_autoindex_playlists_1",
+      "playlists",
+      null
+     ],
+     [
+      "index",
+      "sqlite_autoindex_track_neighbors_1",
+      "track_neighbors",
+      null
+     ],
+     [
+      "index",
+      "sqlite_autoindex_track_partitions_1",
+      "track_partitions",
+      null
+     ],
+     [
+      "index",
+      "sqlite_autoindex_tracks_1",
+      "tracks",
+      null
+     ],
+     [
+      "table",
+      "albums",
+      "albums",
+      "CREATE TABLE albums ( id INTEGER PRIMARY KEY AUTOINCREMENT, artist_id INTEGER NOT NULL, title TEXT NOT NULL COLLATE NOCASE, year TEXT, genre TEXT, genre_bucket TEXT, track_count INTEGER DEFAULT 0, FOREIGN KEY (artist_id) REFERENCES artists(id) ON DELETE CASCADE, UNIQUE (artist_id, title) )"
+     ],
+     [
+      "table",
+      "artist_ai_research",
+      "artist_ai_research",
+      "CREATE TABLE artist_ai_research ( artist_name TEXT PRIMARY KEY COLLATE NOCASE, payload TEXT NOT NULL, -- JSON, see metadata_ai.research_artist state TEXT NOT NULL DEFAULT 'pending', created_at REAL NOT NULL )"
+     ],
+     [
+      "table",
+      "artist_alias_rejections",
+      "artist_alias_rejections",
+      "CREATE TABLE artist_alias_rejections ( a TEXT NOT NULL, b TEXT NOT NULL, -- casefolded, a < b PRIMARY KEY (a, b) )"
+     ],
+     [
+      "table",
+      "artist_aliases",
+      "artist_aliases",
+      "CREATE TABLE artist_aliases ( alias TEXT PRIMARY KEY COLLATE NOCASE, canonical TEXT NOT NULL COLLATE NOCASE, enrichment TEXT, -- JSON snapshot of the alias's artist_enrichment row created_at REAL NOT NULL )"
+     ],
+     [
+      "table",
+      "artist_enrichment",
+      "artist_enrichment",
+      "CREATE TABLE artist_enrichment ( artist_name TEXT PRIMARY KEY COLLATE NOCASE, mbid TEXT, country TEXT, area TEXT, genres TEXT, -- JSON: [{\"name\": str, \"count\": int}, ...] source TEXT, -- e.g. 'musicbrainz' score INTEGER, -- match confidence (0-100) from the search status TEXT, -- 'ok' | 'lowconfidence' | 'notfound' | 'retry' | 'error' fetched_at REAL , provenance TEXT, attempts INTEGER DEFAULT 0)"
+     ],
+     [
+      "table",
+      "artist_releases",
+      "artist_releases",
+      "CREATE TABLE artist_releases ( artist_name TEXT PRIMARY KEY COLLATE NOCASE, source TEXT NOT NULL, source_id TEXT, releases TEXT NOT NULL, fetched_at REAL NOT NULL )"
+     ],
+     [
+      "table",
+      "artists",
+      "artists",
+      "CREATE TABLE artists ( id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE COLLATE NOCASE NOT NULL, album_count INTEGER DEFAULT 0, track_count INTEGER DEFAULT 0 )"
+     ],
+     [
+      "table",
+      "fts_search",
+      "fts_search",
+      "CREATE VIRTUAL TABLE fts_search USING fts5( title, album, artist, tokenize='unicode61' )"
+     ],
+     [
+      "table",
+      "fts_search_config",
+      "fts_search_config",
+      "CREATE TABLE 'fts_search_config'(k PRIMARY KEY, v) WITHOUT ROWID"
+     ],
+     [
+      "table",
+      "fts_search_content",
+      "fts_search_content",
+      "CREATE TABLE 'fts_search_content'(id INTEGER PRIMARY KEY, c0, c1, c2)"
+     ],
+     [
+      "table",
+      "fts_search_data",
+      "fts_search_data",
+      "CREATE TABLE 'fts_search_data'(id INTEGER PRIMARY KEY, block BLOB)"
+     ],
+     [
+      "table",
+      "fts_search_docsize",
+      "fts_search_docsize",
+      "CREATE TABLE 'fts_search_docsize'(id INTEGER PRIMARY KEY, sz BLOB)"
+     ],
+     [
+      "table",
+      "fts_search_idx",
+      "fts_search_idx",
+      "CREATE TABLE 'fts_search_idx'(segid, term, pgno, PRIMARY KEY(segid, term)) WITHOUT ROWID"
+     ],
+     [
+      "table",
+      "genre_affinity",
+      "genre_affinity",
+      "CREATE TABLE genre_affinity ( id INTEGER PRIMARY KEY CHECK (id = 1), model TEXT NOT NULL, -- JSON {\"a|b\": npmi, ...}, a < b updated_at REAL NOT NULL )"
+     ],
+     [
+      "table",
+      "metadata_audit_dismissed",
+      "metadata_audit_dismissed",
+      "CREATE TABLE metadata_audit_dismissed ( artist_name TEXT NOT NULL COLLATE NOCASE, rule TEXT NOT NULL, value TEXT, -- the country the user said was right PRIMARY KEY (artist_name, rule) )"
+     ],
+     [
+      "table",
+      "play_counts",
+      "play_counts",
+      "CREATE TABLE play_counts ( track_path TEXT PRIMARY KEY, count INTEGER DEFAULT 0, last_played INTEGER, bpm REAL DEFAULT 0, energy REAL DEFAULT 0, brightness REAL DEFAULT 0, pca_coords BLOB , timbre BLOB, features_version INTEGER DEFAULT 0, rolloff REAL DEFAULT 0, beat_strength REAL DEFAULT 0, spectral_flatness REAL DEFAULT 0, spectral_contrast REAL DEFAULT 0, key_index INTEGER DEFAULT 0)"
+     ],
+     [
+      "table",
+      "playback_history",
+      "playback_history",
+      "CREATE TABLE playback_history ( track_path TEXT NOT NULL, played_at REAL NOT NULL, event TEXT NOT NULL, seed_path TEXT , listened_s REAL)"
+     ],
+     [
+      "table",
+      "playlist_tracks",
+      "playlist_tracks",
+      "CREATE TABLE playlist_tracks ( id INTEGER PRIMARY KEY AUTOINCREMENT, playlist_id INTEGER NOT NULL REFERENCES playlists(id) ON DELETE CASCADE, track_path TEXT NOT NULL, order_index INTEGER NOT NULL DEFAULT 0, UNIQUE (playlist_id, track_path) )"
+     ],
+     [
+      "table",
+      "playlists",
+      "playlists",
+      "CREATE TABLE playlists ( id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE COLLATE NOCASE, created INTEGER DEFAULT (CAST(strftime('%s','now') AS INTEGER)), color TEXT )"
+     ],
+     [
+      "table",
+      "release_sync_log",
+      "release_sync_log",
+      "CREATE TABLE release_sync_log ( id INTEGER PRIMARY KEY AUTOINCREMENT, sync_date TEXT NOT NULL, started_at REAL NOT NULL, finished_at REAL, artists_checked INTEGER DEFAULT 0, new_found INTEGER DEFAULT 0, trigger_type TEXT NOT NULL, status TEXT NOT NULL )"
+     ],
+     [
+      "table",
+      "sqlite_sequence",
+      "sqlite_sequence",
+      "CREATE TABLE sqlite_sequence(name,seq)"
+     ],
+     [
+      "table",
+      "track_neighbors",
+      "track_neighbors",
+      "CREATE TABLE track_neighbors ( track_path TEXT NOT NULL, neighbor_path TEXT NOT NULL, weight REAL NOT NULL, edge_kind TEXT NOT NULL, PRIMARY KEY (track_path, neighbor_path, edge_kind) )"
+     ],
+     [
+      "table",
+      "track_partitions",
+      "track_partitions",
+      "CREATE TABLE track_partitions ( track_path TEXT REFERENCES tracks(path) ON DELETE CASCADE, mood TEXT, islet_id INTEGER, PRIMARY KEY (track_path, mood) )"
+     ],
+     [
+      "table",
+      "tracks",
+      "tracks",
+      "CREATE TABLE tracks ( id INTEGER PRIMARY KEY AUTOINCREMENT, album_id INTEGER NOT NULL, title TEXT, track_num INTEGER, duration REAL, path TEXT UNIQUE NOT NULL, format TEXT, added_date REAL, bitrate INTEGER, bpm REAL DEFAULT 0, energy REAL DEFAULT 0, brightness REAL DEFAULT 0, artist_tag TEXT, -- the file's artist tag when an alias redirected it FOREIGN KEY (album_id) REFERENCES albums(id) ON DELETE CASCADE )"
+     ],
+     [
+      "trigger",
+      "trg_albums_artist_update_counts",
+      "albums",
+      "CREATE TRIGGER trg_albums_artist_update_counts AFTER UPDATE OF artist_id ON albums BEGIN UPDATE artists SET album_count = album_count - 1, track_count = track_count - (SELECT COUNT(*) FROM tracks WHERE album_id = OLD.id) WHERE id = OLD.artist_id; UPDATE artists SET album_count = album_count + 1, track_count = track_count + (SELECT COUNT(*) FROM tracks WHERE album_id = NEW.id) WHERE id = NEW.artist_id; END"
+     ],
+     [
+      "trigger",
+      "trg_albums_artist_update_fts",
+      "albums",
+      "CREATE TRIGGER trg_albums_artist_update_fts AFTER UPDATE OF artist_id ON albums BEGIN UPDATE fts_search SET artist = (SELECT name FROM artists WHERE id = NEW.artist_id) WHERE rowid IN (SELECT id FROM tracks WHERE album_id = NEW.id); END"
+     ],
+     [
+      "trigger",
+      "trg_albums_delete_counts",
+      "albums",
+      "CREATE TRIGGER trg_albums_delete_counts AFTER DELETE ON albums BEGIN UPDATE artists SET album_count = album_count - 1 WHERE id = OLD.artist_id; END"
+     ],
+     [
+      "trigger",
+      "trg_albums_insert_counts",
+      "albums",
+      "CREATE TRIGGER trg_albums_insert_counts AFTER INSERT ON albums BEGIN UPDATE artists SET album_count = album_count + 1 WHERE id = NEW.artist_id; END"
+     ],
+     [
+      "trigger",
+      "trg_albums_update_fts",
+      "albums",
+      "CREATE TRIGGER trg_albums_update_fts AFTER UPDATE OF title ON albums BEGIN UPDATE fts_search SET album = NEW.title WHERE rowid IN ( SELECT id FROM tracks WHERE album_id = NEW.id ); END"
+     ],
+     [
+      "trigger",
+      "trg_artists_update_fts",
+      "artists",
+      "CREATE TRIGGER trg_artists_update_fts AFTER UPDATE OF name ON artists BEGIN UPDATE fts_search SET artist = NEW.name WHERE rowid IN ( SELECT t.id FROM tracks t JOIN albums al ON t.album_id = al.id WHERE al.artist_id = NEW.id ); END"
+     ],
+     [
+      "trigger",
+      "trg_tracks_delete_counts",
+      "tracks",
+      "CREATE TRIGGER trg_tracks_delete_counts AFTER DELETE ON tracks BEGIN UPDATE albums SET track_count = track_count - 1 WHERE id = OLD.album_id; UPDATE artists SET track_count = track_count - 1 WHERE id = ( SELECT artist_id FROM albums WHERE id = OLD.album_id ); DELETE FROM fts_search WHERE rowid = OLD.id; END"
+     ],
+     [
+      "trigger",
+      "trg_tracks_insert_counts",
+      "tracks",
+      "CREATE TRIGGER trg_tracks_insert_counts AFTER INSERT ON tracks BEGIN UPDATE albums SET track_count = track_count + 1 WHERE id = NEW.album_id; UPDATE artists SET track_count = track_count + 1 WHERE id = ( SELECT artist_id FROM albums WHERE id = NEW.album_id ); INSERT INTO fts_search(rowid, title, album, artist) SELECT NEW.id, NEW.title, al.title, ar.name FROM albums al JOIN artists ar ON al.artist_id = ar.id WHERE al.id = NEW.album_id; END"
+     ],
+     [
+      "trigger",
+      "trg_tracks_update_counts",
+      "tracks",
+      "CREATE TRIGGER trg_tracks_update_counts AFTER UPDATE OF album_id ON tracks BEGIN UPDATE albums SET track_count = track_count - 1 WHERE id = OLD.album_id; UPDATE artists SET track_count = track_count - 1 WHERE id = ( SELECT artist_id FROM albums WHERE id = OLD.album_id ); UPDATE albums SET track_count = track_count + 1 WHERE id = NEW.album_id; UPDATE artists SET track_count = track_count + 1 WHERE id = ( SELECT artist_id FROM albums WHERE id = NEW.album_id ); END"
+     ],
+     [
+      "trigger",
+      "trg_tracks_update_fts",
+      "tracks",
+      "CREATE TRIGGER trg_tracks_update_fts AFTER UPDATE ON tracks BEGIN UPDATE fts_search SET title = NEW.title, album = (SELECT title FROM albums WHERE id = NEW.album_id), artist = ( SELECT ar.name FROM artists ar JOIN albums al ON al.artist_id = ar.id WHERE al.id = NEW.album_id ) WHERE rowid = NEW.id; END"
+     ]
+    ],
+    "tables": {
+     "albums": {
+      "columns": [
+       "rowid",
+       "id",
+       "artist_id",
+       "title",
+       "year",
+       "genre",
+       "genre_bucket",
+       "track_count"
+      ],
+      "rows": []
+     },
+     "artist_ai_research": {
+      "columns": [
+       "rowid",
+       "artist_name",
+       "payload",
+       "state",
+       "created_at"
+      ],
+      "rows": []
+     },
+     "artist_alias_rejections": {
+      "columns": [
+       "rowid",
+       "a",
+       "b"
+      ],
+      "rows": []
+     },
+     "artist_aliases": {
+      "columns": [
+       "rowid",
+       "alias",
+       "canonical",
+       "enrichment",
+       "created_at"
+      ],
+      "rows": []
+     },
+     "artist_enrichment": {
+      "columns": [
+       "rowid",
+       "artist_name",
+       "mbid",
+       "country",
+       "area",
+       "genres",
+       "source",
+       "score",
+       "status",
+       "fetched_at",
+       "provenance",
+       "attempts"
+      ],
+      "rows": []
+     },
+     "artist_releases": {
+      "columns": [
+       "rowid",
+       "artist_name",
+       "source",
+       "source_id",
+       "releases",
+       "fetched_at"
+      ],
+      "rows": []
+     },
+     "artists": {
+      "columns": [
+       "rowid",
+       "id",
+       "name",
+       "album_count",
+       "track_count"
+      ],
+      "rows": []
+     },
+     "fts_search": {
+      "columns": [
+       "rowid",
+       "title",
+       "album",
+       "artist"
+      ],
+      "rows": []
+     },
+     "genre_affinity": {
+      "columns": [
+       "rowid",
+       "id",
+       "model",
+       "updated_at"
+      ],
+      "rows": []
+     },
+     "metadata_audit_dismissed": {
+      "columns": [
+       "rowid",
+       "artist_name",
+       "rule",
+       "value"
+      ],
+      "rows": []
+     },
+     "play_counts": {
+      "columns": [
+       "rowid",
+       "track_path",
+       "count",
+       "last_played",
+       "bpm",
+       "energy",
+       "brightness",
+       "pca_coords",
+       "timbre",
+       "features_version",
+       "rolloff",
+       "beat_strength",
+       "spectral_flatness",
+       "spectral_contrast",
+       "key_index"
+      ],
+      "rows": []
+     },
+     "playback_history": {
+      "columns": [
+       "rowid",
+       "track_path",
+       "played_at",
+       "event",
+       "seed_path",
+       "listened_s"
+      ],
+      "rows": []
+     },
+     "playlist_tracks": {
+      "columns": [
+       "rowid",
+       "id",
+       "playlist_id",
+       "track_path",
+       "order_index"
+      ],
+      "rows": []
+     },
+     "playlists": {
+      "columns": [
+       "rowid",
+       "id",
+       "name",
+       "created",
+       "color"
+      ],
+      "rows": []
+     },
+     "release_sync_log": {
+      "columns": [
+       "rowid",
+       "id",
+       "sync_date",
+       "started_at",
+       "finished_at",
+       "artists_checked",
+       "new_found",
+       "trigger_type",
+       "status"
+      ],
+      "rows": []
+     },
+     "sqlite_sequence": {
+      "columns": [
+       "rowid",
+       "name",
+       "seq"
+      ],
+      "rows": []
+     },
+     "track_neighbors": {
+      "columns": [
+       "rowid",
+       "track_path",
+       "neighbor_path",
+       "weight",
+       "edge_kind"
+      ],
+      "rows": []
+     },
+     "track_partitions": {
+      "columns": [
+       "rowid",
+       "track_path",
+       "mood",
+       "islet_id"
+      ],
+      "rows": []
+     },
+     "tracks": {
+      "columns": [
+       "rowid",
+       "id",
+       "album_id",
+       "title",
+       "track_num",
+       "duration",
+       "path",
+       "format",
+       "added_date",
+       "bitrate",
+       "bpm",
+       "energy",
+       "brightness",
+       "artist_tag"
+      ],
+      "rows": []
+     }
+    }
+   }
+  },
+  {
+   "name": "fresh_reopened",
+   "sql": [],
+   "opens": 2,
+   "result": {
+    "user_version": 2,
+    "master": [
+     [
+      "index",
+      "idx_albums_artist_id",
+      "albums",
+      "CREATE INDEX idx_albums_artist_id ON albums(artist_id)"
+     ],
+     [
+      "index",
+      "idx_albums_title",
+      "albums",
+      "CREATE INDEX idx_albums_title ON albums(title COLLATE NOCASE)"
+     ],
+     [
+      "index",
+      "idx_history_listen_uniq",
+      "playback_history",
+      "CREATE UNIQUE INDEX idx_history_listen_uniq ON playback_history(track_path, played_at, event) WHERE event IN ('completed', 'skipped_early')"
+     ],
+     [
+      "index",
+      "idx_history_recent",
+      "playback_history",
+      "CREATE INDEX idx_history_recent ON playback_history(played_at DESC)"
+     ],
+     [
+      "index",
+      "idx_history_track",
+      "playback_history",
+      "CREATE INDEX idx_history_track ON playback_history(track_path, event)"
+     ],
+     [
+      "index",
+      "idx_neighbors_track",
+      "track_neighbors",
+      "CREATE INDEX idx_neighbors_track ON track_neighbors(track_path, edge_kind, weight DESC)"
+     ],
+     [
+      "index",
+      "idx_pt_playlist_id",
+      "playlist_tracks",
+      "CREATE INDEX idx_pt_playlist_id ON playlist_tracks(playlist_id, order_index)"
+     ],
+     [
+      "index",
+      "idx_release_sync_log_date",
+      "release_sync_log",
+      "CREATE INDEX idx_release_sync_log_date ON release_sync_log (sync_date, status)"
+     ],
+     [
+      "index",
+      "idx_tp_islet_id",
+      "track_partitions",
+      "CREATE INDEX idx_tp_islet_id ON track_partitions(islet_id)"
+     ],
+     [
+      "index",
+      "idx_tp_mood",
+      "track_partitions",
+      "CREATE INDEX idx_tp_mood ON track_partitions(mood)"
+     ],
+     [
+      "index",
+      "idx_tracks_added_date",
+      "tracks",
+      "CREATE INDEX idx_tracks_added_date ON tracks(added_date)"
+     ],
+     [
+      "index",
+      "idx_tracks_album_id",
+      "tracks",
+      "CREATE INDEX idx_tracks_album_id ON tracks(album_id)"
+     ],
+     [
+      "index",
+      "idx_tracks_title",
+      "tracks",
+      "CREATE INDEX idx_tracks_title ON tracks(title COLLATE NOCASE)"
+     ],
+     [
+      "index",
+      "sqlite_autoindex_albums_1",
+      "albums",
+      null
+     ],
+     [
+      "index",
+      "sqlite_autoindex_artist_ai_research_1",
+      "artist_ai_research",
+      null
+     ],
+     [
+      "index",
+      "sqlite_autoindex_artist_alias_rejections_1",
+      "artist_alias_rejections",
+      null
+     ],
+     [
+      "index",
+      "sqlite_autoindex_artist_aliases_1",
+      "artist_aliases",
+      null
+     ],
+     [
+      "index",
+      "sqlite_autoindex_artist_enrichment_1",
+      "artist_enrichment",
+      null
+     ],
+     [
+      "index",
+      "sqlite_autoindex_artist_releases_1",
+      "artist_releases",
+      null
+     ],
+     [
+      "index",
+      "sqlite_autoindex_artists_1",
+      "artists",
+      null
+     ],
+     [
+      "index",
+      "sqlite_autoindex_metadata_audit_dismissed_1",
+      "metadata_audit_dismissed",
+      null
+     ],
+     [
+      "index",
+      "sqlite_autoindex_play_counts_1",
+      "play_counts",
+      null
+     ],
+     [
+      "index",
+      "sqlite_autoindex_playlist_tracks_1",
+      "playlist_tracks",
+      null
+     ],
+     [
+      "index",
+      "sqlite_autoindex_playlists_1",
+      "playlists",
+      null
+     ],
+     [
+      "index",
+      "sqlite_autoindex_track_neighbors_1",
+      "track_neighbors",
+      null
+     ],
+     [
+      "index",
+      "sqlite_autoindex_track_partitions_1",
+      "track_partitions",
+      null
+     ],
+     [
+      "index",
+      "sqlite_autoindex_tracks_1",
+      "tracks",
+      null
+     ],
+     [
+      "table",
+      "albums",
+      "albums",
+      "CREATE TABLE albums ( id INTEGER PRIMARY KEY AUTOINCREMENT, artist_id INTEGER NOT NULL, title TEXT NOT NULL COLLATE NOCASE, year TEXT, genre TEXT, genre_bucket TEXT, track_count INTEGER DEFAULT 0, FOREIGN KEY (artist_id) REFERENCES artists(id) ON DELETE CASCADE, UNIQUE (artist_id, title) )"
+     ],
+     [
+      "table",
+      "artist_ai_research",
+      "artist_ai_research",
+      "CREATE TABLE artist_ai_research ( artist_name TEXT PRIMARY KEY COLLATE NOCASE, payload TEXT NOT NULL, -- JSON, see metadata_ai.research_artist state TEXT NOT NULL DEFAULT 'pending', created_at REAL NOT NULL )"
+     ],
+     [
+      "table",
+      "artist_alias_rejections",
+      "artist_alias_rejections",
+      "CREATE TABLE artist_alias_rejections ( a TEXT NOT NULL, b TEXT NOT NULL, -- casefolded, a < b PRIMARY KEY (a, b) )"
+     ],
+     [
+      "table",
+      "artist_aliases",
+      "artist_aliases",
+      "CREATE TABLE artist_aliases ( alias TEXT PRIMARY KEY COLLATE NOCASE, canonical TEXT NOT NULL COLLATE NOCASE, enrichment TEXT, -- JSON snapshot of the alias's artist_enrichment row created_at REAL NOT NULL )"
+     ],
+     [
+      "table",
+      "artist_enrichment",
+      "artist_enrichment",
+      "CREATE TABLE artist_enrichment ( artist_name TEXT PRIMARY KEY COLLATE NOCASE, mbid TEXT, country TEXT, area TEXT, genres TEXT, -- JSON: [{\"name\": str, \"count\": int}, ...] source TEXT, -- e.g. 'musicbrainz' score INTEGER, -- match confidence (0-100) from the search status TEXT, -- 'ok' | 'lowconfidence' | 'notfound' | 'retry' | 'error' fetched_at REAL , provenance TEXT, attempts INTEGER DEFAULT 0)"
+     ],
+     [
+      "table",
+      "artist_releases",
+      "artist_releases",
+      "CREATE TABLE artist_releases ( artist_name TEXT PRIMARY KEY COLLATE NOCASE, source TEXT NOT NULL, source_id TEXT, releases TEXT NOT NULL, fetched_at REAL NOT NULL )"
+     ],
+     [
+      "table",
+      "artists",
+      "artists",
+      "CREATE TABLE artists ( id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE COLLATE NOCASE NOT NULL, album_count INTEGER DEFAULT 0, track_count INTEGER DEFAULT 0 )"
+     ],
+     [
+      "table",
+      "fts_search",
+      "fts_search",
+      "CREATE VIRTUAL TABLE fts_search USING fts5( title, album, artist, tokenize='unicode61' )"
+     ],
+     [
+      "table",
+      "fts_search_config",
+      "fts_search_config",
+      "CREATE TABLE 'fts_search_config'(k PRIMARY KEY, v) WITHOUT ROWID"
+     ],
+     [
+      "table",
+      "fts_search_content",
+      "fts_search_content",
+      "CREATE TABLE 'fts_search_content'(id INTEGER PRIMARY KEY, c0, c1, c2)"
+     ],
+     [
+      "table",
+      "fts_search_data",
+      "fts_search_data",
+      "CREATE TABLE 'fts_search_data'(id INTEGER PRIMARY KEY, block BLOB)"
+     ],
+     [
+      "table",
+      "fts_search_docsize",
+      "fts_search_docsize",
+      "CREATE TABLE 'fts_search_docsize'(id INTEGER PRIMARY KEY, sz BLOB)"
+     ],
+     [
+      "table",
+      "fts_search_idx",
+      "fts_search_idx",
+      "CREATE TABLE 'fts_search_idx'(segid, term, pgno, PRIMARY KEY(segid, term)) WITHOUT ROWID"
+     ],
+     [
+      "table",
+      "genre_affinity",
+      "genre_affinity",
+      "CREATE TABLE genre_affinity ( id INTEGER PRIMARY KEY CHECK (id = 1), model TEXT NOT NULL, -- JSON {\"a|b\": npmi, ...}, a < b updated_at REAL NOT NULL )"
+     ],
+     [
+      "table",
+      "metadata_audit_dismissed",
+      "metadata_audit_dismissed",
+      "CREATE TABLE metadata_audit_dismissed ( artist_name TEXT NOT NULL COLLATE NOCASE, rule TEXT NOT NULL, value TEXT, -- the country the user said was right PRIMARY KEY (artist_name, rule) )"
+     ],
+     [
+      "table",
+      "play_counts",
+      "play_counts",
+      "CREATE TABLE play_counts ( track_path TEXT PRIMARY KEY, count INTEGER DEFAULT 0, last_played INTEGER, bpm REAL DEFAULT 0, energy REAL DEFAULT 0, brightness REAL DEFAULT 0, pca_coords BLOB , timbre BLOB, features_version INTEGER DEFAULT 0, rolloff REAL DEFAULT 0, beat_strength REAL DEFAULT 0, spectral_flatness REAL DEFAULT 0, spectral_contrast REAL DEFAULT 0, key_index INTEGER DEFAULT 0, cluster_id INTEGER)"
+     ],
+     [
+      "table",
+      "playback_history",
+      "playback_history",
+      "CREATE TABLE playback_history ( track_path TEXT NOT NULL, played_at REAL NOT NULL, event TEXT NOT NULL, seed_path TEXT , listened_s REAL)"
+     ],
+     [
+      "table",
+      "playlist_tracks",
+      "playlist_tracks",
+      "CREATE TABLE playlist_tracks ( id INTEGER PRIMARY KEY AUTOINCREMENT, playlist_id INTEGER NOT NULL REFERENCES playlists(id) ON DELETE CASCADE, track_path TEXT NOT NULL, order_index INTEGER NOT NULL DEFAULT 0, UNIQUE (playlist_id, track_path) )"
+     ],
+     [
+      "table",
+      "playlists",
+      "playlists",
+      "CREATE TABLE playlists ( id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE COLLATE NOCASE, created INTEGER DEFAULT (CAST(strftime('%s','now') AS INTEGER)), color TEXT )"
+     ],
+     [
+      "table",
+      "release_sync_log",
+      "release_sync_log",
+      "CREATE TABLE release_sync_log ( id INTEGER PRIMARY KEY AUTOINCREMENT, sync_date TEXT NOT NULL, started_at REAL NOT NULL, finished_at REAL, artists_checked INTEGER DEFAULT 0, new_found INTEGER DEFAULT 0, trigger_type TEXT NOT NULL, status TEXT NOT NULL )"
+     ],
+     [
+      "table",
+      "sqlite_sequence",
+      "sqlite_sequence",
+      "CREATE TABLE sqlite_sequence(name,seq)"
+     ],
+     [
+      "table",
+      "track_neighbors",
+      "track_neighbors",
+      "CREATE TABLE track_neighbors ( track_path TEXT NOT NULL, neighbor_path TEXT NOT NULL, weight REAL NOT NULL, edge_kind TEXT NOT NULL, PRIMARY KEY (track_path, neighbor_path, edge_kind) )"
+     ],
+     [
+      "table",
+      "track_partitions",
+      "track_partitions",
+      "CREATE TABLE track_partitions ( track_path TEXT REFERENCES tracks(path) ON DELETE CASCADE, mood TEXT, islet_id INTEGER, PRIMARY KEY (track_path, mood) )"
+     ],
+     [
+      "table",
+      "tracks",
+      "tracks",
+      "CREATE TABLE tracks ( id INTEGER PRIMARY KEY AUTOINCREMENT, album_id INTEGER NOT NULL, title TEXT, track_num INTEGER, duration REAL, path TEXT UNIQUE NOT NULL, format TEXT, added_date REAL, bitrate INTEGER, bpm REAL DEFAULT 0, energy REAL DEFAULT 0, brightness REAL DEFAULT 0, artist_tag TEXT, -- the file's artist tag when an alias redirected it FOREIGN KEY (album_id) REFERENCES albums(id) ON DELETE CASCADE )"
+     ],
+     [
+      "trigger",
+      "trg_albums_artist_update_counts",
+      "albums",
+      "CREATE TRIGGER trg_albums_artist_update_counts AFTER UPDATE OF artist_id ON albums BEGIN UPDATE artists SET album_count = album_count - 1, track_count = track_count - (SELECT COUNT(*) FROM tracks WHERE album_id = OLD.id) WHERE id = OLD.artist_id; UPDATE artists SET album_count = album_count + 1, track_count = track_count + (SELECT COUNT(*) FROM tracks WHERE album_id = NEW.id) WHERE id = NEW.artist_id; END"
+     ],
+     [
+      "trigger",
+      "trg_albums_artist_update_fts",
+      "albums",
+      "CREATE TRIGGER trg_albums_artist_update_fts AFTER UPDATE OF artist_id ON albums BEGIN UPDATE fts_search SET artist = (SELECT name FROM artists WHERE id = NEW.artist_id) WHERE rowid IN (SELECT id FROM tracks WHERE album_id = NEW.id); END"
+     ],
+     [
+      "trigger",
+      "trg_albums_delete_counts",
+      "albums",
+      "CREATE TRIGGER trg_albums_delete_counts AFTER DELETE ON albums BEGIN UPDATE artists SET album_count = album_count - 1 WHERE id = OLD.artist_id; END"
+     ],
+     [
+      "trigger",
+      "trg_albums_insert_counts",
+      "albums",
+      "CREATE TRIGGER trg_albums_insert_counts AFTER INSERT ON albums BEGIN UPDATE artists SET album_count = album_count + 1 WHERE id = NEW.artist_id; END"
+     ],
+     [
+      "trigger",
+      "trg_albums_update_fts",
+      "albums",
+      "CREATE TRIGGER trg_albums_update_fts AFTER UPDATE OF title ON albums BEGIN UPDATE fts_search SET album = NEW.title WHERE rowid IN ( SELECT id FROM tracks WHERE album_id = NEW.id ); END"
+     ],
+     [
+      "trigger",
+      "trg_artists_update_fts",
+      "artists",
+      "CREATE TRIGGER trg_artists_update_fts AFTER UPDATE OF name ON artists BEGIN UPDATE fts_search SET artist = NEW.name WHERE rowid IN ( SELECT t.id FROM tracks t JOIN albums al ON t.album_id = al.id WHERE al.artist_id = NEW.id ); END"
+     ],
+     [
+      "trigger",
+      "trg_tracks_delete_counts",
+      "tracks",
+      "CREATE TRIGGER trg_tracks_delete_counts AFTER DELETE ON tracks BEGIN UPDATE albums SET track_count = track_count - 1 WHERE id = OLD.album_id; UPDATE artists SET track_count = track_count - 1 WHERE id = ( SELECT artist_id FROM albums WHERE id = OLD.album_id ); DELETE FROM fts_search WHERE rowid = OLD.id; END"
+     ],
+     [
+      "trigger",
+      "trg_tracks_insert_counts",
+      "tracks",
+      "CREATE TRIGGER trg_tracks_insert_counts AFTER INSERT ON tracks BEGIN UPDATE albums SET track_count = track_count + 1 WHERE id = NEW.album_id; UPDATE artists SET track_count = track_count + 1 WHERE id = ( SELECT artist_id FROM albums WHERE id = NEW.album_id ); INSERT INTO fts_search(rowid, title, album, artist) SELECT NEW.id, NEW.title, al.title, ar.name FROM albums al JOIN artists ar ON al.artist_id = ar.id WHERE al.id = NEW.album_id; END"
+     ],
+     [
+      "trigger",
+      "trg_tracks_update_counts",
+      "tracks",
+      "CREATE TRIGGER trg_tracks_update_counts AFTER UPDATE OF album_id ON tracks BEGIN UPDATE albums SET track_count = track_count - 1 WHERE id = OLD.album_id; UPDATE artists SET track_count = track_count - 1 WHERE id = ( SELECT artist_id FROM albums WHERE id = OLD.album_id ); UPDATE albums SET track_count = track_count + 1 WHERE id = NEW.album_id; UPDATE artists SET track_count = track_count + 1 WHERE id = ( SELECT artist_id FROM albums WHERE id = NEW.album_id ); END"
+     ],
+     [
+      "trigger",
+      "trg_tracks_update_fts",
+      "tracks",
+      "CREATE TRIGGER trg_tracks_update_fts AFTER UPDATE ON tracks BEGIN UPDATE fts_search SET title = NEW.title, album = (SELECT title FROM albums WHERE id = NEW.album_id), artist = ( SELECT ar.name FROM artists ar JOIN albums al ON al.artist_id = ar.id WHERE al.id = NEW.album_id ) WHERE rowid = NEW.id; END"
+     ]
+    ],
+    "tables": {
+     "albums": {
+      "columns": [
+       "rowid",
+       "id",
+       "artist_id",
+       "title",
+       "year",
+       "genre",
+       "genre_bucket",
+       "track_count"
+      ],
+      "rows": []
+     },
+     "artist_ai_research": {
+      "columns": [
+       "rowid",
+       "artist_name",
+       "payload",
+       "state",
+       "created_at"
+      ],
+      "rows": []
+     },
+     "artist_alias_rejections": {
+      "columns": [
+       "rowid",
+       "a",
+       "b"
+      ],
+      "rows": []
+     },
+     "artist_aliases": {
+      "columns": [
+       "rowid",
+       "alias",
+       "canonical",
+       "enrichment",
+       "created_at"
+      ],
+      "rows": []
+     },
+     "artist_enrichment": {
+      "columns": [
+       "rowid",
+       "artist_name",
+       "mbid",
+       "country",
+       "area",
+       "genres",
+       "source",
+       "score",
+       "status",
+       "fetched_at",
+       "provenance",
+       "attempts"
+      ],
+      "rows": []
+     },
+     "artist_releases": {
+      "columns": [
+       "rowid",
+       "artist_name",
+       "source",
+       "source_id",
+       "releases",
+       "fetched_at"
+      ],
+      "rows": []
+     },
+     "artists": {
+      "columns": [
+       "rowid",
+       "id",
+       "name",
+       "album_count",
+       "track_count"
+      ],
+      "rows": []
+     },
+     "fts_search": {
+      "columns": [
+       "rowid",
+       "title",
+       "album",
+       "artist"
+      ],
+      "rows": []
+     },
+     "genre_affinity": {
+      "columns": [
+       "rowid",
+       "id",
+       "model",
+       "updated_at"
+      ],
+      "rows": []
+     },
+     "metadata_audit_dismissed": {
+      "columns": [
+       "rowid",
+       "artist_name",
+       "rule",
+       "value"
+      ],
+      "rows": []
+     },
+     "play_counts": {
+      "columns": [
+       "rowid",
+       "track_path",
+       "count",
+       "last_played",
+       "bpm",
+       "energy",
+       "brightness",
+       "pca_coords",
+       "timbre",
+       "features_version",
+       "rolloff",
+       "beat_strength",
+       "spectral_flatness",
+       "spectral_contrast",
+       "key_index",
+       "cluster_id"
+      ],
+      "rows": []
+     },
+     "playback_history": {
+      "columns": [
+       "rowid",
+       "track_path",
+       "played_at",
+       "event",
+       "seed_path",
+       "listened_s"
+      ],
+      "rows": []
+     },
+     "playlist_tracks": {
+      "columns": [
+       "rowid",
+       "id",
+       "playlist_id",
+       "track_path",
+       "order_index"
+      ],
+      "rows": []
+     },
+     "playlists": {
+      "columns": [
+       "rowid",
+       "id",
+       "name",
+       "created",
+       "color"
+      ],
+      "rows": []
+     },
+     "release_sync_log": {
+      "columns": [
+       "rowid",
+       "id",
+       "sync_date",
+       "started_at",
+       "finished_at",
+       "artists_checked",
+       "new_found",
+       "trigger_type",
+       "status"
+      ],
+      "rows": []
+     },
+     "sqlite_sequence": {
+      "columns": [
+       "rowid",
+       "name",
+       "seq"
+      ],
+      "rows": []
+     },
+     "track_neighbors": {
+      "columns": [
+       "rowid",
+       "track_path",
+       "neighbor_path",
+       "weight",
+       "edge_kind"
+      ],
+      "rows": []
+     },
+     "track_partitions": {
+      "columns": [
+       "rowid",
+       "track_path",
+       "mood",
+       "islet_id"
+      ],
+      "rows": []
+     },
+     "tracks": {
+      "columns": [
+       "rowid",
+       "id",
+       "album_id",
+       "title",
+       "track_num",
+       "duration",
+       "path",
+       "format",
+       "added_date",
+       "bitrate",
+       "bpm",
+       "energy",
+       "brightness",
+       "artist_tag"
+      ],
+      "rows": []
+     }
+    }
+   }
+  },
+  {
+   "name": "legacy_old",
+   "sql": [
+    "CREATE TABLE artists (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE COLLATE NOCASE NOT NULL, album_count INTEGER DEFAULT 0, track_count INTEGER DEFAULT 0)",
+    "CREATE TABLE albums (id INTEGER PRIMARY KEY AUTOINCREMENT, artist_id INTEGER NOT NULL, title TEXT NOT NULL COLLATE NOCASE, year TEXT, genre TEXT, track_count INTEGER DEFAULT 0, FOREIGN KEY (artist_id) REFERENCES artists(id) ON DELETE CASCADE, UNIQUE (artist_id, title))",
+    "CREATE TABLE tracks (id INTEGER PRIMARY KEY AUTOINCREMENT, album_id INTEGER NOT NULL, title TEXT, track_num INTEGER, duration REAL, path TEXT UNIQUE NOT NULL, format TEXT, added_date REAL, bitrate INTEGER, FOREIGN KEY (album_id) REFERENCES albums(id) ON DELETE CASCADE)",
+    "CREATE TABLE play_counts (track_path TEXT PRIMARY KEY, count INTEGER DEFAULT 0, last_played INTEGER)",
+    "CREATE TABLE playlists (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE COLLATE NOCASE, created INTEGER DEFAULT (CAST(strftime('%s','now') AS INTEGER)))",
+    "CREATE TABLE playback_history (track_path TEXT NOT NULL, played_at REAL NOT NULL, event TEXT NOT NULL, seed_path TEXT)",
+    "CREATE TABLE track_partitions (track_path TEXT PRIMARY KEY REFERENCES tracks(path) ON DELETE CASCADE, mood TEXT, islet_id INTEGER)",
+    "CREATE TABLE mood_feedback (x)",
+    "CREATE TABLE mood_profiles (x)",
+    "CREATE TABLE pca_space (x)",
+    "CREATE TABLE genre_graph (x)",
+    "CREATE TABLE autoplay_hop_rejects (x)",
+    "CREATE TABLE autoplay_hidden (x)",
+    "INSERT INTO artists (name) VALUES ('Björk'), ('Χάρις Αλεξίου')",
+    "INSERT INTO albums (artist_id, title, genre) VALUES (1, 'Post', 'Electronic'), (2, 'Η Αγάπη', 'Laiko')",
+    "INSERT INTO tracks (album_id, title, track_num, duration, path, format, added_date) VALUES (1, 'Army of Me', 1, 234.5, '/m/bjork/01.flac', 'flac', 1700000000.5), (2, 'Τα Κλειδιά', 1, 201.0, '/m/haris/01.mp3', 'mp3', 1700000001)",
+    "INSERT INTO play_counts (track_path, count, last_played) VALUES ('/m/bjork/01.flac', 3, 1700000100)",
+    "INSERT INTO playlists (name, created) VALUES ('Morning', 1700000000)",
+    "INSERT INTO playback_history VALUES ('/m/bjork/01.flac', 1700000050, 'played', NULL), ('/m/bjork/01.flac', 1700000050, 'played', NULL)",
+    "INSERT INTO track_partitions VALUES ('/m/bjork/01.flac', 'calm', 2), ('/m/haris/01.mp3', NULL, 3)",
+    "PRAGMA user_version = 0"
+   ],
+   "opens": 1,
+   "result": {
+    "user_version": 2,
+    "master": [
+     [
+      "index",
+      "idx_albums_artist_id",
+      "albums",
+      "CREATE INDEX idx_albums_artist_id ON albums(artist_id)"
+     ],
+     [
+      "index",
+      "idx_albums_title",
+      "albums",
+      "CREATE INDEX idx_albums_title ON albums(title COLLATE NOCASE)"
+     ],
+     [
+      "index",
+      "idx_history_listen_uniq",
+      "playback_history",
+      "CREATE UNIQUE INDEX idx_history_listen_uniq ON playback_history(track_path, played_at, event) WHERE event IN ('completed', 'skipped_early')"
+     ],
+     [
+      "index",
+      "idx_history_recent",
+      "playback_history",
+      "CREATE INDEX idx_history_recent ON playback_history(played_at DESC)"
+     ],
+     [
+      "index",
+      "idx_history_track",
+      "playback_history",
+      "CREATE INDEX idx_history_track ON playback_history(track_path, event)"
+     ],
+     [
+      "index",
+      "idx_neighbors_track",
+      "track_neighbors",
+      "CREATE INDEX idx_neighbors_track ON track_neighbors(track_path, edge_kind, weight DESC)"
+     ],
+     [
+      "index",
+      "idx_pt_playlist_id",
+      "playlist_tracks",
+      "CREATE INDEX idx_pt_playlist_id ON playlist_tracks(playlist_id, order_index)"
+     ],
+     [
+      "index",
+      "idx_release_sync_log_date",
+      "release_sync_log",
+      "CREATE INDEX idx_release_sync_log_date ON release_sync_log (sync_date, status)"
+     ],
+     [
+      "index",
+      "idx_tp_islet_id",
+      "track_partitions",
+      "CREATE INDEX idx_tp_islet_id ON track_partitions(islet_id)"
+     ],
+     [
+      "index",
+      "idx_tp_mood",
+      "track_partitions",
+      "CREATE INDEX idx_tp_mood ON track_partitions(mood)"
+     ],
+     [
+      "index",
+      "idx_tracks_added_date",
+      "tracks",
+      "CREATE INDEX idx_tracks_added_date ON tracks(added_date)"
+     ],
+     [
+      "index",
+      "idx_tracks_album_id",
+      "tracks",
+      "CREATE INDEX idx_tracks_album_id ON tracks(album_id)"
+     ],
+     [
+      "index",
+      "idx_tracks_title",
+      "tracks",
+      "CREATE INDEX idx_tracks_title ON tracks(title COLLATE NOCASE)"
+     ],
+     [
+      "index",
+      "sqlite_autoindex_albums_1",
+      "albums",
+      null
+     ],
+     [
+      "index",
+      "sqlite_autoindex_artist_ai_research_1",
+      "artist_ai_research",
+      null
+     ],
+     [
+      "index",
+      "sqlite_autoindex_artist_alias_rejections_1",
+      "artist_alias_rejections",
+      null
+     ],
+     [
+      "index",
+      "sqlite_autoindex_artist_aliases_1",
+      "artist_aliases",
+      null
+     ],
+     [
+      "index",
+      "sqlite_autoindex_artist_enrichment_1",
+      "artist_enrichment",
+      null
+     ],
+     [
+      "index",
+      "sqlite_autoindex_artist_releases_1",
+      "artist_releases",
+      null
+     ],
+     [
+      "index",
+      "sqlite_autoindex_artists_1",
+      "artists",
+      null
+     ],
+     [
+      "index",
+      "sqlite_autoindex_metadata_audit_dismissed_1",
+      "metadata_audit_dismissed",
+      null
+     ],
+     [
+      "index",
+      "sqlite_autoindex_play_counts_1",
+      "play_counts",
+      null
+     ],
+     [
+      "index",
+      "sqlite_autoindex_playlist_tracks_1",
+      "playlist_tracks",
+      null
+     ],
+     [
+      "index",
+      "sqlite_autoindex_playlists_1",
+      "playlists",
+      null
+     ],
+     [
+      "index",
+      "sqlite_autoindex_track_neighbors_1",
+      "track_neighbors",
+      null
+     ],
+     [
+      "index",
+      "sqlite_autoindex_track_partitions_1",
+      "track_partitions",
+      null
+     ],
+     [
+      "index",
+      "sqlite_autoindex_tracks_1",
+      "tracks",
+      null
+     ],
+     [
+      "table",
+      "albums",
+      "albums",
+      "CREATE TABLE albums (id INTEGER PRIMARY KEY AUTOINCREMENT, artist_id INTEGER NOT NULL, title TEXT NOT NULL COLLATE NOCASE, year TEXT, genre TEXT, track_count INTEGER DEFAULT 0, genre_bucket TEXT, FOREIGN KEY (artist_id) REFERENCES artists(id) ON DELETE CASCADE, UNIQUE (artist_id, title))"
+     ],
+     [
+      "table",
+      "artist_ai_research",
+      "artist_ai_research",
+      "CREATE TABLE artist_ai_research ( artist_name TEXT PRIMARY KEY COLLATE NOCASE, payload TEXT NOT NULL, -- JSON, see metadata_ai.research_artist state TEXT NOT NULL DEFAULT 'pending', created_at REAL NOT NULL )"
+     ],
+     [
+      "table",
+      "artist_alias_rejections",
+      "artist_alias_rejections",
+      "CREATE TABLE artist_alias_rejections ( a TEXT NOT NULL, b TEXT NOT NULL, -- casefolded, a < b PRIMARY KEY (a, b) )"
+     ],
+     [
+      "table",
+      "artist_aliases",
+      "artist_aliases",
+      "CREATE TABLE artist_aliases ( alias TEXT PRIMARY KEY COLLATE NOCASE, canonical TEXT NOT NULL COLLATE NOCASE, enrichment TEXT, -- JSON snapshot of the alias's artist_enrichment row created_at REAL NOT NULL )"
+     ],
+     [
+      "table",
+      "artist_enrichment",
+      "artist_enrichment",
+      "CREATE TABLE artist_enrichment ( artist_name TEXT PRIMARY KEY COLLATE NOCASE, mbid TEXT, country TEXT, area TEXT, genres TEXT, -- JSON: [{\"name\": str, \"count\": int}, ...] source TEXT, -- e.g. 'musicbrainz' score INTEGER, -- match confidence (0-100) from the search status TEXT, -- 'ok' | 'lowconfidence' | 'notfound' | 'retry' | 'error' fetched_at REAL , provenance TEXT, attempts INTEGER DEFAULT 0)"
+     ],
+     [
+      "table",
+      "artist_releases",
+      "artist_releases",
+      "CREATE TABLE artist_releases ( artist_name TEXT PRIMARY KEY COLLATE NOCASE, source TEXT NOT NULL, source_id TEXT, releases TEXT NOT NULL, fetched_at REAL NOT NULL )"
+     ],
+     [
+      "table",
+      "artists",
+      "artists",
+      "CREATE TABLE artists (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE COLLATE NOCASE NOT NULL, album_count INTEGER DEFAULT 0, track_count INTEGER DEFAULT 0)"
+     ],
+     [
+      "table",
+      "fts_search",
+      "fts_search",
+      "CREATE VIRTUAL TABLE fts_search USING fts5( title, album, artist, tokenize='unicode61' )"
+     ],
+     [
+      "table",
+      "fts_search_config",
+      "fts_search_config",
+      "CREATE TABLE 'fts_search_config'(k PRIMARY KEY, v) WITHOUT ROWID"
+     ],
+     [
+      "table",
+      "fts_search_content",
+      "fts_search_content",
+      "CREATE TABLE 'fts_search_content'(id INTEGER PRIMARY KEY, c0, c1, c2)"
+     ],
+     [
+      "table",
+      "fts_search_data",
+      "fts_search_data",
+      "CREATE TABLE 'fts_search_data'(id INTEGER PRIMARY KEY, block BLOB)"
+     ],
+     [
+      "table",
+      "fts_search_docsize",
+      "fts_search_docsize",
+      "CREATE TABLE 'fts_search_docsize'(id INTEGER PRIMARY KEY, sz BLOB)"
+     ],
+     [
+      "table",
+      "fts_search_idx",
+      "fts_search_idx",
+      "CREATE TABLE 'fts_search_idx'(segid, term, pgno, PRIMARY KEY(segid, term)) WITHOUT ROWID"
+     ],
+     [
+      "table",
+      "genre_affinity",
+      "genre_affinity",
+      "CREATE TABLE genre_affinity ( id INTEGER PRIMARY KEY CHECK (id = 1), model TEXT NOT NULL, -- JSON {\"a|b\": npmi, ...}, a < b updated_at REAL NOT NULL )"
+     ],
+     [
+      "table",
+      "metadata_audit_dismissed",
+      "metadata_audit_dismissed",
+      "CREATE TABLE metadata_audit_dismissed ( artist_name TEXT NOT NULL COLLATE NOCASE, rule TEXT NOT NULL, value TEXT, -- the country the user said was right PRIMARY KEY (artist_name, rule) )"
+     ],
+     [
+      "table",
+      "play_counts",
+      "play_counts",
+      "CREATE TABLE play_counts (track_path TEXT PRIMARY KEY, count INTEGER DEFAULT 0, last_played INTEGER, pca_coords BLOB, cluster_id INTEGER, bpm REAL DEFAULT 0, energy REAL DEFAULT 0, brightness REAL DEFAULT 0, timbre BLOB, features_version INTEGER DEFAULT 0, rolloff REAL DEFAULT 0, beat_strength REAL DEFAULT 0, spectral_flatness REAL DEFAULT 0, spectral_contrast REAL DEFAULT 0, key_index INTEGER DEFAULT 0)"
+     ],
+     [
+      "table",
+      "playback_history",
+      "playback_history",
+      "CREATE TABLE playback_history (track_path TEXT NOT NULL, played_at REAL NOT NULL, event TEXT NOT NULL, seed_path TEXT, listened_s REAL)"
+     ],
+     [
+      "table",
+      "playlist_tracks",
+      "playlist_tracks",
+      "CREATE TABLE playlist_tracks ( id INTEGER PRIMARY KEY AUTOINCREMENT, playlist_id INTEGER NOT NULL REFERENCES playlists(id) ON DELETE CASCADE, track_path TEXT NOT NULL, order_index INTEGER NOT NULL DEFAULT 0, UNIQUE (playlist_id, track_path) )"
+     ],
+     [
+      "table",
+      "playlists",
+      "playlists",
+      "CREATE TABLE playlists (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE COLLATE NOCASE, created INTEGER DEFAULT (CAST(strftime('%s','now') AS INTEGER)), color TEXT)"
+     ],
+     [
+      "table",
+      "release_sync_log",
+      "release_sync_log",
+      "CREATE TABLE release_sync_log ( id INTEGER PRIMARY KEY AUTOINCREMENT, sync_date TEXT NOT NULL, started_at REAL NOT NULL, finished_at REAL, artists_checked INTEGER DEFAULT 0, new_found INTEGER DEFAULT 0, trigger_type TEXT NOT NULL, status TEXT NOT NULL )"
+     ],
+     [
+      "table",
+      "sqlite_sequence",
+      "sqlite_sequence",
+      "CREATE TABLE sqlite_sequence(name,seq)"
+     ],
+     [
+      "table",
+      "track_neighbors",
+      "track_neighbors",
+      "CREATE TABLE track_neighbors ( track_path TEXT NOT NULL, neighbor_path TEXT NOT NULL, weight REAL NOT NULL, edge_kind TEXT NOT NULL, PRIMARY KEY (track_path, neighbor_path, edge_kind) )"
+     ],
+     [
+      "table",
+      "track_partitions",
+      "track_partitions",
+      "CREATE TABLE track_partitions ( track_path TEXT REFERENCES tracks(path) ON DELETE CASCADE, mood TEXT, islet_id INTEGER, PRIMARY KEY (track_path, mood) )"
+     ],
+     [
+      "table",
+      "tracks",
+      "tracks",
+      "CREATE TABLE tracks (id INTEGER PRIMARY KEY AUTOINCREMENT, album_id INTEGER NOT NULL, title TEXT, track_num INTEGER, duration REAL, path TEXT UNIQUE NOT NULL, format TEXT, added_date REAL, bitrate INTEGER, artist_tag TEXT, bpm REAL DEFAULT 0, energy REAL DEFAULT 0, brightness REAL DEFAULT 0, FOREIGN KEY (album_id) REFERENCES albums(id) ON DELETE CASCADE)"
+     ],
+     [
+      "trigger",
+      "trg_albums_artist_update_counts",
+      "albums",
+      "CREATE TRIGGER trg_albums_artist_update_counts AFTER UPDATE OF artist_id ON albums BEGIN UPDATE artists SET album_count = album_count - 1, track_count = track_count - (SELECT COUNT(*) FROM tracks WHERE album_id = OLD.id) WHERE id = OLD.artist_id; UPDATE artists SET album_count = album_count + 1, track_count = track_count + (SELECT COUNT(*) FROM tracks WHERE album_id = NEW.id) WHERE id = NEW.artist_id; END"
+     ],
+     [
+      "trigger",
+      "trg_albums_artist_update_fts",
+      "albums",
+      "CREATE TRIGGER trg_albums_artist_update_fts AFTER UPDATE OF artist_id ON albums BEGIN UPDATE fts_search SET artist = (SELECT name FROM artists WHERE id = NEW.artist_id) WHERE rowid IN (SELECT id FROM tracks WHERE album_id = NEW.id); END"
+     ],
+     [
+      "trigger",
+      "trg_albums_delete_counts",
+      "albums",
+      "CREATE TRIGGER trg_albums_delete_counts AFTER DELETE ON albums BEGIN UPDATE artists SET album_count = album_count - 1 WHERE id = OLD.artist_id; END"
+     ],
+     [
+      "trigger",
+      "trg_albums_insert_counts",
+      "albums",
+      "CREATE TRIGGER trg_albums_insert_counts AFTER INSERT ON albums BEGIN UPDATE artists SET album_count = album_count + 1 WHERE id = NEW.artist_id; END"
+     ],
+     [
+      "trigger",
+      "trg_albums_update_fts",
+      "albums",
+      "CREATE TRIGGER trg_albums_update_fts AFTER UPDATE OF title ON albums BEGIN UPDATE fts_search SET album = NEW.title WHERE rowid IN ( SELECT id FROM tracks WHERE album_id = NEW.id ); END"
+     ],
+     [
+      "trigger",
+      "trg_artists_update_fts",
+      "artists",
+      "CREATE TRIGGER trg_artists_update_fts AFTER UPDATE OF name ON artists BEGIN UPDATE fts_search SET artist = NEW.name WHERE rowid IN ( SELECT t.id FROM tracks t JOIN albums al ON t.album_id = al.id WHERE al.artist_id = NEW.id ); END"
+     ],
+     [
+      "trigger",
+      "trg_tracks_delete_counts",
+      "tracks",
+      "CREATE TRIGGER trg_tracks_delete_counts AFTER DELETE ON tracks BEGIN UPDATE albums SET track_count = track_count - 1 WHERE id = OLD.album_id; UPDATE artists SET track_count = track_count - 1 WHERE id = ( SELECT artist_id FROM albums WHERE id = OLD.album_id ); DELETE FROM fts_search WHERE rowid = OLD.id; END"
+     ],
+     [
+      "trigger",
+      "trg_tracks_insert_counts",
+      "tracks",
+      "CREATE TRIGGER trg_tracks_insert_counts AFTER INSERT ON tracks BEGIN UPDATE albums SET track_count = track_count + 1 WHERE id = NEW.album_id; UPDATE artists SET track_count = track_count + 1 WHERE id = ( SELECT artist_id FROM albums WHERE id = NEW.album_id ); INSERT INTO fts_search(rowid, title, album, artist) SELECT NEW.id, NEW.title, al.title, ar.name FROM albums al JOIN artists ar ON al.artist_id = ar.id WHERE al.id = NEW.album_id; END"
+     ],
+     [
+      "trigger",
+      "trg_tracks_update_counts",
+      "tracks",
+      "CREATE TRIGGER trg_tracks_update_counts AFTER UPDATE OF album_id ON tracks BEGIN UPDATE albums SET track_count = track_count - 1 WHERE id = OLD.album_id; UPDATE artists SET track_count = track_count - 1 WHERE id = ( SELECT artist_id FROM albums WHERE id = OLD.album_id ); UPDATE albums SET track_count = track_count + 1 WHERE id = NEW.album_id; UPDATE artists SET track_count = track_count + 1 WHERE id = ( SELECT artist_id FROM albums WHERE id = NEW.album_id ); END"
+     ],
+     [
+      "trigger",
+      "trg_tracks_update_fts",
+      "tracks",
+      "CREATE TRIGGER trg_tracks_update_fts AFTER UPDATE ON tracks BEGIN UPDATE fts_search SET title = NEW.title, album = (SELECT title FROM albums WHERE id = NEW.album_id), artist = ( SELECT ar.name FROM artists ar JOIN albums al ON al.artist_id = ar.id WHERE al.id = NEW.album_id ) WHERE rowid = NEW.id; END"
+     ]
+    ],
+    "tables": {
+     "albums": {
+      "columns": [
+       "rowid",
+       "id",
+       "artist_id",
+       "title",
+       "year",
+       "genre",
+       "track_count",
+       "genre_bucket"
+      ],
+      "rows": [
+       [
+        1,
+        1,
+        1,
+        "Post",
+        null,
+        "Electronic",
+        0,
+        null
+       ],
+       [
+        2,
+        2,
+        2,
+        "Η Αγάπη",
+        null,
+        "Laiko",
+        0,
+        null
+       ]
+      ]
+     },
+     "artist_ai_research": {
+      "columns": [
+       "rowid",
+       "artist_name",
+       "payload",
+       "state",
+       "created_at"
+      ],
+      "rows": []
+     },
+     "artist_alias_rejections": {
+      "columns": [
+       "rowid",
+       "a",
+       "b"
+      ],
+      "rows": []
+     },
+     "artist_aliases": {
+      "columns": [
+       "rowid",
+       "alias",
+       "canonical",
+       "enrichment",
+       "created_at"
+      ],
+      "rows": []
+     },
+     "artist_enrichment": {
+      "columns": [
+       "rowid",
+       "artist_name",
+       "mbid",
+       "country",
+       "area",
+       "genres",
+       "source",
+       "score",
+       "status",
+       "fetched_at",
+       "provenance",
+       "attempts"
+      ],
+      "rows": []
+     },
+     "artist_releases": {
+      "columns": [
+       "rowid",
+       "artist_name",
+       "source",
+       "source_id",
+       "releases",
+       "fetched_at"
+      ],
+      "rows": []
+     },
+     "artists": {
+      "columns": [
+       "rowid",
+       "id",
+       "name",
+       "album_count",
+       "track_count"
+      ],
+      "rows": [
+       [
+        1,
+        1,
+        "Björk",
+        0,
+        0
+       ],
+       [
+        2,
+        2,
+        "Χάρις Αλεξίου",
+        0,
+        0
+       ]
+      ]
+     },
+     "fts_search": {
+      "columns": [
+       "rowid",
+       "title",
+       "album",
+       "artist"
+      ],
+      "rows": []
+     },
+     "genre_affinity": {
+      "columns": [
+       "rowid",
+       "id",
+       "model",
+       "updated_at"
+      ],
+      "rows": []
+     },
+     "metadata_audit_dismissed": {
+      "columns": [
+       "rowid",
+       "artist_name",
+       "rule",
+       "value"
+      ],
+      "rows": []
+     },
+     "play_counts": {
+      "columns": [
+       "rowid",
+       "track_path",
+       "count",
+       "last_played",
+       "pca_coords",
+       "cluster_id",
+       "bpm",
+       "energy",
+       "brightness",
+       "timbre",
+       "features_version",
+       "rolloff",
+       "beat_strength",
+       "spectral_flatness",
+       "spectral_contrast",
+       "key_index"
+      ],
+      "rows": [
+       [
+        1,
+        "/m/bjork/01.flac",
+        3,
+        1700000100,
+        null,
+        null,
+        {
+         "real": "0.0"
+        },
+        {
+         "real": "0.0"
+        },
+        {
+         "real": "0.0"
+        },
+        null,
+        0,
+        {
+         "real": "0.0"
+        },
+        {
+         "real": "0.0"
+        },
+        {
+         "real": "0.0"
+        },
+        {
+         "real": "0.0"
+        },
+        0
+       ]
+      ]
+     },
+     "playback_history": {
+      "columns": [
+       "rowid",
+       "track_path",
+       "played_at",
+       "event",
+       "seed_path",
+       "listened_s"
+      ],
+      "rows": [
+       [
+        1,
+        "/m/bjork/01.flac",
+        {
+         "real": "1700000050.0"
+        },
+        "played",
+        null,
+        null
+       ],
+       [
+        2,
+        "/m/bjork/01.flac",
+        {
+         "real": "1700000050.0"
+        },
+        "played",
+        null,
+        null
+       ]
+      ]
+     },
+     "playlist_tracks": {
+      "columns": [
+       "rowid",
+       "id",
+       "playlist_id",
+       "track_path",
+       "order_index"
+      ],
+      "rows": []
+     },
+     "playlists": {
+      "columns": [
+       "rowid",
+       "id",
+       "name",
+       "created",
+       "color"
+      ],
+      "rows": [
+       [
+        1,
+        1,
+        "Morning",
+        1700000000,
+        null
+       ]
+      ]
+     },
+     "release_sync_log": {
+      "columns": [
+       "rowid",
+       "id",
+       "sync_date",
+       "started_at",
+       "finished_at",
+       "artists_checked",
+       "new_found",
+       "trigger_type",
+       "status"
+      ],
+      "rows": []
+     },
+     "sqlite_sequence": {
+      "columns": [
+       "rowid",
+       "name",
+       "seq"
+      ],
+      "rows": [
+       [
+        1,
+        "artists",
+        2
+       ],
+       [
+        2,
+        "albums",
+        2
+       ],
+       [
+        3,
+        "tracks",
+        2
+       ],
+       [
+        4,
+        "playlists",
+        1
+       ]
+      ]
+     },
+     "track_neighbors": {
+      "columns": [
+       "rowid",
+       "track_path",
+       "neighbor_path",
+       "weight",
+       "edge_kind"
+      ],
+      "rows": []
+     },
+     "track_partitions": {
+      "columns": [
+       "rowid",
+       "track_path",
+       "mood",
+       "islet_id"
+      ],
+      "rows": [
+       [
+        1,
+        "/m/bjork/01.flac",
+        "calm",
+        2
+       ]
+      ]
+     },
+     "tracks": {
+      "columns": [
+       "rowid",
+       "id",
+       "album_id",
+       "title",
+       "track_num",
+       "duration",
+       "path",
+       "format",
+       "added_date",
+       "bitrate",
+       "artist_tag",
+       "bpm",
+       "energy",
+       "brightness"
+      ],
+      "rows": [
+       [
+        1,
+        1,
+        1,
+        "Army of Me",
+        1,
+        {
+         "real": "234.5"
+        },
+        "/m/bjork/01.flac",
+        "flac",
+        {
+         "real": "1700000000.5"
+        },
+        null,
+        null,
+        {
+         "real": "0.0"
+        },
+        {
+         "real": "0.0"
+        },
+        {
+         "real": "0.0"
+        }
+       ],
+       [
+        2,
+        2,
+        2,
+        "Τα Κλειδιά",
+        1,
+        {
+         "real": "201.0"
+        },
+        "/m/haris/01.mp3",
+        "mp3",
+        {
+         "real": "1700000001.0"
+        },
+        null,
+        null,
+        {
+         "real": "0.0"
+        },
+        {
+         "real": "0.0"
+        },
+        {
+         "real": "0.0"
+        }
+       ]
+      ]
+     }
+    }
+   }
+  },
+  {
+   "name": "legacy_old_reopened",
+   "sql": [
+    "CREATE TABLE artists (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE COLLATE NOCASE NOT NULL, album_count INTEGER DEFAULT 0, track_count INTEGER DEFAULT 0)",
+    "CREATE TABLE albums (id INTEGER PRIMARY KEY AUTOINCREMENT, artist_id INTEGER NOT NULL, title TEXT NOT NULL COLLATE NOCASE, year TEXT, genre TEXT, track_count INTEGER DEFAULT 0, FOREIGN KEY (artist_id) REFERENCES artists(id) ON DELETE CASCADE, UNIQUE (artist_id, title))",
+    "CREATE TABLE tracks (id INTEGER PRIMARY KEY AUTOINCREMENT, album_id INTEGER NOT NULL, title TEXT, track_num INTEGER, duration REAL, path TEXT UNIQUE NOT NULL, format TEXT, added_date REAL, bitrate INTEGER, FOREIGN KEY (album_id) REFERENCES albums(id) ON DELETE CASCADE)",
+    "CREATE TABLE play_counts (track_path TEXT PRIMARY KEY, count INTEGER DEFAULT 0, last_played INTEGER)",
+    "CREATE TABLE playlists (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE COLLATE NOCASE, created INTEGER DEFAULT (CAST(strftime('%s','now') AS INTEGER)))",
+    "CREATE TABLE playback_history (track_path TEXT NOT NULL, played_at REAL NOT NULL, event TEXT NOT NULL, seed_path TEXT)",
+    "CREATE TABLE track_partitions (track_path TEXT PRIMARY KEY REFERENCES tracks(path) ON DELETE CASCADE, mood TEXT, islet_id INTEGER)",
+    "CREATE TABLE mood_feedback (x)",
+    "CREATE TABLE mood_profiles (x)",
+    "CREATE TABLE pca_space (x)",
+    "CREATE TABLE genre_graph (x)",
+    "CREATE TABLE autoplay_hop_rejects (x)",
+    "CREATE TABLE autoplay_hidden (x)",
+    "INSERT INTO artists (name) VALUES ('Björk'), ('Χάρις Αλεξίου')",
+    "INSERT INTO albums (artist_id, title, genre) VALUES (1, 'Post', 'Electronic'), (2, 'Η Αγάπη', 'Laiko')",
+    "INSERT INTO tracks (album_id, title, track_num, duration, path, format, added_date) VALUES (1, 'Army of Me', 1, 234.5, '/m/bjork/01.flac', 'flac', 1700000000.5), (2, 'Τα Κλειδιά', 1, 201.0, '/m/haris/01.mp3', 'mp3', 1700000001)",
+    "INSERT INTO play_counts (track_path, count, last_played) VALUES ('/m/bjork/01.flac', 3, 1700000100)",
+    "INSERT INTO playlists (name, created) VALUES ('Morning', 1700000000)",
+    "INSERT INTO playback_history VALUES ('/m/bjork/01.flac', 1700000050, 'played', NULL), ('/m/bjork/01.flac', 1700000050, 'played', NULL)",
+    "INSERT INTO track_partitions VALUES ('/m/bjork/01.flac', 'calm', 2), ('/m/haris/01.mp3', NULL, 3)",
+    "PRAGMA user_version = 0"
+   ],
+   "opens": 2,
+   "result": {
+    "user_version": 2,
+    "master": [
+     [
+      "index",
+      "idx_albums_artist_id",
+      "albums",
+      "CREATE INDEX idx_albums_artist_id ON albums(artist_id)"
+     ],
+     [
+      "index",
+      "idx_albums_title",
+      "albums",
+      "CREATE INDEX idx_albums_title ON albums(title COLLATE NOCASE)"
+     ],
+     [
+      "index",
+      "idx_history_listen_uniq",
+      "playback_history",
+      "CREATE UNIQUE INDEX idx_history_listen_uniq ON playback_history(track_path, played_at, event) WHERE event IN ('completed', 'skipped_early')"
+     ],
+     [
+      "index",
+      "idx_history_recent",
+      "playback_history",
+      "CREATE INDEX idx_history_recent ON playback_history(played_at DESC)"
+     ],
+     [
+      "index",
+      "idx_history_track",
+      "playback_history",
+      "CREATE INDEX idx_history_track ON playback_history(track_path, event)"
+     ],
+     [
+      "index",
+      "idx_neighbors_track",
+      "track_neighbors",
+      "CREATE INDEX idx_neighbors_track ON track_neighbors(track_path, edge_kind, weight DESC)"
+     ],
+     [
+      "index",
+      "idx_pt_playlist_id",
+      "playlist_tracks",
+      "CREATE INDEX idx_pt_playlist_id ON playlist_tracks(playlist_id, order_index)"
+     ],
+     [
+      "index",
+      "idx_release_sync_log_date",
+      "release_sync_log",
+      "CREATE INDEX idx_release_sync_log_date ON release_sync_log (sync_date, status)"
+     ],
+     [
+      "index",
+      "idx_tp_islet_id",
+      "track_partitions",
+      "CREATE INDEX idx_tp_islet_id ON track_partitions(islet_id)"
+     ],
+     [
+      "index",
+      "idx_tp_mood",
+      "track_partitions",
+      "CREATE INDEX idx_tp_mood ON track_partitions(mood)"
+     ],
+     [
+      "index",
+      "idx_tracks_added_date",
+      "tracks",
+      "CREATE INDEX idx_tracks_added_date ON tracks(added_date)"
+     ],
+     [
+      "index",
+      "idx_tracks_album_id",
+      "tracks",
+      "CREATE INDEX idx_tracks_album_id ON tracks(album_id)"
+     ],
+     [
+      "index",
+      "idx_tracks_title",
+      "tracks",
+      "CREATE INDEX idx_tracks_title ON tracks(title COLLATE NOCASE)"
+     ],
+     [
+      "index",
+      "sqlite_autoindex_albums_1",
+      "albums",
+      null
+     ],
+     [
+      "index",
+      "sqlite_autoindex_artist_ai_research_1",
+      "artist_ai_research",
+      null
+     ],
+     [
+      "index",
+      "sqlite_autoindex_artist_alias_rejections_1",
+      "artist_alias_rejections",
+      null
+     ],
+     [
+      "index",
+      "sqlite_autoindex_artist_aliases_1",
+      "artist_aliases",
+      null
+     ],
+     [
+      "index",
+      "sqlite_autoindex_artist_enrichment_1",
+      "artist_enrichment",
+      null
+     ],
+     [
+      "index",
+      "sqlite_autoindex_artist_releases_1",
+      "artist_releases",
+      null
+     ],
+     [
+      "index",
+      "sqlite_autoindex_artists_1",
+      "artists",
+      null
+     ],
+     [
+      "index",
+      "sqlite_autoindex_metadata_audit_dismissed_1",
+      "metadata_audit_dismissed",
+      null
+     ],
+     [
+      "index",
+      "sqlite_autoindex_play_counts_1",
+      "play_counts",
+      null
+     ],
+     [
+      "index",
+      "sqlite_autoindex_playlist_tracks_1",
+      "playlist_tracks",
+      null
+     ],
+     [
+      "index",
+      "sqlite_autoindex_playlists_1",
+      "playlists",
+      null
+     ],
+     [
+      "index",
+      "sqlite_autoindex_track_neighbors_1",
+      "track_neighbors",
+      null
+     ],
+     [
+      "index",
+      "sqlite_autoindex_track_partitions_1",
+      "track_partitions",
+      null
+     ],
+     [
+      "index",
+      "sqlite_autoindex_tracks_1",
+      "tracks",
+      null
+     ],
+     [
+      "table",
+      "albums",
+      "albums",
+      "CREATE TABLE albums (id INTEGER PRIMARY KEY AUTOINCREMENT, artist_id INTEGER NOT NULL, title TEXT NOT NULL COLLATE NOCASE, year TEXT, genre TEXT, track_count INTEGER DEFAULT 0, genre_bucket TEXT, FOREIGN KEY (artist_id) REFERENCES artists(id) ON DELETE CASCADE, UNIQUE (artist_id, title))"
+     ],
+     [
+      "table",
+      "artist_ai_research",
+      "artist_ai_research",
+      "CREATE TABLE artist_ai_research ( artist_name TEXT PRIMARY KEY COLLATE NOCASE, payload TEXT NOT NULL, -- JSON, see metadata_ai.research_artist state TEXT NOT NULL DEFAULT 'pending', created_at REAL NOT NULL )"
+     ],
+     [
+      "table",
+      "artist_alias_rejections",
+      "artist_alias_rejections",
+      "CREATE TABLE artist_alias_rejections ( a TEXT NOT NULL, b TEXT NOT NULL, -- casefolded, a < b PRIMARY KEY (a, b) )"
+     ],
+     [
+      "table",
+      "artist_aliases",
+      "artist_aliases",
+      "CREATE TABLE artist_aliases ( alias TEXT PRIMARY KEY COLLATE NOCASE, canonical TEXT NOT NULL COLLATE NOCASE, enrichment TEXT, -- JSON snapshot of the alias's artist_enrichment row created_at REAL NOT NULL )"
+     ],
+     [
+      "table",
+      "artist_enrichment",
+      "artist_enrichment",
+      "CREATE TABLE artist_enrichment ( artist_name TEXT PRIMARY KEY COLLATE NOCASE, mbid TEXT, country TEXT, area TEXT, genres TEXT, -- JSON: [{\"name\": str, \"count\": int}, ...] source TEXT, -- e.g. 'musicbrainz' score INTEGER, -- match confidence (0-100) from the search status TEXT, -- 'ok' | 'lowconfidence' | 'notfound' | 'retry' | 'error' fetched_at REAL , provenance TEXT, attempts INTEGER DEFAULT 0)"
+     ],
+     [
+      "table",
+      "artist_releases",
+      "artist_releases",
+      "CREATE TABLE artist_releases ( artist_name TEXT PRIMARY KEY COLLATE NOCASE, source TEXT NOT NULL, source_id TEXT, releases TEXT NOT NULL, fetched_at REAL NOT NULL )"
+     ],
+     [
+      "table",
+      "artists",
+      "artists",
+      "CREATE TABLE artists (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE COLLATE NOCASE NOT NULL, album_count INTEGER DEFAULT 0, track_count INTEGER DEFAULT 0)"
+     ],
+     [
+      "table",
+      "fts_search",
+      "fts_search",
+      "CREATE VIRTUAL TABLE fts_search USING fts5( title, album, artist, tokenize='unicode61' )"
+     ],
+     [
+      "table",
+      "fts_search_config",
+      "fts_search_config",
+      "CREATE TABLE 'fts_search_config'(k PRIMARY KEY, v) WITHOUT ROWID"
+     ],
+     [
+      "table",
+      "fts_search_content",
+      "fts_search_content",
+      "CREATE TABLE 'fts_search_content'(id INTEGER PRIMARY KEY, c0, c1, c2)"
+     ],
+     [
+      "table",
+      "fts_search_data",
+      "fts_search_data",
+      "CREATE TABLE 'fts_search_data'(id INTEGER PRIMARY KEY, block BLOB)"
+     ],
+     [
+      "table",
+      "fts_search_docsize",
+      "fts_search_docsize",
+      "CREATE TABLE 'fts_search_docsize'(id INTEGER PRIMARY KEY, sz BLOB)"
+     ],
+     [
+      "table",
+      "fts_search_idx",
+      "fts_search_idx",
+      "CREATE TABLE 'fts_search_idx'(segid, term, pgno, PRIMARY KEY(segid, term)) WITHOUT ROWID"
+     ],
+     [
+      "table",
+      "genre_affinity",
+      "genre_affinity",
+      "CREATE TABLE genre_affinity ( id INTEGER PRIMARY KEY CHECK (id = 1), model TEXT NOT NULL, -- JSON {\"a|b\": npmi, ...}, a < b updated_at REAL NOT NULL )"
+     ],
+     [
+      "table",
+      "metadata_audit_dismissed",
+      "metadata_audit_dismissed",
+      "CREATE TABLE metadata_audit_dismissed ( artist_name TEXT NOT NULL COLLATE NOCASE, rule TEXT NOT NULL, value TEXT, -- the country the user said was right PRIMARY KEY (artist_name, rule) )"
+     ],
+     [
+      "table",
+      "play_counts",
+      "play_counts",
+      "CREATE TABLE play_counts (track_path TEXT PRIMARY KEY, count INTEGER DEFAULT 0, last_played INTEGER, pca_coords BLOB, cluster_id INTEGER, bpm REAL DEFAULT 0, energy REAL DEFAULT 0, brightness REAL DEFAULT 0, timbre BLOB, features_version INTEGER DEFAULT 0, rolloff REAL DEFAULT 0, beat_strength REAL DEFAULT 0, spectral_flatness REAL DEFAULT 0, spectral_contrast REAL DEFAULT 0, key_index INTEGER DEFAULT 0)"
+     ],
+     [
+      "table",
+      "playback_history",
+      "playback_history",
+      "CREATE TABLE playback_history (track_path TEXT NOT NULL, played_at REAL NOT NULL, event TEXT NOT NULL, seed_path TEXT, listened_s REAL)"
+     ],
+     [
+      "table",
+      "playlist_tracks",
+      "playlist_tracks",
+      "CREATE TABLE playlist_tracks ( id INTEGER PRIMARY KEY AUTOINCREMENT, playlist_id INTEGER NOT NULL REFERENCES playlists(id) ON DELETE CASCADE, track_path TEXT NOT NULL, order_index INTEGER NOT NULL DEFAULT 0, UNIQUE (playlist_id, track_path) )"
+     ],
+     [
+      "table",
+      "playlists",
+      "playlists",
+      "CREATE TABLE playlists (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE COLLATE NOCASE, created INTEGER DEFAULT (CAST(strftime('%s','now') AS INTEGER)), color TEXT)"
+     ],
+     [
+      "table",
+      "release_sync_log",
+      "release_sync_log",
+      "CREATE TABLE release_sync_log ( id INTEGER PRIMARY KEY AUTOINCREMENT, sync_date TEXT NOT NULL, started_at REAL NOT NULL, finished_at REAL, artists_checked INTEGER DEFAULT 0, new_found INTEGER DEFAULT 0, trigger_type TEXT NOT NULL, status TEXT NOT NULL )"
+     ],
+     [
+      "table",
+      "sqlite_sequence",
+      "sqlite_sequence",
+      "CREATE TABLE sqlite_sequence(name,seq)"
+     ],
+     [
+      "table",
+      "track_neighbors",
+      "track_neighbors",
+      "CREATE TABLE track_neighbors ( track_path TEXT NOT NULL, neighbor_path TEXT NOT NULL, weight REAL NOT NULL, edge_kind TEXT NOT NULL, PRIMARY KEY (track_path, neighbor_path, edge_kind) )"
+     ],
+     [
+      "table",
+      "track_partitions",
+      "track_partitions",
+      "CREATE TABLE track_partitions ( track_path TEXT REFERENCES tracks(path) ON DELETE CASCADE, mood TEXT, islet_id INTEGER, PRIMARY KEY (track_path, mood) )"
+     ],
+     [
+      "table",
+      "tracks",
+      "tracks",
+      "CREATE TABLE tracks (id INTEGER PRIMARY KEY AUTOINCREMENT, album_id INTEGER NOT NULL, title TEXT, track_num INTEGER, duration REAL, path TEXT UNIQUE NOT NULL, format TEXT, added_date REAL, bitrate INTEGER, artist_tag TEXT, bpm REAL DEFAULT 0, energy REAL DEFAULT 0, brightness REAL DEFAULT 0, FOREIGN KEY (album_id) REFERENCES albums(id) ON DELETE CASCADE)"
+     ],
+     [
+      "trigger",
+      "trg_albums_artist_update_counts",
+      "albums",
+      "CREATE TRIGGER trg_albums_artist_update_counts AFTER UPDATE OF artist_id ON albums BEGIN UPDATE artists SET album_count = album_count - 1, track_count = track_count - (SELECT COUNT(*) FROM tracks WHERE album_id = OLD.id) WHERE id = OLD.artist_id; UPDATE artists SET album_count = album_count + 1, track_count = track_count + (SELECT COUNT(*) FROM tracks WHERE album_id = NEW.id) WHERE id = NEW.artist_id; END"
+     ],
+     [
+      "trigger",
+      "trg_albums_artist_update_fts",
+      "albums",
+      "CREATE TRIGGER trg_albums_artist_update_fts AFTER UPDATE OF artist_id ON albums BEGIN UPDATE fts_search SET artist = (SELECT name FROM artists WHERE id = NEW.artist_id) WHERE rowid IN (SELECT id FROM tracks WHERE album_id = NEW.id); END"
+     ],
+     [
+      "trigger",
+      "trg_albums_delete_counts",
+      "albums",
+      "CREATE TRIGGER trg_albums_delete_counts AFTER DELETE ON albums BEGIN UPDATE artists SET album_count = album_count - 1 WHERE id = OLD.artist_id; END"
+     ],
+     [
+      "trigger",
+      "trg_albums_insert_counts",
+      "albums",
+      "CREATE TRIGGER trg_albums_insert_counts AFTER INSERT ON albums BEGIN UPDATE artists SET album_count = album_count + 1 WHERE id = NEW.artist_id; END"
+     ],
+     [
+      "trigger",
+      "trg_albums_update_fts",
+      "albums",
+      "CREATE TRIGGER trg_albums_update_fts AFTER UPDATE OF title ON albums BEGIN UPDATE fts_search SET album = NEW.title WHERE rowid IN ( SELECT id FROM tracks WHERE album_id = NEW.id ); END"
+     ],
+     [
+      "trigger",
+      "trg_artists_update_fts",
+      "artists",
+      "CREATE TRIGGER trg_artists_update_fts AFTER UPDATE OF name ON artists BEGIN UPDATE fts_search SET artist = NEW.name WHERE rowid IN ( SELECT t.id FROM tracks t JOIN albums al ON t.album_id = al.id WHERE al.artist_id = NEW.id ); END"
+     ],
+     [
+      "trigger",
+      "trg_tracks_delete_counts",
+      "tracks",
+      "CREATE TRIGGER trg_tracks_delete_counts AFTER DELETE ON tracks BEGIN UPDATE albums SET track_count = track_count - 1 WHERE id = OLD.album_id; UPDATE artists SET track_count = track_count - 1 WHERE id = ( SELECT artist_id FROM albums WHERE id = OLD.album_id ); DELETE FROM fts_search WHERE rowid = OLD.id; END"
+     ],
+     [
+      "trigger",
+      "trg_tracks_insert_counts",
+      "tracks",
+      "CREATE TRIGGER trg_tracks_insert_counts AFTER INSERT ON tracks BEGIN UPDATE albums SET track_count = track_count + 1 WHERE id = NEW.album_id; UPDATE artists SET track_count = track_count + 1 WHERE id = ( SELECT artist_id FROM albums WHERE id = NEW.album_id ); INSERT INTO fts_search(rowid, title, album, artist) SELECT NEW.id, NEW.title, al.title, ar.name FROM albums al JOIN artists ar ON al.artist_id = ar.id WHERE al.id = NEW.album_id; END"
+     ],
+     [
+      "trigger",
+      "trg_tracks_update_counts",
+      "tracks",
+      "CREATE TRIGGER trg_tracks_update_counts AFTER UPDATE OF album_id ON tracks BEGIN UPDATE albums SET track_count = track_count - 1 WHERE id = OLD.album_id; UPDATE artists SET track_count = track_count - 1 WHERE id = ( SELECT artist_id FROM albums WHERE id = OLD.album_id ); UPDATE albums SET track_count = track_count + 1 WHERE id = NEW.album_id; UPDATE artists SET track_count = track_count + 1 WHERE id = ( SELECT artist_id FROM albums WHERE id = NEW.album_id ); END"
+     ],
+     [
+      "trigger",
+      "trg_tracks_update_fts",
+      "tracks",
+      "CREATE TRIGGER trg_tracks_update_fts AFTER UPDATE ON tracks BEGIN UPDATE fts_search SET title = NEW.title, album = (SELECT title FROM albums WHERE id = NEW.album_id), artist = ( SELECT ar.name FROM artists ar JOIN albums al ON al.artist_id = ar.id WHERE al.id = NEW.album_id ) WHERE rowid = NEW.id; END"
+     ]
+    ],
+    "tables": {
+     "albums": {
+      "columns": [
+       "rowid",
+       "id",
+       "artist_id",
+       "title",
+       "year",
+       "genre",
+       "track_count",
+       "genre_bucket"
+      ],
+      "rows": [
+       [
+        1,
+        1,
+        1,
+        "Post",
+        null,
+        "Electronic",
+        0,
+        null
+       ],
+       [
+        2,
+        2,
+        2,
+        "Η Αγάπη",
+        null,
+        "Laiko",
+        0,
+        null
+       ]
+      ]
+     },
+     "artist_ai_research": {
+      "columns": [
+       "rowid",
+       "artist_name",
+       "payload",
+       "state",
+       "created_at"
+      ],
+      "rows": []
+     },
+     "artist_alias_rejections": {
+      "columns": [
+       "rowid",
+       "a",
+       "b"
+      ],
+      "rows": []
+     },
+     "artist_aliases": {
+      "columns": [
+       "rowid",
+       "alias",
+       "canonical",
+       "enrichment",
+       "created_at"
+      ],
+      "rows": []
+     },
+     "artist_enrichment": {
+      "columns": [
+       "rowid",
+       "artist_name",
+       "mbid",
+       "country",
+       "area",
+       "genres",
+       "source",
+       "score",
+       "status",
+       "fetched_at",
+       "provenance",
+       "attempts"
+      ],
+      "rows": []
+     },
+     "artist_releases": {
+      "columns": [
+       "rowid",
+       "artist_name",
+       "source",
+       "source_id",
+       "releases",
+       "fetched_at"
+      ],
+      "rows": []
+     },
+     "artists": {
+      "columns": [
+       "rowid",
+       "id",
+       "name",
+       "album_count",
+       "track_count"
+      ],
+      "rows": [
+       [
+        1,
+        1,
+        "Björk",
+        0,
+        0
+       ],
+       [
+        2,
+        2,
+        "Χάρις Αλεξίου",
+        0,
+        0
+       ]
+      ]
+     },
+     "fts_search": {
+      "columns": [
+       "rowid",
+       "title",
+       "album",
+       "artist"
+      ],
+      "rows": []
+     },
+     "genre_affinity": {
+      "columns": [
+       "rowid",
+       "id",
+       "model",
+       "updated_at"
+      ],
+      "rows": []
+     },
+     "metadata_audit_dismissed": {
+      "columns": [
+       "rowid",
+       "artist_name",
+       "rule",
+       "value"
+      ],
+      "rows": []
+     },
+     "play_counts": {
+      "columns": [
+       "rowid",
+       "track_path",
+       "count",
+       "last_played",
+       "pca_coords",
+       "cluster_id",
+       "bpm",
+       "energy",
+       "brightness",
+       "timbre",
+       "features_version",
+       "rolloff",
+       "beat_strength",
+       "spectral_flatness",
+       "spectral_contrast",
+       "key_index"
+      ],
+      "rows": [
+       [
+        1,
+        "/m/bjork/01.flac",
+        3,
+        1700000100,
+        null,
+        null,
+        {
+         "real": "0.0"
+        },
+        {
+         "real": "0.0"
+        },
+        {
+         "real": "0.0"
+        },
+        null,
+        0,
+        {
+         "real": "0.0"
+        },
+        {
+         "real": "0.0"
+        },
+        {
+         "real": "0.0"
+        },
+        {
+         "real": "0.0"
+        },
+        0
+       ]
+      ]
+     },
+     "playback_history": {
+      "columns": [
+       "rowid",
+       "track_path",
+       "played_at",
+       "event",
+       "seed_path",
+       "listened_s"
+      ],
+      "rows": [
+       [
+        1,
+        "/m/bjork/01.flac",
+        {
+         "real": "1700000050.0"
+        },
+        "played",
+        null,
+        null
+       ],
+       [
+        2,
+        "/m/bjork/01.flac",
+        {
+         "real": "1700000050.0"
+        },
+        "played",
+        null,
+        null
+       ]
+      ]
+     },
+     "playlist_tracks": {
+      "columns": [
+       "rowid",
+       "id",
+       "playlist_id",
+       "track_path",
+       "order_index"
+      ],
+      "rows": []
+     },
+     "playlists": {
+      "columns": [
+       "rowid",
+       "id",
+       "name",
+       "created",
+       "color"
+      ],
+      "rows": [
+       [
+        1,
+        1,
+        "Morning",
+        1700000000,
+        null
+       ]
+      ]
+     },
+     "release_sync_log": {
+      "columns": [
+       "rowid",
+       "id",
+       "sync_date",
+       "started_at",
+       "finished_at",
+       "artists_checked",
+       "new_found",
+       "trigger_type",
+       "status"
+      ],
+      "rows": []
+     },
+     "sqlite_sequence": {
+      "columns": [
+       "rowid",
+       "name",
+       "seq"
+      ],
+      "rows": [
+       [
+        1,
+        "artists",
+        2
+       ],
+       [
+        2,
+        "albums",
+        2
+       ],
+       [
+        3,
+        "tracks",
+        2
+       ],
+       [
+        4,
+        "playlists",
+        1
+       ]
+      ]
+     },
+     "track_neighbors": {
+      "columns": [
+       "rowid",
+       "track_path",
+       "neighbor_path",
+       "weight",
+       "edge_kind"
+      ],
+      "rows": []
+     },
+     "track_partitions": {
+      "columns": [
+       "rowid",
+       "track_path",
+       "mood",
+       "islet_id"
+      ],
+      "rows": [
+       [
+        1,
+        "/m/bjork/01.flac",
+        "calm",
+        2
+       ]
+      ]
+     },
+     "tracks": {
+      "columns": [
+       "rowid",
+       "id",
+       "album_id",
+       "title",
+       "track_num",
+       "duration",
+       "path",
+       "format",
+       "added_date",
+       "bitrate",
+       "artist_tag",
+       "bpm",
+       "energy",
+       "brightness"
+      ],
+      "rows": [
+       [
+        1,
+        1,
+        1,
+        "Army of Me",
+        1,
+        {
+         "real": "234.5"
+        },
+        "/m/bjork/01.flac",
+        "flac",
+        {
+         "real": "1700000000.5"
+        },
+        null,
+        null,
+        {
+         "real": "0.0"
+        },
+        {
+         "real": "0.0"
+        },
+        {
+         "real": "0.0"
+        }
+       ],
+       [
+        2,
+        2,
+        2,
+        "Τα Κλειδιά",
+        1,
+        {
+         "real": "201.0"
+        },
+        "/m/haris/01.mp3",
+        "mp3",
+        {
+         "real": "1700000001.0"
+        },
+        null,
+        null,
+        {
+         "real": "0.0"
+        },
+        {
+         "real": "0.0"
+        },
+        {
+         "real": "0.0"
+        }
+       ]
+      ]
+     }
+    }
+   }
+  },
+  {
+   "name": "legacy_mid",
+   "sql": [
+    "CREATE TABLE artists (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE COLLATE NOCASE NOT NULL, album_count INTEGER DEFAULT 0, track_count INTEGER DEFAULT 0)",
+    "CREATE TABLE albums (id INTEGER PRIMARY KEY AUTOINCREMENT, artist_id INTEGER NOT NULL, title TEXT NOT NULL COLLATE NOCASE, year TEXT, genre TEXT, track_count INTEGER DEFAULT 0, FOREIGN KEY (artist_id) REFERENCES artists(id) ON DELETE CASCADE, UNIQUE (artist_id, title))",
+    "CREATE TABLE tracks (id INTEGER PRIMARY KEY AUTOINCREMENT, album_id INTEGER NOT NULL, title TEXT, track_num INTEGER, duration REAL, path TEXT UNIQUE NOT NULL, format TEXT, added_date REAL, bitrate INTEGER, bpm REAL DEFAULT 0, energy REAL DEFAULT 0, brightness REAL DEFAULT 0, FOREIGN KEY (album_id) REFERENCES albums(id) ON DELETE CASCADE)",
+    "CREATE TABLE play_counts (track_path TEXT PRIMARY KEY, count INTEGER DEFAULT 0, last_played INTEGER, bpm REAL DEFAULT 0, energy REAL DEFAULT 0, brightness REAL DEFAULT 0, pca_coords BLOB, timbre BLOB, features_version INTEGER DEFAULT 0)",
+    "CREATE TABLE feature_cache (track_path TEXT PRIMARY KEY, timbre BLOB, features_version INTEGER)",
+    "CREATE TABLE artist_enrichment (artist_name TEXT PRIMARY KEY COLLATE NOCASE, mbid TEXT, country TEXT, area TEXT, genres TEXT, source TEXT, score INTEGER, status TEXT, fetched_at REAL)",
+    "CREATE TABLE track_neighbors (track_path TEXT NOT NULL, neighbor_path TEXT NOT NULL, weight REAL NOT NULL, edge_kind TEXT NOT NULL, PRIMARY KEY (track_path, neighbor_path, edge_kind))",
+    "CREATE VIRTUAL TABLE fts_search USING fts5(title, album, artist, tokenize='unicode61')",
+    "CREATE TRIGGER trg_tracks_insert_counts AFTER INSERT ON tracks BEGIN UPDATE albums SET track_count = track_count + 1 WHERE id = NEW.album_id; END",
+    "INSERT INTO artists (name) VALUES ('Massive Attack')",
+    "INSERT INTO albums (artist_id, title, genre) VALUES (1, 'Mezzanine', 'Trip-Hop')",
+    "INSERT INTO tracks (album_id, title, track_num, duration, path, format, added_date, bpm, energy) VALUES (1, 'Angel', 1, 379.0, '/m/ma/01.flac', 'flac', 1700000000, 80.5, 0.4), (1, 'Risingson', 2, 298.0, '/m/ma/02.flac', 'flac', 1700000000, 90.0, 0.5), (1, 'Teardrop', 3, 330.0, '/m/ma/03.flac', 'flac', 1700000000, 77.0, 0.3)",
+    "INSERT INTO play_counts (track_path, count, last_played, bpm, energy, pca_coords, timbre, features_version) VALUES ('/m/ma/01.flac', 2, 1700000200, 80.5, 0.4, X'00000000CDCCCC3DCDCC4C3E9A99993ECDCCCC3E0000003F9A99193F3333333FCDCC4C3F6666663F0000803FCDCC8C3F9A99993F6666A63F3333B33F0000C03FCDCCCC3F', X'000000000000003F0000803F0000C03F0000004000002040000040400000604000008040000090400000A0400000B0400000C0400000D0400000E0400000F0400000004100000841000010410000184100002041000028410000304100003841000040410000484100005041000058410000604100006841000070410000784100008041000084410000884100008C4100009041000094410000984100009C410000A0410000A4410000A8410000AC410000B0410000B4410000B8410000BC410000C0410000C4410000C8410000CC410000D0410000D4410000D8410000DC410000E0410000E4410000E8410000EC410000F0410000F4410000F8410000FC41000000420000024200000442000006420000084200000A4200000C4200000E42000010420000124200001442000016420000184200001A4200001C4200001E42000020420000224200002442000026420000284200002A4200002C4200002E42', 4), ('/m/ma/02.flac', 0, NULL, 90.0, 0.5, X'00000000CDCCCC3DCDCC4C3E9A99993ECDCCCC3E0000003F9A99193F3333333FCDCC4C3F6666663F0000803FCDCC8C3F9A99993F6666A63F3333B33F0000C03FCDCCCC3F', X'0000803F0000004000004040', 4), ('/m/ma/03.flac', 1, 1700000300, 77.0, 0.3, NULL, X'000000000000803E0000003F0000403F0000803F0000A03F0000C03F0000E03F0000004000001040000020400000304000004040000050400000604000007040000080400000884000009040000098400000A0400000A8400000B0400000B8400000C0400000C8400000D0400000D8400000E0400000E8400000F0400000F84000000041000004410000084100000C4100001041000014410000184100001C4100002041000024410000284100002C4100003041000034410000384100003C4100004041000044410000484100004C4100005041000054410000584100005C4100006041000064410000684100006C4100007041000074410000784100007C4100008041000082410000844100008641', 5)",
+    "INSERT INTO feature_cache VALUES ('/m/ma/01.flac', X'000000000000003F0000803F0000C03F0000004000002040000040400000604000008040000090400000A0400000B0400000C0400000D0400000E0400000F0400000004100000841000010410000184100002041000028410000304100003841000040410000484100005041000058410000604100006841000070410000784100008041000084410000884100008C4100009041000094410000984100009C410000A0410000A4410000A8410000AC410000B0410000B4410000B8410000BC410000C0410000C4410000C8410000CC410000D0410000D4410000D8410000DC410000E0410000E4410000E8410000EC410000F0410000F4410000F8410000FC41000000420000024200000442000006420000084200000A4200000C4200000E42000010420000124200001442000016420000184200001A4200001C4200001E42000020420000224200002442000026420000284200002A4200002C4200002E42', 4), ('/m/ma/03.flac', X'000000000000803E0000003F0000403F0000803F0000A03F0000C03F0000E03F0000004000001040000020400000304000004040000050400000604000007040000080400000884000009040000098400000A0400000A8400000B0400000B8400000C0400000C8400000D0400000D8400000E0400000E8400000F0400000F84000000041000004410000084100000C4100001041000014410000184100001C4100002041000024410000284100002C4100003041000034410000384100003C4100004041000044410000484100004C4100005041000054410000584100005C4100006041000064410000684100006C4100007041000074410000784100007C4100008041000082410000844100008641', 5)",
+    "INSERT INTO artist_enrichment (artist_name, country, genres, source, status) VALUES ('Massive Attack', 'GB', '[{\"name\": \"trip hop\", \"count\": 9}]', 'musicbrainz', 'ok')",
+    "PRAGMA user_version = 1"
+   ],
+   "opens": 1,
+   "result": {
+    "user_version": 2,
+    "master": [
+     [
+      "index",
+      "idx_albums_artist_id",
+      "albums",
+      "CREATE INDEX idx_albums_artist_id ON albums(artist_id)"
+     ],
+     [
+      "index",
+      "idx_albums_title",
+      "albums",
+      "CREATE INDEX idx_albums_title ON albums(title COLLATE NOCASE)"
+     ],
+     [
+      "index",
+      "idx_history_listen_uniq",
+      "playback_history",
+      "CREATE UNIQUE INDEX idx_history_listen_uniq ON playback_history(track_path, played_at, event) WHERE event IN ('completed', 'skipped_early')"
+     ],
+     [
+      "index",
+      "idx_history_recent",
+      "playback_history",
+      "CREATE INDEX idx_history_recent ON playback_history(played_at DESC)"
+     ],
+     [
+      "index",
+      "idx_history_track",
+      "playback_history",
+      "CREATE INDEX idx_history_track ON playback_history(track_path, event)"
+     ],
+     [
+      "index",
+      "idx_neighbors_track",
+      "track_neighbors",
+      "CREATE INDEX idx_neighbors_track ON track_neighbors(track_path, edge_kind, weight DESC)"
+     ],
+     [
+      "index",
+      "idx_pt_playlist_id",
+      "playlist_tracks",
+      "CREATE INDEX idx_pt_playlist_id ON playlist_tracks(playlist_id, order_index)"
+     ],
+     [
+      "index",
+      "idx_release_sync_log_date",
+      "release_sync_log",
+      "CREATE INDEX idx_release_sync_log_date ON release_sync_log (sync_date, status)"
+     ],
+     [
+      "index",
+      "idx_tp_islet_id",
+      "track_partitions",
+      "CREATE INDEX idx_tp_islet_id ON track_partitions(islet_id)"
+     ],
+     [
+      "index",
+      "idx_tp_mood",
+      "track_partitions",
+      "CREATE INDEX idx_tp_mood ON track_partitions(mood)"
+     ],
+     [
+      "index",
+      "idx_tracks_added_date",
+      "tracks",
+      "CREATE INDEX idx_tracks_added_date ON tracks(added_date)"
+     ],
+     [
+      "index",
+      "idx_tracks_album_id",
+      "tracks",
+      "CREATE INDEX idx_tracks_album_id ON tracks(album_id)"
+     ],
+     [
+      "index",
+      "idx_tracks_title",
+      "tracks",
+      "CREATE INDEX idx_tracks_title ON tracks(title COLLATE NOCASE)"
+     ],
+     [
+      "index",
+      "sqlite_autoindex_albums_1",
+      "albums",
+      null
+     ],
+     [
+      "index",
+      "sqlite_autoindex_artist_ai_research_1",
+      "artist_ai_research",
+      null
+     ],
+     [
+      "index",
+      "sqlite_autoindex_artist_alias_rejections_1",
+      "artist_alias_rejections",
+      null
+     ],
+     [
+      "index",
+      "sqlite_autoindex_artist_aliases_1",
+      "artist_aliases",
+      null
+     ],
+     [
+      "index",
+      "sqlite_autoindex_artist_enrichment_1",
+      "artist_enrichment",
+      null
+     ],
+     [
+      "index",
+      "sqlite_autoindex_artist_releases_1",
+      "artist_releases",
+      null
+     ],
+     [
+      "index",
+      "sqlite_autoindex_artists_1",
+      "artists",
+      null
+     ],
+     [
+      "index",
+      "sqlite_autoindex_feature_cache_1",
+      "feature_cache",
+      null
+     ],
+     [
+      "index",
+      "sqlite_autoindex_metadata_audit_dismissed_1",
+      "metadata_audit_dismissed",
+      null
+     ],
+     [
+      "index",
+      "sqlite_autoindex_play_counts_1",
+      "play_counts",
+      null
+     ],
+     [
+      "index",
+      "sqlite_autoindex_playlist_tracks_1",
+      "playlist_tracks",
+      null
+     ],
+     [
+      "index",
+      "sqlite_autoindex_playlists_1",
+      "playlists",
+      null
+     ],
+     [
+      "index",
+      "sqlite_autoindex_track_neighbors_1",
+      "track_neighbors",
+      null
+     ],
+     [
+      "index",
+      "sqlite_autoindex_track_partitions_1",
+      "track_partitions",
+      null
+     ],
+     [
+      "index",
+      "sqlite_autoindex_tracks_1",
+      "tracks",
+      null
+     ],
+     [
+      "table",
+      "albums",
+      "albums",
+      "CREATE TABLE albums (id INTEGER PRIMARY KEY AUTOINCREMENT, artist_id INTEGER NOT NULL, title TEXT NOT NULL COLLATE NOCASE, year TEXT, genre TEXT, track_count INTEGER DEFAULT 0, genre_bucket TEXT, FOREIGN KEY (artist_id) REFERENCES artists(id) ON DELETE CASCADE, UNIQUE (artist_id, title))"
+     ],
+     [
+      "table",
+      "artist_ai_research",
+      "artist_ai_research",
+      "CREATE TABLE artist_ai_research ( artist_name TEXT PRIMARY KEY COLLATE NOCASE, payload TEXT NOT NULL, -- JSON, see metadata_ai.research_artist state TEXT NOT NULL DEFAULT 'pending', created_at REAL NOT NULL )"
+     ],
+     [
+      "table",
+      "artist_alias_rejections",
+      "artist_alias_rejections",
+      "CREATE TABLE artist_alias_rejections ( a TEXT NOT NULL, b TEXT NOT NULL, -- casefolded, a < b PRIMARY KEY (a, b) )"
+     ],
+     [
+      "table",
+      "artist_aliases",
+      "artist_aliases",
+      "CREATE TABLE artist_aliases ( alias TEXT PRIMARY KEY COLLATE NOCASE, canonical TEXT NOT NULL COLLATE NOCASE, enrichment TEXT, -- JSON snapshot of the alias's artist_enrichment row created_at REAL NOT NULL )"
+     ],
+     [
+      "table",
+      "artist_enrichment",
+      "artist_enrichment",
+      "CREATE TABLE artist_enrichment (artist_name TEXT PRIMARY KEY COLLATE NOCASE, mbid TEXT, country TEXT, area TEXT, genres TEXT, source TEXT, score INTEGER, status TEXT, fetched_at REAL, provenance TEXT, attempts INTEGER DEFAULT 0)"
+     ],
+     [
+      "table",
+      "artist_releases",
+      "artist_releases",
+      "CREATE TABLE artist_releases ( artist_name TEXT PRIMARY KEY COLLATE NOCASE, source TEXT NOT NULL, source_id TEXT, releases TEXT NOT NULL, fetched_at REAL NOT NULL )"
+     ],
+     [
+      "table",
+      "artists",
+      "artists",
+      "CREATE TABLE artists (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE COLLATE NOCASE NOT NULL, album_count INTEGER DEFAULT 0, track_count INTEGER DEFAULT 0)"
+     ],
+     [
+      "table",
+      "feature_cache",
+      "feature_cache",
+      "CREATE TABLE feature_cache (track_path TEXT PRIMARY KEY, timbre BLOB, features_version INTEGER)"
+     ],
+     [
+      "table",
+      "fts_search",
+      "fts_search",
+      "CREATE VIRTUAL TABLE fts_search USING fts5(title, album, artist, tokenize='unicode61')"
+     ],
+     [
+      "table",
+      "fts_search_config",
+      "fts_search_config",
+      "CREATE TABLE 'fts_search_config'(k PRIMARY KEY, v) WITHOUT ROWID"
+     ],
+     [
+      "table",
+      "fts_search_content",
+      "fts_search_content",
+      "CREATE TABLE 'fts_search_content'(id INTEGER PRIMARY KEY, c0, c1, c2)"
+     ],
+     [
+      "table",
+      "fts_search_data",
+      "fts_search_data",
+      "CREATE TABLE 'fts_search_data'(id INTEGER PRIMARY KEY, block BLOB)"
+     ],
+     [
+      "table",
+      "fts_search_docsize",
+      "fts_search_docsize",
+      "CREATE TABLE 'fts_search_docsize'(id INTEGER PRIMARY KEY, sz BLOB)"
+     ],
+     [
+      "table",
+      "fts_search_idx",
+      "fts_search_idx",
+      "CREATE TABLE 'fts_search_idx'(segid, term, pgno, PRIMARY KEY(segid, term)) WITHOUT ROWID"
+     ],
+     [
+      "table",
+      "genre_affinity",
+      "genre_affinity",
+      "CREATE TABLE genre_affinity ( id INTEGER PRIMARY KEY CHECK (id = 1), model TEXT NOT NULL, -- JSON {\"a|b\": npmi, ...}, a < b updated_at REAL NOT NULL )"
+     ],
+     [
+      "table",
+      "metadata_audit_dismissed",
+      "metadata_audit_dismissed",
+      "CREATE TABLE metadata_audit_dismissed ( artist_name TEXT NOT NULL COLLATE NOCASE, rule TEXT NOT NULL, value TEXT, -- the country the user said was right PRIMARY KEY (artist_name, rule) )"
+     ],
+     [
+      "table",
+      "play_counts",
+      "play_counts",
+      "CREATE TABLE play_counts (track_path TEXT PRIMARY KEY, count INTEGER DEFAULT 0, last_played INTEGER, bpm REAL DEFAULT 0, energy REAL DEFAULT 0, brightness REAL DEFAULT 0, pca_coords BLOB, timbre BLOB, features_version INTEGER DEFAULT 0, cluster_id INTEGER, rolloff REAL DEFAULT 0, beat_strength REAL DEFAULT 0, spectral_flatness REAL DEFAULT 0, spectral_contrast REAL DEFAULT 0, key_index INTEGER DEFAULT 0)"
+     ],
+     [
+      "table",
+      "playback_history",
+      "playback_history",
+      "CREATE TABLE playback_history ( track_path TEXT NOT NULL, played_at REAL NOT NULL, event TEXT NOT NULL, seed_path TEXT , listened_s REAL)"
+     ],
+     [
+      "table",
+      "playlist_tracks",
+      "playlist_tracks",
+      "CREATE TABLE playlist_tracks ( id INTEGER PRIMARY KEY AUTOINCREMENT, playlist_id INTEGER NOT NULL REFERENCES playlists(id) ON DELETE CASCADE, track_path TEXT NOT NULL, order_index INTEGER NOT NULL DEFAULT 0, UNIQUE (playlist_id, track_path) )"
+     ],
+     [
+      "table",
+      "playlists",
+      "playlists",
+      "CREATE TABLE playlists ( id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE COLLATE NOCASE, created INTEGER DEFAULT (CAST(strftime('%s','now') AS INTEGER)), color TEXT )"
+     ],
+     [
+      "table",
+      "release_sync_log",
+      "release_sync_log",
+      "CREATE TABLE release_sync_log ( id INTEGER PRIMARY KEY AUTOINCREMENT, sync_date TEXT NOT NULL, started_at REAL NOT NULL, finished_at REAL, artists_checked INTEGER DEFAULT 0, new_found INTEGER DEFAULT 0, trigger_type TEXT NOT NULL, status TEXT NOT NULL )"
+     ],
+     [
+      "table",
+      "sqlite_sequence",
+      "sqlite_sequence",
+      "CREATE TABLE sqlite_sequence(name,seq)"
+     ],
+     [
+      "table",
+      "track_neighbors",
+      "track_neighbors",
+      "CREATE TABLE track_neighbors (track_path TEXT NOT NULL, neighbor_path TEXT NOT NULL, weight REAL NOT NULL, edge_kind TEXT NOT NULL, PRIMARY KEY (track_path, neighbor_path, edge_kind))"
+     ],
+     [
+      "table",
+      "track_partitions",
+      "track_partitions",
+      "CREATE TABLE track_partitions ( track_path TEXT REFERENCES tracks(path) ON DELETE CASCADE, mood TEXT, islet_id INTEGER, PRIMARY KEY (track_path, mood) )"
+     ],
+     [
+      "table",
+      "tracks",
+      "tracks",
+      "CREATE TABLE tracks (id INTEGER PRIMARY KEY AUTOINCREMENT, album_id INTEGER NOT NULL, title TEXT, track_num INTEGER, duration REAL, path TEXT UNIQUE NOT NULL, format TEXT, added_date REAL, bitrate INTEGER, bpm REAL DEFAULT 0, energy REAL DEFAULT 0, brightness REAL DEFAULT 0, artist_tag TEXT, FOREIGN KEY (album_id) REFERENCES albums(id) ON DELETE CASCADE)"
+     ],
+     [
+      "trigger",
+      "trg_albums_artist_update_counts",
+      "albums",
+      "CREATE TRIGGER trg_albums_artist_update_counts AFTER UPDATE OF artist_id ON albums BEGIN UPDATE artists SET album_count = album_count - 1, track_count = track_count - (SELECT COUNT(*) FROM tracks WHERE album_id = OLD.id) WHERE id = OLD.artist_id; UPDATE artists SET album_count = album_count + 1, track_count = track_count + (SELECT COUNT(*) FROM tracks WHERE album_id = NEW.id) WHERE id = NEW.artist_id; END"
+     ],
+     [
+      "trigger",
+      "trg_albums_artist_update_fts",
+      "albums",
+      "CREATE TRIGGER trg_albums_artist_update_fts AFTER UPDATE OF artist_id ON albums BEGIN UPDATE fts_search SET artist = (SELECT name FROM artists WHERE id = NEW.artist_id) WHERE rowid IN (SELECT id FROM tracks WHERE album_id = NEW.id); END"
+     ],
+     [
+      "trigger",
+      "trg_albums_delete_counts",
+      "albums",
+      "CREATE TRIGGER trg_albums_delete_counts AFTER DELETE ON albums BEGIN UPDATE artists SET album_count = album_count - 1 WHERE id = OLD.artist_id; END"
+     ],
+     [
+      "trigger",
+      "trg_albums_insert_counts",
+      "albums",
+      "CREATE TRIGGER trg_albums_insert_counts AFTER INSERT ON albums BEGIN UPDATE artists SET album_count = album_count + 1 WHERE id = NEW.artist_id; END"
+     ],
+     [
+      "trigger",
+      "trg_albums_update_fts",
+      "albums",
+      "CREATE TRIGGER trg_albums_update_fts AFTER UPDATE OF title ON albums BEGIN UPDATE fts_search SET album = NEW.title WHERE rowid IN ( SELECT id FROM tracks WHERE album_id = NEW.id ); END"
+     ],
+     [
+      "trigger",
+      "trg_artists_update_fts",
+      "artists",
+      "CREATE TRIGGER trg_artists_update_fts AFTER UPDATE OF name ON artists BEGIN UPDATE fts_search SET artist = NEW.name WHERE rowid IN ( SELECT t.id FROM tracks t JOIN albums al ON t.album_id = al.id WHERE al.artist_id = NEW.id ); END"
+     ],
+     [
+      "trigger",
+      "trg_tracks_delete_counts",
+      "tracks",
+      "CREATE TRIGGER trg_tracks_delete_counts AFTER DELETE ON tracks BEGIN UPDATE albums SET track_count = track_count - 1 WHERE id = OLD.album_id; UPDATE artists SET track_count = track_count - 1 WHERE id = ( SELECT artist_id FROM albums WHERE id = OLD.album_id ); DELETE FROM fts_search WHERE rowid = OLD.id; END"
+     ],
+     [
+      "trigger",
+      "trg_tracks_insert_counts",
+      "tracks",
+      "CREATE TRIGGER trg_tracks_insert_counts AFTER INSERT ON tracks BEGIN UPDATE albums SET track_count = track_count + 1 WHERE id = NEW.album_id; UPDATE artists SET track_count = track_count + 1 WHERE id = ( SELECT artist_id FROM albums WHERE id = NEW.album_id ); INSERT INTO fts_search(rowid, title, album, artist) SELECT NEW.id, NEW.title, al.title, ar.name FROM albums al JOIN artists ar ON al.artist_id = ar.id WHERE al.id = NEW.album_id; END"
+     ],
+     [
+      "trigger",
+      "trg_tracks_update_counts",
+      "tracks",
+      "CREATE TRIGGER trg_tracks_update_counts AFTER UPDATE OF album_id ON tracks BEGIN UPDATE albums SET track_count = track_count - 1 WHERE id = OLD.album_id; UPDATE artists SET track_count = track_count - 1 WHERE id = ( SELECT artist_id FROM albums WHERE id = OLD.album_id ); UPDATE albums SET track_count = track_count + 1 WHERE id = NEW.album_id; UPDATE artists SET track_count = track_count + 1 WHERE id = ( SELECT artist_id FROM albums WHERE id = NEW.album_id ); END"
+     ],
+     [
+      "trigger",
+      "trg_tracks_update_fts",
+      "tracks",
+      "CREATE TRIGGER trg_tracks_update_fts AFTER UPDATE ON tracks BEGIN UPDATE fts_search SET title = NEW.title, album = (SELECT title FROM albums WHERE id = NEW.album_id), artist = ( SELECT ar.name FROM artists ar JOIN albums al ON al.artist_id = ar.id WHERE al.id = NEW.album_id ) WHERE rowid = NEW.id; END"
+     ]
+    ],
+    "tables": {
+     "albums": {
+      "columns": [
+       "rowid",
+       "id",
+       "artist_id",
+       "title",
+       "year",
+       "genre",
+       "track_count",
+       "genre_bucket"
+      ],
+      "rows": [
+       [
+        1,
+        1,
+        1,
+        "Mezzanine",
+        null,
+        "Trip-Hop",
+        3,
+        null
+       ]
+      ]
+     },
+     "artist_ai_research": {
+      "columns": [
+       "rowid",
+       "artist_name",
+       "payload",
+       "state",
+       "created_at"
+      ],
+      "rows": []
+     },
+     "artist_alias_rejections": {
+      "columns": [
+       "rowid",
+       "a",
+       "b"
+      ],
+      "rows": []
+     },
+     "artist_aliases": {
+      "columns": [
+       "rowid",
+       "alias",
+       "canonical",
+       "enrichment",
+       "created_at"
+      ],
+      "rows": []
+     },
+     "artist_enrichment": {
+      "columns": [
+       "rowid",
+       "artist_name",
+       "mbid",
+       "country",
+       "area",
+       "genres",
+       "source",
+       "score",
+       "status",
+       "fetched_at",
+       "provenance",
+       "attempts"
+      ],
+      "rows": [
+       [
+        1,
+        "Massive Attack",
+        null,
+        "GB",
+        null,
+        "[{\"name\": \"trip hop\", \"count\": 9}]",
+        "musicbrainz",
+        null,
+        "ok",
+        null,
+        null,
+        0
+       ]
+      ]
+     },
+     "artist_releases": {
+      "columns": [
+       "rowid",
+       "artist_name",
+       "source",
+       "source_id",
+       "releases",
+       "fetched_at"
+      ],
+      "rows": []
+     },
+     "artists": {
+      "columns": [
+       "rowid",
+       "id",
+       "name",
+       "album_count",
+       "track_count"
+      ],
+      "rows": [
+       [
+        1,
+        1,
+        "Massive Attack",
+        0,
+        0
+       ]
+      ]
+     },
+     "feature_cache": {
+      "columns": [
+       "rowid",
+       "track_path",
+       "timbre",
+       "features_version"
+      ],
+      "rows": [
+       [
+        1,
+        "/m/ma/01.flac",
+        {
+         "blob": "000000000000003f0000803f0000c03f0000004000002040000040400000604000008040000090400000a0400000b0400000c0400000d0400000e0400000f0400000004100000841000010410000184100002041000028410000304100003841000040410000484100005041000058410000604100006841000070410000784100008041000084410000884100008c4100009041000094410000984100009c410000f0410000f4410000f8410000fc41000000420000024200000442000006420000084200000a4200000c4200000e42000010420000124200001442000016420000184200001a4200001c4200001e42000020420000224200002442000026420000284200002a4200002c4200002e42"
+        },
+        5
+       ],
+       [
+        2,
+        "/m/ma/03.flac",
+        {
+         "blob": "000000000000803e0000003f0000403f0000803f0000a03f0000c03f0000e03f0000004000001040000020400000304000004040000050400000604000007040000080400000884000009040000098400000a0400000a8400000b0400000b8400000c0400000c8400000d0400000d8400000e0400000e8400000f0400000f84000000041000004410000084100000c4100001041000014410000184100001c4100002041000024410000284100002c4100003041000034410000384100003c4100004041000044410000484100004c4100005041000054410000584100005c4100006041000064410000684100006c4100007041000074410000784100007c4100008041000082410000844100008641"
+        },
+        5
+       ]
+      ]
+     },
+     "fts_search": {
+      "columns": [
+       "rowid",
+       "title",
+       "album",
+       "artist"
+      ],
+      "rows": []
+     },
+     "genre_affinity": {
+      "columns": [
+       "rowid",
+       "id",
+       "model",
+       "updated_at"
+      ],
+      "rows": []
+     },
+     "metadata_audit_dismissed": {
+      "columns": [
+       "rowid",
+       "artist_name",
+       "rule",
+       "value"
+      ],
+      "rows": []
+     },
+     "play_counts": {
+      "columns": [
+       "rowid",
+       "track_path",
+       "count",
+       "last_played",
+       "bpm",
+       "energy",
+       "brightness",
+       "pca_coords",
+       "timbre",
+       "features_version",
+       "cluster_id",
+       "rolloff",
+       "beat_strength",
+       "spectral_flatness",
+       "spectral_contrast",
+       "key_index"
+      ],
+      "rows": [
+       [
+        1,
+        "/m/ma/01.flac",
+        2,
+        1700000200,
+        {
+         "real": "80.5"
+        },
+        {
+         "real": "0.4"
+        },
+        {
+         "real": "0.0"
+        },
+        null,
+        {
+         "blob": "000000000000003f0000803f0000c03f0000004000002040000040400000604000008040000090400000a0400000b0400000c0400000d0400000e0400000f0400000004100000841000010410000184100002041000028410000304100003841000040410000484100005041000058410000604100006841000070410000784100008041000084410000884100008c4100009041000094410000984100009c410000f0410000f4410000f8410000fc41000000420000024200000442000006420000084200000a4200000c4200000e42000010420000124200001442000016420000184200001a4200001c4200001e42000020420000224200002442000026420000284200002a4200002c4200002e42"
+        },
+        5,
+        null,
+        {
+         "real": "0.0"
+        },
+        {
+         "real": "0.0"
+        },
+        {
+         "real": "0.0"
+        },
+        {
+         "real": "0.0"
+        },
+        0
+       ],
+       [
+        2,
+        "/m/ma/02.flac",
+        0,
+        null,
+        {
+         "real": "90.0"
+        },
+        {
+         "real": "0.5"
+        },
+        {
+         "real": "0.0"
+        },
+        null,
+        {
+         "blob": "0000803f0000004000004040"
+        },
+        4,
+        null,
+        {
+         "real": "0.0"
+        },
+        {
+         "real": "0.0"
+        },
+        {
+         "real": "0.0"
+        },
+        {
+         "real": "0.0"
+        },
+        0
+       ],
+       [
+        3,
+        "/m/ma/03.flac",
+        1,
+        1700000300,
+        {
+         "real": "77.0"
+        },
+        {
+         "real": "0.3"
+        },
+        {
+         "real": "0.0"
+        },
+        null,
+        {
+         "blob": "000000000000803e0000003f0000403f0000803f0000a03f0000c03f0000e03f0000004000001040000020400000304000004040000050400000604000007040000080400000884000009040000098400000a0400000a8400000b0400000b8400000c0400000c8400000d0400000d8400000e0400000e8400000f0400000f84000000041000004410000084100000c4100001041000014410000184100001c4100002041000024410000284100002c4100003041000034410000384100003c4100004041000044410000484100004c4100005041000054410000584100005c4100006041000064410000684100006c4100007041000074410000784100007c4100008041000082410000844100008641"
+        },
+        5,
+        null,
+        {
+         "real": "0.0"
+        },
+        {
+         "real": "0.0"
+        },
+        {
+         "real": "0.0"
+        },
+        {
+         "real": "0.0"
+        },
+        0
+       ]
+      ]
+     },
+     "playback_history": {
+      "columns": [
+       "rowid",
+       "track_path",
+       "played_at",
+       "event",
+       "seed_path",
+       "listened_s"
+      ],
+      "rows": []
+     },
+     "playlist_tracks": {
+      "columns": [
+       "rowid",
+       "id",
+       "playlist_id",
+       "track_path",
+       "order_index"
+      ],
+      "rows": []
+     },
+     "playlists": {
+      "columns": [
+       "rowid",
+       "id",
+       "name",
+       "created",
+       "color"
+      ],
+      "rows": []
+     },
+     "release_sync_log": {
+      "columns": [
+       "rowid",
+       "id",
+       "sync_date",
+       "started_at",
+       "finished_at",
+       "artists_checked",
+       "new_found",
+       "trigger_type",
+       "status"
+      ],
+      "rows": []
+     },
+     "sqlite_sequence": {
+      "columns": [
+       "rowid",
+       "name",
+       "seq"
+      ],
+      "rows": [
+       [
+        1,
+        "artists",
+        1
+       ],
+       [
+        2,
+        "albums",
+        1
+       ],
+       [
+        3,
+        "tracks",
+        3
+       ]
+      ]
+     },
+     "track_neighbors": {
+      "columns": [
+       "rowid",
+       "track_path",
+       "neighbor_path",
+       "weight",
+       "edge_kind"
+      ],
+      "rows": []
+     },
+     "track_partitions": {
+      "columns": [
+       "rowid",
+       "track_path",
+       "mood",
+       "islet_id"
+      ],
+      "rows": []
+     },
+     "tracks": {
+      "columns": [
+       "rowid",
+       "id",
+       "album_id",
+       "title",
+       "track_num",
+       "duration",
+       "path",
+       "format",
+       "added_date",
+       "bitrate",
+       "bpm",
+       "energy",
+       "brightness",
+       "artist_tag"
+      ],
+      "rows": [
+       [
+        1,
+        1,
+        1,
+        "Angel",
+        1,
+        {
+         "real": "379.0"
+        },
+        "/m/ma/01.flac",
+        "flac",
+        {
+         "real": "1700000000.0"
+        },
+        null,
+        {
+         "real": "80.5"
+        },
+        {
+         "real": "0.4"
+        },
+        {
+         "real": "0.0"
+        },
+        null
+       ],
+       [
+        2,
+        2,
+        1,
+        "Risingson",
+        2,
+        {
+         "real": "298.0"
+        },
+        "/m/ma/02.flac",
+        "flac",
+        {
+         "real": "1700000000.0"
+        },
+        null,
+        {
+         "real": "90.0"
+        },
+        {
+         "real": "0.5"
+        },
+        {
+         "real": "0.0"
+        },
+        null
+       ],
+       [
+        3,
+        3,
+        1,
+        "Teardrop",
+        3,
+        {
+         "real": "330.0"
+        },
+        "/m/ma/03.flac",
+        "flac",
+        {
+         "real": "1700000000.0"
+        },
+        null,
+        {
+         "real": "77.0"
+        },
+        {
+         "real": "0.3"
+        },
+        {
+         "real": "0.0"
+        },
+        null
+       ]
+      ]
+     }
+    }
+   }
+  }
+ ],
+ "ledger": {
+  "setup_sql": [
+   "CREATE TABLE artists (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE COLLATE NOCASE NOT NULL, album_count INTEGER DEFAULT 0, track_count INTEGER DEFAULT 0)",
+   "CREATE TABLE albums (id INTEGER PRIMARY KEY AUTOINCREMENT, artist_id INTEGER NOT NULL, title TEXT NOT NULL COLLATE NOCASE, year TEXT, genre TEXT, track_count INTEGER DEFAULT 0, FOREIGN KEY (artist_id) REFERENCES artists(id) ON DELETE CASCADE, UNIQUE (artist_id, title))",
+   "CREATE TABLE tracks (id INTEGER PRIMARY KEY AUTOINCREMENT, album_id INTEGER NOT NULL, title TEXT, track_num INTEGER, duration REAL, path TEXT UNIQUE NOT NULL, format TEXT, added_date REAL, bitrate INTEGER, FOREIGN KEY (album_id) REFERENCES albums(id) ON DELETE CASCADE)",
+   "CREATE TABLE play_counts (track_path TEXT PRIMARY KEY, count INTEGER DEFAULT 0, last_played INTEGER)",
+   "CREATE TABLE playlists (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE COLLATE NOCASE, created INTEGER DEFAULT (CAST(strftime('%s','now') AS INTEGER)))",
+   "CREATE TABLE playback_history (track_path TEXT NOT NULL, played_at REAL NOT NULL, event TEXT NOT NULL, seed_path TEXT)",
+   "CREATE TABLE track_partitions (track_path TEXT PRIMARY KEY REFERENCES tracks(path) ON DELETE CASCADE, mood TEXT, islet_id INTEGER)",
+   "CREATE TABLE mood_feedback (x)",
+   "CREATE TABLE mood_profiles (x)",
+   "CREATE TABLE pca_space (x)",
+   "CREATE TABLE genre_graph (x)",
+   "CREATE TABLE autoplay_hop_rejects (x)",
+   "CREATE TABLE autoplay_hidden (x)",
+   "INSERT INTO artists (name) VALUES ('Björk'), ('Χάρις Αλεξίου')",
+   "INSERT INTO albums (artist_id, title, genre) VALUES (1, 'Post', 'Electronic'), (2, 'Η Αγάπη', 'Laiko')",
+   "INSERT INTO tracks (album_id, title, track_num, duration, path, format, added_date) VALUES (1, 'Army of Me', 1, 234.5, '/m/bjork/01.flac', 'flac', 1700000000.5), (2, 'Τα Κλειδιά', 1, 201.0, '/m/haris/01.mp3', 'mp3', 1700000001)",
+   "INSERT INTO play_counts (track_path, count, last_played) VALUES ('/m/bjork/01.flac', 3, 1700000100)",
+   "INSERT INTO playlists (name, created) VALUES ('Morning', 1700000000)",
+   "INSERT INTO playback_history VALUES ('/m/bjork/01.flac', 1700000050, 'played', NULL), ('/m/bjork/01.flac', 1700000050, 'played', NULL)",
+   "INSERT INTO track_partitions VALUES ('/m/bjork/01.flac', 'calm', 2), ('/m/haris/01.mp3', NULL, 3)",
+   "PRAGMA user_version = 0"
+  ],
+  "setup_update": "UPDATE tracks SET bpm = 120.5, energy = 0.7, brightness = 0.2 WHERE path = '/m/bjork/01.flac'",
+  "steps": [
+   {
+    "lines": [
+     "{\"id\": \"file:///m/bjork/01.flac\", \"ms\": 45000, \"dur\": 234500, \"start\": 1700001000, \"end\": 1700001045}",
+     "{\"id\": \"file:///m/bjork/01.flac\", \"ms\": 8000, \"dur\": 234500, \"start\": 1700001050, \"end\": 1700001058}",
+     "{\"id\": \"file:///m/haris/01.mp3\", \"ms\": 25000, \"dur\": 40000, \"start\": 1700001060, \"end\": 1700001085}",
+     "{\"id\": \"file:///m/haris/01.mp3\", \"ms\": 19999, \"dur\": 40000, \"start\": 1700001090, \"end\": 1700001110}",
+     "{\"id\": \"file:///storage/emulated/0/Music/%CE%A7%CE%AC%CF%81%CE%B9%CF%82%20%CE%91%CE%BB%CE%B5%CE%BE%CE%AF%CE%BF%CF%85/%CE%97%20%CE%91%CE%B3%CE%AC%CF%80%CE%B7%20%231%20%28live%29%20100%25.mp3\", \"ms\": 61250, \"dur\": 0, \"start\": 1700001200, \"end\": 1700001261}",
+     "{\"id\": \"file:///m/not/in/library.flac\", \"ms\": 30000, \"dur\": 0, \"start\": 1, \"end\": 1700001300}",
+     "{\"id\": \"https://cdn.example/x.flac\", \"ms\": 90000, \"dur\": 0, \"end\": 1700001400}",
+     "{\"id\": \"/m/bare/path.ogg\", \"ms\": 30750, \"dur\": 100000, \"end\": 1700001500}",
+     "{\"id\": \"file:///m/bjork/01.flac\", \"ms\": \"31000\", \"dur\": null, \"end\": 1700001600.9}",
+     "{\"ms\": 50000, \"end\": 1700001700}",
+     "{\"id\": \"file:///m/bjork/01.flac\", \"ms\": \"abc\", \"end\": 1700001800}",
+     "{\"id\": \"file:///m/bjork/01.flac\", \"ms\": 40000, \"end\": \"1700001900\"}",
+     "{\"id\": \"file:///m/bjork/01.flac\", \"ms\": 40000, \"end\": \"17.5\"}",
+     "{\"id\": \"file:///m/bjork/01.flac\", \"ms\": true, \"dur\": 1, \"end\": 1700002000}",
+     "",
+     "   ",
+     "not json",
+     "{\"id\": \"file:///m/haris/01.mp3\", \"ms\": 9"
+    ],
+    "counted": 8,
+    "left_over": [
+     "library.db",
+     "library.db-shm",
+     "library.db-wal"
+    ],
+    "playback_history": [
+     [
+      "/m/bjork/01.flac",
+      {
+       "real": "1700000050.0"
+      },
+      "played",
+      null,
+      null
+     ],
+     [
+      "/m/bjork/01.flac",
+      {
+       "real": "1700000050.0"
+      },
+      "played",
+      null,
+      null
+     ],
+     [
+      "/m/bjork/01.flac",
+      {
+       "real": "1700001045.0"
+      },
+      "completed",
+      {
+       "real": "45.0"
+      },
+      null
+     ],
+     [
+      "/m/bjork/01.flac",
+      {
+       "real": "1700001058.0"
+      },
+      "skipped_early",
+      {
+       "real": "8.0"
+      },
+      null
+     ],
+     [
+      "/m/haris/01.mp3",
+      {
+       "real": "1700001085.0"
+      },
+      "completed",
+      {
+       "real": "25.0"
+      },
+      null
+     ],
+     [
+      "/m/haris/01.mp3",
+      {
+       "real": "1700001110.0"
+      },
+      "skipped_early",
+      {
+       "real": "20.0"
+      },
+      null
+     ],
+     [
+      "/storage/emulated/0/Music/Χάρις Αλεξίου/Η Αγάπη #1 (live) 100%.mp3",
+      {
+       "real": "1700001261.0"
+      },
+      "completed",
+      {
+       "real": "61.2"
+      },
+      null
+     ],
+     [
+      "/m/not/in/library.flac",
+      {
+       "real": "1700001300.0"
+      },
+      "completed",
+      {
+       "real": "30.0"
+      },
+      null
+     ],
+     [
+      "/m/bare/path.ogg",
+      {
+       "real": "1700001500.0"
+      },
+      "completed",
+      {
+       "real": "30.8"
+      },
+      null
+     ],
+     [
+      "/m/bjork/01.flac",
+      {
+       "real": "1700001600.0"
+      },
+      "completed",
+      {
+       "real": "31.0"
+      },
+      null
+     ],
+     [
+      "/m/bjork/01.flac",
+      {
+       "real": "1700001900.0"
+      },
+      "completed",
+      {
+       "real": "40.0"
+      },
+      null
+     ],
+     [
+      "/m/bjork/01.flac",
+      {
+       "real": "1700002000.0"
+      },
+      "completed",
+      {
+       "real": "0.0"
+      },
+      null
+     ]
+    ],
+    "play_counts": [
+     [
+      "/m/bare/path.ogg",
+      1,
+      1700001500,
+      {
+       "real": "0.0"
+      },
+      {
+       "real": "0.0"
+      },
+      {
+       "real": "0.0"
+      }
+     ],
+     [
+      "/m/bjork/01.flac",
+      7,
+      1700002000,
+      {
+       "real": "120.5"
+      },
+      {
+       "real": "0.7"
+      },
+      {
+       "real": "0.2"
+      }
+     ],
+     [
+      "/m/haris/01.mp3",
+      1,
+      1700001085,
+      {
+       "real": "0.0"
+      },
+      {
+       "real": "0.0"
+      },
+      {
+       "real": "0.0"
+      }
+     ],
+     [
+      "/m/not/in/library.flac",
+      1,
+      1700001300,
+      {
+       "real": "0.0"
+      },
+      {
+       "real": "0.0"
+      },
+      {
+       "real": "0.0"
+      }
+     ],
+     [
+      "/storage/emulated/0/Music/Χάρις Αλεξίου/Η Αγάπη #1 (live) 100%.mp3",
+      1,
+      1700001261,
+      {
+       "real": "0.0"
+      },
+      {
+       "real": "0.0"
+      },
+      {
+       "real": "0.0"
+      }
+     ]
+    ]
+   },
+   {
+    "draining": [
+     "{\"id\": \"file:///m/bjork/01.flac\", \"ms\": 45000, \"dur\": 234500, \"start\": 1700001000, \"end\": 1700001045}",
+     "{\"id\": \"file:///m/haris/01.mp3\", \"ms\": 25000, \"dur\": 40000, \"start\": 1700001060, \"end\": 1700001085}"
+    ],
+    "lines": [
+     "{\"id\": \"file:///m/bjork/01.flac\", \"ms\": 200000, \"dur\": 234500, \"start\": 1700003000, \"end\": 1700003200}",
+     "{\"id\": \"file:///m/bjork/01.flac\", \"ms\": 12340, \"dur\": 234500, \"start\": 1700003300, \"end\": 1700003312}"
+    ],
+    "counted": 1,
+    "left_over": [
+     "library.db",
+     "library.db-shm",
+     "library.db-wal"
+    ],
+    "playback_history": [
+     [
+      "/m/bjork/01.flac",
+      {
+       "real": "1700000050.0"
+      },
+      "played",
+      null,
+      null
+     ],
+     [
+      "/m/bjork/01.flac",
+      {
+       "real": "1700000050.0"
+      },
+      "played",
+      null,
+      null
+     ],
+     [
+      "/m/bjork/01.flac",
+      {
+       "real": "1700001045.0"
+      },
+      "completed",
+      {
+       "real": "45.0"
+      },
+      null
+     ],
+     [
+      "/m/bjork/01.flac",
+      {
+       "real": "1700001058.0"
+      },
+      "skipped_early",
+      {
+       "real": "8.0"
+      },
+      null
+     ],
+     [
+      "/m/haris/01.mp3",
+      {
+       "real": "1700001085.0"
+      },
+      "completed",
+      {
+       "real": "25.0"
+      },
+      null
+     ],
+     [
+      "/m/haris/01.mp3",
+      {
+       "real": "1700001110.0"
+      },
+      "skipped_early",
+      {
+       "real": "20.0"
+      },
+      null
+     ],
+     [
+      "/storage/emulated/0/Music/Χάρις Αλεξίου/Η Αγάπη #1 (live) 100%.mp3",
+      {
+       "real": "1700001261.0"
+      },
+      "completed",
+      {
+       "real": "61.2"
+      },
+      null
+     ],
+     [
+      "/m/not/in/library.flac",
+      {
+       "real": "1700001300.0"
+      },
+      "completed",
+      {
+       "real": "30.0"
+      },
+      null
+     ],
+     [
+      "/m/bare/path.ogg",
+      {
+       "real": "1700001500.0"
+      },
+      "completed",
+      {
+       "real": "30.8"
+      },
+      null
+     ],
+     [
+      "/m/bjork/01.flac",
+      {
+       "real": "1700001600.0"
+      },
+      "completed",
+      {
+       "real": "31.0"
+      },
+      null
+     ],
+     [
+      "/m/bjork/01.flac",
+      {
+       "real": "1700001900.0"
+      },
+      "completed",
+      {
+       "real": "40.0"
+      },
+      null
+     ],
+     [
+      "/m/bjork/01.flac",
+      {
+       "real": "1700002000.0"
+      },
+      "completed",
+      {
+       "real": "0.0"
+      },
+      null
+     ],
+     [
+      "/m/bjork/01.flac",
+      {
+       "real": "1700003200.0"
+      },
+      "completed",
+      {
+       "real": "200.0"
+      },
+      null
+     ],
+     [
+      "/m/bjork/01.flac",
+      {
+       "real": "1700003312.0"
+      },
+      "skipped_early",
+      {
+       "real": "12.3"
+      },
+      null
+     ]
+    ],
+    "play_counts": [
+     [
+      "/m/bare/path.ogg",
+      1,
+      1700001500,
+      {
+       "real": "0.0"
+      },
+      {
+       "real": "0.0"
+      },
+      {
+       "real": "0.0"
+      }
+     ],
+     [
+      "/m/bjork/01.flac",
+      8,
+      1700003200,
+      {
+       "real": "120.5"
+      },
+      {
+       "real": "0.7"
+      },
+      {
+       "real": "0.2"
+      }
+     ],
+     [
+      "/m/haris/01.mp3",
+      1,
+      1700001085,
+      {
+       "real": "0.0"
+      },
+      {
+       "real": "0.0"
+      },
+      {
+       "real": "0.0"
+      }
+     ],
+     [
+      "/m/not/in/library.flac",
+      1,
+      1700001300,
+      {
+       "real": "0.0"
+      },
+      {
+       "real": "0.0"
+      },
+      {
+       "real": "0.0"
+      }
+     ],
+     [
+      "/storage/emulated/0/Music/Χάρις Αλεξίου/Η Αγάπη #1 (live) 100%.mp3",
+      1,
+      1700001261,
+      {
+       "real": "0.0"
+      },
+      {
+       "real": "0.0"
+      },
+      {
+       "real": "0.0"
+      }
+     ]
+    ]
+   },
+   {
+    "lines": [],
+    "counted": 0,
+    "left_over": [
+     "library.db",
+     "library.db-shm",
+     "library.db-wal"
+    ],
+    "playback_history": [
+     [
+      "/m/bjork/01.flac",
+      {
+       "real": "1700000050.0"
+      },
+      "played",
+      null,
+      null
+     ],
+     [
+      "/m/bjork/01.flac",
+      {
+       "real": "1700000050.0"
+      },
+      "played",
+      null,
+      null
+     ],
+     [
+      "/m/bjork/01.flac",
+      {
+       "real": "1700001045.0"
+      },
+      "completed",
+      {
+       "real": "45.0"
+      },
+      null
+     ],
+     [
+      "/m/bjork/01.flac",
+      {
+       "real": "1700001058.0"
+      },
+      "skipped_early",
+      {
+       "real": "8.0"
+      },
+      null
+     ],
+     [
+      "/m/haris/01.mp3",
+      {
+       "real": "1700001085.0"
+      },
+      "completed",
+      {
+       "real": "25.0"
+      },
+      null
+     ],
+     [
+      "/m/haris/01.mp3",
+      {
+       "real": "1700001110.0"
+      },
+      "skipped_early",
+      {
+       "real": "20.0"
+      },
+      null
+     ],
+     [
+      "/storage/emulated/0/Music/Χάρις Αλεξίου/Η Αγάπη #1 (live) 100%.mp3",
+      {
+       "real": "1700001261.0"
+      },
+      "completed",
+      {
+       "real": "61.2"
+      },
+      null
+     ],
+     [
+      "/m/not/in/library.flac",
+      {
+       "real": "1700001300.0"
+      },
+      "completed",
+      {
+       "real": "30.0"
+      },
+      null
+     ],
+     [
+      "/m/bare/path.ogg",
+      {
+       "real": "1700001500.0"
+      },
+      "completed",
+      {
+       "real": "30.8"
+      },
+      null
+     ],
+     [
+      "/m/bjork/01.flac",
+      {
+       "real": "1700001600.0"
+      },
+      "completed",
+      {
+       "real": "31.0"
+      },
+      null
+     ],
+     [
+      "/m/bjork/01.flac",
+      {
+       "real": "1700001900.0"
+      },
+      "completed",
+      {
+       "real": "40.0"
+      },
+      null
+     ],
+     [
+      "/m/bjork/01.flac",
+      {
+       "real": "1700002000.0"
+      },
+      "completed",
+      {
+       "real": "0.0"
+      },
+      null
+     ],
+     [
+      "/m/bjork/01.flac",
+      {
+       "real": "1700003200.0"
+      },
+      "completed",
+      {
+       "real": "200.0"
+      },
+      null
+     ],
+     [
+      "/m/bjork/01.flac",
+      {
+       "real": "1700003312.0"
+      },
+      "skipped_early",
+      {
+       "real": "12.3"
+      },
+      null
+     ]
+    ],
+    "play_counts": [
+     [
+      "/m/bare/path.ogg",
+      1,
+      1700001500,
+      {
+       "real": "0.0"
+      },
+      {
+       "real": "0.0"
+      },
+      {
+       "real": "0.0"
+      }
+     ],
+     [
+      "/m/bjork/01.flac",
+      8,
+      1700003200,
+      {
+       "real": "120.5"
+      },
+      {
+       "real": "0.7"
+      },
+      {
+       "real": "0.2"
+      }
+     ],
+     [
+      "/m/haris/01.mp3",
+      1,
+      1700001085,
+      {
+       "real": "0.0"
+      },
+      {
+       "real": "0.0"
+      },
+      {
+       "real": "0.0"
+      }
+     ],
+     [
+      "/m/not/in/library.flac",
+      1,
+      1700001300,
+      {
+       "real": "0.0"
+      },
+      {
+       "real": "0.0"
+      },
+      {
+       "real": "0.0"
+      }
+     ],
+     [
+      "/storage/emulated/0/Music/Χάρις Αλεξίου/Η Αγάπη #1 (live) 100%.mp3",
+      1,
+      1700001261,
+      {
+       "real": "0.0"
+      },
+      {
+       "real": "0.0"
+      },
+      {
+       "real": "0.0"
+      }
+     ]
+    ]
+   }
+  ],
+  "parsed": [
+   {
+    "path": "/m/bjork/01.flac",
+    "listened_s": {
+     "real": "45.0"
+    },
+    "duration_s": {
+     "real": "234.5"
+    },
+    "ended_at": 1700001045
+   },
+   {
+    "path": "/m/bjork/01.flac",
+    "listened_s": {
+     "real": "8.0"
+    },
+    "duration_s": {
+     "real": "234.5"
+    },
+    "ended_at": 1700001058
+   },
+   {
+    "path": "/m/haris/01.mp3",
+    "listened_s": {
+     "real": "25.0"
+    },
+    "duration_s": {
+     "real": "40.0"
+    },
+    "ended_at": 1700001085
+   },
+   {
+    "path": "/m/haris/01.mp3",
+    "listened_s": {
+     "real": "19.999"
+    },
+    "duration_s": {
+     "real": "40.0"
+    },
+    "ended_at": 1700001110
+   },
+   {
+    "path": "/storage/emulated/0/Music/Χάρις Αλεξίου/Η Αγάπη #1 (live) 100%.mp3",
+    "listened_s": {
+     "real": "61.25"
+    },
+    "duration_s": {
+     "real": "0.0"
+    },
+    "ended_at": 1700001261
+   },
+   {
+    "path": "/m/not/in/library.flac",
+    "listened_s": {
+     "real": "30.0"
+    },
+    "duration_s": {
+     "real": "0.0"
+    },
+    "ended_at": 1700001300
+   },
+   {
+    "path": "/m/bare/path.ogg",
+    "listened_s": {
+     "real": "30.75"
+    },
+    "duration_s": {
+     "real": "100.0"
+    },
+    "ended_at": 1700001500
+   },
+   {
+    "path": "/m/bjork/01.flac",
+    "listened_s": {
+     "real": "31.0"
+    },
+    "duration_s": {
+     "real": "0.0"
+    },
+    "ended_at": 1700001600
+   },
+   {
+    "path": "/m/bjork/01.flac",
+    "listened_s": {
+     "real": "40.0"
+    },
+    "duration_s": {
+     "real": "0.0"
+    },
+    "ended_at": 1700001900
+   },
+   {
+    "path": "/m/bjork/01.flac",
+    "listened_s": {
+     "real": "0.001"
+    },
+    "duration_s": {
+     "real": "0.001"
+    },
+    "ended_at": 1700002000
+   }
+  ],
+  "rounding": [
+   [
+    0,
+    {
+     "real": "0.0"
+    }
+   ],
+   [
+    1,
+    {
+     "real": "0.0"
+    }
+   ],
+   [
+    49,
+    {
+     "real": "0.0"
+    }
+   ],
+   [
+    50,
+    {
+     "real": "0.1"
+    }
+   ],
+   [
+    51,
+    {
+     "real": "0.1"
+    }
+   ],
+   [
+    149,
+    {
+     "real": "0.1"
+    }
+   ],
+   [
+    150,
+    {
+     "real": "0.1"
+    }
+   ],
+   [
+    250,
+    {
+     "real": "0.2"
+    }
+   ],
+   [
+    350,
+    {
+     "real": "0.3"
+    }
+   ],
+   [
+    750,
+    {
+     "real": "0.8"
+    }
+   ],
+   [
+    1250,
+    {
+     "real": "1.2"
+    }
+   ],
+   [
+    1350,
+    {
+     "real": "1.4"
+    }
+   ],
+   [
+    2250,
+    {
+     "real": "2.2"
+    }
+   ],
+   [
+    61250,
+    {
+     "real": "61.2"
+    }
+   ],
+   [
+    61750,
+    {
+     "real": "61.8"
+    }
+   ],
+   [
+    99950,
+    {
+     "real": "100.0"
+    }
+   ],
+   [
+    100050,
+    {
+     "real": "100.0"
+    }
+   ],
+   [
+    123456,
+    {
+     "real": "123.5"
+    }
+   ],
+   [
+    999999,
+    {
+     "real": "1000.0"
+    }
+   ],
+   [
+    1000050,
+    {
+     "real": "1000.0"
+    }
+   ]
+  ]
+ }
+}

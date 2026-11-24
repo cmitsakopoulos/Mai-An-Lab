@@ -12,7 +12,9 @@
 #
 # Lands at files/data/library.db: the same place the Flet app keeps it
 # (FLET_APP_STORAGE_DATA), so the port reads it exactly as it will at cutover.
-# Restart the app afterwards (R in `flutter run`).
+# It replaces the port's copy, discarding what the port wrote into it (the
+# ledger drain's play counts). The app is stopped first: it holds the file
+# open read-write. Start it again afterwards.
 set -euo pipefail
 
 PKG=com.mitsakopoulos.maianlab.mai_an_lab.port
@@ -57,6 +59,8 @@ echo "Snapshot: $(sqlite3 "$TMP/library.db" 'SELECT count(*) FROM tracks') track
      "e.g. $(sqlite3 "$TMP/library.db" 'SELECT path FROM tracks LIMIT 1')"
 
 "$ADB" push "$TMP/library.db" /data/local/tmp/maian_library.db >/dev/null
+# Never swap the file under a running app's open connection (and its WAL).
+"$ADB" shell am force-stop "$PKG" 2>/dev/null || true
 "$ADB" shell "run-as $PKG sh -c 'mkdir -p files/data && cp /data/local/tmp/maian_library.db files/data/library.db && rm -f files/data/library.db-wal files/data/library.db-shm'"
 "$ADB" shell rm -f /data/local/tmp/maian_library.db
 echo "Pushed to $PKG:files/data/library.db"

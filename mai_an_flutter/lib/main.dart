@@ -9,6 +9,7 @@ import 'package:permission_handler/permission_handler.dart';
 import 'core/app_config.dart';
 import 'core/haptics.dart';
 import 'data/library_repository.dart';
+import 'data/play_ledger.dart';
 import 'library/library_controller.dart';
 import 'library/library_screen.dart';
 import 'player/audio_handler.dart';
@@ -46,10 +47,15 @@ Future<void> main() async {
   final dbPath = _dbOverride.isNotEmpty
       ? _dbOverride
       : '$dataDir${Platform.pathSeparator}library.db';
+  // The port's own database is migrated and written (the ledger drain); an
+  // override (e.g. the Flet app's live database on the Mac) is only read.
+  final writable = _dbOverride.isEmpty;
   final library = LibraryController(
-    () => LibraryRepository.open(dbPath),
+    () => LibraryRepository.open(dbPath, writable: writable),
     sort: config.librarySort,
-  )..load();
+  );
+  final loaded = library.load();
+  final ledger = writable ? LedgerDrain(dataDir, library.recordListens) : null;
   final player = ValueNotifier<PlayerController?>(null);
   runApp(
     MaiAnApp(
@@ -57,9 +63,13 @@ Future<void> main() async {
       player: player,
       accent: config.accent ?? Tokens.accent,
       haptics: Haptics(config.haptics),
+      ledger: ledger,
     ),
   );
-  player.value = await _startPlayer(dataDir, library);
+  player.value = await _startPlayer(dataDir, library, ledger);
+  // on_native_ready: listens logged while the app was closed.
+  await loaded;
+  ledger?.schedule(Duration.zero);
 }
 
 /// Permissions first, as the Flet extension did (`_requestRuntimePermissions`
@@ -69,6 +79,7 @@ Future<void> main() async {
 Future<PlayerController> _startPlayer(
   String dataDir,
   LibraryController library,
+  LedgerDrain? ledger,
 ) async {
   if (Platform.isAndroid) await _requestPermissions();
   final backend = Platform.isAndroid
@@ -84,6 +95,9 @@ Future<PlayerController> _startPlayer(
     dspFeatures: library.dspFeatures,
   );
   player.autoplay = AutoPlay(player: player, library: library);
+  // Flet drains on every track change, 3 s later, once the outgoing
+  // track's line has landed. A listen is exactly that line being written.
+  if (ledger != null) backend.listens.listen((_) => ledger.schedule());
   await player.init();
   return player;
 }
@@ -114,12 +128,16 @@ class MaiAnApp extends StatefulWidget {
     required this.player,
     required this.accent,
     required this.haptics,
+    this.ledger,
   });
 
   final LibraryController library;
   final ValueNotifier<PlayerController?> player;
   final Color accent;
   final Haptics haptics;
+
+  /// Null while the database is opened read-only.
+  final LedgerDrain? ledger;
 
   @override
   State<MaiAnApp> createState() => _MaiAnAppState();
@@ -137,7 +155,11 @@ class _MaiAnAppState extends State<MaiAnApp> {
     // and saves where it is.
     _lifecycle = AppLifecycleListener(
       onHide: () => widget.player.value?.setForeground(false),
-      onShow: () => widget.player.value?.setForeground(true),
+      onShow: () {
+        widget.player.value?.setForeground(true);
+        // Pick up listens that finished while in the background.
+        widget.ledger?.schedule(Duration.zero);
+      },
     );
     // Notification taps arrive here. With one screen there is nowhere to
     // route them yet; listening (and draining a cold-start tap) keeps the
@@ -150,6 +172,7 @@ class _MaiAnAppState extends State<MaiAnApp> {
   void dispose() {
     _lifecycle.dispose();
     _notifications?.cancel();
+    widget.ledger?.dispose();
     super.dispose();
   }
 
