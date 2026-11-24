@@ -12,7 +12,7 @@ the Search tab's local landing cards, Settings with the config.toml
 writer, and the Acoustic Network view (§4, phase 3). Phase 4 (sync,
 Android side) is under way: the Companion protocol and discovery, tested
 against Flet's own server (§4, phase 4). Desktop
-tests pass (`flutter test`: 408, including the real-library golden tests
+tests pass (`flutter test`: 421, including the real-library golden tests
 that need the gitignored goldens; analyzer clean in Dart's strict modes);
 debug and release APKs build.
 It is installed on the phone (2026-11-24, with the 2026-11-02 library, an
@@ -95,7 +95,7 @@ Status key:
 | 4 | **Background playback** | `audio_service` `AudioService` (foreground type `mediaPlayback`), `MediaButtonReceiver`, `MediaBrowserService`. `AudioPlayerHandler` lives in the extension's Dart. | Lifted into `lib/player/audio_handler.dart`, Flet bridge removed. The epoch/ack protocol shrank to an in-process op chain in `PlayerController` (ordered ops, push supersedes, index adopted only when the row matches, rate-limited re-push on divergence). | 1 | 🧪 |
 | 5 | **Audio focus, interruptions, headphones unplugged** | `audio_session` `.music()`, interruption stream, user play/pause supersedes a pending interruption | Comes with #4 | 1 | 🧪 |
 | 6 | **Resume after process death** | `native_resume.json` (`setResumePath`), `queue_state.json`, `queue_pos.json` snapshotted every few seconds | Same files and the same JSON (`lib/player/queue_store.dart`), so a cutover install resumes the user's queue. `_choose_resume` ported with its tests. | 1 | 🧪 |
-| 7 | **Notifications** | `POST_NOTIFICATIONS` requested at runtime (Android 13+). Kotlin `ProgressNotifications` and alert notifications. Tapping one navigates via `takePendingNavigate`. | Keep the Kotlin (`packages/maian_native`). Playback-error cards work. Taps are received and drained but not routed: with one screen there is nowhere to go yet. | 1–3 | 🧪 |
+| 7 | **Notifications** | `POST_NOTIFICATIONS` requested at runtime (Android 13+). Kotlin `ProgressNotifications` and alert notifications. Tapping one navigates via `takePendingNavigate`. | Keep the Kotlin (`packages/maian_native`). Playback-error cards work. Job progress (`core/progress_notify.dart`) and tap routing (`core/notification_router.dart`) since phase 4b; each target screen registers when it is ported. | 1–4 | 🧪 |
 | 8 | **Long tasks with the screen off** | Kotlin `LibraryTaskService`, foreground type `dataSync`. The first job starts it and the last one stops it. | Keep the Kotlin. ⚠️ Android 15+ caps `dataSync` foreground services at about 6 h per 24 h. Long offloads or downloads must handle the timeout callback. Verify on device. | 3–4 | ♻️⚠️ |
 | 9 | **Reading music files** | `MANAGE_EXTERNAL_STORAGE` (all-files access) + `READ_MEDIA_AUDIO` + legacy storage permissions. Plain file paths under `/storage/emulated/0/Music`. | Same permissions via `permission_handler`, requested before the player starts (as Flet did), minus RECORD_AUDIO until phase 5. ⚠️ Play Store policy rejects all-files access, so sideload only, as now. | 1 | 🧪 |
 | 10 | **Music folder rules** | `storage_paths.py`: never return an app-private folder, downloads follow the library folder, fallbacks are never written back | `scan/storage_paths.dart` (resolvers and `is_app_private`; the platform and sandbox roots are passed in) and `scan/library_folder.dart` (`sync_config_to_ui`'s inputs: `library_path` pref, `[downloads] folder`). Python's tests ported (`storage_paths_test.dart`); `pick_download_dir` comes with downloads (6). | 3 | 🧪 |
@@ -205,7 +205,7 @@ Verdicts:
 | `audio_engine_macos.py` (pyobjc / AVFoundation) | 1,311 | Rewrite for the Mac | 8 |
 | main.py, the app shell (everything but playback): splash, tab bar and startup tab ✅ (`app_shell.dart`: Search and Library), back navigation and confirm-pop, Settings as a pushed page ✅ (`settings/settings_page.dart`), startup jobs (state-zip auto-import, state auto-export, enrichment pass, new-releases refresh, graph readiness build, cache pruning, companion start), maintenance actions (wipe, clear index/DSP, caches ✅ `data/maintenance.dart`; fresh-install reset: decision C), delete track/playlist ✅, notification routing, success sound | ~2,500 | Rewrite, each piece with the feature behind it (§11) | 3–7 |
 | `config.py` (streamrip config: load, defaults, `repair_config`) + `streamrip_api.py`'s `load_config`, `update_config_params`, `ensure_config_exists` | 552 | Read half for the keys in use (`core/app_config.dart`). Writes ✅ (`core/config_file.dart`: `update_config_params` as tomlkit edits the text, the template copy of `ensure_config_exists`). Its repair half (`fill_missing` from a newer template) when the template next changes (§7). | 1, 3, then all |
-| `progress_notify.py` (job notifications: progress, summary text, retry action, task-service start/stop) | 239 | Port: a Dart wrapper over the Kotlin `showProgressNotification` (not wrapped yet), with the summary and retry rules. A scan the user starts posts nothing (in-app banner only); the scan's alert ("n tracks not analysed yet") follows only the automatic scan after a download or transfer. First users: sync (4), then downloads (6), analysis (B), metadata (7). | 4 |
+| `progress_notify.py` (job notifications: progress, summary text, retry action, task-service start/stop) | 239 | Port ✅ (`core/progress_notify.dart`, phase 4b): a Dart wrapper over the Kotlin `showProgressNotification`, with the throttle, summary and retry rules; the metadata and analysis helpers with 7 and B. A scan the user starts posts nothing (in-app banner only); the scan's alert ("n tracks not analysed yet") follows only the automatic scan after a download or transfer. First users: sync (4), then downloads (6), analysis (B), metadata (7). | 4 |
 | `ui/player/dialogs.py` (confirm and text-input dialogs) | 100 | Rewrite ✅ (`library/library_dialogs.dart`: playlist editor, name dialog, delete confirmations) | 3 |
 | `search_history.py` (`recent_searches.json`), `text_match.py` | 81 | Port with Search | 6 |
 | streamrip-derived helpers: `client.py`, `metadata_objects.py`, `ssl_utils.py`, `exceptions.py`, `filepath_utils.py` | ~330 | Go with the source clients (decision A) | 6 |
@@ -552,7 +552,7 @@ stays Python until phase 8). Stages, one commit each:
 | | Stage | Flet source | |
 |---|---|---|---|
 | a | Protocol: the client, multipart uploads, discovery (query, beacons, /24 sweep), the Kotlin for the route address and the multicast lock, the permissions | `sync/client.py`, `sync/discovery.py` (listener half) | ✅ |
-| b | Progress and alert notifications: a Dart `ProgressNotifier` over the Kotlin `showProgressNotification` (throttle, summary, cancel and Retry buttons, the task service), `post_alert`, notification routing to the screens that exist | `progress_notify.py`, main.py `_on_notification_navigate` | 🔨 |
+| b | Progress and alert notifications: a Dart `ProgressNotifier` over the Kotlin `showProgressNotification` (throttle, summary, cancel and Retry buttons, the task service), `post_alert`, notification routing to the screens that exist | `progress_notify.py`, main.py `_on_notification_navigate` | ✅ |
 | c | The manager: enable and idle auto-off, USB and saved-address probe, heartbeat, PIN snooze, Find Mac (probe, query, sweep) and its messages, manual connect, unpair, background and resume hooks, auto-accept, the Send to Mac worker and acks; the device name | `sync/manager.py`, `sync/send.py` | 🔨 |
 | d | Transfers onto the phone: the download queue for the `companion` source (`.part`, size check, no-overwrite names, `clean_filename`, NFC, `pick_download_dir`, features stored, one quiet scan after the queue drains, Android media scan) and the dock as far as transfers need it | `queue_controller.py`, `streamrip_api.download` (companion branch), `download_dock.py` | 🔨 |
 | e | UI: Settings → Companion & Sync and the sync hub, the PIN and transfer dialogs, Send to Mac in the long-press, selection and album menus | `ui/views/sync_hub.py`, manager dialogs, `send.py` | 🔨 |
@@ -577,6 +577,22 @@ route's address (`defaultRouteIpv4`) and a WifiManager.MulticastLock
 (Flet had none, §7) from `MainActivity`; INTERNET, ACCESS_NETWORK_STATE
 and CHANGE_WIFI_MULTICAST_STATE in the manifest. `core/py_text.dart`
 gained `pyQuote` (`urllib.parse.quote`).
+
+**Stage b.** `core/progress_notify.dart` is progress_notify.py:
+`ProgressNotifier` (one notification per job; about one update a second,
+the first and last always posted; `stage`; a summary, or nothing when
+nothing was shown; a Retry-style button that opens the app at a target),
+the Cancel button dispatched to the newest notifier of its job (the
+extension's per-job handler table), `post_alert`, `cancel_alert` and
+`format_eta`. The Kotlin already starts and stops LibraryTaskService with
+the first and last running job; `MaianNative.showProgressNotification`
+is the new call into it. The metadata and analysis helpers come with
+phases 7 and B. `core/notification_router.dart` is
+`_on_notification_navigate`: taps go to the screen named by
+"screen:action", and a cold-start tap waits for its screen to register.
+The Library registers now (`library`, from the scan alert); `sync` and
+`downloads` with stages d and e. `test/progress_notify_test.dart` ports
+test_progress_notify.py and the notifier scenarios.
 
 **How parity is proved (stage a).** `tool/companion_test_server.py` runs
 Flet's own `CompanionServer` hermetically (scratch feature cache and
@@ -646,7 +662,7 @@ uninstall and reinstall; the bundle export/import covers the data.
 | Queue rows | `_play_track_core` rows carry no `duration` | They carry `duration` | Harmless to the Flet reader; the slider has the right length before the decoder reports. |
 | Microphone permission | Asked at first launch with the rest | Not asked until voice exists (phase 5) | Intentional. |
 | Long-press on a track | Flet's full context menu | Play next, Add to queue, Start radio (haptic tick as in Flet) | The rest arrives with the features behind it (Select…, playlists, send, redownload, delete). |
-| Notification taps | Routed to the target tab | Received and dropped (none of their targets is ported) | When the target screens are. |
+| Notification taps | Routed to the target tab | Routed (`core/notification_router.dart`) to the screens that exist: the Library; sync and downloads with phase 4d–e, the workbench with 7 | Each target with its screen. A tap on a target not ported yet is held, not acted on. |
 | DSP after background auto-advance | `reapply_dsp` runs only while the Python session hears the player, so tracks reached with the session torn down keep the previous track's settings | Applied on every row change | Intentional. |
 | Track row | Format badge, Flet subtitle rules, tint on the playing row | Same | Fixed in the phase 0–1 audit. |
 | Sort in Artists and Genres | One `sort_mode` for every view, coerced on each switch (Tracks → Artists → Tracks loses the Tracks sort; Genres keeps an unrelated mode and shows no tick) | Tracks and Albums share one sort, as in Flet; Artists and Genres each keep their own, starting at A–Z | Intentional. |
@@ -779,7 +795,7 @@ Python primitives, migrations and the ledger drain, the scan engine, the
 views' and playlists' queries, the library UI (views, scan UI, playlists,
 long-press menu, selection, delete), and the tab bar with the Search
 landing; then this plan; all pushed to origin. Then Settings (`e946579`)
-and the Network view, local. Then phase 4a (the Companion protocol), local.
+and the Network view, local. Then phase 4a (the Companion protocol) and 4b (notifications), local.
 
 **Done**
 - [x] Phase 0: backbone (read-only DB isolate, tracks tab, sort, search,
@@ -889,9 +905,9 @@ and the Network view, local. Then phase 4a (the Companion protocol), local.
           what remains of it is phone verification (item 1).
        j. Phase 4 (sync, Android side) started 2026-11-24, before
           decisions A–C: none of its stages depends on them (transfers
-          from the Mac matter more if A keeps downloads there). Next:
-          stage b (progress notifications), then c (the manager); the
-          table in §4, phase 4 has the order. Stage f and g bring the
+          from the Mac matter more if A keeps downloads there). Stages a
+          (protocol) and b (notifications) done. Next: c (the manager);
+          the table in §4, phase 4 has the order. Stage f and g bring the
           first callers of `build_metadata_edges`.
 5. [ ] Decisions A, B, C (§6) before phase 6 is planned in detail.
 6. [ ] Flet, on master: the album menu's Play Album tuple,
@@ -928,7 +944,7 @@ Status: ✅ done · 🧪 written, not yet confirmed in use · 🔨 to build
 | Lifecycle: stop UI work when hidden, prefill auto-play | `_on_lifecycle` | 🧪 (§1 row 18) |
 | Tab bar (Jarvis optional, Search, Library), Settings as a pushed page, startup tab from `startup_page` | `_build_ui`, `_switch_tab` | 🧪 Search and Library, startup tab, fade, back, Settings (§7); Jarvis 🔨 5 |
 | Splash while the app loads | `_build_splash` | 🔨 3, only if startup is slow on the phone |
-| Notification taps routed to a screen (metadata sync, suggestions, download retry, transfers) | `_on_notification_navigate` | 🔨 with each target screen |
+| Notification taps routed to a screen (metadata sync, suggestions, download retry, transfers) | `_on_notification_navigate` | 🧪 the router and the Library; transfers and download retry 🔨 4; workbench 🔨 7 |
 | Success sound after a download | `play_success_notification` | 🔨 6 |
 | Onboarding on first launch | `check_onboarding` | 🔨 7 |
 

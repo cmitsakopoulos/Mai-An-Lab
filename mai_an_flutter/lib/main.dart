@@ -10,6 +10,7 @@ import 'app_shell.dart';
 import 'core/app_config.dart';
 import 'core/config_file.dart';
 import 'core/haptics.dart';
+import 'core/notification_router.dart';
 import 'data/library_repository.dart';
 import 'data/play_ledger.dart';
 import 'library/browse_controller.dart';
@@ -189,6 +190,7 @@ class MaiAnApp extends StatefulWidget {
 class _MaiAnAppState extends State<MaiAnApp> {
   late final AppLifecycleListener _lifecycle;
   StreamSubscription<NotificationAction>? _notifications;
+  final _router = NotificationRouter();
 
   @override
   void initState() {
@@ -204,12 +206,12 @@ class _MaiAnAppState extends State<MaiAnApp> {
         widget.ledger?.schedule(Duration.zero);
       },
     );
-    // Notification taps arrive here. None of their targets (metadata,
-    // downloads, transfers) is ported yet, so there is nowhere to route
-    // them; listening (and draining a cold-start tap) keeps the
-    // Kotlin side from holding them. Routing lands with the other screens.
-    _notifications = MaianNative.notificationActions.listen((_) {});
-    MaianNative.takePendingNavigate();
+    // Notification taps: routed to the screen they name (main.py
+    // `_on_notification_navigate`); a cold-start tap is drained once.
+    _notifications = MaianNative.notificationActions.listen((a) {
+      if (a.job == 'navigate') _router.route(a.action);
+    });
+    MaianNative.takePendingNavigate().then(_router.route);
   }
 
   @override
@@ -239,6 +241,7 @@ class _MaiAnAppState extends State<MaiAnApp> {
           haptics: widget.haptics,
           startTab: widget.startTab,
           settings: widget.settings,
+          router: _router,
         ),
       ),
     );

@@ -41,7 +41,8 @@ abstract final class MaianNative {
   }
 
   /// A notification tap that launched the app before Dart was listening.
-  static Future<String?> takePendingNavigate() => _invoke('takePendingNavigate');
+  static Future<String?> takePendingNavigate() =>
+      _invoke('takePendingNavigate');
 
   /// Embedded art (sidecar as fallback), downscaled to a JPEG in the app
   /// cache, cached per [key]. Null when the file has none.
@@ -49,16 +50,39 @@ abstract final class MaianNative {
     required String path,
     String? sidecar,
     required String key,
-  }) => _invoke('resolveArtwork', {
-    'path': path,
-    'sidecar': sidecar,
-    'key': key,
-  });
+  }) =>
+      _invoke('resolveArtwork', {'path': path, 'sidecar': sidecar, 'key': key});
 
   /// Drops audio_service's foreground state and wakelock, which its own
   /// stop() can't do (see releasePlaybackService in the Kotlin).
   static Future<void> releasePlaybackService() =>
       _invoke<Object?>('releasePlaybackService');
+
+  /// One progress notification per [job]. While any job is running the
+  /// Kotlin holds LibraryTaskService in the foreground (the job survives the
+  /// screen going off) and shows the progress there; [done] ends the job and
+  /// leaves a summary, or removes it when [content] is empty.
+  static Future<void> showProgressNotification({
+    required String job,
+    required String title,
+    required String content,
+    required int progress,
+    required int total,
+    required bool done,
+    required bool cancellable,
+    String? actionLabel,
+    String? actionTarget,
+  }) => _invoke<Object?>('showProgressNotification', {
+    'job': job,
+    'title': title,
+    'content': content,
+    'progress': progress,
+    'total': total,
+    'done': done,
+    'cancellable': cancellable,
+    'actionLabel': actionLabel,
+    'actionTarget': actionTarget,
+  });
 
   static Future<void> showAlert({
     required String key,

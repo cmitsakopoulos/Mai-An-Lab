@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'core/haptics.dart';
+import 'core/notification_router.dart';
 import 'library/browse_controller.dart';
 import 'library/library_controller.dart';
 import 'library/library_screen.dart';
@@ -44,6 +45,7 @@ class AppShell extends StatefulWidget {
     this.unifiedPills = false,
     this.startTab = AppTab.library,
     this.settings,
+    this.router,
   });
 
   final LibraryController library;
@@ -56,6 +58,9 @@ class AppShell extends StatefulWidget {
 
   /// What the Settings page acts on; null leaves its buttons out (tests).
   final SettingsDeps? settings;
+
+  /// Notification taps: the shell's screens register their targets.
+  final NotificationRouter? router;
 
   @override
   State<AppShell> createState() => AppShellState();
@@ -72,10 +77,14 @@ class AppShellState extends State<AppShell> {
   void initState() {
     super.initState();
     _tabShown(tab);
+    // library.py's "n tracks not analysed yet" card opens the Library
+    // (its Analyse button waits for decision B).
+    widget.router?.register('library', (_) => switchTab(AppTab.library));
   }
 
   @override
   void dispose() {
+    widget.router?.unregister('library');
     selection.dispose();
     super.dispose();
   }
