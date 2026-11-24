@@ -9,12 +9,15 @@ import '../core/py_text.dart';
 import '../player/dsp.dart';
 import '../stations/station.dart';
 import 'browse_queries.dart';
+import 'landing_queries.dart';
 import 'library_schema.dart';
 import 'play_ledger.dart';
 import 'playlists.dart';
 import 'scan_writes.dart';
 
 export 'library_schema.dart' show kGeometryVersion;
+export 'landing_queries.dart'
+    show LibraryCounts, MostPlayedGroup, MostPlayedTrack;
 export 'playlists.dart' show PlaylistRow;
 export 'scan_writes.dart' show ScannedTrack;
 
@@ -184,6 +187,15 @@ class LibraryRepository {
       _db.run(tracksByAlbumJob(album, artist));
   Future<List<Track>> tracksByGenre(String genre) =>
       _db.run(tracksByGenreJob(genre));
+
+  // The Search tab's landing cards (landing_queries.dart).
+  Future<List<MostPlayedTrack>> mostPlayed(int limit) =>
+      _db.run(mostPlayedJob(limit));
+  Future<List<MostPlayedGroup>> mostPlayedArtists(int limit) =>
+      _db.run(mostPlayedArtistsJob(limit));
+  Future<List<MostPlayedGroup>> mostPlayedGenres(int limit) =>
+      _db.run(mostPlayedGenresJob(limit));
+  Future<LibraryCounts> libraryCounts() => _db.run(libraryCountsJob);
 
   // Playlists (playlists.dart). Writes throw on a read-only library.
   Future<List<PlaylistRow>> allPlaylists(String sortMode) =>

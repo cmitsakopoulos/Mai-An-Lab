@@ -15,6 +15,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:mai_an_lab/data/browse_queries.dart';
 import 'package:mai_an_lab/data/library_repository.dart';
 
+import 'landing_queries_test.dart' show landingRows;
+
 File? _golden() {
   final env = Platform.environment['LIBRARY_GOLDEN'];
   if (env != null) return File(env);
@@ -117,6 +119,17 @@ void main() {
         a['artist'] as String?,
       );
       expect([for (final t in tracks) t.path], a['tracks'], reason: '$a');
+    }
+  });
+
+  test('Search landing queries', () async {
+    final landing = golden['landing'] as Map<String, dynamic>?;
+    if (landing == null) {
+      markTestSkipped('export predates the landing queries');
+      return;
+    }
+    for (final MapEntry(:key, :value) in landing.entries) {
+      expect(await landingRows(repo, int.parse(key)), value, reason: key);
     }
   });
 }

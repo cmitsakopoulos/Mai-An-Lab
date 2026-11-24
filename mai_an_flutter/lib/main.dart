@@ -6,18 +6,19 @@ import 'package:maian_native/maian_native.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 
+import 'app_shell.dart';
 import 'core/app_config.dart';
 import 'core/haptics.dart';
 import 'data/library_repository.dart';
 import 'data/play_ledger.dart';
 import 'library/browse_controller.dart';
 import 'library/library_controller.dart';
-import 'library/library_screen.dart';
 import 'player/audio_handler.dart';
 import 'player/autoplay.dart';
 import 'player/player_controller.dart';
 import 'player/queue_store.dart';
 import 'scan/library_folder.dart';
+import 'search/landing_controller.dart';
 import 'ui/tokens.dart';
 
 /// Override with: --dart-define=LIBRARY_DB=/path/library.db
@@ -63,11 +64,14 @@ Future<void> main() async {
     library,
     views: LibraryView.fromConfig(config.libraryTabs.visible),
   );
+  final landing = LandingController(library, sections: config.landing);
   final player = ValueNotifier<PlayerController?>(null);
   runApp(
     MaiAnApp(
       library: library,
       browse: browse,
+      landing: landing,
+      startTab: AppTab.fromStartupPage(config.startupPage),
       unifiedPills: config.libraryTabs.unified,
       player: player,
       accent: config.accent ?? Tokens.accent,
@@ -135,15 +139,19 @@ class MaiAnApp extends StatefulWidget {
     super.key,
     required this.library,
     required this.browse,
+    required this.landing,
     required this.player,
     required this.accent,
     required this.haptics,
     this.unifiedPills = false,
+    this.startTab = AppTab.library,
     this.ledger,
   });
 
   final LibraryController library;
   final BrowseController browse;
+  final LandingController landing;
+  final AppTab startTab;
   final bool unifiedPills;
   final ValueNotifier<PlayerController?> player;
   final Color accent;
@@ -174,8 +182,9 @@ class _MaiAnAppState extends State<MaiAnApp> {
         widget.ledger?.schedule(Duration.zero);
       },
     );
-    // Notification taps arrive here. With one screen there is nowhere to
-    // route them yet; listening (and draining a cold-start tap) keeps the
+    // Notification taps arrive here. None of their targets (metadata,
+    // downloads, transfers) is ported yet, so there is nowhere to route
+    // them; listening (and draining a cold-start tap) keeps the
     // Kotlin side from holding them. Routing lands with the other screens.
     _notifications = MaianNative.notificationActions.listen((_) {});
     MaianNative.takePendingNavigate();
@@ -195,12 +204,14 @@ class _MaiAnAppState extends State<MaiAnApp> {
       title: 'Mai An Lab',
       debugShowCheckedModeBanner: false,
       theme: Tokens.theme(accentColor: widget.accent),
-      home: LibraryScreen(
-        controller: widget.library,
+      home: AppShell(
+        library: widget.library,
         browse: widget.browse,
+        landing: widget.landing,
         unifiedPills: widget.unifiedPills,
         player: widget.player,
         haptics: widget.haptics,
+        startTab: widget.startTab,
       ),
     );
   }

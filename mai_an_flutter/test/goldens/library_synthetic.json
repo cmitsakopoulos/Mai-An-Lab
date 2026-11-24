@@ -1168,5 +1168,255 @@
     "Soundtrack"
    ]
   }
- ]
+ ],
+ "landing": {
+  "setup": [
+   "INSERT INTO artists (name) VALUES ('Björk'), ('Χάρις Αλεξίου'), ('Aphex Twin'), ('Nobody'), ('Tie A'), ('Tie B'), ('Zero')",
+   "INSERT INTO albums (artist_id, title, genre, genre_bucket) VALUES (1, 'Post', 'Electronic, Pop', NULL), (2, 'Η Αγάπη', 'Laiko', 'Laiko, Λαϊκό'), (3, 'SAW', 'Unknown', ''), (3, 'Drukqs', NULL, NULL), (4, 'Silence', 'Ambient', NULL), (5, 'TA', NULL, 'rock, Other'), (6, 'TB', 'Pop', 'Rock'), (7, 'Nil', 'Jazz', NULL)",
+   "INSERT INTO tracks (album_id, title, track_num, duration, path, format, added_date) VALUES (1, 'Hyperballad', 1, 200, '/m/bjork/1.flac', 'FLAC', 1700000000)",
+   "INSERT INTO tracks (album_id, title, track_num, duration, path, format, added_date) VALUES (1, 'Isobel', 2, 200, '/m/bjork/2.flac', 'FLAC', 1700000001)",
+   "INSERT INTO tracks (album_id, title, track_num, duration, path, format, added_date) VALUES (1, NULL, 3, 200, '/m/bjork/3.flac', 'FLAC', 1700000002)",
+   "INSERT INTO tracks (album_id, title, track_num, duration, path, format, added_date) VALUES (2, 'Σ’ αγαπώ', 1, 200, '/m/haris/1.flac', 'FLAC', 1700000003)",
+   "INSERT INTO tracks (album_id, title, track_num, duration, path, format, added_date) VALUES (2, 'Δρόμοι', 2, 200, '/m/haris/2.flac', 'FLAC', 1700000004)",
+   "INSERT INTO tracks (album_id, title, track_num, duration, path, format, added_date) VALUES (3, 'Xtal', 1, 200, '/m/aphex/1.flac', 'FLAC', 1700000005)",
+   "INSERT INTO tracks (album_id, title, track_num, duration, path, format, added_date) VALUES (4, 'Avril 14th', 1, 200, '/m/aphex/2.flac', 'FLAC', 1700000006)",
+   "INSERT INTO tracks (album_id, title, track_num, duration, path, format, added_date) VALUES (5, 'Quiet', 1, 200, '/m/nobody/1.flac', 'FLAC', 1700000007)",
+   "INSERT INTO tracks (album_id, title, track_num, duration, path, format, added_date) VALUES (6, 'A', 1, 200, '/m/tie/a.flac', 'FLAC', 1700000008)",
+   "INSERT INTO tracks (album_id, title, track_num, duration, path, format, added_date) VALUES (7, 'B', 1, 200, '/m/tie/b.flac', 'FLAC', 1700000009)",
+   "INSERT INTO tracks (album_id, title, track_num, duration, path, format, added_date) VALUES (8, 'Zero', 1, 200, '/m/zero/1.flac', 'FLAC', 1700000010)",
+   "INSERT INTO play_counts (track_path, count, last_played) VALUES ('/m/bjork/1.flac', 9, 1700000500), ('/m/bjork/2.flac', 4, 1700000400), ('/m/bjork/3.flac', 4, 1700000600), ('/m/haris/1.flac', 7, 1700000100), ('/m/haris/2.flac', 6, 1700000200), ('/m/aphex/1.flac', 3, 1700000300), ('/m/aphex/2.flac', 2, 1700000700), ('/m/nobody/1.flac', 0, 1700000800), ('/m/tie/a.flac', 5, 1700000900), ('/m/tie/b.flac', 5, 1700000950), ('/m/gone/1.flac', 50, 1700001000), ('/m/zero/1.flac', 0, NULL)",
+   "INSERT INTO playlists (name, created) VALUES ('One', 1700000000), ('Two', 1700000001)"
+  ],
+  "limits": {
+   "5": {
+    "most_played": [
+     [
+      "/m/bjork/1.flac",
+      "Hyperballad",
+      "Björk",
+      9
+     ],
+     [
+      "/m/haris/1.flac",
+      "Σ’ αγαπώ",
+      "Χάρις Αλεξίου",
+      7
+     ],
+     [
+      "/m/haris/2.flac",
+      "Δρόμοι",
+      "Χάρις Αλεξίου",
+      6
+     ],
+     [
+      "/m/tie/b.flac",
+      "B",
+      "Tie B",
+      5
+     ],
+     [
+      "/m/tie/a.flac",
+      "A",
+      "Tie A",
+      5
+     ]
+    ],
+    "artists": [
+     [
+      "Björk",
+      17,
+      3
+     ],
+     [
+      "Χάρις Αλεξίου",
+      13,
+      2
+     ],
+     [
+      "Tie B",
+      5,
+      1
+     ],
+     [
+      "Tie A",
+      5,
+      1
+     ],
+     [
+      "Aphex Twin",
+      5,
+      2
+     ]
+    ],
+    "genres": [
+     [
+      "Electronic",
+      17,
+      1
+     ],
+     [
+      "Pop",
+      17,
+      1
+     ],
+     [
+      "Laiko",
+      13,
+      1
+     ],
+     [
+      "Λαϊκό",
+      13,
+      1
+     ],
+     [
+      "Rock",
+      5,
+      1
+     ]
+    ],
+    "counts": [
+     11,
+     8,
+     7,
+     2
+    ]
+   },
+   "50": {
+    "most_played": [
+     [
+      "/m/bjork/1.flac",
+      "Hyperballad",
+      "Björk",
+      9
+     ],
+     [
+      "/m/haris/1.flac",
+      "Σ’ αγαπώ",
+      "Χάρις Αλεξίου",
+      7
+     ],
+     [
+      "/m/haris/2.flac",
+      "Δρόμοι",
+      "Χάρις Αλεξίου",
+      6
+     ],
+     [
+      "/m/tie/b.flac",
+      "B",
+      "Tie B",
+      5
+     ],
+     [
+      "/m/tie/a.flac",
+      "A",
+      "Tie A",
+      5
+     ],
+     [
+      "/m/bjork/3.flac",
+      null,
+      "Björk",
+      4
+     ],
+     [
+      "/m/bjork/2.flac",
+      "Isobel",
+      "Björk",
+      4
+     ],
+     [
+      "/m/aphex/1.flac",
+      "Xtal",
+      "Aphex Twin",
+      3
+     ],
+     [
+      "/m/aphex/2.flac",
+      "Avril 14th",
+      "Aphex Twin",
+      2
+     ],
+     [
+      "/m/nobody/1.flac",
+      "Quiet",
+      "Nobody",
+      0
+     ],
+     [
+      "/m/zero/1.flac",
+      "Zero",
+      "Zero",
+      0
+     ]
+    ],
+    "artists": [
+     [
+      "Björk",
+      17,
+      3
+     ],
+     [
+      "Χάρις Αλεξίου",
+      13,
+      2
+     ],
+     [
+      "Tie B",
+      5,
+      1
+     ],
+     [
+      "Tie A",
+      5,
+      1
+     ],
+     [
+      "Aphex Twin",
+      5,
+      2
+     ]
+    ],
+    "genres": [
+     [
+      "Electronic",
+      17,
+      1
+     ],
+     [
+      "Pop",
+      17,
+      1
+     ],
+     [
+      "Laiko",
+      13,
+      1
+     ],
+     [
+      "Λαϊκό",
+      13,
+      1
+     ],
+     [
+      "Rock",
+      5,
+      1
+     ],
+     [
+      "rock",
+      5,
+      1
+     ]
+    ],
+    "counts": [
+     11,
+     8,
+     7,
+     2
+    ]
+   }
+  }
+ }
 }

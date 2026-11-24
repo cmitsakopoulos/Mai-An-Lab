@@ -29,6 +29,7 @@ class LibraryScreen extends StatefulWidget {
     required this.player,
     required this.haptics,
     this.unifiedPills = false,
+    this.selection,
   });
 
   final LibraryController controller;
@@ -43,6 +44,11 @@ class LibraryScreen extends StatefulWidget {
   /// Null until the player has started (after the permission prompts).
   final ValueListenable<PlayerController?> player;
 
+  /// The shell's (AppShell owns back, and with it leaving selection mode).
+  /// Null when the screen stands alone (tests): then it owns both, and the
+  /// mini player.
+  final SelectionController? selection;
+
   @override
   State<LibraryScreen> createState() => _LibraryScreenState();
 }
@@ -54,7 +60,13 @@ class _LibraryScreenState extends State<LibraryScreen> {
   StreamSubscription<String>? _libraryMessages;
 
   /// library.py's multi-select, shared by every view.
-  final selection = SelectionController();
+  late final SelectionController selection =
+      widget.selection ?? SelectionController();
+  bool get _standalone => widget.selection == null;
+
+  /// The search box. `show_filtered` (the Search landing) sets the query
+  /// from outside, so the box follows the controller.
+  late final _search = TextEditingController(text: controller.query);
 
   @override
   void initState() {
@@ -62,6 +74,11 @@ class _LibraryScreenState extends State<LibraryScreen> {
     widget.player.addListener(_bindMessages);
     _bindMessages();
     _libraryMessages = controller.messages.listen(_snack);
+    controller.addListener(_syncSearch);
+  }
+
+  void _syncSearch() {
+    if (_search.text != controller.query) _search.text = controller.query;
   }
 
   void _bindMessages() {
@@ -81,7 +98,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
     widget.player.removeListener(_bindMessages);
     _messages?.cancel();
     _libraryMessages?.cancel();
-    selection.dispose();
+    controller.removeListener(_syncSearch);
+    _search.dispose();
+    if (_standalone) selection.dispose();
     super.dispose();
   }
 
@@ -119,144 +138,144 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
   @override
   Widget build(BuildContext context) {
-    // Back on the root screen sends the app to the background (like Home)
-    // instead of finishing it; playback carries on either way.
+    final screen = _screen();
+    if (!_standalone) return screen;
+    // Standalone, the screen is the root: back leaves selection mode, then
+    // sends the app to the background (AppShell does this in the app).
     return PopScope(
       canPop: false,
       onPopInvokedWithResult: (didPop, _) {
         if (didPop) return;
-        // Selection mode is the innermost state: back leaves it first.
         if (selection.active) {
           selection.exit();
           return;
         }
         _appChannel.invokeMethod('moveTaskToBack').ignore();
       },
-      child: Scaffold(
-        appBar: AppBar(
-          title: ListenableBuilder(
-            listenable: Listenable.merge([controller, browse]),
-            builder: (context, _) =>
-                _Header(controller: controller, browse: browse),
-          ),
-          actions: [
-            ListenableBuilder(
-              listenable: Listenable.merge([controller, browse]),
-              builder: (context, _) => _sortMenu(),
-            ),
-            // library.py's scan button (Flet: refresh icon in the accent).
-            ListenableBuilder(
-              listenable: controller,
-              builder: (context, _) => controller.canScan
-                  ? IconButton(
-                      icon: const Icon(Icons.refresh),
-                      color: Theme.of(context).colorScheme.primary,
-                      tooltip: 'Scan library',
-                      onPressed: controller.scanning ? null : controller.scan,
-                    )
-                  : const SizedBox.shrink(),
-            ),
-          ],
+      child: screen,
+    );
+  }
+
+  Widget _screen() {
+    return Scaffold(
+      appBar: AppBar(
+        title: ListenableBuilder(
+          listenable: Listenable.merge([controller, browse]),
+          builder: (context, _) =>
+              _Header(controller: controller, browse: browse),
         ),
-        body: Column(
-          children: [
-            Expanded(
-              child: ListenableBuilder(
-                listenable: controller,
-                builder: (context, _) => switch (controller.state) {
-                  LoadState.loading => const Center(
-                    child: CircularProgressIndicator(),
-                  ),
-                  LoadState.error => _ErrorView(
-                    message: controller.error ?? '',
-                  ),
-                  LoadState.ready => Column(
-                    children: [
-                      Padding(
-                        padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
-                        child: TextField(
-                          onChanged: controller.setQuery,
-                          decoration: const InputDecoration(
-                            hintText: 'Search artists, albums, tracks…',
-                            prefixIcon: Icon(Icons.search, color: Tokens.dim),
-                            isDense: true,
-                          ),
+        actions: [
+          ListenableBuilder(
+            listenable: Listenable.merge([controller, browse]),
+            builder: (context, _) => _sortMenu(),
+          ),
+          // library.py's scan button (Flet: refresh icon in the accent).
+          ListenableBuilder(
+            listenable: controller,
+            builder: (context, _) => controller.canScan
+                ? IconButton(
+                    icon: const Icon(Icons.refresh),
+                    color: Theme.of(context).colorScheme.primary,
+                    tooltip: 'Scan library',
+                    onPressed: controller.scanning ? null : controller.scan,
+                  )
+                : const SizedBox.shrink(),
+          ),
+        ],
+      ),
+      body: Column(
+        children: [
+          Expanded(
+            child: ListenableBuilder(
+              listenable: controller,
+              builder: (context, _) => switch (controller.state) {
+                LoadState.loading => const Center(
+                  child: CircularProgressIndicator(),
+                ),
+                LoadState.error => _ErrorView(message: controller.error ?? ''),
+                LoadState.ready => Column(
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
+                      child: TextField(
+                        controller: _search,
+                        onChanged: controller.setQuery,
+                        decoration: const InputDecoration(
+                          hintText: 'Search artists, albums, tracks…',
+                          prefixIcon: Icon(Icons.search, color: Tokens.dim),
+                          isDense: true,
                         ),
                       ),
-                      ListenableBuilder(
-                        listenable: browse,
-                        builder: (context, _) => browse.views.length < 2
-                            ? const SizedBox.shrink()
-                            : Padding(
-                                padding: const EdgeInsets.fromLTRB(
-                                  14,
-                                  0,
-                                  14,
-                                  8,
-                                ),
-                                child: ViewBar(
-                                  views: browse.views,
-                                  selected: browse.view,
-                                  unified: widget.unifiedPills,
-                                  onSelect: browse.setView,
-                                ),
+                    ),
+                    ListenableBuilder(
+                      listenable: browse,
+                      builder: (context, _) => browse.views.length < 2
+                          ? const SizedBox.shrink()
+                          : Padding(
+                              padding: const EdgeInsets.fromLTRB(14, 0, 14, 8),
+                              child: ViewBar(
+                                views: browse.views,
+                                selected: browse.view,
+                                unified: widget.unifiedPills,
+                                onSelect: browse.setView,
+                              ),
+                            ),
+                    ),
+                    ListenableBuilder(
+                      listenable: controller,
+                      builder: (context, _) => controller.scanning
+                          ? _ScanBanner(controller: controller)
+                          : const SizedBox.shrink(),
+                    ),
+                    Expanded(
+                      child: ListenableBuilder(
+                        listenable: Listenable.merge([browse, controller]),
+                        builder: (context, _) =>
+                            controller.total == 0 && !controller.scanning
+                            ? const _EmptyLibrary()
+                            : browse.view == LibraryView.tracks
+                            ? _tracksList()
+                            : BrowseList(
+                                controller: browse,
+                                player: widget.player,
+                                onPlayTrack: _playInContext,
+                                onTrackMenu: _trackMenu,
+                                onAlbumMenu: _albumMenu,
+                                onPlayGenre: _playGenre,
+                                selection: selection,
+                                onCreatePlaylist: _createPlaylist,
+                                onEditPlaylist: _editPlaylist,
+                                onDeletePlaylist: _deletePlaylist,
+                                onRemoveFromPlaylist: _removeFromPlaylist,
                               ),
                       ),
-                      ListenableBuilder(
-                        listenable: controller,
-                        builder: (context, _) => controller.scanning
-                            ? _ScanBanner(controller: controller)
-                            : const SizedBox.shrink(),
-                      ),
-                      Expanded(
-                        child: ListenableBuilder(
-                          listenable: Listenable.merge([browse, controller]),
-                          builder: (context, _) =>
-                              controller.total == 0 && !controller.scanning
-                              ? const _EmptyLibrary()
-                              : browse.view == LibraryView.tracks
-                              ? _tracksList()
-                              : BrowseList(
-                                  controller: browse,
-                                  player: widget.player,
-                                  onPlayTrack: _playInContext,
-                                  onTrackMenu: _trackMenu,
-                                  onAlbumMenu: _albumMenu,
-                                  onPlayGenre: _playGenre,
-                                  selection: selection,
-                                  onCreatePlaylist: _createPlaylist,
-                                  onEditPlaylist: _editPlaylist,
-                                  onDeletePlaylist: _deletePlaylist,
-                                  onRemoveFromPlaylist: _removeFromPlaylist,
-                                ),
-                        ),
-                      ),
-                    ],
-                  ),
-                },
-              ),
+                    ),
+                  ],
+                ),
+              },
             ),
-            ListenableBuilder(
-              listenable: selection,
-              builder: (context, _) => selection.active
-                  ? _SelectionBar(
-                      selection: selection,
-                      onPlay: () => _selectionPlay(replace: true),
-                      onQueue: () => _selectionPlay(replace: false),
-                      onAddToPlaylist: () =>
-                          _addToPlaylist(selection.tracks, fromSelection: true),
-                      canWritePlaylists: controller.canWrite,
-                    )
-                  : const SizedBox.shrink(),
-            ),
+          ),
+          ListenableBuilder(
+            listenable: selection,
+            builder: (context, _) => selection.active
+                ? _SelectionBar(
+                    selection: selection,
+                    onPlay: () => _selectionPlay(replace: true),
+                    onQueue: () => _selectionPlay(replace: false),
+                    onAddToPlaylist: () =>
+                        _addToPlaylist(selection.tracks, fromSelection: true),
+                    canWritePlaylists: controller.canWrite,
+                  )
+                : const SizedBox.shrink(),
+          ),
+          if (_standalone)
             ValueListenableBuilder(
               valueListenable: widget.player,
               builder: (context, player, _) => player == null
                   ? const SizedBox.shrink()
                   : SafeArea(top: false, child: MiniPlayer(player: player)),
             ),
-          ],
-        ),
+        ],
       ),
     );
   }

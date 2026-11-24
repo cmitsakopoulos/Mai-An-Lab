@@ -19,6 +19,8 @@ class AppConfig {
     this.haptics = const HapticsConfig(),
     this.libraryTabs = const LibraryTabs(),
     this.downloadsFolder = '',
+    this.startupPage = 'Library',
+    this.landing = const LandingSections(),
   });
 
   /// `general.library_sort` (Flet library.py: the initial sort).
@@ -39,6 +41,13 @@ class AppConfig {
   /// `[downloads] folder`, unresolved (storage_paths.dart resolves it; the
   /// library folder falls back to it).
   final String downloadsFolder;
+
+  /// `general.startup_page`: "Jarvis", "Search", "Library" or "Settings"
+  /// (main.py `_build_ui`, default "Library").
+  final String startupPage;
+
+  /// `[landing]`: which Search landing cards show.
+  final LandingSections landing;
 
   /// Where utils/config.py puts it. The Flet app points HOME at the data dir
   /// first (main.py), so `Path.home()` is `<data>`:
@@ -79,6 +88,11 @@ class AppConfig {
         {'folder': final Object f?} => '$f',
         _ => '',
       },
+      startupPage: switch (general) {
+        {'startup_page': final Object p?} => '$p',
+        _ => 'Library',
+      },
+      landing: LandingSections.fromToml(doc['landing']),
     );
   }
 
@@ -105,6 +119,46 @@ class AppConfig {
     final m = RegExp(r'^#?([0-9a-fA-F]{6})$').firstMatch(hex.trim());
     if (m == null) return null;
     return Color(0xFF000000 | int.parse(m[1]!, radix: 16));
+  }
+}
+
+/// search.py `refresh_setup_state`'s `sections`: each `[landing]` key read
+/// with Python's `bool()`, defaulting to shown. `show_search_history` is the
+/// historical key of the Most Listened Tracks card.
+class LandingSections {
+  const LandingSections({
+    this.newReleases = true,
+    this.mostListened = true,
+    this.topArtists = true,
+    this.topGenres = true,
+    this.stats = true,
+  });
+
+  /// New From Your Artists (phase 6; read so the setting carries over).
+  final bool newReleases;
+  final bool mostListened;
+  final bool topArtists;
+  final bool topGenres;
+  final bool stats;
+
+  static LandingSections fromToml(Object? landing) {
+    final l = landing is Map ? landing : const <String, Object?>{};
+    bool on(String key) => switch (l[key]) {
+      null => true,
+      bool b => b,
+      String s => s.isNotEmpty,
+      num n => n != 0,
+      List<Object?> v => v.isNotEmpty,
+      Map<Object?, Object?> v => v.isNotEmpty,
+      _ => true,
+    };
+    return LandingSections(
+      newReleases: on('show_new_releases'),
+      mostListened: on('show_search_history'),
+      topArtists: on('show_top_artists'),
+      topGenres: on('show_top_genres'),
+      stats: on('show_library_stats'),
+    );
   }
 }
 
