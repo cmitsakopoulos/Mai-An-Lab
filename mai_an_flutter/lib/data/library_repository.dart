@@ -10,8 +10,10 @@ import '../player/dsp.dart';
 import '../stations/station.dart';
 import 'library_schema.dart';
 import 'play_ledger.dart';
+import 'scan_writes.dart';
 
 export 'library_schema.dart' show kGeometryVersion;
+export 'scan_writes.dart' show ScannedTrack;
 
 class Track {
   const Track({
@@ -93,6 +95,20 @@ class LibraryRepository {
     if (!writable) throw StateError('library opened read-only');
     return _db.run(recordListensJob(entries));
   }
+
+  // The library scan's reads and writes (scan_writes.dart).
+  Future<Map<String, double?>> pathMtimeMap() => _db.run(pathMtimeMapJob);
+  Future<Map<String, String>> artistAliases() => _db.run(artistAliasesJob);
+  Future<void> deleteTracksByPaths(List<String> paths) =>
+      _write(deleteTracksByPathsJob(paths));
+  Future<void> insertTracksBatch(
+    List<ScannedTrack> tracks,
+    Map<String, String> aliases,
+  ) => _write(insertTracksBatchJob(tracks, aliases));
+  Future<void> beginBulkImport() => _write(beginBulkImportJob);
+  Future<void> endBulkImport() => _write(endBulkImportJob);
+  Future<void> pruneOrphans() => _write(pruneOrphansJob);
+  Future<void> checkpoint() => _write(checkpointJob);
 
   /// Raw statements, for tests that set up rows the app makes elsewhere.
   @visibleForTesting

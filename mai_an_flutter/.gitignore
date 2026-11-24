@@ -43,3 +43,7 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# tinytag pinned to the APK's version for tool/export_scan_goldens.py
+/tool/.pydeps/
+__pycache__/

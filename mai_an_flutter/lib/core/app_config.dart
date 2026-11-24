@@ -17,6 +17,7 @@ class AppConfig {
     this.accent,
     this.dsp = const DspConfig(),
     this.haptics = const HapticsConfig(),
+    this.downloadsFolder = '',
   });
 
   /// `general.library_sort` (Flet library.py: the initial sort).
@@ -30,6 +31,10 @@ class AppConfig {
 
   /// `[haptics]`: on/off and the intensity per action.
   final HapticsConfig haptics;
+
+  /// `[downloads] folder`, unresolved (storage_paths.dart resolves it; the
+  /// library folder falls back to it).
+  final String downloadsFolder;
 
   /// Where utils/config.py puts it. The Flet app points HOME at the data dir
   /// first (main.py), so `Path.home()` is `<data>`:
@@ -65,6 +70,10 @@ class AppConfig {
       accent: rawAccent is String ? parseAccent(rawAccent) : null,
       dsp: DspConfig.fromToml(doc['dsp']),
       haptics: HapticsConfig.fromToml(doc['haptics']),
+      downloadsFolder: switch (doc['downloads']) {
+        {'folder': final Object f?} => '$f',
+        _ => '',
+      },
     );
   }
 
