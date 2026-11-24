@@ -173,6 +173,42 @@ DbJob<GraphReadiness> graphReadinessJob([int featuresVersion = 5]) => (db) {
   );
 };
 
+/// `track_graph.graph_status`: the assistant's first-open check.
+typedef GraphStatus = ({
+  int totalTracks,
+  int coordTracks,
+  int acousticEdges,
+  int artistEdges,
+  int albumEdges,
+});
+
+/// `track_graph.graph_status` job.
+DbJob<GraphStatus> graphStatusJob = (db) {
+  int count(String sql, [List<Object?> args = const []]) {
+    try {
+      return db.select(sql, args).first.values.first as int;
+    } on SqliteException {
+      return 0;
+    }
+  }
+
+  return (
+    totalTracks: count('SELECT COUNT(*) FROM tracks'),
+    coordTracks: count(
+      'SELECT COUNT(*) FROM play_counts WHERE pca_coords IS NOT NULL',
+    ),
+    acousticEdges: count(
+      "SELECT COUNT(*) FROM track_neighbors WHERE kind = 'acoustic'",
+    ),
+    artistEdges: count(
+      "SELECT COUNT(*) FROM track_neighbors WHERE kind = 'artist'",
+    ),
+    albumEdges: count(
+      "SELECT COUNT(*) FROM track_neighbors WHERE kind = 'album'",
+    ),
+  );
+};
+
 /// `get_tracks_missing_features`: paths whose features are absent or stale.
 DbJob<List<String>> tracksMissingFeaturesJob([int featuresVersion = 5]) =>
     (db) => [

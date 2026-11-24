@@ -20,6 +20,7 @@ class AppConfig {
     this.dsp = const DspConfig(),
     this.haptics = const HapticsConfig(),
     this.libraryTabs = const LibraryTabs(),
+    this.showJarvis = true,
     this.downloadsFolder = '',
     this.startupPage = 'Library',
     this.landing = const LandingSections(),
@@ -40,6 +41,9 @@ class AppConfig {
 
   /// `appearance.show_*` and `pill_style`: the Library tab's view bar.
   final LibraryTabs libraryTabs;
+
+  /// `appearance.show_jarvis`: whether the Jarvis tab appears in the nav bar.
+  final bool showJarvis;
 
   /// `[downloads] folder`, unresolved (storage_paths.dart resolves it; the
   /// library folder falls back to it).
@@ -90,6 +94,10 @@ class AppConfig {
       dsp: DspConfig.fromToml(doc['dsp']),
       haptics: HapticsConfig.fromToml(doc['haptics']),
       libraryTabs: LibraryTabs.fromToml(appearance),
+      showJarvis: LibraryTabs.parseBool(
+        appearance is Map ? appearance['show_jarvis'] : null,
+        true,
+      ),
       downloadsFolder: switch (doc['downloads']) {
         {'folder': final Object f?} => '$f',
         _ => '',
@@ -218,7 +226,7 @@ class LibraryTabs {
     final a = appearance is Map ? appearance : const <String, Object?>{};
     final visible = [
       for (final m in order)
-        if (_toBool(a['show_$m'], _defaults[m]!)) m,
+        if (parseBool(a['show_$m'], _defaults[m]!)) m,
     ];
     return LibraryTabs(
       visible: visible.isEmpty ? const ['tracks'] : visible,
@@ -226,8 +234,8 @@ class LibraryTabs {
     );
   }
 
-  /// library.py `_to_bool`.
-  static bool _toBool(Object? v, bool fallback) => switch (v) {
+  /// library.py `_to_bool` / main.py `show_jarvis`.
+  static bool parseBool(Object? v, bool fallback) => switch (v) {
     null => fallback,
     bool b => b,
     String s => const {'true', '1', 'yes'}.contains(s.trim().toLowerCase()),

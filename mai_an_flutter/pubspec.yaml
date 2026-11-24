@@ -46,6 +46,8 @@ dependencies:
   # Kotlin shared with the Flet app (see packages/maian_native).
   maian_native:
     path: packages/maian_native
+  flutter_markdown_plus: ^1.0.12
+  url_launcher: ^6.3.3
 
 dev_dependencies:
   flutter_test:

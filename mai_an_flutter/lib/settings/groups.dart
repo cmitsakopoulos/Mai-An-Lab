@@ -561,6 +561,9 @@ class _AppearanceGroupState extends State<AppearanceGroup> {
         _switch('albums', 'Albums'),
         _switch('tracks', 'Tracks'),
         divider,
+        const AccentLabel('AI Companion'),
+        _switch('jarvis', 'Enable Jarvis Tab'),
+        divider,
         const AccentLabel('Accent Color'),
         Wrap(
           spacing: 12,

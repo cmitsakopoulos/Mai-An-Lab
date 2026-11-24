@@ -20,11 +20,12 @@ class SettingEntry {
 }
 
 /// The hub's groups the port has (settings.py `open_subpage` names). Those
-/// waiting on later phases (Authentication, AI Assistant, Metadata) are
+/// waiting on later phases (Authentication, Metadata) are
 /// left out of the hub and the search alike.
 enum SettingsPage {
   companion('Companion & Sync'),
   storage('Storage'),
+  assistant('AI Assistant'),
   appearance('Appearance'),
   audio('Audio & DSP'),
   haptics('Haptic Feedback'),
@@ -62,6 +63,20 @@ const kSettingEntries = [
       'download', 'path', 'folder', 'directory', 'streamrip', 'location', //
       'storage', 'music folder', 'save', 'destination', 'library path',
       'db path', 'disk', 'target',
+    ],
+  ),
+  SettingEntry(
+    page: SettingsPage.assistant,
+    title: 'AI Assistant (Jarvis)',
+    subtitle: 'Google Gemini API key, providers & LLM settings',
+    category: 'GENERAL',
+    icon: Icons.smart_toy_rounded,
+    keywords: [
+      'gemini', 'ollama', 'api key', 'llm', 'jarvis', 'ai', 'assistant', //
+      'personality', 'prompt', 'zax', 'model', 'voice', 'speech', 'stt',
+      'tts', 'agent', 'intelligence', 'endpoint', 'lm studio', 'local server',
+      'chat', 'bot', 'system directive', 'voice command', 'apikey', 'disable',
+      'enable',
     ],
   ),
   SettingEntry(

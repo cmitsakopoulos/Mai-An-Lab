@@ -21,7 +21,7 @@ import 'maintenance.dart';
 import 'network_queries.dart';
 import 'scan_writes.dart';
 
-export 'graph_build.dart' show AcousticBuildResult, GraphReadiness;
+export 'graph_build.dart' show AcousticBuildResult, GraphReadiness, GraphStatus;
 export 'library_schema.dart' show kGeometryVersion;
 export 'landing_queries.dart'
     show LibraryCounts, MostPlayedGroup, MostPlayedTrack;
@@ -326,6 +326,9 @@ class LibraryRepository {
   /// The startup readiness check's counts.
   Future<GraphReadiness> graphReadiness() =>
       _db.run(graphReadinessJob(kFeaturesVersion));
+
+  /// `track_graph.graph_status`: the assistant's init check.
+  Future<GraphStatus> graphStatus() => _db.run(graphStatusJob);
 
   /// `get_tracks_missing_features`: the DSP offload's work list.
   Future<List<String>> tracksMissingFeatures() =>

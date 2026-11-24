@@ -107,7 +107,8 @@
   {
    "query": "dark mode",
    "titles": [
-    "Appearance"
+    "Appearance",
+    "AI Assistant (Jarvis)"
    ]
   },
   {
@@ -328,7 +329,9 @@
   },
   {
    "query": "jarvis",
-   "titles": []
+   "titles": [
+    "AI Assistant (Jarvis)"
+   ]
   },
   {
    "query": "qobuz",
@@ -357,12 +360,15 @@
   {
    "query": "enable eq",
    "titles": [
+    "AI Assistant (Jarvis)",
     "Audio & DSP"
    ]
   },
   {
    "query": "disable",
-   "titles": []
+   "titles": [
+    "AI Assistant (Jarvis)"
+   ]
   },
   {
    "query": "change folder",
@@ -381,6 +387,7 @@
    "titles": [
     "Companion & Sync",
     "Storage & Paths",
+    "AI Assistant (Jarvis)",
     "Appearance",
     "Audio & DSP",
     "Haptic Feedback",
@@ -402,7 +409,8 @@
    "query": "general",
    "titles": [
     "Companion & Sync",
-    "Storage & Paths"
+    "Storage & Paths",
+    "AI Assistant (Jarvis)"
    ]
   },
   {
@@ -527,6 +535,7 @@
   {
    "query": "lobotomize",
    "titles": [
+    "AI Assistant (Jarvis)",
     "Advanced"
    ]
   },
@@ -539,7 +548,8 @@
   {
    "query": "pairing",
    "titles": [
-    "Companion & Sync"
+    "Companion & Sync",
+    "AI Assistant (Jarvis)"
    ]
   },
   {
@@ -570,13 +580,15 @@
   {
    "query": "server",
    "titles": [
-    "Companion & Sync"
+    "Companion & Sync",
+    "AI Assistant (Jarvis)"
    ]
   },
   {
    "query": "pair with mac",
    "titles": [
-    "Companion & Sync"
+    "Companion & Sync",
+    "AI Assistant (Jarvis)"
    ]
   }
  ]

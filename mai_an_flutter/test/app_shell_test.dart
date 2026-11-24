@@ -60,7 +60,8 @@ show_top_genres = 0
       AppTab.fromStartupPage(const AppConfig().startupPage),
       AppTab.library,
     );
-    expect(AppTab.fromStartupPage('Jarvis'), AppTab.library);
+    expect(AppTab.fromStartupPage('Jarvis'), AppTab.jarvis);
+    expect(AppTab.fromStartupPage('Jarvis', showJarvis: false), AppTab.library);
     expect(AppTab.fromStartupPage('Settings'), AppTab.library);
   });
 

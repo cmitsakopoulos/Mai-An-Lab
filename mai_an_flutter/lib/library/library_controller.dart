@@ -237,6 +237,7 @@ class LibraryController extends ChangeNotifier
     }
     _scanBusy = false;
     scanning = false;
+    scanGeneration++;
     notifyListeners();
     await reload();
     if (quiet) {
@@ -253,6 +254,13 @@ class LibraryController extends ChangeNotifier
   /// A scan is running, the user's or a quiet one (library.py
   /// `_is_scanning`).
   bool _scanBusy = false;
+
+  /// Bumped whenever a library scan completes so Jarvis can re-greet if
+  /// needed (assistant.py `_init_greeted = False`).
+  int scanGeneration = 0;
+
+  /// `track_graph.graph_status` for the assistant's init check.
+  Future<GraphStatus?> graphStatus() async => _repo?.graphStatus();
 
   /// library.py `_announce_unanalysed`: until new tracks are analysed,
   /// auto-play and the similar-track picks can't use them, and nothing

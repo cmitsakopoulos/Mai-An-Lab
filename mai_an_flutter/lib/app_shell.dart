@@ -4,6 +4,8 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import 'assistant/assistant_controller.dart';
+import 'assistant/assistant_screen.dart';
 import 'core/haptics.dart';
 import 'core/notification_router.dart';
 import 'downloads/download_dock.dart';
@@ -21,17 +23,21 @@ import 'ui/tokens.dart';
 
 const _appChannel = MethodChannel('mai_an/app');
 
-/// The main.py tabs the port has. Jarvis (phase 5) and Settings (a pushed
-/// page) come later.
+/// The main.py tabs the port has. Settings is a pushed page.
 enum AppTab {
+  jarvis,
   search,
   library;
 
-  /// main.py `_build_ui`: `general.startup_page`, default Library. Jarvis
-  /// and Settings aren't ported, so they open the Library (as Jarvis does in
-  /// Flet when its tab is hidden).
-  static AppTab fromStartupPage(String name) =>
-      name == 'Search' ? search : library;
+  /// main.py `_build_ui`: `general.startup_page`, default Library.
+  /// When Jarvis is disabled (`appearance.show_jarvis = false`), Jarvis falls
+  /// back to Library, as in Flet.
+  static AppTab fromStartupPage(String name, {bool showJarvis = true}) =>
+      switch (name) {
+        'Jarvis' => showJarvis ? jarvis : library,
+        'Search' => search,
+        _ => library,
+      };
 }
 
 /// main.py `_build_ui`: the tab content, the mini player and the tab bar,
@@ -44,6 +50,8 @@ class AppShell extends StatefulWidget {
     required this.landing,
     required this.player,
     required this.haptics,
+    this.assistant,
+    this.showJarvis = false,
     this.unifiedPills = false,
     this.startTab = AppTab.library,
     this.settings,
@@ -56,6 +64,8 @@ class AppShell extends StatefulWidget {
   final LandingController landing;
   final ValueListenable<PlayerController?> player;
   final Haptics haptics;
+  final AssistantController? assistant;
+  final bool showJarvis;
   final bool unifiedPills;
   final AppTab startTab;
 
@@ -74,10 +84,25 @@ class AppShell extends StatefulWidget {
 
 @visibleForTesting
 class AppShellState extends State<AppShell> {
-  late AppTab tab = widget.startTab;
+  late AppTab tab = _effectiveTab(widget.startTab);
+
+  bool get _hasJarvis => widget.showJarvis && widget.assistant != null;
+
+  AppTab _effectiveTab(AppTab requested) =>
+      requested == AppTab.jarvis && !_hasJarvis ? AppTab.library : requested;
 
   /// The Library's multi-select: here, because back leaves it first.
   final selection = SelectionController();
+
+  @override
+  void didUpdateWidget(AppShell oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (tab == AppTab.jarvis && !_hasJarvis) {
+      widget.assistant?.onHide();
+      tab = AppTab.library;
+      _tabShown(tab);
+    }
+  }
 
   @override
   void initState() {
@@ -148,14 +173,18 @@ class AppShellState extends State<AppShell> {
 
   /// main.py `_switch_tab`.
   void switchTab(AppTab to) {
-    if (to == tab) return;
-    setState(() => tab = to);
-    _tabShown(to);
+    final target = _effectiveTab(to);
+    if (target == tab) return;
+    final from = tab;
+    setState(() => tab = target);
+    if (from == AppTab.jarvis) widget.assistant?.onHide();
+    _tabShown(target);
   }
 
   /// The tab's `on_show`.
   void _tabShown(AppTab t) {
     if (t == AppTab.search) widget.landing.onShow();
+    if (t == AppTab.jarvis) widget.assistant?.onShow().ignore();
   }
 
   void _snack(String text) {
@@ -236,6 +265,14 @@ class AppShellState extends State<AppShell> {
         body: Stack(
           fit: StackFit.expand,
           children: [
+            if (_hasJarvis)
+              _FadeTab(
+                active: tab == AppTab.jarvis,
+                child: AssistantScreen(
+                  controller: widget.assistant!,
+                  onOpenSettings: _openSettings,
+                ),
+              ),
             _FadeTab(
               active: tab == AppTab.search,
               child: SearchScreen(
@@ -271,7 +308,7 @@ class AppShellState extends State<AppShell> {
                   ? const SizedBox.shrink()
                   : MiniPlayer(player: player),
             ),
-            _TabBar(tab: tab, onSelect: switchTab),
+            _TabBar(tab: tab, showJarvis: _hasJarvis, onSelect: switchTab),
           ],
         ),
       ),
@@ -282,21 +319,28 @@ class AppShellState extends State<AppShell> {
 /// main.py `_nav`: no pill, a hairline on top, labels always shown, the
 /// accent indicator at about a third.
 class _TabBar extends StatelessWidget {
-  const _TabBar({required this.tab, required this.onSelect});
+  const _TabBar({
+    required this.tab,
+    required this.showJarvis,
+    required this.onSelect,
+  });
 
   final AppTab tab;
+  final bool showJarvis;
   final ValueChanged<AppTab> onSelect;
 
   @override
   Widget build(BuildContext context) {
     final accent = Theme.of(context).colorScheme.primary;
+    final tabs = [if (showJarvis) AppTab.jarvis, AppTab.search, AppTab.library];
+    final selectedIndex = tabs.indexOf(tab).clamp(0, tabs.length - 1);
     return DecoratedBox(
       decoration: const BoxDecoration(
         border: Border(top: BorderSide(color: Tokens.borderSubtle, width: 0.5)),
       ),
       child: NavigationBar(
-        selectedIndex: tab.index,
-        onDestinationSelected: (i) => onSelect(AppTab.values[i]),
+        selectedIndex: selectedIndex,
+        onDestinationSelected: (i) => onSelect(tabs[i]),
         backgroundColor: Tokens.surface,
         indicatorColor: accent.withValues(alpha: 0x55 / 0xFF),
         elevation: 0,
@@ -304,12 +348,18 @@ class _TabBar extends StatelessWidget {
         labelTextStyle: const WidgetStatePropertyAll(
           TextStyle(fontSize: 11, fontWeight: FontWeight.w500),
         ),
-        destinations: const [
-          NavigationDestination(
+        destinations: [
+          if (showJarvis)
+            const NavigationDestination(
+              icon: Icon(Icons.auto_awesome_rounded),
+              selectedIcon: Icon(Icons.auto_awesome_rounded),
+              label: 'Jarvis',
+            ),
+          const NavigationDestination(
             icon: Icon(Icons.search_rounded),
             label: 'Search',
           ),
-          NavigationDestination(
+          const NavigationDestination(
             icon: Icon(Icons.library_music_outlined),
             selectedIcon: Icon(Icons.library_music_rounded),
             label: 'Library',

@@ -23,15 +23,16 @@ on 4,961 utterances), b (the LLM client and tool declarations), c (the
 runner's deterministic half and its database and player adapters, identical
 to Python across 14 conversations / 124 turns), d (the agent loop and
 tool executor, identical to Python across 51 tool cases and 9 HTTP-recorded
-loop scenarios) and e (the web tools: DuckDuckGo Lite, Wikipedia and Gemini
-Google Search grounding, identical to Python across 29 golden cases) are done
-(§4, phase 5).
-Desktop tests pass (`flutter test`: 715, including the real-library golden
+loop scenarios), e (the web tools: DuckDuckGo Lite, Wikipedia and Gemini
+Google Search grounding, identical to Python across 29 golden cases) and f
+(the Jarvis tab, `AppShell` tab bar with `show_jarvis`, Settings → AI
+Assistant and Appearance's Jarvis switch) are done (§4, phase 5).
+Desktop tests pass (`flutter test`: 722, including the real-library golden
 tests that need the gitignored goldens; analyzer clean in Dart's strict
 modes); debug and release APKs build.
 It is installed on the phone (2026-11-24, with the 2026-11-02 library, an
 older build: no scan, no Settings yet). The user reports problems found in use; fix
-them, or record intended differences in §7. Nothing ships from this port yet. 54 of the 91 Flet features in §11
+them, or record intended differences in §7. Nothing ships from this port yet. 58 of the 91 Flet features in §11
 are ported. Third-party code the port uses or copies is listed in §12.*
 
 **Next session: start at §10 (open items). §11 lists every Flet feature and
@@ -210,7 +211,7 @@ Verdicts:
 | `state_export.py` | 294 | Port ✅ (`data/state_export.dart`, `core/zip_archive.dart`, `sync/state_bundles.dart`) | 4 |
 | `llm_engine.py` (Gemini/Ollama over an OpenAI-compatible API) | 231 | Port ✅ (`assistant/llm_engine.dart`, golden-tested) | 5 |
 | `llm_tools.py`, `assistant_runner.py`, `assistant_intent.py`, `chat_memory.py`, `web_research.py` | ~4,500 | Port, with golden intent and tool-call tests (§4, phase 5). `assistant_intent` ✅ (`assistant/intent.dart`), `chat_memory` ✅, `llm_tools`' text helpers and `names_mentioned` ✅ (`assistant/agent_text.dart`, `assistant/web_text.dart`), over `core/py_re.dart` (Python's `re` semantics); `assistant_runner` (deterministic half + `_dispatch_llm` agent loop and bridges) ✅ (`assistant/runner.dart`, `assistant/runner_phrases.dart`, `assistant/adapters.dart`, `data/assistant_queries.dart`, `core/py_difflib.dart`, `core/py_values.dart`); `llm_tools.execute_tool` for library, playback, status, read-only metadata and web tools ✅ (`assistant/tool_executor.dart`); `web_research` + `metadata_ai`'s search/grounding half ✅ (`assistant/web_research.dart`) | 5 |
-| `ui/views/assistant.py` | 861 | Rewrite | 5 |
+| `ui/views/assistant.py` | 861 | Rewrite ✅ (`assistant/assistant_controller.dart`, `assistant/assistant_screen.dart`; voice hooks in stage g) | 5 |
 | `qobuz.py`, `deezer.py`, `streamrip_api.py`, `streamrip_search.py`, `downloadable.py`, `search_results.py`, `source_metadata.py`, `new_releases.py` + deezer-py, streamrip, pycryptodomex | ~3,000 + libraries | ⚠️ Port or keep on Mac (§6, decision A) | 6 |
 | `ui/views/search.py`, `ui/player/download_dock.py` | 3,806 | Rewrite. The landing's local cards ✅ (`search/`, `data/landing_queries.dart`, golden-tested); the dock ✅ (`downloads/download_dock.dart`, 4d); the rest with the sources | 3, 4, 6 |
 | `dsp.py`, `pca_engine.py` | 1,044 | `pca_engine.redundant_raw_features` ✅ (with the acoustic build, 4g); the rest of `pca_engine` is genre-taxonomy re-exports (ported in phase 2). `dsp.py`: ⚠️ port to Dart, or keep on Mac (§6, decision B) | 4, 6 |
@@ -264,7 +265,7 @@ AI Assistant, and voice through the extension's `flutter_tts` and
 | c | The runner's deterministic half: dispatch, the pending confirmation and choice, anaphora, every `_handle_*`, `_resolve_queries` (with difflib's `SequenceMatcher` ported), the avoid set, and its database and player adapters | `assistant_runner.py`, `db_manager.py` (assistant queries) | ✅ |
 | d | The agent: `_dispatch_llm`'s loop and prompt, `execute_tool` for the library, playback, status and read-only metadata tools | `assistant_runner._dispatch_llm`, `llm_tools.execute_tool` | ✅ |
 | e | The web tools: `ask` (DuckDuckGo Lite, Wikipedia, Google grounding), `learn_about`, `find_related_artists` | `web_research.py`, `metadata_ai`'s search half | ✅ |
-| f | The Jarvis tab and Settings → AI Assistant | `ui/views/assistant.py`, `settings.py` (AI Assistant), main.py's tab and lifecycle hooks | 🔨 |
+| f | The Jarvis tab and Settings → AI Assistant | `ui/views/assistant.py`, `settings.py` (AI Assistant), main.py's tab and lifecycle hooks | ✅ |
 | g | Voice: replies spoken, push-to-talk, the microphone permission | the extension's `tts_*`/`stt_*`, `assistant.py` | 🔨 |
 
 **Stage a.** Pure functions, no UI. `assistant/intent.dart` is
@@ -442,16 +443,24 @@ quota latch, empty web uncached + unreachable error + empty question), and 10
 `find_related_artists`, plus a refused-connection retry test. Every HTTP
 request (method, path, app headers, body) and result matches Python.
 
-**Stage f.** The tab returns to the bar (`appearance.show_jarvis`); the
-chat view keeps Flet's bubbles (user text; assistant Markdown, GitHub
-flavoured, links opened outside), the option buttons, the thinking
-bubble, the empty state's four prompts, the 50-message cap, Clear, the
-init flow (graph status, the edge builds, `graph_state.json`, the
-empty-library line), the entities stored with each reply for anaphora,
-deferred play, and the background and resume hooks (session touch, the
-15-minute expiry). Settings → AI Assistant: enable, provider, key, the
-model list, research mode, the local server, personality presets, Test
-Connection. A Markdown renderer from pub.dev is chosen here (§12).
+**Stage f.** `assistant/assistant_controller.dart` and
+`assistant/assistant_screen.dart` port `ui/views/assistant.py`: the Jarvis
+tab returns to `AppShell`'s nav bar (controlled by `appearance.show_jarvis`,
+with `startup_page = "Jarvis"` falling back to Library when hidden), user
+text bubbles and GitHub-flavoured Markdown assistant bubbles
+(`flutter_markdown_plus`, links opened outside with `url_launcher`),
+disambiguation option buttons, the thinking bubble, the empty state's four
+prompts, the 50-message cap, Clear, the init flow (`graphStatus`, metadata +
+acoustic edge builds, `graph_state.json`, the empty-library line,
+`scanGeneration` reset), entity persistence for anaphora, deferred play, and
+the background/resume lifecycle hooks in `main.dart` (`touchSession` on hide,
+15-minute expiry clear + re-init on resume). `settings/assistant_settings.dart`
+ports Settings → AI Assistant (enable switch, Gemini/Ollama provider switch,
+API key, `listGeminiModels` refresh keeping retired models flagged, research
+paradigm, local server fields, all five personality presets, Test Connection),
+added to the hub and search (`tool/export_settings_goldens.py` re-exported
+with `AI Assistant (Jarvis)`), and Appearance gains `Enable Jarvis Tab`.
+Widget and controller tests live in `test/assistant_ui_test.dart`.
 
 **Stage g.** Phone checks only: the voice choice (Google engine, en-GB,
 the extension's selection rules, rate and pitch 0.75), hold-to-talk (60 s
@@ -680,7 +689,8 @@ sync manager), 4d (the download queue and dock), 4e (the Companion UI),
 4f (state bundles) and 4g (the DSP offload and the acoustic build), local.
 Then the phase 5 plan, stages a (the intent parser), b (the LLM
 client), c (the assistant runner and adapters), d (the agent loop and
-tool executor) and e (the web tools), local.
+tool executor), e (the web tools) and f (the Jarvis tab and Settings → AI
+Assistant), local.
 
 **Done**
 - [x] Phase 0: backbone (read-only DB isolate, tracks tab, sort, search,
@@ -787,6 +797,12 @@ tool executor) and e (the web tools), local.
       `googleSearch` grounding, 30-minute cache and Google-off latch; wired
       into `tool_executor.dart` for `web_search`, `learn_about` and
       `find_related_artists`); identical to Python across 29 golden cases.
+- [x] Phase 5f: the Jarvis tab (`assistant/assistant_controller.dart`,
+      `assistant/assistant_screen.dart` with `flutter_markdown_plus` and
+      `url_launcher`), `AppShell` (`AppTab.jarvis`, `appearance.show_jarvis`),
+      Settings → AI Assistant (`settings/assistant_settings.dart`),
+      Appearance's `Enable Jarvis Tab`, and `main.dart` lifecycle hooks
+      (`test/assistant_ui_test.dart`, Settings search golden updated).
 
 **To do, in order**
 1. [ ] Install the current build on the phone: `tool/install_phone.sh
@@ -848,10 +864,12 @@ tool executor) and e (the web tools), local.
           b (the LLM client and the tool declarations), c (the runner's
           deterministic half and its database and player adapters), d
           (the agent loop, bridges and `execute_tool` for the library,
-          playback, status and read-only metadata tools) and e (the web
+          playback, status and read-only metadata tools), e (the web
           tools: `web_research.py` `ask`, `learn_about`,
-          `find_related_artists`) done.
-          Next: stage f (the Jarvis tab and Settings → AI Assistant).
+          `find_related_artists`) and f (the Jarvis tab and Settings → AI
+          Assistant) done.
+          Next: stage g (voice: TTS, push-to-talk STT, `RECORD_AUDIO` and
+          Android `<queries>`).
 5. [ ] Decisions A, B, C (§6) before phase 6 is planned in detail.
 6. [ ] Flet, on master: the album menu's Play Album tuple,
        Appearance's sort writing `library_sort`, the Network view's
@@ -874,7 +892,7 @@ add its row here.
 Status: ✅ done · 🧪 written, not yet confirmed in use · 🔨 to build
 (phase) · ⚠️ depends on a decision (§6) · ✗ dropped.
 
-**Counts:** 54 of the 91 rows are ported (✅ or 🧪); 37 are to build or to decide. The ported rows are the player, the stations, the library views (the Acoustic Network included), playlists, the long-press menu and selection mode, the ledger drain, the scan, the tab bar, the Search landing's local cards, the download dock, Companion pairing, transfers, Send to Mac and the DSP offload, state bundles, the similarity-graph builds, and Settings for all of these.
+**Counts:** 58 of the 91 rows are ported (✅ or 🧪); 33 are to build or to decide. The ported rows are the player, the stations, the library views (the Acoustic Network included), playlists, the long-press menu and selection mode, the ledger drain, the scan, the tab bar (including Jarvis), the Search landing's local cards, the download dock, Companion pairing, transfers, Send to Mac and the DSP offload, state bundles, the similarity-graph builds, the Jarvis assistant (chat, tools, memory, web research), and Settings for all of these.
 
 ### App shell (`main.py`)
 
@@ -959,10 +977,10 @@ Status: ✅ done · 🧪 written, not yet confirmed in use · 🔨 to build
 
 | Feature | Port |
 |---|---|
-| Chat with the LLM agent; tool calls into library and player; intents | 🔨 5 |
-| Voice: push-to-talk, listening/thinking states, spoken replies (toggle) | 🔨 5 |
-| Chat memory, clear chat, background/resume hooks | 🔨 5 |
-| Web research for artists | 🔨 5 |
+| Chat with the LLM agent; tool calls into library and player; intents | 🧪 |
+| Voice: push-to-talk, listening/thinking states, spoken replies (toggle) | 🔨 5g |
+| Chat memory, clear chat, background/resume hooks | 🧪 |
+| Web research for artists | 🧪 |
 
 ### Companion & Sync (`ui/views/sync_hub.py`, `utils/sync/`)
 
@@ -982,8 +1000,8 @@ Status: ✅ done · 🧪 written, not yet confirmed in use · 🔨 to build
 | Companion & Sync | Opens the sync hub | 🧪 (all four cards) |
 | Storage & Paths | Library folder, downloads folder, default download quality | 🧪 folders and the Android navigator; ⚠️ A (quality) |
 | Authentication | Qobuz (email/ID, password or token, app ID and secret), Deezer ARL | ⚠️ A |
-| AI Assistant | Enable, provider and API key, model list, test connection, personality presets (built-in and custom) | 🔨 5 |
-| Appearance | Accent colour, startup page, Jarvis tab, library tab visibility, landing sections | 🧪 (the Jarvis switch 🔨 5) |
+| AI Assistant | Enable, provider and API key, model list, test connection, personality presets (built-in and custom) | 🧪 |
+| Appearance | Accent colour, startup page, Jarvis tab, library tab visibility, landing sections | 🧪 |
 | Audio & DSP | EQ on/off, presets, five bands, Dynamism | 🧪 |
 | Haptic Feedback | On/off, per-action intensity | 🧪 |
 | Metadata | Opens the workbench | 🔨 7 |
@@ -1058,7 +1076,8 @@ code or a published template comes in, before it is committed.
 | SVD sign convention: each component's largest-magnitude loading positive (scikit-learn's `svd_flip`, `u_based_decision=False`) | `stations/acoustic_geometry.dart` | scikit-learn documentation | BSD-3-Clause; convention only, no code copied |
 
 **Dependencies (pub.dev)**: `sqlite3`, `path_provider`, `audio_service`,
-`just_audio`, `audio_session`, `permission_handler`, `toml`. Their licences
+`just_audio`, `audio_session`, `permission_handler`, `toml`,
+`flutter_markdown_plus`, `url_launcher`. Their licences
 ship in the app through Flutter's `LicenseRegistry` (`showLicensePage`), so
 Settings → About opens it (Licenses).
 

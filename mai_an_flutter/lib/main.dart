@@ -7,6 +7,8 @@ import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import 'app_shell.dart';
+import 'assistant/assistant_controller.dart';
+import 'assistant/chat_memory.dart';
 import 'core/app_config.dart';
 import 'core/config_file.dart';
 import 'core/haptics.dart';
@@ -115,6 +117,12 @@ Future<void> main() async {
   );
   final landing = LandingController(library, sections: config.landing);
   final player = ValueNotifier<PlayerController?>(null);
+  final assistant = AssistantController(
+    memory: ChatMemory(dataDir),
+    library: library,
+    player: player,
+    loadAssistantConfig: () => settings.config.assistant,
+  );
   final haptics = Haptics(config.haptics);
   // queue_controller.py: Mac transfers now, the sources' downloads later.
   final downloadHost = AppDownloadHost(
@@ -159,7 +167,11 @@ Future<void> main() async {
       library: library,
       browse: browse,
       landing: landing,
-      startTab: AppTab.fromStartupPage(config.startupPage),
+      assistant: assistant,
+      startTab: AppTab.fromStartupPage(
+        config.startupPage,
+        showJarvis: config.showJarvis,
+      ),
       player: player,
       config: settings,
       haptics: haptics,
@@ -261,6 +273,7 @@ class MaiAnApp extends StatefulWidget {
     required this.config,
     required this.haptics,
     required this.settings,
+    this.assistant,
     this.startTab = AppTab.library,
     this.ledger,
     this.downloads,
@@ -270,6 +283,7 @@ class MaiAnApp extends StatefulWidget {
   final LibraryController library;
   final BrowseController browse;
   final LandingController landing;
+  final AssistantController? assistant;
   final AppTab startTab;
   final ValueNotifier<PlayerController?> player;
 
@@ -305,6 +319,7 @@ class _MaiAnAppState extends State<MaiAnApp> {
     _lifecycle = AppLifecycleListener(
       onHide: () {
         widget.player.value?.setForeground(false);
+        widget.assistant?.handleAppBackground();
         if (widget.syncHost case final h?) {
           h.inBackground = true;
           h.manager.handleAppBackground();
@@ -312,6 +327,7 @@ class _MaiAnAppState extends State<MaiAnApp> {
       },
       onShow: () {
         widget.player.value?.setForeground(true);
+        widget.assistant?.handleAppResume();
         // Pick up listens that finished while in the background.
         widget.ledger?.schedule(Duration.zero);
         // Re-checks a link that may have died while hidden, or re-probes
@@ -354,6 +370,8 @@ class _MaiAnAppState extends State<MaiAnApp> {
           library: widget.library,
           browse: widget.browse,
           landing: widget.landing,
+          assistant: widget.assistant,
+          showJarvis: widget.config.config.showJarvis,
           unifiedPills: widget.config.config.libraryTabs.unified,
           player: widget.player,
           haptics: widget.haptics,
