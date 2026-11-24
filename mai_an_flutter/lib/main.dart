@@ -9,6 +9,7 @@ import 'package:permission_handler/permission_handler.dart';
 import 'app_shell.dart';
 import 'assistant/assistant_controller.dart';
 import 'assistant/chat_memory.dart';
+import 'assistant/voice_service.dart';
 import 'core/app_config.dart';
 import 'core/config_file.dart';
 import 'core/haptics.dart';
@@ -122,6 +123,8 @@ Future<void> main() async {
     library: library,
     player: player,
     loadAssistantConfig: () => settings.config.assistant,
+    voice: FlutterVoiceBackend(),
+    onSnack: _snack,
   );
   final haptics = Haptics(config.haptics);
   // queue_controller.py: Mac transfers now, the sources' downloads later.

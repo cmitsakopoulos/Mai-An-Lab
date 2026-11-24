@@ -12,6 +12,7 @@ import 'adapters.dart';
 import 'chat_memory.dart';
 import 'intent.dart';
 import 'runner.dart';
+import 'voice_service.dart';
 
 /// State and lifecycle of `ui/views/assistant.py` (`AssistantView`).
 ///
@@ -26,10 +27,14 @@ class AssistantController extends ChangeNotifier {
     this.player,
     this.loadAssistantConfig,
     AssistantRunner? runner,
+    this.voice,
     this.onSpeak,
     this.onStopSpeak,
     this.onInitVoice,
+    this.onSnack,
     this.initDelay = const Duration(milliseconds: 200),
+    this.maxListenDuration = const Duration(seconds: 60),
+    this.postReleaseTimeout = const Duration(seconds: 4),
   }) : _customRunner = runner {
     final session = memory.loadSession();
     _initGreeted = session.initGreeted;
@@ -44,13 +49,19 @@ class AssistantController extends ChangeNotifier {
   final FutureOr<AssistantConfig?> Function()? loadAssistantConfig;
   final AssistantRunner? _customRunner;
 
-  /// Voice hooks (wired in stage g): speak [text] and stop any in-flight TTS.
+  /// Voice backend (stage g): TTS + push-to-talk STT + RECORD_AUDIO.
+  final VoiceBackend? voice;
+
+  /// Optional test overrides for voice callbacks.
   Future<void> Function(String text)? onSpeak;
   Future<void> Function()? onStopSpeak;
   Future<void> Function()? onInitVoice;
+  void Function(String message)? onSnack;
 
   /// Initial delay before `_doInit` runs (200 ms in Flet; 0 in tests).
   final Duration initDelay;
+  final Duration maxListenDuration;
+  final Duration postReleaseTimeout;
 
   static const maxMessages = 50;
   static const _nonCanonicalSeeds = {'play_random', 'play_similar_bulk'};
@@ -64,6 +75,11 @@ class AssistantController extends ChangeNotifier {
   bool _initStarted = false;
   bool _thinking = false;
   bool _ttsEnabled = true;
+  bool _micPressed = false;
+  bool _micListening = false;
+  bool _micProcessing = false;
+  Completer<SttResult>? _releaseCancel;
+  Timer? _postReleaseTimer;
   int _lastScanGen = 0;
   bool _disposed = false;
 
@@ -71,6 +87,9 @@ class AssistantController extends ChangeNotifier {
   bool get initGreeted => _initGreeted;
   bool get thinking => _thinking;
   bool get ttsEnabled => _ttsEnabled;
+  bool get hasVoice => voice != null;
+  bool get micListening => _micListening;
+  bool get micProcessing => _micProcessing;
 
   void _onLibraryChanged() {
     final gen = library?.scanGeneration ?? 0;
@@ -118,8 +137,15 @@ class AssistantController extends ChangeNotifier {
 
   /// `AssistantView.collapse`: stop any in-flight TTS when leaving the tab.
   void onHide() {
-    final stop = onStopSpeak;
-    if (stop != null) unawaited(stop());
+    _stopSpeak();
+  }
+
+  void _stopSpeak() {
+    if (onStopSpeak != null) {
+      unawaited(onStopSpeak!());
+    } else if (voice != null) {
+      unawaited(voice!.stopSpeaking());
+    }
   }
 
   Future<void> _doInit() async {
@@ -129,8 +155,12 @@ class AssistantController extends ChangeNotifier {
     if (_disposed) return;
 
     _ensureRunner();
-    final initVoice = onInitVoice;
-    if (initVoice != null) unawaited(initVoice());
+    if (onInitVoice != null) {
+      unawaited(onInitVoice!());
+    } else if (voice != null) {
+      // assistant.py line 250: pitch=0.75, rate=0.75.
+      unawaited(voice!.setVoice(rate: 0.75, pitch: 0.75));
+    }
 
     final lib = library;
     if (lib == null) return;
@@ -189,11 +219,93 @@ class AssistantController extends ChangeNotifier {
   /// `AssistantView._toggle_tts`.
   void toggleTts() {
     _ttsEnabled = !_ttsEnabled;
-    if (!_ttsEnabled) {
-      final stop = onStopSpeak;
-      if (stop != null) unawaited(stop());
-    }
+    if (!_ttsEnabled) _stopSpeak();
     _notify();
+  }
+
+  /// `AssistantView._on_mic_down`: request RECORD_AUDIO on first press, then
+  /// capture speech up to [maxListenDuration] (60 s).
+  void onMicDown() {
+    if (voice == null || _disposed) return;
+    _micPressed = true;
+    unawaited(_startListening());
+  }
+
+  /// `AssistantView._on_mic_up`: transition bubble to "Thinking...", stop STT,
+  /// and cap post-release transcription wait at [postReleaseTimeout] (4 s).
+  void onMicUp() {
+    _micPressed = false;
+    if (!_micListening) return;
+    _micListening = false;
+    _micProcessing = true;
+    _notify();
+    _postReleaseTimer?.cancel();
+    _postReleaseTimer = Timer(postReleaseTimeout, () {
+      final c = _releaseCancel;
+      if (c != null && !c.isCompleted) {
+        c.complete((ok: false, text: '', error: 'cancelled'));
+      }
+    });
+    unawaited(voice?.stopListening());
+  }
+
+  Future<void> _startListening() async {
+    final v = voice;
+    if (v == null || _micListening || _micProcessing || _disposed) return;
+
+    try {
+      final granted = await v.ensureMicPermission();
+      if (!granted) {
+        onSnack?.call('Microphone permission is required for voice commands.');
+        _micPressed = false;
+        return;
+      }
+    } catch (_) {
+      onSnack?.call("Couldn't verify microphone permission.");
+      _micPressed = false;
+      return;
+    }
+
+    // Safeguard: user released while awaiting permission dialog.
+    if (!_micPressed || _disposed) return;
+
+    _micListening = true;
+    _micProcessing = false;
+    _notify();
+
+    final cancel = Completer<SttResult>();
+    _releaseCancel = cancel;
+    try {
+      final res = await Future.any<SttResult>([
+        v.listen(maxDuration: maxListenDuration),
+        cancel.future,
+      ]);
+      if (_disposed) return;
+      final text = res.text.trim();
+      final err = res.error;
+      if (res.ok && text.isNotEmpty) {
+        _micListening = false;
+        _micProcessing = false;
+        _notify();
+        await sendUserText(text);
+      } else if (err != null && err.isNotEmpty) {
+        final low = err.toLowerCase();
+        if (!low.contains('cancel') &&
+            !low.contains('no_match') &&
+            !low.contains('no match')) {
+          onSnack?.call('Speech error: $err');
+        }
+      }
+    } catch (e) {
+      debugPrint('AssistantController: STT error: $e');
+    } finally {
+      _postReleaseTimer?.cancel();
+      _postReleaseTimer = null;
+      _releaseCancel = null;
+      _micListening = false;
+      _micProcessing = false;
+      _notify();
+    }
   }
 
   /// `AssistantView._handle_user_text`.
@@ -318,12 +430,13 @@ class AssistantController extends ChangeNotifier {
     memory.saveSession(_messages, _initGreeted);
     _notify();
 
-    if (speak && _ttsEnabled && onSpeak != null) {
+    final speaker = onSpeak ?? voice?.speak;
+    if (speak && _ttsEnabled && speaker != null) {
       final pl = player?.value;
       final wasPlaying = pl?.playing ?? false;
       try {
         if (wasPlaying) pl!.pause();
-        await onSpeak!(
+        await speaker(
           speakText != null && speakText.isNotEmpty ? speakText : text,
         );
       } catch (exc) {
@@ -360,6 +473,7 @@ class AssistantController extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    _postReleaseTimer?.cancel();
     library?.removeListener(_onLibraryChanged);
     super.dispose();
   }

@@ -48,6 +48,8 @@ dependencies:
     path: packages/maian_native
   flutter_markdown_plus: ^1.0.12
   url_launcher: ^6.3.3
+  flutter_tts: ^4.2.0
+  speech_to_text: ^7.0.0
 
 dev_dependencies:
   flutter_test:

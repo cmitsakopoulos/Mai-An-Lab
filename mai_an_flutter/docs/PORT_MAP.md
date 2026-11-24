@@ -17,22 +17,24 @@ the Companion & Sync page, its dialogs and Send to Mac in the menus,
 state bundles (export, import, the boot snapshot and import, backup to the
 Mac), and the DSP offload with the acoustic build (the SVD geometry and the
 genre model, identical in effect to Python's: the same stations on all 20
-golden seeds) (§4, phase 4). Phase 5 (the assistant) is planned in seven
-stages; stages a (the intent parser and text helpers, identical to Python
-on 4,961 utterances), b (the LLM client and tool declarations), c (the
-runner's deterministic half and its database and player adapters, identical
-to Python across 14 conversations / 124 turns), d (the agent loop and
-tool executor, identical to Python across 51 tool cases and 9 HTTP-recorded
-loop scenarios), e (the web tools: DuckDuckGo Lite, Wikipedia and Gemini
-Google Search grounding, identical to Python across 29 golden cases) and f
-(the Jarvis tab, `AppShell` tab bar with `show_jarvis`, Settings → AI
-Assistant and Appearance's Jarvis switch) are done (§4, phase 5).
-Desktop tests pass (`flutter test`: 722, including the real-library golden
+golden seeds) (§4, phase 4). Phase 5's code (the assistant) is complete:
+stages a (the intent parser and text helpers, identical to Python on 4,961
+utterances), b (the LLM client and tool declarations), c (the runner's
+deterministic half and its database and player adapters, identical to Python
+across 14 conversations / 124 turns), d (the agent loop and tool executor,
+identical to Python across 51 tool cases and 9 HTTP-recorded loop
+scenarios), e (the web tools: DuckDuckGo Lite, Wikipedia and Gemini Google
+Search grounding, identical to Python across 29 golden cases), f (the Jarvis
+tab, `AppShell` tab bar with `show_jarvis`, Settings → AI Assistant and
+Appearance's Jarvis switch) and g (voice: `flutter_tts` and
+`speech_to_text`, push-to-talk, `RECORD_AUDIO` on first press and Android
+`<queries>`) (§4, phase 5).
+Desktop tests pass (`flutter test`: 732, including the real-library golden
 tests that need the gitignored goldens; analyzer clean in Dart's strict
 modes); debug and release APKs build.
 It is installed on the phone (2026-11-24, with the 2026-11-02 library, an
 older build: no scan, no Settings yet). The user reports problems found in use; fix
-them, or record intended differences in §7. Nothing ships from this port yet. 58 of the 91 Flet features in §11
+them, or record intended differences in §7. Nothing ships from this port yet. 59 of the 91 Flet features in §11
 are ported. Third-party code the port uses or copies is listed in §12.*
 
 **Next session: start at §10 (open items). §11 lists every Flet feature and
@@ -118,10 +120,10 @@ Status key:
 | 12 | **Artwork** | Kotlin `resolveArtwork`: embedded art via `MediaMetadataRetriever`, then the sidecar file, cached by sha1 | Keep the Kotlin. The handler resolves it for the current and next rows; sidecar lookup is lazy (per folder, not per queue row). | 1 | 🧪 |
 | 13 | **Audio analysis** | Kotlin `decodePcm` (MediaCodec, to mono PCM) + `dsp.py` (numpy, 906 lines). Usually offloaded to the Mac (sync). | The offload is ported (4g), and so is the geometry built from the features (`build_acoustic_edges`: the SVD, no numpy). Keep the decoder. The feature maths becomes Dart, or never runs on the phone (§6, decision B). | 4, 6 | 🧪⚠️ |
 | 14 | **EQ and loudness boost** | `set_eq_band_gain` and `set_loudness_boost` in the extension (just_audio Android effects). `reapply_dsp` runs on every track change: config.toml `[dsp]` preset + Dynamism (boost and EQ contour from the track's play_counts features). | In the handler (`setEqBandGain`, `setLoudnessBoost`). `player/dsp.dart` ports `reapply_dsp` with Python reference values; the controller applies it on every row change, including background auto-advance. Now Playing shows the Dynamism badge. Gains set before the device's EQ bands load are applied when they arrive. No settings UI yet (the Flet-written config is honoured). | 1 | 🧪 |
-| 15 | **Voice** | `flutter_tts`, `speech_to_text`, `RECORD_AUDIO`, `<queries>` for `RecognitionService` | Same plugins | 5 | ♻️ |
+| 15 | **Voice** | `flutter_tts`, `speech_to_text`, `RECORD_AUDIO`, `<queries>` for `RecognitionService` | Same plugins (`assistant/voice_service.dart`, `RECORD_AUDIO` requested on first mic press, `<queries>` for `RecognitionService` and `TTS_SERVICE`) | 5 | 🧪 |
 | 16 | **Plain HTTP to the Mac** | `usesCleartextTraffic="true"` app-wide | Nothing to declare: dart:io sockets don't go through Android's cleartext policy (this SDK's dart:io has no such check). INTERNET is declared. Confirm on the phone with the first real pairing. | 4 | 🧪 |
 | 17 | **LAN discovery** | UDP query every 2 s on port 54545, answered by unicast; beacons dropped (no multicast lock: pyjnius isn't in the build) | `sync/discovery.dart` (`RawDatagramSocket`), with `MainActivity`'s `acquireMulticastLock` and `defaultRouteIpv4` (§4, phase 4a). ⚠️ Recheck local-network permission rules before raising targetSdk past 36. | 4 | 🧪⚠️ |
-| 18 | **Lifecycle** | `on_app_lifecycle_state_change`: suspend UI updates in the background, prefill the autoplay buffer on hide, run assistant and companion background hooks, pick up listens finished in the background | `AppLifecycleListener`. Flutter stops drawing frames by itself. Done: the position ticker stops, the position is saved and the auto-play buffer is topped up to 24 on hide. Listens reach auto-play in-process (§7), so there is no catch-up to do for it. The ledger drain runs on show, at start and 3 s after each listen (phase 3, 🧪). The Companion manager's background and resume hooks (phase 4e, 🧪). Still to come: the assistant's (5). | 1–5 | 🔨 |
+| 18 | **Lifecycle** | `on_app_lifecycle_state_change`: suspend UI updates in the background, prefill the autoplay buffer on hide, run assistant and companion background hooks, pick up listens finished in the background | `AppLifecycleListener`. Flutter stops drawing frames by itself. Done: the position ticker stops, the position is saved and the auto-play buffer is topped up to 24 on hide. Listens reach auto-play in-process (§7), so there is no catch-up to do for it. The ledger drain runs on show, at start and 3 s after each listen (phase 3, 🧪). The Companion manager's background and resume hooks (phase 4e, 🧪). The assistant's `handleAppBackground` / `handleAppResume` hooks (phase 5f, 🧪). | 1–5 | 🧪 |
 | 19 | **Edge-to-edge, predictive back** | Flet/Flutter defaults | targetSdk 36 forces both. Back on the root screen calls `moveTaskToBack` (MainActivity channel `mai_an/app`); predictive back is enabled. Still to audit: edge-to-edge insets in the sheets. | 1 | 🧪 |
 | 20 | **16 KB memory pages** (Android 15+ devices) | Flet build | ✅ Checked: every `.so` in the port's APK has 16 KB LOAD alignment, and the zip is 16 KB-aligned | 0 | ✅ |
 | 21 | **Haptics, links, clipboard, file picker** | `HapticFeedback` (about 15 call sites, configurable intensity), `UrlLauncher`, `FilePicker` (1) | `core/haptics.dart` reads `[haptics]` (on/off, per-action intensity, main.py's defaults); used by the track menu (long_press, swipe_queue): 🧪. `url_launcher`, `file_selector` when needed: 🔨. | as needed | 🧪🔨 |
@@ -266,7 +268,7 @@ AI Assistant, and voice through the extension's `flutter_tts` and
 | d | The agent: `_dispatch_llm`'s loop and prompt, `execute_tool` for the library, playback, status and read-only metadata tools | `assistant_runner._dispatch_llm`, `llm_tools.execute_tool` | ✅ |
 | e | The web tools: `ask` (DuckDuckGo Lite, Wikipedia, Google grounding), `learn_about`, `find_related_artists` | `web_research.py`, `metadata_ai`'s search half | ✅ |
 | f | The Jarvis tab and Settings → AI Assistant | `ui/views/assistant.py`, `settings.py` (AI Assistant), main.py's tab and lifecycle hooks | ✅ |
-| g | Voice: replies spoken, push-to-talk, the microphone permission | the extension's `tts_*`/`stt_*`, `assistant.py` | 🔨 |
+| g | Voice: replies spoken, push-to-talk, the microphone permission | the extension's `tts_*`/`stt_*`, `assistant.py` | ✅ |
 
 **Stage a.** Pure functions, no UI. `assistant/intent.dart` is
 `assistant_intent.py`: Flet's 41 patterns character for character, the
@@ -462,12 +464,19 @@ added to the hub and search (`tool/export_settings_goldens.py` re-exported
 with `AI Assistant (Jarvis)`), and Appearance gains `Enable Jarvis Tab`.
 Widget and controller tests live in `test/assistant_ui_test.dart`.
 
-**Stage g.** Phone checks only: the voice choice (Google engine, en-GB,
-the extension's selection rules, rate and pitch 0.75), hold-to-talk (60 s
-cap, 4 s after release), RECORD_AUDIO asked on the first press (§1 row
-9), `<queries>` for RecognitionService, music paused while Jarvis speaks
-and resumed after, speech stopped when the tab closes or voice is turned
-off.
+**Stage g.** `assistant/voice_service.dart` lifts the extension's
+`flutter_tts` and `speech_to_text` layer (`FlutterVoiceBackend` over a
+testable `VoiceBackend` interface, with `pickJarvisVoice` matching
+`flet_audio_service`'s Google engine, `en-GB` British male → any `en-GB` →
+any male selection rules, and `rate`/`pitch` `0.75`).
+`AssistantController` drives hold-to-talk (`onMicDown`/`onMicUp`, 60 s cap,
+4 s post-release timeout, `"Listening, sir..."` → `"Thinking..."` bubble,
+`RECORD_AUDIO` requested on first press with release-during-prompt abort
+safeguard, music paused while Jarvis speaks and resumed after, speech
+stopped on tab hide or voice toggle off). `AndroidManifest.xml` adds
+`RECORD_AUDIO` and `<queries>` for `RecognitionService`, `TTS_SERVICE` and
+`http`/`https` links. Unit and widget tests live in
+`test/voice_service_test.dart`; on-device voice checks remain (item 1).
 
 ---
 
@@ -524,7 +533,7 @@ uninstall and reinstall; the bundle export/import covers the data.
 | Shuffle on/off | `set_queue` reloads the playing track from 0:00 and starts playback even when paused; the ledger logs it as an early skip | The track keeps its position and play/pause state (`keepListen`) | Intentional: the Flet behaviour is a side effect, not a feature. |
 | Restored track missing on disk | Not preloaded, and Play then does nothing | Not preloaded; the first Play loads it at the saved offset | Intentional. |
 | Queue rows | `_play_track_core` rows carry no `duration` | They carry `duration` | Harmless to the Flet reader; the slider has the right length before the decoder reports. |
-| Microphone permission | Asked at first launch with the rest | Not asked until voice exists (phase 5) | Intentional. |
+| Microphone permission | Asked at first launch with the rest | Requested on the first press of Jarvis's mic button (phase 5g) | Intentional: keeps startup prompts minimal. |
 | Long-press on a track | Flet's full context menu | Play next, Add to queue, Start radio (haptic tick as in Flet) | The rest arrives with the features behind it (Select…, playlists, send, redownload, delete). |
 | Notification taps | Routed to the target tab | Routed (`core/notification_router.dart`) to the screens that exist: the Library; sync and downloads with phase 4d–e, the workbench with 7 | Each target with its screen. A tap on a target not ported yet is held, not acted on. |
 | DSP after background auto-advance | `reapply_dsp` runs only while the Python session hears the player, so tracks reached with the session torn down keep the previous track's settings | Applied on every row change | Intentional. |
@@ -546,7 +555,7 @@ uninstall and reinstall; the bundle export/import covers the data.
 | Scan: ASF/AIFF content in an `.aac` file | tinytag's ASF or AIFF parser | Skipped as unreadable | Not ported (§4, the scan); never seen in a library. |
 | Search tab without source credentials | "Setup Required" prompt; no landing cards (they show only once Qobuz or Deezer is set up, or demo mode is on) | The landing cards always | Intentional: the port has no source search yet (decision A), and the cards only read the library. |
 | Search tab header | Title, source switch, connection signal, recent searches, settings shortcut, search box, result tabs | The title and the settings shortcut | The rest with the sources (6). |
-| Startup tab | `general.startup_page`: Jarvis, Search, Library or Settings | Search, else Library | Jarvis (5) isn't ported; Settings is a pushed page, not a tab. Settings' dropdown offers Search and Library, as Flet's does. |
+| Startup tab | `general.startup_page`: Jarvis, Search, Library or Settings | Jarvis (when `appearance.show_jarvis` is on), Search, else Library | Settings is a pushed page, not a tab. Settings' dropdown offers Search and Library, as Flet's does. |
 | Empty library | "ENTER PATHS" opens Settings → Storage | The same | Fixed in phase 3 (Settings). |
 | Untagged files on every scan | Never get a row, so each scan rereads them and counts them in "Indexed n items." | The same | Kept for parity. |
 | Playlist search | `LIKE` on the name (ASCII case only), then closest match | The other views' semantics: every word, accent- and case-blind for every script; same closest-match scoring | Intentional, as for Tracks. Golden-tested on ASCII queries, where both agree. |
@@ -559,8 +568,8 @@ uninstall and reinstall; the bundle export/import covers the data.
 | Library reload after a scan or delete | The snackbar follows `load_library` (no graph rebuild there) | Rows reload, the snackbar shows, the station graphs rebuild behind | Same order as Flet. |
 | Settings → Appearance's Default Library Sort | The dropdown shows `library_sort` but saves `general.default_sort`, which nothing reads, so the sort never changes | Writes `default_sort` as Flet does, plus `library_sort`, and re-sorts the Library at once | Port is right. The Flet fix: write `library_sort` in `_save_appearance_settings`; not made on master yet. |
 | Applying Settings | Appearance restarts the UI (`restart_ui`); a raw TOML save applies at the next start | Any config change (Settings or the raw editor) reaches the view bar, landing cards, accent, pills and haptics at once | Intentional. |
-| Settings hub | Twelve groups | The nine whose features exist (§4, Settings; Companion & Sync since 4e); Authentication, AI Assistant and Metadata with A, 5 and 7 | Until then. |
-| Settings rows waiting on features | Default Download Quality, the Jarvis tab switch, Commence/Continue DSP Compute and Recompute All DSP Features, demo search, debug play counts, fresh-install reset | Not shown; values the hidden rows would save are written back as read | With decisions A, B, C and phase 5. (Export/import came with 4f, Recompute PCA with 4g.) |
+| Settings hub | Twelve groups | The ten whose features exist (§4, Settings; Companion & Sync since 4e, AI Assistant since 5f); Authentication and Metadata with A and 7 | Until then. |
+| Settings rows waiting on features | Default Download Quality, Commence/Continue DSP Compute and Recompute All DSP Features, demo search, debug play counts, fresh-install reset | Not shown; values the hidden rows would save are written back as read | With decisions A, B, C. (Export/import came with 4f, Recompute PCA with 4g, the Jarvis tab switch with 5f.) |
 | EQ drag and slider writes | `update_config_params` on every drag event of the curve and the sliders | The player gets each step; the file is written when the drag ends | Intentional: same file afterwards, without a write per frame. |
 | EQ curve and slider haptics | `trigger_haptic("light")` on every event | On each 0.1 dB step (slider: each value change, as Flet) | Same feel without a buzz per pixel. |
 | Settings labels | Only the switch toggles | Tapping a switch's label toggles it too | Small usability fix. |
@@ -591,6 +600,7 @@ uninstall and reinstall; the bundle export/import covers the data.
 | Graph readiness build | Waits up to 20 s for a pause in scrolling before building | Builds 5 s after start, without waiting | The build runs on the database isolate (48 ms on the Mac for 1,216 tracks): nothing to wait out. |
 | Offload button after "All tracks analyzed" | Re-enabled by the next manager change; a tap then says "All tracks already analysed!" | Stays off while the count is 0 | Small fix. |
 | Assistant tools from later phases (`search_online`, `research_artist_metadata`, `apply_artist_metadata`) | Execute against Qobuz / `metadata_ai` | Declared in `agentTools()` (all 30) and hookable on `AssistantRunner`; return `{"success": false, "error": "… not available yet."}` until their phase | Read-only metadata tools (`get_metadata_status`, `get_artist_metadata`) work in 5d, web tools (`web_search`, `learn_about`, `find_related_artists`) in 5e; `search_online` arrives with decision A, metadata writes with phase 7. |
+| Jarvis disambiguation option buttons | `_handle_play_now` puts `options` on `response.extras`, while `assistant.py` reads `intent.extras["options"]` without copying it across | `AssistantController` copies `response.extras["options"]` onto `intent.extras["options"]` | Port is right: the option buttons render and dispatch their choice IDs on tap. |
 
 ---
 
@@ -689,8 +699,8 @@ sync manager), 4d (the download queue and dock), 4e (the Companion UI),
 4f (state bundles) and 4g (the DSP offload and the acoustic build), local.
 Then the phase 5 plan, stages a (the intent parser), b (the LLM
 client), c (the assistant runner and adapters), d (the agent loop and
-tool executor), e (the web tools) and f (the Jarvis tab and Settings → AI
-Assistant), local.
+tool executor), e (the web tools), f (the Jarvis tab and Settings → AI
+Assistant) and g (voice: TTS, push-to-talk STT and Android manifest), local.
 
 **Done**
 - [x] Phase 0: backbone (read-only DB isolate, tracks tab, sort, search,
@@ -803,6 +813,12 @@ Assistant), local.
       Settings → AI Assistant (`settings/assistant_settings.dart`),
       Appearance's `Enable Jarvis Tab`, and `main.dart` lifecycle hooks
       (`test/assistant_ui_test.dart`, Settings search golden updated).
+- [x] Phase 5g: voice (`assistant/voice_service.dart` lifting
+      `flet_audio_service`'s `flutter_tts` and `speech_to_text` setup,
+      push-to-talk state machine in `assistant_controller.dart`,
+      `RECORD_AUDIO` and `<queries>` in `AndroidManifest.xml`,
+      `test/voice_service_test.dart`). Phase 5's code is complete.
+      Release APK: 27.5 MB.
 
 **To do, in order**
 1. [ ] Install the current build on the phone: `tool/install_phone.sh
@@ -860,16 +876,12 @@ Assistant), local.
           Cancel with the screen off; the graph rebuilt after; Settings →
           Database Management → Recompute PCA).
        k. Phase 5 (the assistant), planned 2026-11-24 in seven stages
-          (§4, phase 5). Stages a (the intent parser and text helpers),
-          b (the LLM client and the tool declarations), c (the runner's
-          deterministic half and its database and player adapters), d
-          (the agent loop, bridges and `execute_tool` for the library,
-          playback, status and read-only metadata tools), e (the web
-          tools: `web_research.py` `ask`, `learn_about`,
-          `find_related_artists`) and f (the Jarvis tab and Settings → AI
-          Assistant) done.
-          Next: stage g (voice: TTS, push-to-talk STT, `RECORD_AUDIO` and
-          Android `<queries>`).
+          (§4, phase 5): stages a–g done. Phase 5's code is complete; what
+          remains is on-phone verification (item 1: Jarvis chat, Settings →
+          AI Assistant, TTS voice choice, hold-to-talk STT with `RECORD_AUDIO`
+          prompt, music pause/resume while speaking).
+          Next: decisions A, B, C (§6) before phase 6 is planned in detail,
+          or phase 7 (metadata tools / onboarding).
 5. [ ] Decisions A, B, C (§6) before phase 6 is planned in detail.
 6. [ ] Flet, on master: the album menu's Play Album tuple,
        Appearance's sort writing `library_sort`, the Network view's
@@ -892,7 +904,7 @@ add its row here.
 Status: ✅ done · 🧪 written, not yet confirmed in use · 🔨 to build
 (phase) · ⚠️ depends on a decision (§6) · ✗ dropped.
 
-**Counts:** 58 of the 91 rows are ported (✅ or 🧪); 33 are to build or to decide. The ported rows are the player, the stations, the library views (the Acoustic Network included), playlists, the long-press menu and selection mode, the ledger drain, the scan, the tab bar (including Jarvis), the Search landing's local cards, the download dock, Companion pairing, transfers, Send to Mac and the DSP offload, state bundles, the similarity-graph builds, the Jarvis assistant (chat, tools, memory, web research), and Settings for all of these.
+**Counts:** 59 of the 91 rows are ported (✅ or 🧪); 32 are to build or to decide. The ported rows are the player, the stations, the library views (the Acoustic Network included), playlists, the long-press menu and selection mode, the ledger drain, the scan, the tab bar (including Jarvis), the Search landing's local cards, the download dock, Companion pairing, transfers, Send to Mac and the DSP offload, state bundles, the similarity-graph builds, the Jarvis assistant (chat, tools, memory, web research, voice), and Settings for all of these.
 
 ### App shell (`main.py`)
 
@@ -978,7 +990,7 @@ Status: ✅ done · 🧪 written, not yet confirmed in use · 🔨 to build
 | Feature | Port |
 |---|---|
 | Chat with the LLM agent; tool calls into library and player; intents | 🧪 |
-| Voice: push-to-talk, listening/thinking states, spoken replies (toggle) | 🔨 5g |
+| Voice: push-to-talk, listening/thinking states, spoken replies (toggle) | 🧪 |
 | Chat memory, clear chat, background/resume hooks | 🧪 |
 | Web research for artists | 🧪 |
 
@@ -1077,7 +1089,7 @@ code or a published template comes in, before it is committed.
 
 **Dependencies (pub.dev)**: `sqlite3`, `path_provider`, `audio_service`,
 `just_audio`, `audio_session`, `permission_handler`, `toml`,
-`flutter_markdown_plus`, `url_launcher`. Their licences
+`flutter_markdown_plus`, `url_launcher`, `flutter_tts`, `speech_to_text`. Their licences
 ship in the app through Flutter's `LicenseRegistry` (`showLicensePage`), so
 Settings → About opens it (Licenses).
 

@@ -14,20 +14,10 @@ class AssistantScreen extends StatefulWidget {
     super.key,
     required this.controller,
     this.onOpenSettings,
-    this.onMicDown,
-    this.onMicUp,
-    this.listening = false,
-    this.listeningLabel = 'Listening, sir...',
   });
 
   final AssistantController controller;
   final void Function([SettingsPage?])? onOpenSettings;
-
-  /// Push-to-talk hooks (wired in stage g).
-  final VoidCallback? onMicDown;
-  final VoidCallback? onMicUp;
-  final bool listening;
-  final String listeningLabel;
 
   @override
   State<AssistantScreen> createState() => _AssistantScreenState();
@@ -38,27 +28,24 @@ class _AssistantScreenState extends State<AssistantScreen> {
   final _scroll = ScrollController();
   int _lastCount = 0;
   bool _lastThinking = false;
-  bool _lastListening = false;
+  bool _lastVoiceActive = false;
 
   @override
   void initState() {
     super.initState();
     _lastCount = widget.controller.messages.length;
     _lastThinking = widget.controller.thinking;
-    _lastListening = widget.listening;
+    _lastVoiceActive =
+        widget.controller.micListening || widget.controller.micProcessing;
     widget.controller.addListener(_onChanged);
   }
 
   @override
-  void didUpdateWidget(AssistantScreen old) {
-    super.didUpdateWidget(old);
-    if (old.controller != widget.controller) {
-      old.controller.removeListener(_onChanged);
+  void didUpdateWidget(AssistantScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.controller != widget.controller) {
+      oldWidget.controller.removeListener(_onChanged);
       widget.controller.addListener(_onChanged);
-    }
-    if (widget.listening != _lastListening) {
-      _lastListening = widget.listening;
-      if (widget.listening) _scrollToBottom();
     }
   }
 
@@ -72,9 +59,14 @@ class _AssistantScreenState extends State<AssistantScreen> {
 
   void _onChanged() {
     final c = widget.controller;
-    final grew = c.messages.length != _lastCount || c.thinking != _lastThinking;
+    final voiceActive = c.micListening || c.micProcessing;
+    final grew =
+        c.messages.length != _lastCount ||
+        c.thinking != _lastThinking ||
+        voiceActive != _lastVoiceActive;
     _lastCount = c.messages.length;
     _lastThinking = c.thinking;
+    _lastVoiceActive = voiceActive;
     if (grew) _scrollToBottom();
   }
 
@@ -125,9 +117,10 @@ class _AssistantScreenState extends State<AssistantScreen> {
         builder: (context, _) {
           final c = widget.controller;
           final msgs = c.messages;
-          final showEmpty = msgs.isEmpty && !c.thinking && !widget.listening;
+          final voiceBubble = c.micListening || c.micProcessing;
+          final showEmpty = msgs.isEmpty && !c.thinking && !voiceBubble;
           final itemCount =
-              msgs.length + (widget.listening ? 1 : 0) + (c.thinking ? 1 : 0);
+              msgs.length + (voiceBubble ? 1 : 0) + (c.thinking ? 1 : 0);
 
           return Column(
             children: [
@@ -202,11 +195,17 @@ class _AssistantScreenState extends State<AssistantScreen> {
                                 onLinkTap: _openLink,
                               );
                             }
-                            if (widget.listening && index == msgs.length) {
+                            if (voiceBubble && index == msgs.length) {
                               return _StatusBubble(
-                                icon: Icons.mic_rounded,
-                                iconColor: const Color(0xFFFF4444),
-                                label: widget.listeningLabel,
+                                icon: c.micListening
+                                    ? Icons.mic_rounded
+                                    : Icons.auto_awesome_rounded,
+                                iconColor: c.micListening
+                                    ? const Color(0xFFFF4444)
+                                    : accent,
+                                label: c.micListening
+                                    ? 'Listening, sir...'
+                                    : 'Thinking...',
                                 accent: accent,
                               );
                             }
@@ -226,15 +225,15 @@ class _AssistantScreenState extends State<AssistantScreen> {
                 padding: const EdgeInsets.fromLTRB(12, 8, 8, 12),
                 child: Row(
                   children: [
-                    if (widget.onMicDown != null) ...[
+                    if (c.hasVoice) ...[
                       Tooltip(
-                        message: widget.listening
+                        message: c.micListening
                             ? 'Release to Send'
                             : 'Hold to Speak',
                         child: GestureDetector(
-                          onTapDown: (_) => widget.onMicDown?.call(),
-                          onTapUp: (_) => widget.onMicUp?.call(),
-                          onLongPressEnd: (_) => widget.onMicUp?.call(),
+                          onTapDown: (_) => c.onMicDown(),
+                          onTapUp: (_) => c.onMicUp(),
+                          onLongPressEnd: (_) => c.onMicUp(),
                           child: Container(
                             padding: const EdgeInsets.all(10),
                             decoration: BoxDecoration(
@@ -242,7 +241,7 @@ class _AssistantScreenState extends State<AssistantScreen> {
                             ),
                             child: Icon(
                               Icons.mic_rounded,
-                              color: widget.listening
+                              color: c.micListening
                                   ? const Color(0xFFFF4444)
                                   : accent,
                             ),
