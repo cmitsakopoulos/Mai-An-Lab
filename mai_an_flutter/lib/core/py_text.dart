@@ -1,3 +1,5 @@
+import 'dart:convert' show utf8;
+
 import 'nfkd_fold_table.dart';
 import 'py_unicode_tables.dart';
 
@@ -192,4 +194,25 @@ String pyStrip(String s) {
     b--;
   }
   return String.fromCharCodes(r, a, b);
+}
+
+const _quoteAlwaysSafe =
+    'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-~';
+
+/// `urllib.parse.quote(s, safe)`: UTF-8, every byte outside the always-safe
+/// set and [safe] as `%XX` (upper-case hex). Dart's `Uri.encodeComponent`
+/// leaves `!'()*` alone and has no `safe`.
+String pyQuote(String s, {String safe = '/'}) {
+  final out = StringBuffer();
+  for (final b in utf8.encode(s)) {
+    final c = String.fromCharCode(b);
+    if (b < 0x80 && (_quoteAlwaysSafe.contains(c) || safe.contains(c))) {
+      out.write(c);
+    } else {
+      out
+        ..write('%')
+        ..write(b.toRadixString(16).toUpperCase().padLeft(2, '0'));
+    }
+  }
+  return out.toString();
 }

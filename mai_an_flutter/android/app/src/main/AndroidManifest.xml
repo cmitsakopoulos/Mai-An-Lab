@@ -1,8 +1,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <!-- Phase 1 (phone player): the Flet app's permissions minus the ones no
-         ported feature uses yet. INTERNET (sync, sources) and RECORD_AUDIO
-         (voice) come with phases 4-6 and 5. The playback service permissions
-         (WAKE_LOCK, FOREGROUND_SERVICE_*) are merged in from the shared
+         ported feature uses yet. RECORD_AUDIO (voice) comes with phase 5.
+         The playback service permissions (WAKE_LOCK, FOREGROUND_SERVICE_*) are merged in from the shared
          plugin manifest (packages/maian_native). -->
     <!-- Playback of /storage/emulated/0/Music/…: all-files access, as Flet.
          Sideload only: Play policy rejects MANAGE_EXTERNAL_STORAGE. -->
@@ -13,6 +12,15 @@
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
         android:maxSdkVersion="29"/>
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <!-- Phase 4 (Companion sync): HTTP to the Mac's CompanionServer, the
+         active network's address for discovery, and the multicast lock that
+         lets the Mac's broadcast beacons in. dart:io sockets don't go through
+         Android's cleartext policy (this SDK's dart:io has no such check), so
+         the plain-HTTP server needs no network_security_config; to confirm
+         on the phone (§1 row 16). -->
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE"/>
     <application
         android:label="@string/app_name"
         android:name="${applicationName}"
