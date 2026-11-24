@@ -311,6 +311,52 @@ class PlayerController extends ChangeNotifier {
     queue.queueLastMany([for (final t in ts) QueueEntry.fromTrack(t)]),
   );
 
+  /// library.py `_enqueue_network_tracks` (the selection bar's Play and Add
+  /// to Queue): an ordered block. [replace] plays it now, non-destructively:
+  /// shuffle order off, the block right after the playing row and a jump to
+  /// its head, so the rest of the queue and auto-play survive. Otherwise it
+  /// is Add to Queue (last of the listener's picks), without a jump. An empty
+  /// queue just becomes the block. Returns how many tracks went in.
+  int playBlock(List<Track> tracks, {required bool replace}) {
+    final rows = [
+      for (final t in tracks)
+        if (t.path.isNotEmpty) QueueEntry.fromTrack(t),
+    ];
+    if (rows.isEmpty) return 0;
+    if (replace && queue.shuffle) disableShuffleOrder();
+    if (queue.isEmpty) {
+      _setQueue(rows, 0);
+    } else if (replace) {
+      final start = queue.currentIndex + 1;
+      insertAfter(rows);
+      if (_needsPush || stopped) {
+        // Nothing loaded to skip in: load the queue at the block.
+        _completedTerminal = false;
+        queue.currentIndex = start;
+        _syncForCurrent();
+        _push(start, autoplay: true);
+        notifyListeners();
+      } else {
+        playTrackAt(start);
+      }
+    } else {
+      _apply(queue.queueLastMany(rows));
+    }
+    return rows.length;
+  }
+
+  /// main.py `_delete_track`'s queue half: stop if [path] is playing, then
+  /// drop every row of it.
+  void removePath(String path) {
+    if (path.isEmpty) return;
+    if (!stopped && currentPath == path) stop();
+    final rows = [
+      for (final (i, r) in queue.entries.indexed)
+        if (r.path == path) i,
+    ];
+    if (rows.isNotEmpty) removeIndices(rows);
+  }
+
   /// Remove one row (identity: the same song can be queued twice).
   /// Removing a recommendation is a "not this" for the current station,
   /// reported after the removal so the top-up sees the gap.

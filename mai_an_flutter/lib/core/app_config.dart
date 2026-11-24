@@ -17,6 +17,7 @@ class AppConfig {
     this.accent,
     this.dsp = const DspConfig(),
     this.haptics = const HapticsConfig(),
+    this.libraryTabs = const LibraryTabs(),
     this.downloadsFolder = '',
   });
 
@@ -31,6 +32,9 @@ class AppConfig {
 
   /// `[haptics]`: on/off and the intensity per action.
   final HapticsConfig haptics;
+
+  /// `appearance.show_*` and `pill_style`: the Library tab's view bar.
+  final LibraryTabs libraryTabs;
 
   /// `[downloads] folder`, unresolved (storage_paths.dart resolves it; the
   /// library folder falls back to it).
@@ -70,6 +74,7 @@ class AppConfig {
       accent: rawAccent is String ? parseAccent(rawAccent) : null,
       dsp: DspConfig.fromToml(doc['dsp']),
       haptics: HapticsConfig.fromToml(doc['haptics']),
+      libraryTabs: LibraryTabs.fromToml(appearance),
       downloadsFolder: switch (doc['downloads']) {
         {'folder': final Object f?} => '$f',
         _ => '',
@@ -101,4 +106,58 @@ class AppConfig {
     if (m == null) return null;
     return Color(0xFF000000 | int.parse(m[1]!, radix: 16));
   }
+}
+
+/// The Library tab's view bar as config.toml sets it (library.py
+/// `_visible_view_modes`, `_update_view_tabs`).
+class LibraryTabs {
+  const LibraryTabs({
+    this.visible = const [
+      'playlists', 'genres', 'artists', 'tracks', //
+    ],
+    this.unified = false,
+  });
+
+  /// Shown views, in bar order (network, playlists, genres, artists, albums,
+  /// tracks); never empty.
+  final List<String> visible;
+
+  /// `pill_style = "unified"`: every pill in the accent colour instead of its
+  /// category colour.
+  final bool unified;
+
+  static const order = [
+    'network', 'playlists', 'genres', 'artists', 'albums', 'tracks', //
+  ];
+
+  /// The defaults of `_visible_view_modes`.
+  static const _defaults = {
+    'network': false,
+    'playlists': true,
+    'genres': true,
+    'artists': true,
+    'albums': false,
+    'tracks': true,
+  };
+
+  static LibraryTabs fromToml(Object? appearance) {
+    final a = appearance is Map ? appearance : const <String, Object?>{};
+    final visible = [
+      for (final m in order)
+        if (_toBool(a['show_$m'], _defaults[m]!)) m,
+    ];
+    return LibraryTabs(
+      visible: visible.isEmpty ? const ['tracks'] : visible,
+      unified: '${a['pill_style'] ?? 'category'}'.toLowerCase() == 'unified',
+    );
+  }
+
+  /// library.py `_to_bool`.
+  static bool _toBool(Object? v, bool fallback) => switch (v) {
+    null => fallback,
+    bool b => b,
+    String s => const {'true', '1', 'yes'}.contains(s.trim().toLowerCase()),
+    num n => n != 0,
+    _ => true,
+  };
 }

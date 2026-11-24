@@ -65,7 +65,9 @@ void main() {
     expect(c.nowPlaying!.path, '/music/song2.mp3');
     expect(backend.playing, isTrue);
     await c.saveQueue();
-    final s = jsonDecode(File('${dir.path}/queue_state.json').readAsStringSync());
+    final s = jsonDecode(
+      File('${dir.path}/queue_state.json').readAsStringSync(),
+    );
     expect((s['queue'] as List).length, 3);
     expect(s['current_index'], 1);
   });
@@ -100,25 +102,33 @@ void main() {
   });
 
   // test_aggressive_mode_switching_and_surviving
-  test('shuffle on then off returns the regular queue at the same track', () async {
-    final album = [track(7, dir: '/a'), library[0], track(8, dir: '/a')];
-    await c.playTrack(library[0], context: album);
-    await c.settled;
-    await c.toggleShuffle();
-    await expectInStep();
-    expect(c.shuffle, isTrue);
-    expect(qPaths(), library.map((t) => t.path)); // the whole library
-    await c.flush();
-    expect(File('${dir.path}/.cache/queue_regular.json').existsSync(), isTrue);
-    await c.toggleShuffle();
-    await expectInStep();
-    expect(c.shuffle, isFalse);
-    expect(qPaths(), album.map((t) => t.path));
-    expect(c.nowPlaying!.path, library[0].path);
-    await c.flush();
-    final prefs = jsonDecode(File('${dir.path}/flet_prefs.json').readAsStringSync());
-    expect(prefs['is_shuffle'], isFalse);
-  });
+  test(
+    'shuffle on then off returns the regular queue at the same track',
+    () async {
+      final album = [track(7, dir: '/a'), library[0], track(8, dir: '/a')];
+      await c.playTrack(library[0], context: album);
+      await c.settled;
+      await c.toggleShuffle();
+      await expectInStep();
+      expect(c.shuffle, isTrue);
+      expect(qPaths(), library.map((t) => t.path)); // the whole library
+      await c.flush();
+      expect(
+        File('${dir.path}/.cache/queue_regular.json').existsSync(),
+        isTrue,
+      );
+      await c.toggleShuffle();
+      await expectInStep();
+      expect(c.shuffle, isFalse);
+      expect(qPaths(), album.map((t) => t.path));
+      expect(c.nowPlaying!.path, library[0].path);
+      await c.flush();
+      final prefs = jsonDecode(
+        File('${dir.path}/flet_prefs.json').readAsStringSync(),
+      );
+      expect(prefs['is_shuffle'], isFalse);
+    },
+  );
 
   test('shuffle keeps the playing track playing where it was', () async {
     await c.playTrack(library[1], context: library);
@@ -202,7 +212,10 @@ void main() {
     c.queueLast(track(5));
     await c.settled;
     await expectInStep();
-    expect(backend.ops.sublist(backend.ops.length - 2), ['splice', 'set_playlist']);
+    expect(backend.ops.sublist(backend.ops.length - 2), [
+      'splice',
+      'set_playlist',
+    ]);
   });
 
   test('restore loads the saved queue paused at the saved offset', () async {
@@ -211,19 +224,27 @@ void main() {
       for (var i = 0; i < 3; i++)
         (File('${dir.path}/t$i.mp3')..writeAsStringSync('x')).path,
     ];
-    File('${dir.path}/queue_state.json').writeAsStringSync(jsonEncode({
-      'queue': [for (final p in real) {'path': p, 'track_title': p}],
-      'current_index': 0,
-      'position': 0.0,
-      'duration': 0.0,
-    }));
-    File('${dir.path}/queue_pos.json').writeAsStringSync(jsonEncode({
-      'path': real[2],
-      'current_index': 2,
-      'position': 42.0,
-      'duration': 200.0,
-    }));
-    File('${dir.path}/flet_prefs.json').writeAsStringSync('{"repeat_mode": "one"}');
+    File('${dir.path}/queue_state.json').writeAsStringSync(
+      jsonEncode({
+        'queue': [
+          for (final p in real) {'path': p, 'track_title': p},
+        ],
+        'current_index': 0,
+        'position': 0.0,
+        'duration': 0.0,
+      }),
+    );
+    File('${dir.path}/queue_pos.json').writeAsStringSync(
+      jsonEncode({
+        'path': real[2],
+        'current_index': 2,
+        'position': 42.0,
+        'duration': 200.0,
+      }),
+    );
+    File(
+      '${dir.path}/flet_prefs.json',
+    ).writeAsStringSync('{"repeat_mode": "one"}');
     await c.settled;
     c.dispose();
     backend = FakeBackend();
@@ -241,14 +262,16 @@ void main() {
   });
 
   test('a restored track that is gone loads on first play instead', () async {
-    File('${dir.path}/queue_state.json').writeAsStringSync(jsonEncode({
-      'queue': [
-        {'path': '/gone/a.flac'},
-      ],
-      'current_index': 0,
-      'position': 12.0,
-      'duration': 0,
-    }));
+    File('${dir.path}/queue_state.json').writeAsStringSync(
+      jsonEncode({
+        'queue': [
+          {'path': '/gone/a.flac'},
+        ],
+        'current_index': 0,
+        'position': 12.0,
+        'duration': 0,
+      }),
+    );
     await c.settled;
     c.dispose();
     backend = FakeBackend();
@@ -270,8 +293,10 @@ void main() {
       final rng = Random(seed);
       var fresh = 100;
       Track t() => track(fresh++, dir: '/r');
-      await c.playTrack(library[0], context: [for (var i = 0; i < 8; i++) t()]
-        ..insert(0, library[0]));
+      await c.playTrack(
+        library[0],
+        context: [for (var i = 0; i < 8; i++) t()]..insert(0, library[0]),
+      );
       await c.settled;
       for (var step = 0; step < 40; step++) {
         backend.latency = Duration(microseconds: rng.nextInt(3) * 500);
@@ -293,7 +318,9 @@ void main() {
           default:
         }
         if (rng.nextDouble() < 0.4) {
-          await Future<void>.delayed(Duration(microseconds: rng.nextInt(3) * 700));
+          await Future<void>.delayed(
+            Duration(microseconds: rng.nextInt(3) * 700),
+          );
         }
       }
       await c.settled;
@@ -301,6 +328,84 @@ void main() {
       expect(backend.currentIndex, c.queue.currentIndex, reason: 'seed $seed');
       expect(backend.idAt(backend.currentIndex), c.queue.current!.src);
     }
+  });
+
+  // library.py `_enqueue_network_tracks` (the selection bar).
+  test('selection Play goes in after the playing row and plays', () async {
+    await c.playTrack(library[0], context: library);
+    await c.settled;
+    final picks = [track(8), track(9)];
+    expect(c.playBlock(picks, replace: true), 2);
+    await expectInStep();
+    expect(qPaths(), [
+      '/music/song1.mp3',
+      '/music/song8.mp3',
+      '/music/song9.mp3',
+      '/music/song2.mp3',
+      '/music/song3.mp3',
+    ]);
+    expect(c.nowPlaying!.path, '/music/song8.mp3');
+  });
+
+  test('selection Play turns shuffle order off, keeping the queue', () async {
+    await c.playTrack(library[0], context: library);
+    await c.toggleShuffle();
+    await c.settled;
+    final before = qPaths().length;
+    c.playBlock([track(8)], replace: true);
+    await expectInStep();
+    expect(c.shuffle, isFalse);
+    expect(qPaths().length, before + 1);
+    expect(c.nowPlaying!.path, '/music/song8.mp3');
+  });
+
+  test('selection Add to Queue: after earlier picks, no jump', () async {
+    await c.playTrack(library[0], context: library);
+    c.queueLast(track(7));
+    c.playBlock([track(8), track(9)], replace: false);
+    await expectInStep();
+    expect(qPaths().sublist(0, 4), [
+      '/music/song1.mp3',
+      '/music/song7.mp3',
+      '/music/song8.mp3',
+      '/music/song9.mp3',
+    ]);
+    expect(c.nowPlaying!.path, '/music/song1.mp3');
+  });
+
+  test('selection Play on an empty queue plays the block', () async {
+    c.playBlock([track(8), track(9)], replace: true);
+    await expectInStep();
+    expect(qPaths(), ['/music/song8.mp3', '/music/song9.mp3']);
+    expect(backend.playing, isTrue);
+  });
+
+  test('selection Play after stop loads the queue at the block', () async {
+    await c.playTrack(library[0], context: library);
+    await c.settled;
+    c.stop();
+    c.playBlock([track(8)], replace: true);
+    await expectInStep();
+    expect(c.nowPlaying!.path, '/music/song8.mp3');
+    expect(c.stopped, isFalse);
+  });
+
+  test('deleting a track stops it if playing and drops every row', () async {
+    await c.playTrack(library[1], context: library);
+    c.queueLast(library[2]);
+    await c.settled;
+    c.removePath('/music/song2.mp3');
+    await c.settled;
+    expect(backend.playing, isFalse);
+    expect(backend.ops, contains('stop'));
+    expect(qPaths(), [
+      '/music/song1.mp3',
+      '/music/song3.mp3',
+      '/music/song3.mp3',
+    ]);
+    c.removePath('/music/song3.mp3');
+    await c.settled;
+    expect(qPaths(), ['/music/song1.mp3']);
   });
 
   test('QueueEntry ids are the Flet engine ids', () async {

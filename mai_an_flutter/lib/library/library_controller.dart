@@ -1,12 +1,14 @@
 import 'package:flutter/foundation.dart';
 
 import 'dart:async';
+import 'dart:io';
 
 import '../core/db_worker.dart';
 import '../data/library_repository.dart';
 import '../data/play_ledger.dart';
 import '../player/autoplay.dart';
 import '../player/dsp.dart';
+import '../scan/library_scanner.dart';
 import '../stations/station.dart';
 import 'track_query.dart';
 
@@ -21,11 +23,39 @@ enum LoadState { loading, ready, error }
 /// fallback to a "closest match" list. Search runs in memory on every
 /// keystroke, so the Flet 300 ms debounce isn't needed.
 class LibraryController extends ChangeNotifier implements AutoPlayLibrary {
-  LibraryController(this._open, {LibrarySort sort = LibrarySort.date})
-    : _sort = sort;
+  LibraryController(
+    this._open, {
+    LibrarySort sort = LibrarySort.date,
+    Future<String> Function()? libraryFolder,
+  }) : _sort = sort,
+       _libraryFolder = libraryFolder;
 
   final Future<LibraryRepository> Function() _open;
   LibraryRepository? _repo;
+
+  /// The folder a scan indexes, resolved fresh for each scan.
+  final Future<String> Function()? _libraryFolder;
+
+  /// Bumped each time the rows are reloaded from the database (after a
+  /// scan), so the other views drop what they cached.
+  int dataGeneration = 0;
+
+  /// One-off notices for the screen (scan results).
+  Stream<String> get messages => _messages.stream;
+  final _messages = StreamController<String>.broadcast();
+
+  // library.py's scan banner: a progress bar (indeterminate while the
+  // folder is walked) and a status line.
+  bool scanning = false;
+  double? scanProgress;
+  String scanStatus = '';
+
+  /// The database is the port's own and may be written (a scan, the
+  /// ledger drain); false for a LIBRARY_DB override.
+  bool get canScan => _libraryFolder != null && (_repo?.writable ?? false);
+
+  /// The database is the port's own: playlists and deletes may write it.
+  bool get canWrite => _repo?.writable ?? false;
 
   LoadState state = LoadState.loading;
   String? error;
@@ -63,6 +93,26 @@ class LibraryController extends ChangeNotifier implements AutoPlayLibrary {
   /// The search box is empty: Flet's "general view", where tapping a track
   /// that is already queued jumps to it instead of rebuilding the queue.
   bool get isGeneralView => queryWords(_rawQuery).isEmpty;
+
+  /// The search box as typed. One box serves every library view, as in Flet.
+  String get query => _rawQuery;
+
+  /// The open database, once loaded (the other library views query it).
+  LibraryRepository? get repository => _repo;
+
+  /// Albums (or, with [byArtist], artists) with a track matching every word:
+  /// the Flet album and artist searches also match through their tracks
+  /// (`fts_search`).
+  Set<int> idsWithMatchingTracks(List<String> words, {bool byArtist = false}) {
+    final out = <int>{};
+    for (final (t, key) in _sorted) {
+      final id = byArtist ? t.artistId : t.albumId;
+      if (id != null && !out.contains(id) && words.every(key.contains)) {
+        out.add(id);
+      }
+    }
+    return out;
+  }
 
   Future<void> load() async {
     final sw = Stopwatch()..start();
@@ -133,8 +183,130 @@ class LibraryController extends ChangeNotifier implements AutoPlayLibrary {
 
   // ── AutoPlayLibrary ──────────────────────────────────────────────────────
 
-  /// The station graphs once built; null when they couldn't be.
-  Future<StationSource?> stations() => _stations.future;
+  /// The station graphs once built (the latest, after a scan); null when
+  /// they couldn't be.
+  Future<StationSource?> stations() async {
+    await _stations.future;
+    return graph;
+  }
+
+  /// library.py `start_scan` (a scan the user asked for): index the library
+  /// folder, then reload every view. `_on_scan_complete`'s snackbar says
+  /// how it went.
+  Future<void> scan() async {
+    final repo = _repo;
+    final folder = _libraryFolder;
+    if (scanning || repo == null || folder == null || !repo.writable) return;
+    scanning = true;
+    scanProgress = null;
+    scanStatus = 'Initializing active scan…';
+    notifyListeners();
+    int? count;
+    try {
+      final target = await folder();
+      count = await LibraryScanner(
+        targetFolder: target,
+        repo: repo,
+        onProgress: (percent, message) {
+          if (percent == -1) {
+            scanProgress = null;
+            scanStatus = 'Searching: $message';
+          } else {
+            scanProgress = percent / 100;
+            scanStatus = message;
+          }
+          notifyListeners();
+        },
+      ).run();
+    } catch (e) {
+      // Flet's error boundary reports it; the banner must not stick.
+      debugPrint('library scan failed: $e');
+      _messages.add('Scan failed: ${e is DbWorkerException ? e.message : e}');
+    }
+    scanning = false;
+    notifyListeners();
+    await reload();
+    if (count != null) {
+      _messages.add(
+        count > 0
+            ? 'Scan complete. Indexed $count items.'
+            : 'Library is up to date.',
+      );
+    }
+  }
+
+  /// main.py `_delete_track`, after the player has let go of [path]: the
+  /// file, then its rows (playlist entries, track, emptied album and
+  /// artist), then every view reloads. Returns the snackbar text.
+  Future<String> deleteTrack(String path) async {
+    final repo = _repo;
+    if (repo == null || !repo.writable) return 'The library is read-only.';
+    try {
+      final f = File(path);
+      if (await f.exists()) {
+        await f.delete();
+      } else {
+        // Gone from disk already: the rows still go.
+        debugPrint('delete: file not found on disk: $path');
+      }
+    } on FileSystemException catch (e) {
+      final code = e.osError?.errorCode;
+      if (code == 1 || code == 13) {
+        // EPERM / EACCES: Python's PermissionError.
+        return "Permission denied: Android requires 'Manage All Files' "
+            'access to delete files.';
+      }
+      return 'Could not delete: ${e.osError?.message ?? e.message}';
+    }
+    try {
+      await repo.deleteTracksByPaths([path]);
+    } catch (e) {
+      return 'File deleted but database update failed: '
+          '${e is DbWorkerException ? e.message : e}';
+    }
+    await reload();
+    return 'Track deleted permanently.';
+  }
+
+  /// `load_library` after a change on disk: the rows again, then the
+  /// station graphs.
+  Future<void> reload() async {
+    final repo = _repo;
+    if (repo == null) return;
+    try {
+      _resort(await repo.allTracks());
+      state = LoadState.ready;
+    } catch (e) {
+      debugPrint('library reload failed: $e');
+      return;
+    }
+    dataGeneration++;
+    notifyListeners();
+    // The station graphs follow; nothing waits for them (Flet's
+    // load_library doesn't either).
+    unawaited(_rebuildGraph(repo));
+  }
+
+  int _graphGen = 0;
+  bool _disposed = false;
+
+  Future<void> _rebuildGraph(LibraryRepository repo) async {
+    final gen = ++_graphGen;
+    StationSource? built;
+    String? error;
+    try {
+      built = await repo.stations();
+    } on DbWorkerException catch (e) {
+      error = e.message;
+    } catch (e) {
+      error = '$e';
+    }
+    // A newer reload owns the result; a closed library has none.
+    if (_disposed || gen != _graphGen) return;
+    if (error == null) graph = built;
+    graphError = error;
+    notifyListeners();
+  }
 
   @override
   Future<StationHandle?> openStation(
@@ -180,6 +352,8 @@ class LibraryController extends ChangeNotifier implements AutoPlayLibrary {
 
   @override
   void dispose() {
+    _disposed = true;
+    _messages.close();
     _repo?.close();
     super.dispose();
   }

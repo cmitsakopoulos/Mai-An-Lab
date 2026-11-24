@@ -10,12 +10,14 @@ import 'core/app_config.dart';
 import 'core/haptics.dart';
 import 'data/library_repository.dart';
 import 'data/play_ledger.dart';
+import 'library/browse_controller.dart';
 import 'library/library_controller.dart';
 import 'library/library_screen.dart';
 import 'player/audio_handler.dart';
 import 'player/autoplay.dart';
 import 'player/player_controller.dart';
 import 'player/queue_store.dart';
+import 'scan/library_folder.dart';
 import 'ui/tokens.dart';
 
 /// Override with: --dart-define=LIBRARY_DB=/path/library.db
@@ -53,13 +55,20 @@ Future<void> main() async {
   final library = LibraryController(
     () => LibraryRepository.open(dbPath, writable: writable),
     sort: config.librarySort,
+    libraryFolder: writable ? () => resolveLibraryFolder(dataDir) : null,
   );
   final loaded = library.load();
   final ledger = writable ? LedgerDrain(dataDir, library.recordListens) : null;
+  final browse = BrowseController(
+    library,
+    views: LibraryView.fromConfig(config.libraryTabs.visible),
+  );
   final player = ValueNotifier<PlayerController?>(null);
   runApp(
     MaiAnApp(
       library: library,
+      browse: browse,
+      unifiedPills: config.libraryTabs.unified,
       player: player,
       accent: config.accent ?? Tokens.accent,
       haptics: Haptics(config.haptics),
@@ -125,13 +134,17 @@ class MaiAnApp extends StatefulWidget {
   const MaiAnApp({
     super.key,
     required this.library,
+    required this.browse,
     required this.player,
     required this.accent,
     required this.haptics,
+    this.unifiedPills = false,
     this.ledger,
   });
 
   final LibraryController library;
+  final BrowseController browse;
+  final bool unifiedPills;
   final ValueNotifier<PlayerController?> player;
   final Color accent;
   final Haptics haptics;
@@ -184,6 +197,8 @@ class _MaiAnAppState extends State<MaiAnApp> {
       theme: Tokens.theme(accentColor: widget.accent),
       home: LibraryScreen(
         controller: widget.library,
+        browse: widget.browse,
+        unifiedPills: widget.unifiedPills,
         player: widget.player,
         haptics: widget.haptics,
       ),

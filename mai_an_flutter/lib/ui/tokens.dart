@@ -20,7 +20,12 @@ abstract final class Tokens {
   static const accentGreen = Color(0xFF30D158);
   static const accentRed = Color(0xFFFF453A);
 
+  // LIB_*_COLOR: the library views' category colours.
+  static const libArtist = Color(0xFFBF5AF2);
+  static const libAlbum = Color(0xFF0A84FF);
   static const libTrack = Color(0xFF30D158);
+  static const libPlaylist = Color(0xFFFF9F0A);
+  static const libGenre = Color(0xFFFF375F);
 
   static const radiusCard = 14.0;
   static const radiusPill = 20.0;

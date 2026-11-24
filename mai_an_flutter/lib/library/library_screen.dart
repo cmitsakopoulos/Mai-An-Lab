@@ -5,12 +5,19 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../core/haptics.dart';
+import '../data/browse_queries.dart';
 import '../data/library_repository.dart';
 import '../player/player_controller.dart';
 import '../player/ui/mini_player.dart';
 import '../ui/tokens.dart';
+import 'browse_controller.dart';
+import 'browse_view.dart';
 import 'library_controller.dart';
+import 'library_dialogs.dart';
+import 'selection.dart';
+import 'track_menu.dart';
 import 'track_query.dart';
+import 'track_row.dart';
 
 const _appChannel = MethodChannel('mai_an/app');
 
@@ -18,12 +25,20 @@ class LibraryScreen extends StatefulWidget {
   const LibraryScreen({
     super.key,
     required this.controller,
+    required this.browse,
     required this.player,
     required this.haptics,
+    this.unifiedPills = false,
   });
 
   final LibraryController controller;
+
+  /// The Genres, Artists and Albums views, and which view is open.
+  final BrowseController browse;
   final Haptics haptics;
+
+  /// `appearance.pill_style = "unified"`.
+  final bool unifiedPills;
 
   /// Null until the player has started (after the permission prompts).
   final ValueListenable<PlayerController?> player;
@@ -34,13 +49,19 @@ class LibraryScreen extends StatefulWidget {
 
 class _LibraryScreenState extends State<LibraryScreen> {
   LibraryController get controller => widget.controller;
+  BrowseController get browse => widget.browse;
   StreamSubscription<String>? _messages;
+  StreamSubscription<String>? _libraryMessages;
+
+  /// library.py's multi-select, shared by every view.
+  final selection = SelectionController();
 
   @override
   void initState() {
     super.initState();
     widget.player.addListener(_bindMessages);
     _bindMessages();
+    _libraryMessages = controller.messages.listen(_snack);
   }
 
   void _bindMessages() {
@@ -59,20 +80,41 @@ class _LibraryScreenState extends State<LibraryScreen> {
   void dispose() {
     widget.player.removeListener(_bindMessages);
     _messages?.cancel();
+    _libraryMessages?.cancel();
+    selection.dispose();
     super.dispose();
   }
 
-  void _play(Track t) {
+  PlayerController? _playerOrSnack() {
     final player = widget.player.value;
-    if (player == null) {
-      _snack('The player is still starting.');
-      return;
-    }
-    player.playTrack(
+    if (player == null) _snack('The player is still starting.');
+    return player;
+  }
+
+  void _play(Track t) {
+    _playerOrSnack()?.playTrack(
       t,
       context: controller.visible,
       generalView: controller.isGeneralView && !controller.closestMatch,
     );
+  }
+
+  /// A track under an album or playlist row plays that album or playlist
+  /// from it (`source=("album", artist, album)` / `("playlist", id)`).
+  void _playInContext(Track t, List<Track> context) {
+    _playerOrSnack()?.playTrack(t, context: context);
+  }
+
+  /// The genre row's play button: its tracks, newest first, from the top.
+  Future<void> _playGenre(GenreRow g) async {
+    final player = _playerOrSnack();
+    if (player == null) return;
+    final tracks = await browse.genreTracks(g.name);
+    if (tracks.isEmpty) {
+      _snack('No tracks found for ${g.name}');
+      return;
+    }
+    await player.playTrack(tracks.first, context: tracks);
   }
 
   @override
@@ -82,31 +124,37 @@ class _LibraryScreenState extends State<LibraryScreen> {
     return PopScope(
       canPop: false,
       onPopInvokedWithResult: (didPop, _) {
-        if (!didPop) _appChannel.invokeMethod('moveTaskToBack').ignore();
+        if (didPop) return;
+        // Selection mode is the innermost state: back leaves it first.
+        if (selection.active) {
+          selection.exit();
+          return;
+        }
+        _appChannel.invokeMethod('moveTaskToBack').ignore();
       },
       child: Scaffold(
         appBar: AppBar(
           title: ListenableBuilder(
-            listenable: controller,
-            builder: (context, _) => _Header(controller: controller),
+            listenable: Listenable.merge([controller, browse]),
+            builder: (context, _) =>
+                _Header(controller: controller, browse: browse),
           ),
           actions: [
             ListenableBuilder(
+              listenable: Listenable.merge([controller, browse]),
+              builder: (context, _) => _sortMenu(),
+            ),
+            // library.py's scan button (Flet: refresh icon in the accent).
+            ListenableBuilder(
               listenable: controller,
-              builder: (context, _) => PopupMenuButton<LibrarySort>(
-                icon: const Icon(Icons.sort),
-                tooltip: 'Sort',
-                initialValue: controller.sort,
-                onSelected: controller.setSort,
-                itemBuilder: (context) => [
-                  for (final s in LibrarySort.values)
-                    CheckedPopupMenuItem(
-                      value: s,
-                      checked: s == controller.sort,
-                      child: Text(s.label),
-                    ),
-                ],
-              ),
+              builder: (context, _) => controller.canScan
+                  ? IconButton(
+                      icon: const Icon(Icons.refresh),
+                      color: Theme.of(context).colorScheme.primary,
+                      tooltip: 'Scan library',
+                      onPressed: controller.scanning ? null : controller.scan,
+                    )
+                  : const SizedBox.shrink(),
             ),
           ],
         ),
@@ -129,47 +177,77 @@ class _LibraryScreenState extends State<LibraryScreen> {
                         child: TextField(
                           onChanged: controller.setQuery,
                           decoration: const InputDecoration(
-                            hintText: 'Search title, artist, album',
+                            hintText: 'Search artists, albums, tracks…',
                             prefixIcon: Icon(Icons.search, color: Tokens.dim),
                             isDense: true,
                           ),
                         ),
                       ),
+                      ListenableBuilder(
+                        listenable: browse,
+                        builder: (context, _) => browse.views.length < 2
+                            ? const SizedBox.shrink()
+                            : Padding(
+                                padding: const EdgeInsets.fromLTRB(
+                                  14,
+                                  0,
+                                  14,
+                                  8,
+                                ),
+                                child: ViewBar(
+                                  views: browse.views,
+                                  selected: browse.view,
+                                  unified: widget.unifiedPills,
+                                  onSelect: browse.setView,
+                                ),
+                              ),
+                      ),
+                      ListenableBuilder(
+                        listenable: controller,
+                        builder: (context, _) => controller.scanning
+                            ? _ScanBanner(controller: controller)
+                            : const SizedBox.shrink(),
+                      ),
                       Expanded(
-                        child: ValueListenableBuilder(
-                          valueListenable: widget.player,
-                          builder: (context, player, _) => ListenableBuilder(
-                            // Rebuilds the visible rows when the playing
-                            // track changes (highlight), nothing more.
-                            listenable: player ?? controller,
-                            builder: (context, _) {
-                              final playing = player?.stopped == false
-                                  ? player?.nowPlaying?.path
-                                  : null;
-                              return ListView.builder(
-                                // A fixed extent lets Flutter lay out only the
-                                // visible rows and jump-scroll without
-                                // measuring the rest.
-                                itemExtent: _TrackRow.height,
-                                itemCount: controller.visible.length,
-                                itemBuilder: (context, i) {
-                                  final t = controller.visible[i];
-                                  return _TrackRow(
-                                    track: t,
-                                    playing: t.path == playing,
-                                    onTap: () => _play(t),
-                                    onLongPress: () => _trackMenu(t),
-                                  );
-                                },
-                              );
-                            },
-                          ),
+                        child: ListenableBuilder(
+                          listenable: Listenable.merge([browse, controller]),
+                          builder: (context, _) =>
+                              controller.total == 0 && !controller.scanning
+                              ? const _EmptyLibrary()
+                              : browse.view == LibraryView.tracks
+                              ? _tracksList()
+                              : BrowseList(
+                                  controller: browse,
+                                  player: widget.player,
+                                  onPlayTrack: _playInContext,
+                                  onTrackMenu: _trackMenu,
+                                  onAlbumMenu: _albumMenu,
+                                  onPlayGenre: _playGenre,
+                                  selection: selection,
+                                  onCreatePlaylist: _createPlaylist,
+                                  onEditPlaylist: _editPlaylist,
+                                  onDeletePlaylist: _deletePlaylist,
+                                  onRemoveFromPlaylist: _removeFromPlaylist,
+                                ),
                         ),
                       ),
                     ],
                   ),
                 },
               ),
+            ),
+            ListenableBuilder(
+              listenable: selection,
+              builder: (context, _) => selection.active
+                  ? _SelectionBar(
+                      selection: selection,
+                      onPlay: () => _selectionPlay(replace: true),
+                      onQueue: () => _selectionPlay(replace: false),
+                      onAddToPlaylist: () =>
+                          _addToPlaylist(selection.tracks, fromSelection: true),
+                      canWritePlaylists: controller.canWrite,
+                    )
+                  : const SizedBox.shrink(),
             ),
             ValueListenableBuilder(
               valueListenable: widget.player,
@@ -183,7 +261,90 @@ class _LibraryScreenState extends State<LibraryScreen> {
     );
   }
 
-  void _trackMenu(Track t) {
+  Widget _tracksList() => ValueListenableBuilder(
+    valueListenable: widget.player,
+    builder: (context, player, _) => ListenableBuilder(
+      // Rebuilds the visible rows when the playing track changes
+      // (highlight), nothing more.
+      listenable: Listenable.merge([player ?? controller, selection]),
+      builder: (context, _) {
+        final playing = player?.stopped == false
+            ? player?.nowPlaying?.path
+            : null;
+        final picking = selection.active;
+        return ListView.builder(
+          // A fixed extent lets Flutter lay out only the visible rows and
+          // jump-scroll without measuring the rest.
+          itemExtent: TrackRow.height,
+          itemCount: controller.visible.length,
+          itemBuilder: (context, i) {
+            final t = controller.visible[i];
+            return TrackRow(
+              track: t,
+              playing: t.path == playing,
+              selected: picking ? selection.contains(t.path) : null,
+              onTap: picking ? () => selection.toggle(t) : () => _play(t),
+              onLongPress: () => _trackMenu(t),
+            );
+          },
+        );
+      },
+    ),
+  );
+
+  /// library.py `_open_sort_menu`: the options depend on the view. Tracks
+  /// and Albums share one sort, as in Flet.
+  Widget _sortMenu() {
+    Widget menu<T>(
+      List<T> values,
+      T current,
+      String Function(T) label,
+      ValueChanged<T> onSelected,
+    ) => PopupMenuButton<T>(
+      icon: const Icon(Icons.sort),
+      tooltip: 'Sort',
+      initialValue: current,
+      onSelected: onSelected,
+      itemBuilder: (context) => [
+        for (final v in values)
+          CheckedPopupMenuItem(
+            value: v,
+            checked: v == current,
+            child: Text(label(v)),
+          ),
+      ],
+    );
+    return switch (browse.view) {
+      LibraryView.tracks || LibraryView.albums => menu(
+        LibrarySort.values,
+        controller.sort,
+        (s) => s.label,
+        controller.setSort,
+      ),
+      LibraryView.artists => menu(
+        ArtistSort.values,
+        browse.artistSort,
+        (s) => s.label,
+        browse.setArtistSort,
+      ),
+      LibraryView.genres => menu(
+        GenreSort.values,
+        browse.genreSort,
+        (s) => s.label,
+        browse.setGenreSort,
+      ),
+      LibraryView.playlists => menu(
+        PlaylistSort.values,
+        browse.playlistSort,
+        (s) => s.label,
+        browse.setPlaylistSort,
+      ),
+    };
+  }
+
+  /// library.py `_open_album_context_menu`: Play Album, Add Album to Queue.
+  /// (Send Album arrives with sync, phase 4.)
+  void _albumMenu(AlbumRow a) {
     widget.haptics.trigger('long_press');
     final player = widget.player.value;
     showModalBottomSheet<void>(
@@ -196,50 +357,46 @@ class _LibraryScreenState extends State<LibraryScreen> {
           children: [
             ListTile(
               title: Text(
-                t.title,
-                maxLines: 1,
+                a.displayTitle,
+                maxLines: 2,
                 overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontWeight: FontWeight.w700,
+                  fontSize: 15,
+                ),
               ),
               subtitle: Text(
-                '${t.artist} · ${t.album}',
-                maxLines: 1,
+                '${a.displayArtist}  ·  ${a.trackCount ?? '?'} tracks',
+                maxLines: 2,
                 overflow: TextOverflow.ellipsis,
-                style: const TextStyle(color: Tokens.dim),
+                style: const TextStyle(color: Tokens.dim, fontSize: 12),
               ),
             ),
             const Divider(height: 1, color: Tokens.borderSubtle),
             ListTile(
-              leading: const Icon(Icons.playlist_play_rounded),
-              title: const Text('Play next'),
+              leading: const Icon(Icons.play_arrow_rounded),
+              title: const Text('Play Album'),
               enabled: player != null,
-              onTap: () {
+              onTap: () async {
                 Navigator.pop(sheet);
-                player!.queueNext(t);
-                widget.haptics.trigger('swipe_queue');
+                final tracks = await browse.albumTracks(a);
+                if (tracks.isNotEmpty) {
+                  await player!.playTrack(tracks.first, context: tracks);
+                }
               },
             ),
             ListTile(
               leading: const Icon(Icons.playlist_add_rounded),
-              title: const Text('Add to queue'),
+              title: const Text('Add Album to Queue'),
               enabled: player != null,
-              onTap: () {
+              onTap: () async {
                 Navigator.pop(sheet);
-                player!.queueLast(t);
+                final tracks = await browse.albumTracks(a);
+                for (final t in tracks) {
+                  player!.queueLast(t);
+                }
                 widget.haptics.trigger('swipe_queue');
-              },
-            ),
-            ListTile(
-              leading: const Icon(Icons.all_inclusive_rounded),
-              title: const Text('Start radio'),
-              subtitle: const Text(
-                'Play similar tracks automatically',
-                style: TextStyle(color: Tokens.dim, fontSize: 12),
-              ),
-              enabled: player?.autoplay != null,
-              onTap: () {
-                Navigator.pop(sheet);
-                player!.autoplay!.startRadio(t);
-                widget.haptics.trigger('swipe_queue');
+                _snack('Added ${tracks.length} tracks to queue.');
               },
             ),
           ],
@@ -247,19 +404,225 @@ class _LibraryScreenState extends State<LibraryScreen> {
       ),
     );
   }
+
+  void _trackMenu(Track t) {
+    widget.haptics.trigger('long_press');
+    final player = widget.player.value;
+    final writable = controller.canWrite;
+    showTrackMenu(context, t, (
+      select: () => selection.enable(t),
+      playNext: player == null
+          ? null
+          : () {
+              player.queueNext(t);
+              widget.haptics.trigger('swipe_queue');
+            },
+      addToQueue: player == null
+          ? null
+          : () {
+              player.queueLast(t);
+              widget.haptics.trigger('swipe_queue');
+            },
+      startRadio: player?.autoplay == null
+          ? null
+          : () {
+              player!.autoplay!.startRadio(t);
+              widget.haptics.trigger('swipe_queue');
+            },
+      addToPlaylist: writable ? () => _addToPlaylist([t]) : null,
+      delete: writable && t.path.isNotEmpty ? () => _deleteTrack(t) : null,
+    ));
+  }
+
+  /// library.py `_selection_play`: the selection, in the order it was
+  /// picked, played now or added to the queue; selection mode ends.
+  void _selectionPlay({required bool replace}) {
+    final player = _playerOrSnack();
+    if (player == null) return;
+    final n = player.playBlock(selection.tracks, replace: replace);
+    if (n > 0) widget.haptics.trigger('swipe_queue');
+    selection.exit();
+  }
+
+  /// library.py `_open_add_to_playlist_sheet`, for one track (the track
+  /// menu) or the selection.
+  Future<void> _addToPlaylist(
+    List<Track> tracks, {
+    bool fromSelection = false,
+  }) async {
+    final paths = [
+      for (final t in tracks)
+        if (t.path.isNotEmpty) t.path,
+    ];
+    if (paths.isEmpty) return;
+    final playlists = await browse.playlistsByName();
+    if (!mounted) return;
+    final picked = await showAddToPlaylistSheet(context, playlists);
+    if (!mounted || picked == null) return;
+    switch (picked) {
+      case (null, true):
+        await showPlaylistNameDialog(
+          context,
+          onSubmit: (name) async {
+            final (_, err) = await browse.createPlaylist(name, paths: paths);
+            if (err != null) return 'Could not create playlist: $err';
+            if (fromSelection) selection.exit();
+            return null;
+          },
+        );
+      case (final PlaylistRow p, _):
+        final err = await browse.addToPlaylist(p.id, paths);
+        if (err != null) {
+          _snack('Failed to add track: $err');
+        } else if (fromSelection) {
+          _snack('Added ${paths.length} tracks to ${p.displayName}.');
+          selection.exit();
+        }
+      default:
+    }
+  }
+
+  /// library.py `_create_playlist_dialog` (the Playlists tab).
+  void _createPlaylist() => showPlaylistNameDialog(
+    context,
+    closeFirst: true,
+    withHint: true,
+    onSubmit: (name) async => (await browse.createPlaylist(name)).$2,
+    onError: (err) => _snack('Failed: $err'),
+  );
+
+  void _editPlaylist(PlaylistRow p) => showPlaylistEditor(
+    context,
+    playlist: p,
+    onSave: (name, color) async {
+      final err = await browse.updatePlaylist(p.id, name: name, color: color);
+      if (err != null) _snack('Could not save playlist: $err');
+    },
+  );
+
+  /// main.py `confirm_delete_playlist` + `_delete_playlist`.
+  Future<void> _deletePlaylist(PlaylistRow p) async {
+    final ok = await confirmDelete(
+      context,
+      title: 'Delete Playlist?',
+      message:
+          "Permanently delete playlist '${p.displayName}'? Tracks will "
+          'remain in your library.',
+    );
+    if (!ok) return;
+    final err = await browse.deletePlaylist(p.id);
+    _snack(
+      err == null ? 'Playlist deleted.' : 'Could not delete playlist: $err',
+    );
+  }
+
+  Future<void> _removeFromPlaylist(int playlistId, Track t) async {
+    final err = await browse.removeFromPlaylist(playlistId, t.path);
+    if (err != null) _snack('Could not remove track: $err');
+  }
+
+  /// main.py `confirm_delete_track` + `_delete_track`.
+  Future<void> _deleteTrack(Track t) async {
+    final ok = await confirmDelete(
+      context,
+      title: 'Delete Track?',
+      message: "Permanently delete '${t.title}' from your device?",
+    );
+    if (!ok) return;
+    widget.player.value?.removePath(t.path);
+    _snack(await controller.deleteTrack(t.path));
+  }
+}
+
+/// library.py `_selection_bar`: cancel, the count, Play, Add to Queue, Add
+/// to Playlist (Send arrives with sync, phase 4). The actions are disabled
+/// while nothing is ticked.
+class _SelectionBar extends StatelessWidget {
+  const _SelectionBar({
+    required this.selection,
+    required this.onPlay,
+    required this.onQueue,
+    required this.onAddToPlaylist,
+    required this.canWritePlaylists,
+  });
+
+  final SelectionController selection;
+  final VoidCallback onPlay;
+  final VoidCallback onQueue;
+  final VoidCallback onAddToPlaylist;
+  final bool canWritePlaylists;
+
+  @override
+  Widget build(BuildContext context) {
+    final accent = Theme.of(context).colorScheme.primary;
+    final some = selection.count > 0;
+    return Container(
+      margin: const EdgeInsets.fromLTRB(14, 0, 14, 8),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      decoration: BoxDecoration(
+        color: Tokens.surface2,
+        border: Border.all(color: Tokens.borderSubtle),
+        borderRadius: BorderRadius.circular(Tokens.radiusCard),
+      ),
+      child: Row(
+        children: [
+          IconButton(
+            icon: const Icon(Icons.close_rounded),
+            color: Tokens.dim,
+            tooltip: 'Cancel Selection',
+            onPressed: selection.exit,
+          ),
+          Expanded(
+            child: Text(
+              '${selection.count} selected',
+              style: const TextStyle(
+                color: Tokens.text,
+                fontWeight: FontWeight.w600,
+                fontSize: 13,
+              ),
+            ),
+          ),
+          IconButton(
+            icon: const Icon(Icons.play_arrow_rounded),
+            color: accent,
+            tooltip: 'Play',
+            onPressed: some ? onPlay : null,
+          ),
+          IconButton(
+            icon: const Icon(Icons.playlist_add_check_rounded),
+            color: accent,
+            tooltip: 'Add to Queue',
+            onPressed: some ? onQueue : null,
+          ),
+          IconButton(
+            icon: const Icon(Icons.playlist_add_rounded),
+            color: Tokens.libPlaylist,
+            tooltip: 'Add to Playlist',
+            onPressed: some && canWritePlaylists ? onAddToPlaylist : null,
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 class _Header extends StatelessWidget {
-  const _Header({required this.controller});
+  const _Header({required this.controller, required this.browse});
   final LibraryController controller;
+  final BrowseController browse;
 
   @override
   Widget build(BuildContext context) {
     final c = controller;
+    final b = browse;
     final parts = <String>[
       if (c.state == LoadState.ready)
-        '${c.visible.length} / ${c.total} tracks'
-            '${c.closestMatch ? ' (closest match)' : ''}',
+        if (b.view == LibraryView.tracks)
+          '${c.visible.length} / ${c.total} tracks'
+              '${c.closestMatch ? ' (closest match)' : ''}'
+        else if (!b.loading || b.rows.isNotEmpty)
+          '${b.shown} / ${b.total} ${b.view.label.toLowerCase()}'
+              '${b.closestMatch ? ' (closest match)' : ''}',
       if (c.loadTime != null) 'loaded in ${c.loadTime!.inMilliseconds} ms',
       if (c.graph case final g?) 'graph ${g.length}×${g.dim}',
       if (c.graphError != null) 'no graph',
@@ -274,118 +637,6 @@ class _Header extends StatelessWidget {
             style: const TextStyle(fontSize: 12, color: Tokens.dim),
           ),
       ],
-    );
-  }
-}
-
-/// library.py `_track_row`: format badge, title, "artist · album", duration.
-/// The playing row is tinted and drawn in the accent. Kept light: one
-/// InkWell, one Row.
-class _TrackRow extends StatelessWidget {
-  const _TrackRow({
-    required this.track,
-    this.playing = false,
-    this.onTap,
-    this.onLongPress,
-  });
-
-  /// library.py ROW_H.
-  static const height = 64.0;
-  final Track track;
-  final bool playing;
-  final VoidCallback? onTap;
-  final VoidCallback? onLongPress;
-
-  /// The subtitle rules of `_track_row`: "Unknown" and a value equal to the
-  /// title are left out.
-  static String subtitle(Track t) {
-    bool keep(String v) =>
-        v.isNotEmpty &&
-        v != 'Unknown' &&
-        v.trim().toLowerCase() != t.title.trim().toLowerCase();
-    final parts = [if (keep(t.artist)) t.artist, if (keep(t.album)) t.album];
-    if (parts.isNotEmpty) return parts.join('  ·  ');
-    return (t.artist.isNotEmpty && t.artist != 'Unknown') ? t.artist : '';
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final accent = Theme.of(context).colorScheme.primary;
-    return Material(
-      color: playing ? accent.withValues(alpha: 0.1) : Colors.transparent,
-      child: InkWell(
-        onTap: onTap,
-        onLongPress: onLongPress,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16),
-          child: Row(
-            children: [
-              Container(
-                width: 40,
-                height: 20,
-                alignment: Alignment.center,
-                decoration: BoxDecoration(
-                  color: playing
-                      ? accent.withValues(alpha: 0.22)
-                      : Tokens.text.withValues(alpha: 0.08),
-                  border: Border.all(
-                    color: playing ? accent : Tokens.borderSubtle,
-                  ),
-                  borderRadius: BorderRadius.circular(5),
-                ),
-                child: Text(
-                  track.formatBadge,
-                  style: TextStyle(
-                    fontSize: 9,
-                    fontWeight: FontWeight.w700,
-                    color: playing ? accent : Tokens.dim,
-                  ),
-                ),
-              ),
-              const SizedBox(width: 16),
-              Expanded(
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      track.title,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        color: playing ? accent : Tokens.text,
-                        fontSize: 14,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      subtitle(track),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        color: playing ? accent : Tokens.dim,
-                        fontSize: 12,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              if (track.duration > 0) ...[
-                const SizedBox(width: 12),
-                Text(
-                  track.durationLabel,
-                  style: TextStyle(
-                    color: playing ? accent : Tokens.textTertiary,
-                    fontSize: 12,
-                    fontFeatures: const [FontFeature.tabularFigures()],
-                  ),
-                ),
-              ],
-            ],
-          ),
-        ),
-      ),
     );
   }
 }
@@ -406,6 +657,81 @@ class _ErrorView extends StatelessWidget {
           textAlign: TextAlign.center,
           style: const TextStyle(color: Tokens.dim),
         ),
+      ),
+    );
+  }
+}
+
+/// library.py `_scan_progress_container`: the bar and the status line,
+/// under the view bar while a scan runs.
+class _ScanBanner extends StatelessWidget {
+  const _ScanBanner({required this.controller});
+  final LibraryController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    final accent = Theme.of(context).colorScheme.primary;
+    return Container(
+      margin: const EdgeInsets.fromLTRB(14, 0, 14, 8),
+      padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: accent.withValues(alpha: 0.3)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          LinearProgressIndicator(
+            value: controller.scanProgress,
+            color: accent,
+            backgroundColor: Tokens.surface2,
+          ),
+          const SizedBox(height: 8),
+          Text(
+            controller.scanStatus,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(color: Tokens.dim, fontSize: 11),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// library.py `_empty_label`. Flet's ENTER PATHS button opens Settings →
+/// Storage, which isn't ported yet; the scan button above works meanwhile.
+class _EmptyLibrary extends StatelessWidget {
+  const _EmptyLibrary();
+
+  @override
+  Widget build(BuildContext context) {
+    final accent = Theme.of(context).colorScheme.primary;
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            Icons.library_music_outlined,
+            color: accent.withValues(alpha: 0.3),
+            size: 80,
+          ),
+          const SizedBox(height: 12),
+          const Text(
+            "It's empty in here.",
+            style: TextStyle(
+              color: Tokens.text,
+              fontSize: 20,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+          const SizedBox(height: 12),
+          const Text(
+            'Your music library is currently empty.\nIndex your folders to start listening.',
+            textAlign: TextAlign.center,
+            style: TextStyle(color: Tokens.dim, fontSize: 14),
+          ),
+        ],
       ),
     );
   }
