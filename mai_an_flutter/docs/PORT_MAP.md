@@ -3,11 +3,18 @@
 *Status: 2026-11-24. Branch `flutter-port` (not pushed). Phase 0 (backbone)
 done. Phase 1 (phone player) is written and audited against the Flet sources
 (§9). Phase 2 (stations) is written and matches the Python output exactly on
-a real library (§4, phase 2). Desktop tests pass (`flutter test`: 159,
-including 41 real-library golden tests that need the gitignored goldens;
-analyzer clean); debug and release APKs
-build. Neither phase has run on the phone yet. Nothing ships from this port
-yet. 16 of the 90 Flet features in §11 are ported.*
+a real library (§4, phase 2). Phase 3 is under way: the Genres, Artists and
+Albums views, the migrations the port now owns, the play-ledger drain, the
+library scan (with tinytag ported to Dart), playlists, the full
+long-press menu, selection mode and Delete Track, and the tab bar with
+the Search tab's local landing cards (§4, phase 3). Desktop
+tests pass (`flutter test`: 264, including the real-library golden tests
+that need the gitignored goldens; analyzer clean in Dart's strict modes);
+debug and release APKs build.
+It is installed on the phone (2026-11-24, with the 2026-11-02 library, an
+older build: no scan yet). The user reports problems found in use; fix
+them, or record intended differences in §7. Nothing ships from this port yet. 29 of the 90 Flet features in §11
+are ported. Third-party code the port uses or copies is listed in §12.*
 
 **Next session: start at §10 (open items). §11 lists every Flet feature and
 where it stands.** To put the port on the phone: `tool/install_phone.sh`
@@ -47,8 +54,10 @@ written and tested. The port reuses it rather than rewriting it.
    keeps running it until phase 8, and it stays the reference for anything
    not yet ported).
 2. **The data contract is the interface (§2).** Both apps read the same
-   `library.db`. Python owns the schema, migrations and every write until
-   phase 3. Until then the port opens the database read-only.
+   `library.db`. Python owned the schema, migrations and every write until
+   phase 3. Now the port migrates and writes its own copy exactly as
+   db_manager does (`data/library_schema.dart`, golden-tested); it opens any
+   other database (a `LIBRARY_DB` override, the test goldens) read-only.
 3. **Parity is proved with Python's own outputs.** A test pins reference values
    that the Python function printed. `track_query_test.dart` already does this
    for `_kmer_similarity` and `_safe_fts`. Larger behaviours (stations, intents,
@@ -85,15 +94,15 @@ Status key:
 | 7 | **Notifications** | `POST_NOTIFICATIONS` requested at runtime (Android 13+). Kotlin `ProgressNotifications` and alert notifications. Tapping one navigates via `takePendingNavigate`. | Keep the Kotlin (`packages/maian_native`). Playback-error cards work. Taps are received and drained but not routed: with one screen there is nowhere to go yet. | 1–3 | 🧪 |
 | 8 | **Long tasks with the screen off** | Kotlin `LibraryTaskService`, foreground type `dataSync`. The first job starts it and the last one stops it. | Keep the Kotlin. ⚠️ Android 15+ caps `dataSync` foreground services at about 6 h per 24 h. Long offloads or downloads must handle the timeout callback. Verify on device. | 3–4 | ♻️⚠️ |
 | 9 | **Reading music files** | `MANAGE_EXTERNAL_STORAGE` (all-files access) + `READ_MEDIA_AUDIO` + legacy storage permissions. Plain file paths under `/storage/emulated/0/Music`. | Same permissions via `permission_handler`, requested before the player starts (as Flet did), minus RECORD_AUDIO until phase 5. ⚠️ Play Store policy rejects all-files access, so sideload only, as now. | 1 | 🧪 |
-| 10 | **Music folder rules** | `storage_paths.py`: never return an app-private folder, downloads follow the library folder, fallbacks are never written back | Port the rules and their tests together (about 200 lines). | 3 | 🔨 |
-| 11 | **Path identity** | Absolute, platform-specific paths: phone `/storage/emulated/0/Music/…`, Mac `/Users/…/Desktop/Music/…`. NFC-normalised everywhere (`normalize_nfc`). `play_counts.track_path` is the join key. | Dart has no Unicode normaliser. A package such as `unorm_dart` is needed before the port writes any path (scanner, sync). Search already strips NFD combining marks (`fold`). | 3 | 🔨⚠️ |
+| 10 | **Music folder rules** | `storage_paths.py`: never return an app-private folder, downloads follow the library folder, fallbacks are never written back | `scan/storage_paths.dart` (resolvers and `is_app_private`; the platform and sandbox roots are passed in) and `scan/library_folder.dart` (`sync_config_to_ui`'s inputs: `library_path` pref, `[downloads] folder`). Python's tests ported (`storage_paths_test.dart`); `pick_download_dir` comes with downloads (6). | 3 | 🧪 |
+| 11 | **Path identity** | Absolute, platform-specific paths: phone `/storage/emulated/0/Music/…`, Mac `/Users/…/Desktop/Music/…`. `play_counts.track_path` is the join key. `normalize_nfc` is applied only where a file is *named* by the app: downloads (`streamrip_api`, `queue_controller`) and files received by the sync server. | The scanner stores `os.scandir` paths unnormalised, and so does the port (golden-tested), so phase 3 needs no normaliser. Phase 4 (sync) and 6 (downloads) do: `unorm_dart` (MIT, Unicode 17, §12) is the candidate. Search already strips NFD combining marks (`fold`). | 4, 6 | 🔨 |
 | 12 | **Artwork** | Kotlin `resolveArtwork`: embedded art via `MediaMetadataRetriever`, then the sidecar file, cached by sha1 | Keep the Kotlin. The handler resolves it for the current and next rows; sidecar lookup is lazy (per folder, not per queue row). | 1 | 🧪 |
 | 13 | **Audio analysis** | Kotlin `decodePcm` (MediaCodec, to mono PCM) + `dsp.py` (numpy, 906 lines). Usually offloaded to the Mac (sync). | Keep the decoder. The feature maths becomes Dart, or never runs on the phone (§6, decision B). | 6 | ⚠️ |
 | 14 | **EQ and loudness boost** | `set_eq_band_gain` and `set_loudness_boost` in the extension (just_audio Android effects). `reapply_dsp` runs on every track change: config.toml `[dsp]` preset + Dynamism (boost and EQ contour from the track's play_counts features). | In the handler (`setEqBandGain`, `setLoudnessBoost`). `player/dsp.dart` ports `reapply_dsp` with Python reference values; the controller applies it on every row change, including background auto-advance. Now Playing shows the Dynamism badge. Gains set before the device's EQ bands load are applied when they arrive. No settings UI yet (the Flet-written config is honoured). | 1 | 🧪 |
 | 15 | **Voice** | `flutter_tts`, `speech_to_text`, `RECORD_AUDIO`, `<queries>` for `RecognitionService` | Same plugins | 5 | ♻️ |
 | 16 | **Plain HTTP to the Mac** | `usesCleartextTraffic="true"` app-wide | `network_security_config` permitting cleartext only for local or private addresses (the sync server speaks plain HTTP) | 4 | 🔨 |
 | 17 | **LAN discovery** | UDP beacon on port 54545, `CHANGE_WIFI_MULTICAST_STATE`, listens for 10 s while the sync page is open | `RawDatagramSocket`, plus a small Kotlin call to hold a `WifiManager.MulticastLock`. ⚠️ Recheck local-network permission rules before raising targetSdk past 36. | 4 | 🔨⚠️ |
-| 18 | **Lifecycle** | `on_app_lifecycle_state_change`: suspend UI updates in the background, prefill the autoplay buffer on hide, run assistant and companion background hooks, pick up listens finished in the background | `AppLifecycleListener`. Flutter stops drawing frames by itself. Done: the position ticker stops, the position is saved and the auto-play buffer is topped up to 24 on hide. Listens reach auto-play in-process (§7), so there is no catch-up to do for it. Still to come: the ledger drain into the database (3), assistant and companion hooks (4–5). | 1–4 | 🔨 |
+| 18 | **Lifecycle** | `on_app_lifecycle_state_change`: suspend UI updates in the background, prefill the autoplay buffer on hide, run assistant and companion background hooks, pick up listens finished in the background | `AppLifecycleListener`. Flutter stops drawing frames by itself. Done: the position ticker stops, the position is saved and the auto-play buffer is topped up to 24 on hide. Listens reach auto-play in-process (§7), so there is no catch-up to do for it. The ledger drain runs on show, at start and 3 s after each listen (phase 3, 🧪). Still to come: assistant and companion hooks (4–5). | 1–4 | 🔨 |
 | 19 | **Edge-to-edge, predictive back** | Flet/Flutter defaults | targetSdk 36 forces both. Back on the root screen calls `moveTaskToBack` (MainActivity channel `mai_an/app`); predictive back is enabled. Still to audit: edge-to-edge insets in the sheets. | 1 | 🧪 |
 | 20 | **16 KB memory pages** (Android 15+ devices) | Flet build | ✅ Checked: every `.so` in the port's APK has 16 KB LOAD alignment, and the zip is 16 KB-aligned | 0 | ✅ |
 | 21 | **Haptics, links, clipboard, file picker** | `HapticFeedback` (about 15 call sites, configurable intensity), `UrlLauncher`, `FilePicker` (1) | `core/haptics.dart` reads `[haptics]` (on/off, per-action intensity, main.py's defaults); used by the track menu (long_press, swipe_queue): 🧪. `url_launcher`, `file_selector` when needed: 🔨. | as needed | 🧪🔨 |
@@ -109,12 +118,12 @@ The port reuses each file's exact format, so a cutover install inherits it.
 
 | File | Owner today | Port reads | Port writes |
 |---|---|---|---|
-| `library.db` (main database; schema below) | `db_manager.py` | phase 0 ✅ | phase 3 |
-| `.config/streamrip/config.toml` (Android; on the Mac it is under `Library/Application Support/streamrip/`). Holds `general.library_sort`, `appearance.accent_color`, `[dsp]`, `[haptics]` and credentials. | `config.py` | phase 1 ✅ (sort, accent, `[dsp]`, `[haptics]`: `core/app_config.dart`) | the phase that owns each setting |
+| `library.db` (main database; schema below) | `db_manager.py` | phase 0 ✅ | phase 3: migrations and the ledger drain ✅ (desktop and phone) |
+| `.config/streamrip/config.toml` (Android; on the Mac it is under `Library/Application Support/streamrip/`). Holds `general.library_sort`, `appearance.accent_color`, `[dsp]`, `[haptics]`, `[downloads] folder` and credentials. | `config.py` | phase 1 ✅ (sort, accent, `[dsp]`, `[haptics]`: `core/app_config.dart`); 3 (`[downloads] folder`, for the scan folder) | the phase that owns each setting |
 | `queue_state.json`, `queue_pos.json`, `native_resume.json` | main.py, engine | 1 ✅ | 1 ✅ (`autoplay_held`, the queue auto-play set aside: 2 ✅) |
 | `.cache/queue_regular.json`, `.cache/queue_shuffle.json` (the queue set aside while shuffling the library) | main.py | 1 ✅ | 1 ✅ |
 | `flet_prefs.json` (`_save_pref`; shuffle, repeat, similar-play prefs) | main.py | 1 ✅ | 1–2 ✅ (`is_shuffle`, `repeat_mode`, `play_similar_mode`; merge-write as in Flet) |
-| `play_ledger.jsonl` (one line per finished listen, written by the audio handler) | handler; drained by `play_ledger.py` | 3 (drain) | 1 ✅ (same format and ids). Lines accumulate until the port drains them into `play_counts` / `playback_history` in phase 3. |
+| `play_ledger.jsonl` (one line per finished listen, written by the audio handler) | handler; drained by `play_ledger.py` | 3 (drain) | 1 ✅ (same format and ids). Drained into `play_counts` / `playback_history` by `data/play_ledger.dart` (3 ✅, on the phone too). |
 | `companion_transfers.json` | sync | 4 | 4 |
 | `.onboarded` | onboarding | 7 | 7 |
 | `recent_searches.json` | search | 4 | 4 |
@@ -137,7 +146,7 @@ constant moves.
 | 2 | `artist_enrichment` (country, genres, source), `genre_affinity` (the NPMI model), `play_counts` (`bpm`, `energy`, `timbre`/`features_version` for "is this seed analysed"), `playback_history` (recent plays seed auto-play's history on a cold start). All read-only. ✅ |
 | 3 | `playback_history`, `play_counts` (counts), written by the ledger drain |
 | 5 | `track_neighbors` (the assistant's "more by this artist"; stations don't read it) |
-| 3 | `playlists`, `playlist_tracks`, `fts_search`. FTS5 is kept in step by 11 triggers stored in the database, so port writes stay consistent for free. |
+| 3 | `playlists`, `playlist_tracks` ✅ (`data/playlists.dart`), `fts_search`. FTS5 is kept in step by 11 triggers stored in the database, so port writes stay consistent for free. |
 | 5 | `artist_ai_research` |
 | 6 | `artist_releases`, `release_sync_log` |
 | 7 | `metadata_audit_dismissed`, `artist_aliases`, `artist_alias_rejections` |
@@ -162,18 +171,19 @@ Verdicts:
 | `audio_engine.py` (Android path) | 1,463 | Rewrite: thin controller over #4 ✅ (`player/player_controller.dart`; `reapply_dsp` in `player/dsp.dart`; phone 🧪) | 1 |
 | `queue_layout.py` + the queue half of `audio_engine.py` | ~500 | Port ✅ (`player/play_queue.dart`, `queue_entry.dart`) | 1 |
 | main.py playback: `_play_track_core`, shuffle toggle, `cycle_repeat`, queue/position saves, restore, `_save_pref` | ~700 | Port ✅ (`player/player_controller.dart`, `queue_store.dart`) | 1 |
-| `play_ledger.py` (drain into the database) | 126 | Port: needs database writes | 3 |
+| `play_ledger.py` (drain into the database) | 126 | Port ✅ (`data/play_ledger.dart`, with `record_listens`; golden-tested; runs on the phone) | 3 |
 | `queue_controller.py` (the DOWNLOAD queue, despite the name), `history_manager.py` (download history) | ~530 | Port with downloads | 6 |
 | `ui/player/now_playing`, `mini_player`, `queue_sheet` | 1,087 | Rewrite ✅ (`player/ui/`). The auto-play chain is shown disabled until phase 2. | 1 |
 | `ui/player/quality_selector` (download quality) | 168 | Rewrite | 6 |
 | `db_manager.py`, read half | ~2,000 | Port, one method at a time on demand | 0–3 |
-| `db_manager.py`, write half and migrations | ~2,000 | Port | 3 |
-| `ui/views/library.py` | 4,915 | Rewrite, one tab at a time (tracks ✅ rows, sort, search, long-press menu with Start radio; selection mode with phase 3; albums, artists, genres, playlists, network graph to come) | 1–3 |
+| `db_manager.py`, write half and migrations | ~2,000 | Port. Migrations ✅ (`data/library_schema.dart`: `get_connection` + `initialize`, golden-tested on fresh, legacy and real databases); `record_listens` ✅; the scan's writes ✅; playlists ✅ (`data/playlists.dart`, golden-tested); the rest with its features | 3 |
+| `ui/views/library.py` | 4,915 | Rewrite, one tab at a time (tracks ✅ rows, sort, search; view bar, genres, artists, albums ✅ (`library/browse_*`, `genre_colors.dart`); playlists, the long-press menu, selection mode ✅ (`library/track_menu.dart`, `library_dialogs.dart`, `selection.dart`); network graph to come) | 1–3 |
 | `track_graph.py` (stations: coordinate graph, artist-graph cache, `Station`, `open_station`, `walk`), `artist_graph.py`, `autoplay.py`, `genre_taxonomy.py`, `credit_keys` (in `metadata_enrich`) | ~2,100 | Port ✅ (`stations/`, `player/autoplay.dart`, `core/py_text.dart`; golden-tested) | 2 |
-| `track_graph.py` builders (`build_acoustic_edges`, `build_genre_affinity`, `build_metadata_edges`, `bulk_analyze_library`), `genre_similarity.py` (builds the NPMI model) | ~500 | Port with the database writes and analysis | 3, 6 |
+| `track_graph.py` builders (`build_acoustic_edges`, `build_genre_affinity`, `build_metadata_edges`, `bulk_analyze_library`), `genre_similarity.py` (builds the NPMI model) | ~500 | Port where Flet calls them (§10 4f): metadata edges with the Network view (3), the acoustic build with offload/import (4), analysis with decision B | 3, 4, 6 |
 | `harmonic.py` | 132 | Not needed by stations (key was removed from the geometry); port only if a feature needs it | n/a |
 | `ui/player/autoplay_sheet.py` | 156 | Rewrite ✅ (`player/ui/autoplay_sheet.dart`) | 2 |
-| `library_scanner.py`, `tagger.py`, `metadata_editor.py`, `storage_paths.py` | ~800 | Port. Tag writing needs a Dart or Rust tag library (mutagen equivalent). | 3 |
+| `library_scanner.py`, `storage_paths.py` + `tinytag` 2.3.2 (the tag reader the APK bundles, ~2,500 lines, MIT) | ~2,900 | Port ✅ (`scan/library_scanner.dart`, `scan/tinytag.dart`, `scan/storage_paths.dart`, `data/scan_writes.dart`; golden-tested on a synthetic corpus and the Mac's music folder) | 3 |
+| `tagger.py`, `metadata_editor.py` (mutagen) | ~240 | No Flet feature edits tags. `tagger.tag_file` runs only after a download (`streamrip_api`): port with downloads (decision A), tag writer candidates in §12. `extract_artwork` runs only off Android (the Kotlin resolver serves the phone): Mac | 6, 8 |
 | `sync/client`, `discovery`, `send`, parts of `manager` | ~1,900 | Port (Android side) | 4 |
 | `sync/server.py`, `transcoder.py` (ffmpeg) | ~1,340 | Keep on Mac until phase 8 | 8 |
 | `ui/views/sync_hub.py` | 1,012 | Rewrite | 4 |
@@ -182,17 +192,17 @@ Verdicts:
 | `llm_tools.py`, `assistant_runner.py`, `assistant_intent.py`, `chat_memory.py`, `web_research.py` | ~4,500 | Port, with golden intent and tool-call tests | 5 |
 | `ui/views/assistant.py` | 861 | Rewrite | 5 |
 | `qobuz.py`, `deezer.py`, `streamrip_api.py`, `streamrip_search.py`, `downloadable.py`, `search_results.py`, `source_metadata.py`, `new_releases.py` + deezer-py, streamrip, pycryptodomex | ~3,000 + libraries | ⚠️ Port or keep on Mac (§6, decision A) | 6 |
-| `ui/views/search.py`, `ui/player/download_dock.py` | 3,806 | Rewrite | 6 |
+| `ui/views/search.py`, `ui/player/download_dock.py` | 3,806 | Rewrite. The landing's local cards ✅ (`search/`, `data/landing_queries.dart`, golden-tested); the rest with the sources | 3, 6 |
 | `dsp.py`, `pca_engine.py` | 1,044 | ⚠️ Port to Dart, or keep on Mac (§6, decision B) | 6 |
 | `metadata_enrich`, `metadata_ai`, `metadata_audit`, `metadata_qobuz`, `ui/player/metadata_workbench.py` | ~5,000 | Port last (desktop-heavy) | 7 |
 | `ui/views/settings.py` | 3,932 | Rewrite, spread across phases (rule 4) | all |
 | `ui/player/onboarding_modal.py` | 895 | Rewrite, smaller | 7 |
 | `ui/widgets.py`, `ui/tokens.py` | 769 | Rewrite (tokens ✅) | as needed |
 | `audio_engine_macos.py` (pyobjc / AVFoundation) | 1,311 | Rewrite for the Mac | 8 |
-| main.py, the app shell (everything but playback): splash, tab bar and startup tab, back navigation and confirm-pop, Settings as a pushed page, startup jobs (state-zip auto-import, state auto-export, enrichment pass, new-releases refresh, graph readiness build, cache pruning, companion start), maintenance actions (wipe, fresh-install reset, clear index/DSP/caches), delete track/playlist, notification routing, success sound | ~2,500 | Rewrite, each piece with the feature behind it (§11) | 3–7 |
+| main.py, the app shell (everything but playback): splash, tab bar and startup tab ✅ (`app_shell.dart`: Search and Library), back navigation and confirm-pop, Settings as a pushed page, startup jobs (state-zip auto-import, state auto-export, enrichment pass, new-releases refresh, graph readiness build, cache pruning, companion start), maintenance actions (wipe, fresh-install reset, clear index/DSP/caches), delete track/playlist ✅, notification routing, success sound | ~2,500 | Rewrite, each piece with the feature behind it (§11) | 3–7 |
 | `config.py` (streamrip config: load, defaults, `repair_config`) | 552 | Read half ported for the keys in use (`core/app_config.dart`). Writes and `repair_config` with the settings that need them. | 1, then all |
-| `progress_notify.py` (job notifications: progress, summary text, retry action, task-service start/stop) | 239 | Port: a Dart wrapper over the Kotlin `showProgressNotification` (not wrapped yet), with the summary and retry rules. First user: the scan. | 3 |
-| `ui/player/dialogs.py` (confirm and text-input dialogs) | 100 | Rewrite as needed | 3 |
+| `progress_notify.py` (job notifications: progress, summary text, retry action, task-service start/stop) | 239 | Port: a Dart wrapper over the Kotlin `showProgressNotification` (not wrapped yet), with the summary and retry rules. A scan the user starts posts nothing (in-app banner only); the scan's alert ("n tracks not analysed yet") follows only the automatic scan after a download or transfer. First users: sync (4), then downloads (6), analysis (B), metadata (7). | 4 |
+| `ui/player/dialogs.py` (confirm and text-input dialogs) | 100 | Rewrite ✅ (`library/library_dialogs.dart`: playlist editor, name dialog, delete confirmations) | 3 |
 | `search_history.py` (`recent_searches.json`), `text_match.py` | 81 | Port with Search | 6 |
 | streamrip-derived helpers: `client.py`, `metadata_objects.py`, `ssl_utils.py`, `exceptions.py`, `filepath_utils.py` | ~330 | Go with the source clients (decision A) | 6 |
 | `mock_search.py`, `genre_eval.py`, `error_boundary.py` | ~400 | Drop or fold in (Flutter has `ErrorWidget` and zones). Demo search mode depends on `mock_search` (decision C). | n/a |
@@ -210,47 +220,14 @@ phone. Rough sizes are in Dart lines, excluding tests.
 | # | Phase | Done when | Size |
 |---|---|---|---|
 | 0 | **Backbone** ✅ | Reads `library.db` read-only on a background isolate. Tracks tab with Flet's sort modes and search semantics. Coordinate graph. Android build. | 1k |
-| 1 | **Phone player** 🧪 (code done, phone checks below pending) | Plays the phone's real library with the screen off. Notification, lockscreen and headset controls work. The queue survives process death in Flet's JSON format. Permissions work. | 4–5k |
-| 2 | **Stations** 🧪 (code done; phone checks below pending) | "Play Similar" matches Flet's stations: golden tests on 20 fixed seeds from a `state_backups` bundle. Autoplay sheet. | 3k |
-| 3 | **Library writes** | Ledger drain, scan (with its notification), tag edits, playlists, delete. The port owns migrations (respects `user_version`). Remaining library tabs, selection mode, the full long-press menu, the graph rebuild after a scan, the Search tab's local landing cards. §11 has the list. | 5k |
+| 1 | **Phone player** 🧪 (code done, not yet confirmed in use) | Plays the phone's real library with the screen off. Notification, lockscreen and headset controls work. The queue survives process death in Flet's JSON format. Permissions work. | 4–5k |
+| 2 | **Stations** 🧪 (code done, not yet confirmed in use) | "Play Similar" matches Flet's stations: golden tests on 20 fixed seeds from a `state_backups` bundle. Autoplay sheet. | 3k |
+| 3 | **Library writes** | Ledger drain, scan, playlists, delete. The port owns migrations (respects `user_version`). Remaining library tabs (the Network view with its metadata edges), selection mode, the full long-press menu, the tab bar and the Search tab's local landing cards. §11 has the list. | 5k |
 | 4 | **Sync (Android side)** | Phone ↔ Flet-Mac pairing, transfers and DSP offload. Bundle import and export (incl. the boot-time auto-export and auto-import). | 3k |
 | 5 | **Assistant** | Golden intent and tool-call tests pass. Voice. | 4k |
 | 6 | **Sources and analysis** | Search, previews, downloads, "New from your artists", on-phone analysis: as far as decisions A and B put them on the phone | 4–6k |
 | 7 | **Metadata tools, onboarding** | Feature parity, incl. the automatic enrichment pass | 4k |
 | 8 | **macOS** | Mac player on Flutter; sync server moves over. Needs Xcode or CI. | 3k |
-
-### Phase 1: checks still to run on the phone
-
-The desktop tests cover the queue model, the persistence files and the
-controller against a fake player. These need the real one
-(`tool/install_phone.sh --db`, §8):
-
-1. First launch: the permission prompts, then All-files access in Settings.
-2. Tap a track: it plays; the mini player and the notification appear with art.
-3. Screen off for a few tracks: auto-advance continues; lockscreen and
-   headset next/previous work; headphones unplugged pauses.
-4. Back on the library: the app goes to the background and keeps playing;
-   reopening it shows the right track.
-5. `adb shell am kill` (or swipe from Recents) while paused, then reopen: the
-   queue comes back on the same track and offset. Compare `queue_state.json`,
-   `queue_pos.json` and `native_resume.json` with a Flet-written set.
-6. Shuffle on and off mid-track: the track doesn't restart; the old queue
-   comes back.
-7. Queue sheet: reorder, remove, Clear; Play next and Add to queue land in the
-   up-next block.
-8. A deleted file in the queue: skipped with a snackbar (foreground) or a
-   notification card (background).
-9. Paused for 10 minutes: the notification goes away; Play brings it back.
-10. `play_ledger.jsonl` lines match the Flet format (`id` is the same URI).
-11. EQ and Dynamism: with a Flet-written `[dsp]` (e.g. Rock preset, Dynamism
-    on), the sound changes per track and Now Playing shows "DYNAMISM ACTIVE
-    +x.x dB" for analysed tracks. Check the first track after a cold start
-    too (its gains are queued until the EQ bands load).
-12. Haptics: long-press on a track and Play next / Add to queue vibrate at the
-    `[haptics]` intensities; nothing when haptics are off.
-13. Edge-to-edge: the sheets (Now Playing, queue, track menu) clear the
-    status and gesture bars (§1 row 19).
-14. Measure the release APK (`flutter build apk --release`) for §1 row 22.
 
 ### Phase 2: stations
 
@@ -292,23 +269,174 @@ insert after, replace rows, extend). Now Playing's chain is a plain toggle
 border while on; the queue sheet shows the AUTO-PLAY header, which opens the
 Auto-play sheet; long-press has Start radio.
 
-**Phone checks still to run:**
+### Phase 3: library views (read-only part)
 
-1. Chain on: the rest of the queue goes aside, four recommendations appear
-   under the AUTO-PLAY header, the snackbar says the queue is on hold. Off:
-   the queue comes back after your picks.
-2. Play through a few recommendations: the buffer stays at 3–4, all from the
-   same genre; the sheet shows "now in <genre>".
-3. Screen off for a long while: auto-play keeps going (24 queued on hide);
-   at the end of the buffer it refills or appends and plays.
-4. Skip two recommendations early (under 30 s) or remove them: the buffer is
-   replaced once.
-5. Long-press → Start radio on a library track: it plays now and a station
-   starts from it.
-6. A track with no coordinates: "isn't analysed yet" and the queue comes back.
-7. Kill and reopen with auto-play on: still on, the set-aside queue survives
-   (`autoplay_held` in queue_state.json), the buffer tops up.
-8. Shuffle on turns auto-play off, and auto-play on turns shuffle order off.
+The Genres, Artists and Albums views and the view bar, built before the
+writes because they only read (step 4e of §10).
+
+**How parity is proved.** `tool/export_library_goldens.py` (after
+`export_station_goldens.py`, whose `library.db` copy it reads) writes:
+
+- `test/goldens/library_synthetic.json` (committed): library.py's
+  `_genre_group` and `_genre_color` over about 140 tags.
+  `test/genre_colors_test.dart`.
+- `tools/state_backups/goldens/<bundle>/library_views.json` (gitignored):
+  every Albums, Artists and Genres sort, and a sample of expansions (artists
+  of a genre, their albums in it, a genre's play queue, albums of an artist,
+  tracks of an album). `test/library_views_golden_test.dart`.
+
+On the 2026-11-02 bundle (635 albums, 287 artists, 18 genres) every list and
+expansion is identical to Python's, row order included: the queries are
+db_manager's SQL (`data/browse_queries.dart`), with the double-quoted string
+literals single-quoted.
+
+**What it does.** The view bar follows `appearance.show_*` (defaults:
+Genres, Artists, Tracks; Albums is off by default, as in Flet) and
+`pill_style`. Genre → artists (in that genre) → albums (in that genre) →
+tracks; tapping a track plays its album from it. The genre row's play
+button queues the genre newest first. Album long-press: Play Album, Add
+Album to Queue. Search uses the one box, with the Tracks view's semantics
+(§7).
+
+### Phase 3: migrations and the ledger drain (the first write)
+
+Step 4b of §10. Under decision 4a the port writes only its own copy of
+`library.db`; `tool/push_db.sh` (and `install_phone.sh --db`) replace it,
+discarding those writes, and now stop the app first, since it holds the file
+open read-write in WAL mode.
+
+**Migrations.** `migrateLibrary` (`data/library_schema.dart`) is
+`DatabaseManager(path)` + `initialize()`, which main.py runs on every
+start: the connection pragmas (WAL, foreign keys), `get_connection()`'s
+twelve migrations, then `initialize()`'s schema and triggers, in Python's
+order, so a fresh file comes out the same as Python's (including its
+quirks: `play_counts.cluster_id` only appears on the second open, because
+its migration runs before the table exists). Only the port's own database is
+opened writable (`LibraryRepository.open(…, writable: true)`); the
+`LIBRARY_DB` override and the test goldens stay read-only.
+
+**Drain.** `LedgerDrain` (`data/play_ledger.dart`) is `drain_ledger`: rename
+to `.draining`, settle 0.5 s, parse, `record_listens` in one transaction,
+delete; a leftover `.draining` first. Scheduled as in Flet: 3 s after each
+listen the handler logs (Flet: each track change), immediately on show
+(Flet: resume) and once the library is open at start (Flet: native ready).
+Coalescing, and a failure keeps the file. Auto-play doesn't take the
+drained lines (it already had each listen in-process, §7).
+
+**How parity is proved.** `tool/export_db_goldens.py` writes
+`test/goldens/db_synthetic.json` (committed): the schema and every row
+after Python opens a fresh file (once, twice) and two legacy shapes (old:
+no DSP columns, single-key `track_partitions`, retired tables; mid:
+geometry v1 coordinates, features-v4 blobs, a `feature_cache`, enrichment
+before provenance), plus three ledger drains (broken lines, streams, bare
+paths, string numbers, short tracks, a crash replay) and Python's
+`round(x, 1)` on tie cases. `test/db_schema_test.dart`,
+`test/play_ledger_test.dart`. It also writes
+`tools/state_backups/goldens/<bundle>/library_migrated.db` (gitignored):
+`test/db_schema_real_test.dart` migrates its own copy of the real library
+and every table must equal Python's. All identical.
+
+### Phase 3: the library scan
+
+Step 4c of §10. `LibraryScanner` (`scan/library_scanner.dart`) is
+library_scanner.py: walk the library folder (`os.scandir` order; symlinked
+files count, symlinked folders don't), drop rows whose file is gone, read
+tags for new files and files whose mtime moved by over 1 s, 50 at a time on
+a background isolate, insert 500 per transaction, and for 200 files or more
+drop the insert trigger and rebuild counts and search at the end
+(`begin/end_bulk_import`). The writes are db_manager's, with its SQL
+(`data/scan_writes.dart`), including artist aliases (`artist_tag`). The
+folder comes from `storage_paths` (§1 row 10).
+
+Tags are read by a line-by-line Dart port of **tinytag 2.3.2**
+(`scan/tinytag.dart`, MIT, §12), the version the Flet APK bundles, so
+titles, durations and bitrates come out to the last bit. Images and the
+ASF/AIFF parsers are left out (the scanner never reaches them).
+
+The UI is library.py's: the refresh button (accent) next to sort, the
+banner with the bar and status line under the view bar, "Scan complete.
+Indexed n items." / "Library is up to date.", the empty-library state, and
+a reload of every view and the station graphs afterwards.
+
+**How parity is proved.** `tool/export_scan_goldens.py` (tinytag pinned in
+`tool/.pydeps`, see the script) builds `test/goldens/tags/` (committed,
+~100 KB: every container, ID3 v1/v2.2/v2.3/v2.4 in each text encoding,
+extended headers, SYLT, PRIV, TXXX, vorbis comments in FLAC/Ogg/Opus/Ogg
+FLAC, MP4 AAC/ALAC with freeform atoms, RIFF INFO and ID3 chunks, broken
+files) and writes:
+
+- `test/goldens/scan_synthetic.json`: tinytag on each corpus file
+  (`test/tinytag_test.dart`), and two scan cases
+  (`test/scan_test.dart`): a nested tree with symlinks, unsupported and
+  untagged files, an alias and whitespace in names, then deletes, a
+  replaced file, a touch under 1 s and a new file; and a 205-file tree
+  that takes the bulk path. Counts and every table identical.
+- `tools/state_backups/goldens/mac_music/` (gitignored): tinytag on all
+  454 files of `~/Desktop/Music` and Python's scan of it
+  (`test/scan_real_test.dart`). Every tag identical; every table
+  identical except `added_date` below 1 ms (§7).
+
+### Phase 3: playlists, the long-press menu, selection, delete
+
+Step 4d of §10. Playlists are a fifth view in
+the bar (library.py's order: Playlists, Genres, Artists, Albums, Tracks;
+Flet's initial-view rule puts it last). A playlist row opens onto its
+tracks, each with a drag handle and a remove button; a drag moves a track
+within its own playlist only. The row's edit button opens Customize
+Playlist (name, nine colours), its delete button the red confirmation.
+"Create New Playlist" closes the list (not while searching); with no
+playlists the tab shows "No playlists yet." and CREATE PLAYLIST. Sort:
+Name (A–Z), Date Created (default).
+
+The long-press menu is Flet's: the track card (sidecar cover, title,
+"artist · album", format, duration, bitrate), Select…, Play Next, Add to
+Queue, Start Radio, Add to Playlist, Delete Track. Redownload (decision A)
+and Send (phase 4) come with their features. Select… opens selection mode
+in every view: rows get checkboxes, the bar at the bottom has cancel, the
+count, Play (the picks, in order, right after the playing track, and
+plays), Add to Queue and Add to Playlist. Delete Track asks, stops the
+track if it plays, drops its queue rows, deletes the file, then its
+database rows, and reloads every view.
+
+**How parity is proved.** `tool/export_playlist_goldens.py` writes
+`test/goldens/playlists_synthetic.json` (committed): 29 db_manager calls
+in sequence on one database (create, a NOCASE name clash, Greek names,
+adds, a duplicate, a path not in the library, moves including clamped and
+empty ones, removes, `delete_tracks_by_paths`, an orphan row that a move
+clears, renames with a clash, colours, deletes, a missing id), and after
+each: the result or `str(exc)`, both tables, both listings and every
+playlist's tracks. Plus the playlist search on ASCII queries (§7).
+`test/playlists_test.dart`: all identical. `browse_controller_test`,
+`player_controller_test` and `library_screen_test` cover the view, the
+selection's Play and Add to Queue, and the whole menu → selection →
+playlist → delete flow on real files.
+
+### Phase 3: the tab bar and the Search landing
+
+Step 4g of §10. `AppShell` (`app_shell.dart`) is main.py's `_build_ui`
+for the tabs the port has: Search and Library, the mini player above
+Flet's tab bar (no pill, hairline border, accent indicator at 0x55), a
+220/160 ms fade between tabs, each tab keeping its state. The startup tab
+is `general.startup_page` (§7). Back leaves the Library's selection mode,
+then sends the app to the background, on either tab.
+
+The Search tab (`search/`) has search.py's landing: Most Listened Tracks
+(tap: `play_track(path)`, i.e. the Library's tracks view as it stands),
+Most Listened Artists and Genres (tap: the Library on that view, filtered
+to the name), Library at a Glance (tap: that view, unfiltered; a view
+hidden in Appearance falls back to Tracks with Flet's note). `[landing]`
+switches each card; the cards are rebuilt on show when empty or over 60 s
+old, as in Flet.
+
+**How parity is proved.** `tool/export_library_goldens.py` now also runs
+`get_most_played`, `get_most_played_artists`, `get_most_played_genres`
+and `get_library_counts` at limits 5 and 50: on a synthetic library in
+`library_synthetic.json` (multi-genre albums, Greek and junk tokens,
+"rock" beside "Rock", count-0 rows, a played path not in the library,
+ties on count and on plays; `test/landing_queries_test.dart`) and on the
+real bundle (`library_views.json`; `library_views_golden_test.dart`).
+All identical. `test/app_shell_test.dart` covers the refresh rule, the
+config keys and the links into the Library.
 
 ---
 
@@ -363,9 +491,33 @@ uninstall and reinstall; the bundle export/import covers the data.
 | Queue rows | `_play_track_core` rows carry no `duration` | They carry `duration` | Harmless to the Flet reader; the slider has the right length before the decoder reports. |
 | Microphone permission | Asked at first launch with the rest | Not asked until voice exists (phase 5) | Intentional. |
 | Long-press on a track | Flet's full context menu | Play next, Add to queue, Start radio (haptic tick as in Flet) | The rest arrives with the features behind it (Select…, playlists, send, redownload, delete). |
-| Notification taps | Routed to the target tab | Received and dropped (one screen) | When there are screens to route to. |
+| Notification taps | Routed to the target tab | Received and dropped (none of their targets is ported) | When the target screens are. |
 | DSP after background auto-advance | `reapply_dsp` runs only while the Python session hears the player, so tracks reached with the session torn down keep the previous track's settings | Applied on every row change | Intentional. |
 | Track row | Format badge, Flet subtitle rules, tint on the playing row | Same | Fixed in the phase 0–1 audit. |
+| Sort in Artists and Genres | One `sort_mode` for every view, coerced on each switch (Tracks → Artists → Tracks loses the Tracks sort; Genres keeps an unrelated mode and shows no tick) | Tracks and Albums share one sort, as in Flet; Artists and Genres each keep their own, starting at A–Z | Intentional. |
+| Album long-press → Play Album | Passes `("album", album, artist)`, which `_play_track_core` unpacks as `(artist, album)`: outside shuffle the query finds nothing and it says "No playable media found." | Plays the album from its first track | Port is right. The Flet fix is one line (`library.py` `_open_album_context_menu`, swap the tuple); not made on master yet. |
+| Search in Albums, Artists, Genres | `LIKE` on the album title / artist / genre name, plus albums and artists whose tracks match FTS; then closest match | The Tracks view's semantics (every word, accent-blind, substring) on the same fields and through the tracks; Genres by name only, as in Flet; the same closest-match scoring | Intentional, as for Tracks. |
+| Network tab | Shown when enabled | Hidden until ported (§10 4i) | Until then. |
+| Fix artist info, Curate in Workbench | Buttons on the artist and genre rows | Not shown | Phase 7, with the workbench. |
+| Opening the database | `get_connection` + `initialize` commit after each migration step | The same steps in one transaction | Intentional: a failure leaves the file as it was. Same result otherwise (golden-tested). |
+| Ledger line that is JSON but not an object (`[1]`, `5`) | `raw.get` raises outside the try: the drain fails, and the `.draining` file fails again on every later drain | Dropped like a torn line | Intentional. The handler never writes one. |
+| Drain triggers | Each track change (3 s), resume, native ready | Each listen logged (3 s), show, library open | Same moments: a track change is when the outgoing listen is logged. |
+| Scan: `tracks.added_date` | `st_mtime` (nanoseconds, as a double) | `FileStat.modified` (dart:io has milliseconds only) | Differs by under 1 ms; the scanner rereads a file only when its mtime moved by over 1 s, so a Flet-scanned library is not reread. Exact on whole-second mtimes (the synthetic goldens). |
+| Scan: a row with `added_date` NULL | `abs(None - mtime)` raises and the scan dies | Treated as changed: the file is reread | Intentional. Only very old databases have such rows. |
+| Scan: ASF/AIFF content in an `.aac` file | tinytag's ASF or AIFF parser | Skipped as unreadable | Not ported (§4, the scan); never seen in a library. |
+| Search tab without source credentials | "Setup Required" prompt; no landing cards (they show only once Qobuz or Deezer is set up, or demo mode is on) | The landing cards always | Intentional: the port has no source search yet (decision A), and the cards only read the library. |
+| Search tab header | Title, source switch, connection signal, recent searches, settings shortcut, search box, result tabs | The title only | The rest with the sources (6) and Settings (3h). |
+| Startup tab | `general.startup_page`: Jarvis, Search, Library or Settings | Search, else Library | Jarvis (5) and Settings (3h) aren't ported. |
+| Empty library | "ENTER PATHS" opens Settings → Storage | No button (Settings isn't ported); the scan button works | Until Settings (3h). |
+| Untagged files on every scan | Never get a row, so each scan rereads them and counts them in "Indexed n items." | The same | Kept for parity. |
+| Playlist search | `LIKE` on the name (ASCII case only), then closest match | The other views' semantics: every word, accent- and case-blind for every script; same closest-match scoring | Intentional, as for Tracks. Golden-tested on ASCII queries, where both agree. |
+| Playlist rows after a reload | Opened by a tap: drag handle and remove button. Re-opened by `load_library` (after an add): plain rows, no handle | Always the handle and the remove button | Port is right; Flet's generator omits `playlist_id`. |
+| Playlist count after removing a track | The row's "n tracks" stays stale until the next reload | Updated at once | Port is right. |
+| Add several tracks to a playlist | One transaction per track | One transaction for all | Same rows (golden-tested); a failure adds none instead of some. |
+| Saving the playlist editor with a taken name | The IntegrityError is lost in the task; nothing is shown | "Could not save playlist: UNIQUE constraint failed: playlists.name" | Intentional. |
+| Back in selection mode | Leaves the app (only Search's selection mode is closed by back) | Leaves selection mode | Intentional: back closes the innermost state, as Flet does for Search. |
+| Writes on a read-only library (`LIBRARY_DB` override) | n/a (Flet always owns its database) | Add to Playlist and Delete Track are disabled | Dev-only case. |
+| Library reload after a scan or delete | The snackbar follows `load_library` (no graph rebuild there) | Rows reload, the snackbar shows, the station graphs rebuild behind | Same order as Flet. |
 
 ---
 
@@ -375,8 +527,9 @@ uninstall and reinstall; the bundle export/import covers the data.
   `tool/install_phone.sh` builds, installs and starts the port without a
   terminal session attached (`--help` for the flags):
   - `--db [bundle.zip|library.db]`: copy a library in first (debug builds
-    only; see below). The port's database is a copy until phase 3 writes:
-    rerun `--db` to pick up a newer bundle.
+    only; see below). The port's database is its own copy (decision 4a):
+    rerun `--db` to pick up a newer bundle, which discards what the port
+    wrote (its drained play counts).
   - `--release`: smooth build for everyday listening. Not debuggable, so
     `--db` needs a debug build installed at that moment: `--db` once, then
     `--release` (the data is kept; both are signed with the same key).
@@ -395,6 +548,12 @@ uninstall and reinstall; the bundle export/import covers the data.
   so a fix there reaches both apps. At cutover, move that directory in.
 - **Desktop tests:** `flutter test`. Add `LIBRARY_DB=… flutter test
   test/real_library_test.dart` to run against a real database.
+- **Goldens:** each `tool/export_*_goldens.py` runs with
+  `~/miniconda3/bin/python` from `mai_an_flutter/`. The scan export needs
+  tinytag 2.3.2 apart from the dev env:
+  `~/miniconda3/bin/pip install --target tool/.pydeps tinytag==2.3.2`
+  (gitignored). Generated tables: `tool/gen_nfkd_table.py`,
+  `tool/gen_casefold_table.py` (`str.casefold`, `str.isdecimal`).
 
 ---
 
@@ -439,6 +598,11 @@ the ledger drain (3), EQ settings UI (with the settings phases).
 Last session: 2026-11-24. Commits on `flutter-port`: `4a116b9` (phases 0–1),
 `c6ff28d` (audit fixes), `73ca39e` (plan update), then phase 2 (stations)
 with the install script, and a merge of master (the Flet changes, `2ec2865`).
+Phase 3 so far is seven commits, one per stage: strict analyzer and format,
+Python primitives, migrations and the ledger drain, the scan engine, the
+views' and playlists' queries, the library UI (views, scan UI, playlists,
+long-press menu, selection, delete), and the tab bar with the Search
+landing; then this plan. `flutter-port` is pushed to origin.
 
 **Done**
 - [x] Phase 0: backbone (read-only DB isolate, tracks tab, sort, search,
@@ -460,30 +624,75 @@ with the install script, and a merge of master (the Flet changes, `2ec2865`).
 - [x] Full feature inventory of the Flet app (§11) and the modules §3 was
       missing (app shell, config, progress notifications, dialogs, dev and
       build scripts, tests).
+- [x] Phase 3, read-only part: view bar, Genres, Artists, Albums, genre
+      colours; goldens identical to Python (§4, phase 3). `pyTitle` now
+      applies Final_Sigma as `str.title` does.
+- [x] Phase 3b: the port owns migrations (`data/library_schema.dart`) and
+      drains the play ledger (`data/play_ledger.dart`); goldens identical to
+      Python on synthetic and real databases (§4, phase 3, second part).
+      `push_db.sh` stops the app before replacing its database.
+- [x] Installed on the phone (debug, 2026-11-02 library, permissions
+      granted). The ledger drain runs there; its writes matched Python's.
+- [x] Phase 3c: the library scan, tinytag 2.3.2 ported, storage paths;
+      identical to Python on a synthetic corpus and on the Mac's 454-track
+      music folder (§4, phase 3, the scan).
+- [x] Phase 3d (first part): playlists (view, editor, add/remove/reorder,
+      delete), the full long-press menu, selection mode, Delete Track;
+      playlist writes identical to Python's (§4, phase 3, playlists).
+- [x] Analyzer in Dart's strict modes (`strict-casts`, `strict-inference`,
+      `strict-raw-types`; §12). `dart format` reflowed a few committed
+      files; no code change in them.
+- [x] Phase 3 plan checked against Flet (2026-11-24): no tag editor and
+      no graph rebuild after a scan exist there (4d, 4f).
+- [x] Phase 3g: tab bar (Search, Library) and the Search landing's local
+      cards; queries identical to Python (§4, phase 3, the tab bar).
 
 **To do, in order**
-1. [ ] Phone: `tool/install_phone.sh --db`, then the phase 1 checks (§4,
-       items 1–14) and the phase 2 checks (§4, phase 2, items 1–8). Then
-       `--release` and repeat checks 2–3 and phase 2's 1–3 (R8 shrinking has
-       not run on a device). Record any difference in §7 or fix it.
+1. [ ] Install the current build on the phone: `tool/install_phone.sh`
+       (the database is already in; `--db` resets it). The user reports
+       problems found in use.
 2. [ ] Back up `~/.android/debug.keystore` (§5) somewhere off this Mac.
-3. [ ] Push `master` and `flutter-port`.
+3. [ ] Push `master` (one commit ahead of origin: `2ec2865`, already in
+       `flutter-port`'s history). ~~`flutter-port`~~ pushed 2026-11-24.
 4. [ ] Phase 3, in this order (§11 has the rows):
-       a. Decide how the two apps share writes until cutover (rule 2). The
-          port has its own data dir (`.port`), so today it writes only its
-          own copy; the question is which app's database is the real one.
-       b. Ledger drain (`play_ledger.py`): the first write; then the
-          migrations the port must own.
-       c. Scan + `progress_notify` + `storage_paths` + NFC paths (§1 rows
-          10–11).
-       d. Playlists, delete, the rest of the long-press menu, selection mode.
-       e. Albums, Artists, Genres, Playlists tabs; tab visibility.
-       f. Graph rebuild after a scan (`build_metadata_edges`,
-          `build_acoustic_edges`, `build_genre_affinity`).
-       g. Search-tab landing cards from local data (stats, most listened).
-       h. The settings rows for all of the above (rule 4), incl. the EQ,
-          Dynamism and haptics UI.
+       a. ~~Decide how the two apps share writes until cutover~~. Decided
+          2026-11-24: the Flet app's database stays the real one. The port
+          writes only its own copy (data dir `.port`), a sandbox that
+          `--db` replaces, discarding the port's writes. Its migrations
+          are tested against copies until cutover.
+       b. ~~Ledger drain and the migrations~~ (done).
+       c. ~~Scan + `storage_paths`~~ (done).
+          `progress_notify` moved to phase 4, NFC to 4 and 6 (§1 row 11,
+          §3): the scan needs neither.
+       d. ~~Playlists, delete, the rest of the long-press menu, selection
+          mode~~ (done). ~~Tag edits~~: not a Flet feature (checked
+          2026-11-24). `tagger.tag_file` only tags downloads (6, decision
+          A); `extract_artwork` only serves the Mac (8). §3 updated.
+       e. ~~Albums, Artists, Genres tabs; tab visibility~~ (done).
+          Playlists with d.
+       f. ~~Graph rebuild after a scan~~: Flet doesn't do one (checked
+          2026-11-24). After a scan it reloads, schedules enrichment (7)
+          and, after a quiet scan, posts the "not analysed" alert (4). New
+          tracks have no features until analysed (decision B), so nothing
+          in the geometry changes. The builders go where Flet calls them:
+          `build_metadata_edges` (writes `track_neighbors`, read by the
+          Network view and the assistant) with the Network view (3);
+          `build_acoustic_edges` (an SVD; needs numpy-equal maths, cosine
+          is sign-invariant per component) with the first thing that
+          brings new features: sync offload or bundle import (4), or
+          on-phone analysis (B), plus the startup readiness check and
+          Settings' Recompute PCA; `build_genre_affinity` with it and
+          with enrichment (7).
+       g. ~~Search-tab landing cards from local data~~ (done, with the tab
+          bar: §4, phase 3, the tab bar and Search landing).
+       h. Settings as a pushed page (the Search header's shortcut, the
+          empty library's ENTER PATHS) and its rows for all of the above
+          (rule 4), incl. the EQ, Dynamism and haptics UI.
+       i. The Network view (library.py's Acoustic Network: map, walk,
+          list panel; ~2,000 Flet lines) with `build_metadata_edges`, which
+          writes the `track_neighbors` it reads (4f).
 5. [ ] Decisions A, B, C (§6) before phase 6 is planned in detail.
+6. [ ] Flet, on master: the album menu's Play Album tuple (§7).
 
 **Waiting on a later phase** (not gaps): see §11, every 🔨 row.
 
@@ -496,10 +705,10 @@ Every user-visible feature and background job of the Flet app (master,
 feature, so nothing hides inside a large file. When a Flet feature is added,
 add its row here.
 
-Status: ✅ done · 🧪 written, not yet checked on the phone · 🔨 to build
+Status: ✅ done · 🧪 written, not yet confirmed in use · 🔨 to build
 (phase) · ⚠️ depends on a decision (§6) · ✗ dropped.
 
-**Counts:** 16 of the 90 rows are ported (✅ or 🧪); 74 are to build or to decide. The ported rows are the player and the stations, which carry most of the daily use.
+**Counts:** 29 of the 90 rows are ported (✅ or 🧪); 61 are to build or to decide. The ported rows are the player, the stations, the library views, playlists, the long-press menu and selection mode, the ledger drain, the scan, the tab bar and the Search landing's local cards.
 
 ### App shell (`main.py`)
 
@@ -508,9 +717,9 @@ Status: ✅ done · 🧪 written, not yet checked on the phone · 🔨 to build
 | Accent colour from config | `_apply_accent` | ✅ |
 | Haptic feedback, per-action intensity | `trigger_haptic` | 🧪 |
 | Playback-error snackbar or notification card | `_on_playback_error_toast` | 🧪 |
-| Back: close the open sheet, leave Settings, then to the background | `navigate_back`, `_on_confirm_pop` | 🧪 root screen only; grows with each screen |
+| Back: close the open sheet, leave Settings, then to the background | `navigate_back`, `_on_confirm_pop` | 🧪 root screen and selection mode; grows with each screen |
 | Lifecycle: stop UI work when hidden, prefill auto-play | `_on_lifecycle` | 🧪 (§1 row 18) |
-| Tab bar (Jarvis optional, Search, Library), Settings as a pushed page, startup tab from `startup_page` | `_build_ui`, `_switch_tab` | 🔨 3: the port has the Library screen only |
+| Tab bar (Jarvis optional, Search, Library), Settings as a pushed page, startup tab from `startup_page` | `_build_ui`, `_switch_tab` | 🧪 Search and Library, startup tab, fade, back (§7); Settings 🔨 3h, Jarvis 🔨 5 |
 | Splash while the app loads | `_build_splash` | 🔨 3, only if startup is slow on the phone |
 | Notification taps routed to a screen (metadata sync, suggestions, download retry, transfers) | `_on_notification_navigate` | 🔨 with each target screen |
 | Success sound after a download | `play_success_notification` | 🔨 6 |
@@ -522,8 +731,8 @@ Status: ✅ done · 🧪 written, not yet checked on the phone · 🔨 to build
 |---|---|---|
 | Position save loop; queue saved on every mutation | `_position_save_loop`, `_on_queue_mutated` | 🧪 |
 | Auto-play history from recent plays | `autoplay.load_history` | 🧪 |
-| Ledger drain into `play_counts` / `playback_history` (track change, resume) | `_schedule_ledger_drain`, `play_ledger.py` | 🔨 3 (ledger lines written 🧪) |
-| Similarity-graph readiness build (edges, coordinates) | `_ensure_graph_built_async`, `track_graph` builders | 🔨 3; until then the port reads Python-built coordinates |
+| Ledger drain into `play_counts` / `playback_history` (track change, resume) | `_schedule_ledger_drain`, `play_ledger.py` | 🧪 |
+| Similarity-graph readiness build (edges, coordinates) | `_ensure_graph_built_async`, `track_graph` builders | 🔨 4: it fires only when features exist without coordinates, i.e. after an offload or import; until then the port reads Python-built coordinates |
 | Cache pruning | `_prune_caches_async` | 🔨 3 (album art); 6 (previews) |
 | State bundle auto-export on every boot (Downloads and library folder) | `_auto_export_state_snapshot` | 🔨 4. The Mac offload and `fresh_build_android.sh` depend on it; Flet keeps doing it while installed |
 | State bundle auto-import (`*_import.zip`) on boot, then graph rebuild | `_heavy_init` | 🔨 4 |
@@ -552,26 +761,26 @@ Status: ✅ done · 🧪 written, not yet checked on the phone · 🔨 to build
 |---|---|
 | Tracks: rows, format badge, subtitle rules, sort modes, search, playing-row tint | ✅ / 🧪 |
 | Long-press: Play next, Add to queue, Start radio | 🧪 |
-| Long-press: Add to playlist (existing or new), Delete (file + database), Select multiple | 🔨 3 |
+| Long-press: Add to playlist (existing or new), Delete (file + database), Select multiple | 🧪 |
 | Long-press: Send to the Mac | 🔨 4 |
 | Long-press: Redownload | ⚠️ A |
-| Selection mode: play, queue, add to playlist, send | 🔨 3 (send 4) |
-| Albums: expandable rows; album menu (play, queue, send) | 🔨 3 (send 4) |
-| Artists: artist → albums → tracks; edit-metadata button | 🔨 3 (editor 7) |
-| Genres: genre groups and colours, play a genre, curate in the workbench | 🔨 3 (curate 7) |
-| Playlists: create, rename, delete, reorder (drag, up/down), remove a track | 🔨 3 |
+| Selection mode: play, queue, add to playlist, send | 🧪 (send 🔨 4) |
+| Albums: expandable rows; album menu (play, queue, send) | 🧪 (send 🔨 4) |
+| Artists: artist → albums → tracks; edit-metadata button | 🧪 (editor 🔨 7) |
+| Genres: genre groups and colours, play a genre, curate in the workbench | 🧪 (curate 🔨 7) |
+| Playlists: create, rename and recolour, delete, reorder (drag), remove a track | 🧪 |
 | Acoustic Network: 2-D map of the coordinates; density and step chips; zoom; tap to select; walk from a node, reseed; play or queue the walk; now-playing pulse; list panel with its own menu | 🔨 3. Read-only (coordinates and `walk`), so it could come before the writes |
-| Which tabs show (Appearance setting) | 🔨 3 |
-| Scan the library folder: progress, summary, "n tracks not analysed yet" | 🔨 3 |
+| Which tabs show (Appearance setting) | 🧪 read from config (the setting row 🔨 3) |
+| Scan the library folder: progress, summary, "n tracks not analysed yet" | 🧪 (the alert after automatic scans 🔨 4) |
 | Compute DSP on the phone (cancellable, notification) | ⚠️ B |
-| Empty-library state with "enter paths" | 🔨 3 |
+| Empty-library state with "enter paths" | 🧪 (the button 🔨 with Settings) |
 
 ### Search tab (`ui/views/search.py`)
 
 | Feature | Port |
 |---|---|
-| Landing: library stats card | 🔨 3 |
-| Landing: Most Listened Tracks / Artists / Genres, opening in the Library | 🔨 3 (current counts need the ledger drain) |
+| Landing: library stats card | 🧪 |
+| Landing: Most Listened Tracks / Artists / Genres, opening in the Library | 🧪 |
 | Landing: New From Your Artists shelf (public Deezer API + MusicBrainz, cached in `artist_releases`), manual refresh | 🔨 6 |
 | Recent searches | 🔨 6 |
 | Local-library hits in the results, ownership badges | 🔨 6 |
@@ -630,7 +839,7 @@ Status: ✅ done · 🧪 written, not yet checked on the phone · 🔨 to build
 | Metadata audit and dismissals | 🔨 7 |
 | Artist aliases and alias rejections | 🔨 7 |
 | AI artist research | 🔨 7 |
-| Tag writing to files | 🔨 3 |
+| Tag writing to files (only downloaded files, by `tag_file`; no editor) | ⚠️ A |
 
 ### Onboarding (phase 7)
 
@@ -645,3 +854,40 @@ Status: ✅ done · 🧪 written, not yet checked on the phone · 🔨 to build
 |---|---|
 | Mac player (AVFoundation engine) | 🔨 8 |
 | Sync server and ffmpeg transcoder | 🔨 8 |
+
+---
+
+## 12. Third-party code and sources
+
+Code the port copies, translates or depends on, for attribution in the
+app's About page and the repository's notices. Add a row whenever outside
+code or a published template comes in, before it is committed.
+
+**Ported or copied into the source tree**
+
+| What | Where in the port | Source | License |
+|---|---|---|---|
+| tinytag 2.3.2: the ID3, MPEG, FLAC, Ogg, WAVE and MP4 parsers, translated line by line | `lib/scan/tinytag.dart` (licence text in the header) | https://github.com/tinytag/tinytag (PyPI `tinytag==2.3.2`) | MIT, © 2014-2026 Tom Wallroth, Mat (mathiascode) et al. |
+| `flet_audio_service` extension (audio handler, Kotlin notifications, artwork, PCM decoder) | `lib/player/audio_handler.dart`, `packages/maian_native` | This repository (the Flet app's own extension) | the project's |
+| Unicode data tables (NFKD fold, casefold, decimal digits) generated from Python's `unicodedata` | `lib/core/nfkd_fold_table.dart`, `lib/core/py_unicode_tables.dart` | Unicode Character Database 15.1, via CPython | Unicode License v3 (data) |
+| streamrip-derived helpers (filename cleaning; in the Flet app's `filepath_utils.py`, credited there) | not ported yet (phase 6) | https://github.com/nathom/streamrip | GPL-3.0: check before porting any of it |
+
+**Templates and guidance adopted**
+
+| What | Where | Source | License |
+|---|---|---|---|
+| Strict analyzer modes (`strict-casts`, `strict-inference`, `strict-raw-types`) on top of `flutter_lints` | `analysis_options.yaml` | dart.dev, "Customizing static analysis" (enabling additional type checks) | BSD-3-Clause (Dart SDK docs and `lints`) |
+| `ReorderableListView` with `ReorderableDragStartListener` handles for playlist reordering | `library/browse_view.dart` | Flutter SDK (material) | BSD-3-Clause |
+
+**Dependencies (pub.dev)**: `sqlite3`, `path_provider`, `audio_service`,
+`just_audio`, `audio_session`, `permission_handler`, `toml`. Their licences
+ship in the app through Flutter's `LicenseRegistry` (`showLicensePage`), so
+the About page (3h) only needs to open it.
+
+**Candidates for coming steps** (found 2026-11-24, not yet evaluated)
+
+| Need | Candidate | Notes |
+|---|---|---|
+| NFC for paths the app names (sync 4, downloads 6) | [`unorm_dart`](https://pub.dev/packages/unorm_dart) 0.3.2 | MIT, pure Dart, Unicode 17, no dependencies. Golden-test against `unicodedata.normalize("NFC")` as py_text was. |
+| Tag writing (`tagger.py`, with downloads, 6) | [`metatagger`](https://pub.dev/packages/metatagger) (pure Dart: ID3v2, vorbis comments, iTunes ilst); [`metadata_god`](https://pub.dev/documentation/metadata_god/latest/) and [`haudiotagger`](https://pub.dev/packages/haudiotagger) (Rust lofty via flutter_rust_bridge); [`flutter_taglib`](https://pub.dev/documentation/flutter_taglib/1.3.2/) (TagLib over FFI) | Pure Dart keeps the build free of Rust (decision B's spirit). Whatever is chosen must leave tags that mutagen and tinytag read back the same. |
+
