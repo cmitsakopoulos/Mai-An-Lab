@@ -330,9 +330,13 @@ void main() {
         'Night',
       );
       await tester.tap(find.text('SAVE'));
+      // The file, then the screen re-read from it (the Delete button shows
+      // for a custom preset): under a loaded test run the second can lag.
       await settle(
         tester,
-        () => (fileToml()['dsp']! as Map)['active_preset'] == 'Night',
+        () =>
+            (fileToml()['dsp']! as Map)['active_preset'] == 'Night' &&
+            find.byTooltip('Delete Preset').evaluate().isNotEmpty,
       );
       var dsp = fileToml()['dsp']! as Map;
       expect(dsp['active_preset'], 'Night');
