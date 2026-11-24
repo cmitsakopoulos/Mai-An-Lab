@@ -14,11 +14,13 @@ import 'library_schema.dart';
 import 'play_ledger.dart';
 import 'playlists.dart';
 import 'maintenance.dart';
+import 'network_queries.dart';
 import 'scan_writes.dart';
 
 export 'library_schema.dart' show kGeometryVersion;
 export 'landing_queries.dart'
     show LibraryCounts, MostPlayedGroup, MostPlayedTrack;
+export 'network_queries.dart' show NeighborRow, NetworkTrackRow;
 export 'playlists.dart' show PlaylistRow;
 export 'scan_writes.dart' show ScannedTrack;
 
@@ -228,6 +230,21 @@ class LibraryRepository {
       _write(updatePlaylistJob(playlistId, name: name, color: color));
   Future<void> deletePlaylist(int playlistId) =>
       _write(deletePlaylistJob(playlistId));
+
+  // The Acoustic Network view (network_queries.dart).
+  Future<bool> hasPcaCoords() => _db.run(hasPcaCoordsJob);
+  Future<String> anyPcaPath() => _db.run(anyPcaPathJob);
+  Future<List<NeighborRow>> networkNeighbors(String path, int k) =>
+      _db.run(neighborsJob(path, k));
+  Future<List<NetworkTrackRow>> pcaCoordsForPaths(List<String> paths) =>
+      _db.run(pcaCoordsForPathsJob(paths));
+
+  /// `track_graph.build_metadata_edges`: rewrites the artist tier of
+  /// `track_neighbors`. Returns the edge count.
+  Future<int> buildMetadataEdges([int k = kMetadataEdgesPerTrack]) {
+    if (!writable) throw StateError('library opened read-only');
+    return _db.run(buildMetadataEdgesJob(k));
+  }
 
   Future<void> close() => _db.close();
 }

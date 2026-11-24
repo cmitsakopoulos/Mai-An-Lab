@@ -1,3 +1,4 @@
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 /// Python's `round(x, 1)`: the decimal with one digit nearest to the exact
@@ -55,4 +56,77 @@ String pyFloatRepr(double x) {
   var mant = m[1]!;
   if (mant.contains('.')) mant = mant.replaceFirst(RegExp(r'\.?0+$'), '');
   return '${mant}e${m[2]}${m[3]!.padLeft(2, '0')}';
+}
+
+/// Python's `math.hypot(x, y)` (CPython 3.10+ `vector_norm`): scaled to
+/// [0.5, 1), squared and summed without loss, then one differential
+/// correction, so the result is (almost always) correctly rounded. A plain
+/// `sqrt(x*x + y*y)` can be off by an ulp, which is enough to flip a
+/// comparison the network declutter branches on.
+double pyHypot(double x, double y) {
+  x = x.abs();
+  y = y.abs();
+  if (x.isInfinite || y.isInfinite) return double.infinity;
+  if (x.isNaN || y.isNaN) return double.nan;
+  final max = x > y ? x : y;
+  if (max == 0) return 0;
+  final maxE = _frexpExponent(max);
+  if (maxE < -1023) {
+    // Subnormal: scale up first, as CPython does.
+    const dblMin = 2.2250738585072014e-308;
+    return dblMin * pyHypot(x / dblMin, y / dblMin);
+  }
+  final scale = _pow2(-maxE);
+  var csum = 1.0, frac1 = 0.0, frac2 = 0.0;
+  for (var v in [x, y]) {
+    v *= scale;
+    final (hi, lo) = _twoProduct(v, v);
+    final (s, e) = _fastSum(csum, hi);
+    csum = s;
+    frac1 += lo;
+    frac2 += e;
+  }
+  var h = math.sqrt(csum - 1.0 + (frac1 + frac2));
+  final (hi, lo) = _twoProduct(-h, h);
+  final (s, e) = _fastSum(csum, hi);
+  csum = s;
+  frac1 += lo;
+  frac2 += e;
+  final r = csum - 1.0 + (frac1 + frac2);
+  h += r / (2.0 * h);
+  return h / scale;
+}
+
+/// `frexp(x).exponent` for a positive finite x.
+int _frexpExponent(double x) {
+  final bits = (ByteData(8)..setFloat64(0, x)).getUint64(0);
+  final exp = (bits >> 52) & 0x7FF;
+  if (exp == 0) return -1023 - 52; // subnormal: below every scale we use
+  return exp - 1022;
+}
+
+/// 2^e as an exact double, for -1022 <= e <= 1023.
+double _pow2(int e) =>
+    (ByteData(8)..setUint64(0, (e + 1023) << 52)).getFloat64(0);
+
+/// a*b as hi + lo exactly (Dekker, with Veltkamp's split: what `fma` gives).
+(double, double) _twoProduct(double a, double b) {
+  final p = a * b;
+  final (ah, al) = _split(a);
+  final (bh, bl) = _split(b);
+  final err = ((ah * bh - p) + ah * bl + al * bh) + al * bl;
+  return (p, err);
+}
+
+(double, double) _split(double a) {
+  final c = 134217729.0 * a; // 2^27 + 1
+  final hi = c - (c - a);
+  return (hi, a - hi);
+}
+
+/// a + b as hi + lo exactly, for |a| >= |b| (`dl_fast_sum`).
+(double, double) _fastSum(double a, double b) {
+  final x = a + b;
+  final z = x - a;
+  return (x, b - z);
 }

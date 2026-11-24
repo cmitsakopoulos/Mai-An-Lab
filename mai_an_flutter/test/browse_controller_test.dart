@@ -82,15 +82,20 @@ void main() {
     expect(all.unified, isTrue);
     final views = LibraryView.fromConfig(all.visible);
     expect(views, [
+      LibraryView.network,
       LibraryView.playlists,
       LibraryView.genres,
       LibraryView.artists,
       LibraryView.albums,
     ]);
-    // library.py: tracks, then albums, artists, genres, playlists.
+    // library.py: tracks, then albums, artists, genres, playlists, network.
     expect(LibraryView.initial(views), LibraryView.albums);
     expect(LibraryView.initial([LibraryView.playlists]), LibraryView.playlists);
-    expect(LibraryView.fromConfig(['network']), [LibraryView.tracks]);
+    expect(LibraryView.fromConfig(['network']), [LibraryView.network]);
+    expect(
+      LibraryView.initial([LibraryView.network, LibraryView.playlists]),
+      LibraryView.playlists,
+    );
   });
 
   test(

@@ -380,8 +380,8 @@ const kAccentChoices = [
 ];
 
 /// settings.py `_build_appearance_group` and `_save_appearance_settings`.
-/// The Jarvis and Acoustic Network switches wait for their tabs (phases 5
-/// and 3i); their stored values are written back unchanged.
+/// The Jarvis switch waits for its tab (phase 5); its stored value is
+/// written back unchanged.
 class AppearanceGroup extends StatefulWidget {
   const AppearanceGroup({super.key, required this.deps});
 
@@ -534,6 +534,25 @@ class _AppearanceGroupState extends State<AppearanceGroup> {
         _switch('library_stats', 'Show Library Stats'),
         divider,
         const AccentLabel('Library Tabs Visibility'),
+        _switch(
+          'network',
+          'Acoustic Network',
+          trailing: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+            decoration: BoxDecoration(
+              color: Tokens.amber,
+              borderRadius: BorderRadius.circular(4),
+            ),
+            child: const Text(
+              'EXPERIMENTAL',
+              style: TextStyle(
+                color: Tokens.bg,
+                fontSize: 9,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+          ),
+        ),
         _switch('playlists', 'Playlists'),
         _switch('genres', 'Genres'),
         _switch('artists', 'Artists'),

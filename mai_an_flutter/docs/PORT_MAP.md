@@ -1,20 +1,21 @@
 # Mai An Lab: Flet → Flutter port map
 
-*Status: 2026-11-24. Branch `flutter-port` (not pushed). Phase 0 (backbone)
+*Status: 2026-11-24. Branch `flutter-port` (on origin up to phase 3g; the
+Settings and Network commits are local). Phase 0 (backbone)
 done. Phase 1 (phone player) is written and audited against the Flet sources
 (§9). Phase 2 (stations) is written and matches the Python output exactly on
 a real library (§4, phase 2). Phase 3 is under way: the Genres, Artists and
 Albums views, the migrations the port now owns, the play-ledger drain, the
 library scan (with tinytag ported to Dart), playlists, the full
 long-press menu, selection mode and Delete Track, the tab bar with
-the Search tab's local landing cards, and Settings with the config.toml
-writer (§4, phase 3). Desktop
-tests pass (`flutter test`: 383, including the real-library golden tests
+the Search tab's local landing cards, Settings with the config.toml
+writer, and the Acoustic Network view (§4, phase 3). Desktop
+tests pass (`flutter test`: 394, including the real-library golden tests
 that need the gitignored goldens; analyzer clean in Dart's strict modes);
 debug and release APKs build.
 It is installed on the phone (2026-11-24, with the 2026-11-02 library, an
 older build: no scan, no Settings yet). The user reports problems found in use; fix
-them, or record intended differences in §7. Nothing ships from this port yet. 38 of the 90 Flet features in §11
+them, or record intended differences in §7. Nothing ships from this port yet. 39 of the 90 Flet features in §11
 are ported. Third-party code the port uses or copies is listed in §12.*
 
 **Next session: start at §10 (open items). §11 lists every Flet feature and
@@ -146,7 +147,7 @@ constant moves.
 | 1 | `play_counts` (DSP features: `energy`, `beat_strength`, `spectral_contrast`) ✅ |
 | 2 | `artist_enrichment` (country, genres, source), `genre_affinity` (the NPMI model), `play_counts` (`bpm`, `energy`, `timbre`/`features_version` for "is this seed analysed"), `playback_history` (recent plays seed auto-play's history on a cold start). All read-only. ✅ |
 | 3 | `playback_history`, `play_counts` (counts), written by the ledger drain |
-| 5 | `track_neighbors` (the assistant's "more by this artist"; stations don't read it) |
+| 3 | `track_neighbors` ✅: read by the Network view (`data/network_queries.dart`); its artist tier written by `build_metadata_edges` (ported, golden-tested; called where Flet calls it, phases 4 and B). The assistant reads it too (5); stations don't. |
 | 3 | `playlists`, `playlist_tracks` ✅ (`data/playlists.dart`), `fts_search`. FTS5 is kept in step by 11 triggers stored in the database, so port writes stay consistent for free. |
 | 5 | `artist_ai_research` |
 | 6 | `artist_releases`, `release_sync_log` |
@@ -178,9 +179,9 @@ Verdicts:
 | `ui/player/quality_selector` (download quality) | 168 | Rewrite | 6 |
 | `db_manager.py`, read half | ~2,000 | Port, one method at a time on demand | 0–3 |
 | `db_manager.py`, write half and migrations | ~2,000 | Port. Migrations ✅ (`data/library_schema.dart`: `get_connection` + `initialize`, golden-tested on fresh, legacy and real databases); `record_listens` ✅; the scan's writes ✅; playlists ✅ (`data/playlists.dart`, golden-tested); the rest with its features | 3 |
-| `ui/views/library.py` | 4,915 | Rewrite, one tab at a time (tracks ✅ rows, sort, search; view bar, genres, artists, albums ✅ (`library/browse_*`, `genre_colors.dart`); playlists, the long-press menu, selection mode ✅ (`library/track_menu.dart`, `library_dialogs.dart`, `selection.dart`); network graph to come) | 1–3 |
+| `ui/views/library.py` | 4,915 | Rewrite, one tab at a time (tracks ✅ rows, sort, search; view bar, genres, artists, albums ✅ (`library/browse_*`, `genre_colors.dart`); playlists, the long-press menu, selection mode ✅ (`library/track_menu.dart`, `library_dialogs.dart`, `selection.dart`); the Acoustic Network ✅ (`library/network_*`)) | 1–3 |
 | `track_graph.py` (stations: coordinate graph, artist-graph cache, `Station`, `open_station`, `walk`), `artist_graph.py`, `autoplay.py`, `genre_taxonomy.py`, `credit_keys` (in `metadata_enrich`) | ~2,100 | Port ✅ (`stations/`, `player/autoplay.dart`, `core/py_text.dart`; golden-tested) | 2 |
-| `track_graph.py` builders (`build_acoustic_edges`, `build_genre_affinity`, `build_metadata_edges`, `bulk_analyze_library`), `genre_similarity.py` (builds the NPMI model) | ~500 | Port where Flet calls them (§10 4f): metadata edges with the Network view (3), the acoustic build with offload/import (4), analysis with decision B | 3, 4, 6 |
+| `track_graph.py` builders (`build_acoustic_edges`, `build_genre_affinity`, `build_metadata_edges`, `bulk_analyze_library`), `genre_similarity.py` (builds the NPMI model) | ~500 | Port where Flet calls them (§10 4f): `build_metadata_edges` ✅ (`data/network_queries.dart`, golden-tested; no caller yet: Flet runs it after an import, the readiness build, analysis and Settings' recompute, i.e. phases 4 and B), the acoustic build with offload/import (4), analysis with decision B | 3, 4, 6 |
 | `harmonic.py` | 132 | Not needed by stations (key was removed from the geometry); port only if a feature needs it | n/a |
 | `ui/player/autoplay_sheet.py` | 156 | Rewrite ✅ (`player/ui/autoplay_sheet.dart`) | 2 |
 | `library_scanner.py`, `storage_paths.py` + `tinytag` 2.3.2 (the tag reader the APK bundles, ~2,500 lines, MIT) | ~2,900 | Port ✅ (`scan/library_scanner.dart`, `scan/tinytag.dart`, `scan/storage_paths.dart`, `data/scan_writes.dart`; golden-tested on a synthetic corpus and the Mac's music folder) | 3 |
@@ -492,6 +493,55 @@ floats). `test/goldens/config_synthetic.json` (committed); 192 writes,
 identical. `test/settings_test.dart` covers each group's writes, the
 maintenance actions on a real schema, and the changes reaching the app.
 
+### Phase 3: the Acoustic Network view
+
+Step 4i of §10. library.py's Network view, first in the view bar when
+`appearance.show_network` is on (Settings → Appearance now has the
+switch, with Flet's EXPERIMENTAL tag). Its graph is the seed's
+`track_neighbors` (in practice the artist tier: the acoustic tier is no
+longer written, so the "neighbourhood" is same-artist tracks) placed by
+their coordinates, with a station walk from the selection laid over it.
+
+- `data/network_queries.dart`: `has_pca_coords`, the "any analysed
+  track" seed, `get_neighbors`, `get_tracks_pca_coords_for_paths` and
+  `build_metadata_edges` (+ `replace_neighbors_bulk`), same SQL.
+- `library/network_layout.dart`: the builder's node and edge half
+  (seed, neighbours, the ring for neighbours without coordinates, walk
+  steps), the focal-centred uniform projection pinned per build,
+  `_declutter_net_nodes`, `_apply_walk_seq` (merge, let only newcomers
+  move, prune), `_rebuild_walk_edges`, the legend. The declutter branches
+  on distances, so it uses `pyHypot` (CPython's `vector_norm`, §12):
+  a plain `sqrt(x²+y²)` is an ulp off and moves nodes.
+- `library/network_controller.dart`: `load_library`'s network branch
+  (`buildNetwork`), `_compute_walk_seq` (explore: `StationSource.walk`;
+  live: auto-play's buffer, else the queue ahead), the readout's play /
+  explore-from-here / walk-from-here, density and steps, the mode chip,
+  Play and Next, the row menu (play from here, reseed, walk here, add to
+  playlist), and `_sync_network_now_playing` (live re-anchors after
+  200 ms or reseeds after 350 ms; explore never moves).
+- `library/network_view.dart`: the canvas (`_emit_net_shapes` as a
+  CustomPainter, sizes counter-scaled by the zoom), InteractiveViewer
+  (0.8–5×, 240 px margin, fit button), tap-to-inspect, the legend, the
+  readout, the pulsing now-playing ring, the list panel with collapse,
+  the setup card when nothing is analysed.
+
+**How parity is proved.** `tool/export_network_goldens.py` runs
+library.py's own `_build_interactive_network_canvas` and
+`_apply_walk_seq` on a LibraryView built without a page, and keeps the
+nodes, edges, projection and selection it leaves. Synthetic
+(`test/goldens/network_synthetic.json`, `test/network_synthetic_test.dart`):
+`build_metadata_edges` at k=3 and 30 beside acoustic rows, the queries,
+ten load scenarios (clumps, coincident and collinear points, neighbours
+missing or without coordinates, no seed, a playing focal node, a single
+node, nothing to draw, far outliers) and four re-walks, and 407
+`math.hypot` values. Real (`network.json`, gitignored;
+`test/network_real_golden_test.dart`): all 13,788 artist edges, and 8
+seeds × densities 12/24/36 with the walk (through the ported stations),
+the layout and a 15-step re-walk. All identical to the bit, including
+SQLite's tie order on equal weights. `test/network_view_test.dart`
+covers the controller's actions, both modes following playback, and the
+screen.
+
 ---
 
 ## 5. Cutover (Android)
@@ -551,7 +601,11 @@ uninstall and reinstall; the bundle export/import covers the data.
 | Sort in Artists and Genres | One `sort_mode` for every view, coerced on each switch (Tracks → Artists → Tracks loses the Tracks sort; Genres keeps an unrelated mode and shows no tick) | Tracks and Albums share one sort, as in Flet; Artists and Genres each keep their own, starting at A–Z | Intentional. |
 | Album long-press → Play Album | Passes `("album", album, artist)`, which `_play_track_core` unpacks as `(artist, album)`: outside shuffle the query finds nothing and it says "No playable media found." | Plays the album from its first track | Port is right. The Flet fix is one line (`library.py` `_open_album_context_menu`, swap the tuple); not made on master yet. |
 | Search in Albums, Artists, Genres | `LIKE` on the album title / artist / genre name, plus albums and artists whose tracks match FTS; then closest match | The Tracks view's semantics (every word, accent-blind, substring) on the same fields and through the tracks; Genres by name only, as in Flet; the same closest-match scoring | Intentional, as for Tracks. |
-| Network tab | Shown when enabled | Hidden until ported (§10 4i) | Until then. |
+| Network: rebuild while a walk is selected outside the neighbourhood (a walk step, then a density change) | The walk is computed from the selection, but the selection has no node (only seed, neighbours and walk steps get one), so it resets to the seed and the walk is drawn from the seed | The selection joins the graph (as a walk-step node), so the drawn walk starts where it was computed | Port is right; library.py's own comment says that was the intent. Flet fix: `_add` the `walk_seed` row in `_build_interactive_network_canvas`; not made on master yet. |
+| Network zoom | Node sizes are re-counter-scaled once, when the pinch ends (re-sending the shapes per frame was the bridge cost) | Counter-scaled on every frame of the pinch | Intentional: no bridge; same result at rest. |
+| Network step pills | The number drawn at a guessed width (canvas text can't be measured) | Centred in its pill | Cosmetic. |
+| Network without coordinates | Setup card with a Compute DSP Features button | The card, without the button | Decision B. |
+| Network: a rebuild while a re-walk is pending | The re-walk can land on the new graph afterwards | The rebuild cancels it (the rebuild computes the walk itself) | Intentional. |
 | Fix artist info, Curate in Workbench | Buttons on the artist and genre rows | Not shown | Phase 7, with the workbench. |
 | Opening the database | `get_connection` + `initialize` commit after each migration step | The same steps in one transaction | Intentional: a failure leaves the file as it was. Same result otherwise (golden-tested). |
 | Ledger line that is JSON but not an object (`[1]`, `5`) | `raw.get` raises outside the try: the drain fails, and the `.draining` file fails again on every later drain | Dropped like a torn line | Intentional. The handler never writes one. |
@@ -575,7 +629,7 @@ uninstall and reinstall; the bundle export/import covers the data.
 | Settings → Appearance's Default Library Sort | The dropdown shows `library_sort` but saves `general.default_sort`, which nothing reads, so the sort never changes | Writes `default_sort` as Flet does, plus `library_sort`, and re-sorts the Library at once | Port is right. The Flet fix: write `library_sort` in `_save_appearance_settings`; not made on master yet. |
 | Applying Settings | Appearance restarts the UI (`restart_ui`); a raw TOML save applies at the next start | Any config change (Settings or the raw editor) reaches the view bar, landing cards, accent, pills and haptics at once | Intentional. |
 | Settings hub | Twelve groups | The eight whose features exist (§4, Settings); Companion & Sync, Authentication, AI Assistant and Metadata with phases 4, A, 5 and 7 | Until then. |
-| Settings rows waiting on features | Default Download Quality, the Jarvis and Acoustic Network tab switches, compute DSP/PCA, export/import, demo search, debug play counts, fresh-install reset | Not shown; values the hidden rows would save are written back as read | With decisions A, B, C and phases 3i, 4, 5. |
+| Settings rows waiting on features | Default Download Quality, the Jarvis tab switch, compute DSP/PCA, export/import, demo search, debug play counts, fresh-install reset | Not shown; values the hidden rows would save are written back as read | With decisions A, B, C and phases 4, 5. |
 | EQ drag and slider writes | `update_config_params` on every drag event of the curve and the sliders | The player gets each step; the file is written when the drag ends | Intentional: same file afterwards, without a write per frame. |
 | EQ curve and slider haptics | `trigger_haptic("light")` on every event | On each 0.1 dB step (slider: each value change, as Flet) | Same feel without a buzz per pixel. |
 | Settings labels | Only the switch toggles | Tapping a switch's label toggles it too | Small usability fix. |
@@ -670,8 +724,8 @@ Phase 3 so far is seven commits, one per stage: strict analyzer and format,
 Python primitives, migrations and the ledger drain, the scan engine, the
 views' and playlists' queries, the library UI (views, scan UI, playlists,
 long-press menu, selection, delete), and the tab bar with the Search
-landing; then this plan. `flutter-port` is pushed to origin. Settings
-(4h) is written and tested, not yet committed.
+landing; then this plan; all pushed to origin. Then Settings (`e946579`)
+and the Network view, local.
 
 **Done**
 - [x] Phase 0: backbone (read-only DB isolate, tracks tab, sort, search,
@@ -720,13 +774,20 @@ landing; then this plan. `flutter-port` is pushed to origin. Settings
       config.toml writer, byte-identical to tomlkit on 192 writes (§4,
       phase 3, Settings). `push_db.sh` brings the bundle's config.toml.
       Release APK builds (25.7 MB).
+- [x] Phase 3i: the Acoustic Network view and `build_metadata_edges`;
+      identical to library.py's own builder on synthetic scenarios and on
+      24 real seed × density cases with re-walks, and to Python's 13,788
+      artist edges (§4, phase 3, the Acoustic Network view). Release APK:
+      26.0 MB.
 
 **To do, in order**
 1. [ ] Install the current build on the phone: `tool/install_phone.sh
        --db` (now also brings the bundle's config.toml, so the accent, EQ
        and tabs match the Flet app). The user reports problems found in
        use. Check on the phone: the EQ curve and sliders, the folder
-       navigator, Permissions after the system page, Clear Index.
+       navigator, Permissions after the system page, Clear Index; the
+       Network view (turn it on in Appearance): pinch and pan, taps on
+       small nodes, the pulse, Now Playing mode across track changes.
 2. [ ] Back up `~/.android/debug.keystore` (§5) somewhere off this Mac.
 3. [ ] Push `master` (one commit ahead of origin: `2ec2865`, already in
        `flutter-port`'s history). ~~`flutter-port`~~ pushed 2026-11-24.
@@ -763,12 +824,16 @@ landing; then this plan. `flutter-port` is pushed to origin. Settings
           bar: §4, phase 3, the tab bar and Search landing).
        h. ~~Settings as a pushed page and its rows for all of the above~~
           (done: §4, phase 3, Settings).
-       i. The Network view (library.py's Acoustic Network: map, walk,
-          list panel; ~2,000 Flet lines) with `build_metadata_edges`, which
-          writes the `track_neighbors` it reads (4f).
+       i. ~~The Network view with `build_metadata_edges`~~ (done: §4,
+          phase 3, the Acoustic Network view). Phase 3's list is complete;
+          what remains of it is phone verification (item 1).
+       j. Next: phase 4 (sync, Android side), or decisions A, B, C first
+          (item 5). Phase 4 brings the first callers of
+          `build_metadata_edges` (bundle import, readiness build).
 5. [ ] Decisions A, B, C (§6) before phase 6 is planned in detail.
-6. [ ] Flet, on master: the album menu's Play Album tuple, and
-       Appearance's sort writing `library_sort` (§7).
+6. [ ] Flet, on master: the album menu's Play Album tuple,
+       Appearance's sort writing `library_sort`, and the Network view's
+       walk-seed node (§7).
 7. [ ] Decide on `assets/config_template.toml`: it is streamrip's
        GPL-3.0 template plus the app's sections (§12). The Flet APK already
        ships it; keep it, or write the port's own template.
@@ -787,7 +852,7 @@ add its row here.
 Status: ✅ done · 🧪 written, not yet confirmed in use · 🔨 to build
 (phase) · ⚠️ depends on a decision (§6) · ✗ dropped.
 
-**Counts:** 38 of the 90 rows are ported (✅ or 🧪); 52 are to build or to decide. The ported rows are the player, the stations, the library views, playlists, the long-press menu and selection mode, the ledger drain, the scan, the tab bar, the Search landing's local cards, and Settings for all of these.
+**Counts:** 39 of the 90 rows are ported (✅ or 🧪); 51 are to build or to decide. The ported rows are the player, the stations, the library views (the Acoustic Network included), playlists, the long-press menu and selection mode, the ledger drain, the scan, the tab bar, the Search landing's local cards, and Settings for all of these.
 
 ### App shell (`main.py`)
 
@@ -848,7 +913,7 @@ Status: ✅ done · 🧪 written, not yet confirmed in use · 🔨 to build
 | Artists: artist → albums → tracks; edit-metadata button | 🧪 (editor 🔨 7) |
 | Genres: genre groups and colours, play a genre, curate in the workbench | 🧪 (curate 🔨 7) |
 | Playlists: create, rename and recolour, delete, reorder (drag), remove a track | 🧪 |
-| Acoustic Network: 2-D map of the coordinates; density and step chips; zoom; tap to select; walk from a node, reseed; play or queue the walk; now-playing pulse; list panel with its own menu | 🔨 3. Read-only (coordinates and `walk`), so it could come before the writes |
+| Acoustic Network: 2-D map of the coordinates; density and step chips; zoom; tap to select; walk from a node, reseed; play or queue the walk; now-playing pulse; list panel with its own menu | 🧪 (golden-tested layout; phone check pending) |
 | Which tabs show (Appearance setting) | 🧪 |
 | Scan the library folder: progress, summary, "n tracks not analysed yet" | 🧪 (the alert after automatic scans 🔨 4) |
 | Compute DSP on the phone (cancellable, notification) | ⚠️ B |
@@ -896,7 +961,7 @@ Status: ✅ done · 🧪 written, not yet confirmed in use · 🔨 to build
 | Storage & Paths | Library folder, downloads folder, default download quality | 🧪 folders and the Android navigator; ⚠️ A (quality) |
 | Authentication | Qobuz (email/ID, password or token, app ID and secret), Deezer ARL | ⚠️ A |
 | AI Assistant | Enable, provider and API key, model list, test connection, personality presets (built-in and custom) | 🔨 5 |
-| Appearance | Accent colour, startup page, Jarvis tab, library tab visibility, landing sections | 🧪 (the Jarvis and Network switches 🔨 5, 3i) |
+| Appearance | Accent colour, startup page, Jarvis tab, library tab visibility, landing sections | 🧪 (the Jarvis switch 🔨 5) |
 | Audio & DSP | EQ on/off, presets, five bands, Dynamism | 🧪 |
 | Haptic Feedback | On/off, per-action intensity | 🧪 |
 | Metadata | Opens the workbench | 🔨 7 |
@@ -950,6 +1015,7 @@ code or a published template comes in, before it is committed.
 | `flet_audio_service` extension (audio handler, Kotlin notifications, artwork, PCM decoder) | `lib/player/audio_handler.dart`, `packages/maian_native` | This repository (the Flet app's own extension) | the project's |
 | Unicode data tables (NFKD fold, casefold, decimal digits) generated from Python's `unicodedata` | `lib/core/nfkd_fold_table.dart`, `lib/core/py_unicode_tables.dart` | Unicode Character Database 15.1, via CPython | Unicode License v3 (data) |
 | tomlkit 0.15.2: `InlineTable.as_string`, translated; the rest of its editing behaviour reproduced from its outputs | `lib/core/config_file.dart` (licence text above `_InlineTable`) | https://github.com/python-poetry/tomlkit (PyPI `tomlkit==0.15.2`) | MIT, © 2018 Sébastien Eustace |
+| CPython's `math.hypot` (`vector_norm` in Modules/mathmodule.c: scaling, lossless squaring and summation, one differential correction), translated | `lib/core/py_num.dart` `pyHypot` | https://github.com/python/cpython (3.13) | PSF License v2 |
 | config.toml template: streamrip's `config.toml` plus the app's `[dsp]`, `[haptics]`, `[assistant]`, `[appearance]` sections (utils/config.toml, copied as is) | `assets/config_template.toml` | https://github.com/nathom/streamrip, via the Flet app | GPL-3.0 (streamrip). The Flet APK ships the same file; decide before release (§10 item 7) |
 | streamrip-derived helpers (filename cleaning; in the Flet app's `filepath_utils.py`, credited there) | not ported yet (phase 6) | https://github.com/nathom/streamrip | GPL-3.0: check before porting any of it |
 

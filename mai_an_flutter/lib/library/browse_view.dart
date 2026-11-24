@@ -568,6 +568,7 @@ class ViewBar extends StatelessWidget {
   final ValueChanged<LibraryView> onSelect;
 
   static IconData icon(LibraryView v) => switch (v) {
+    LibraryView.network => Icons.hub_rounded,
     LibraryView.playlists => Icons.queue_music_rounded,
     LibraryView.genres => Icons.style_rounded,
     LibraryView.artists => Icons.person_rounded,
@@ -575,7 +576,9 @@ class ViewBar extends StatelessWidget {
     LibraryView.tracks => Icons.music_note_rounded,
   };
 
-  static Color color(LibraryView v) => switch (v) {
+  /// Null: the accent (library.py's network tab is CYAN).
+  static Color? color(LibraryView v) => switch (v) {
+    LibraryView.network => null,
     LibraryView.playlists => Tokens.libPlaylist,
     LibraryView.genres => Tokens.libGenre,
     LibraryView.artists => Tokens.libArtist,
@@ -603,7 +606,7 @@ class ViewBar extends StatelessWidget {
               child: _Segment(
                 label: v.label,
                 icon: icon(v),
-                accent: unified ? cyan : color(v),
+                accent: unified ? cyan : color(v) ?? cyan,
                 active: v == selected,
                 padH: padH,
                 onTap: () => onSelect(v),

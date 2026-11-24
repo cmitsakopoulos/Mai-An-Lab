@@ -223,6 +223,9 @@ void main() {
         find.byType(ListView).first,
         const Offset(0, -100),
       );
+      // Clear of the save bar that the first change brings up.
+      await tester.drag(find.byType(ListView).first, const Offset(0, -150));
+      await tester.pumpAndSettle();
       await tester.tap(find.text('Albums'));
       await tester.pump();
       // Back to the stored value: nothing to save.

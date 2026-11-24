@@ -15,6 +15,8 @@ import 'browse_controller.dart';
 import 'browse_view.dart';
 import 'library_controller.dart';
 import 'library_dialogs.dart';
+import 'network_controller.dart';
+import 'network_view.dart';
 import 'selection.dart';
 import 'track_menu.dart';
 import 'track_query.dart';
@@ -70,6 +72,14 @@ class _LibraryScreenState extends State<LibraryScreen> {
       widget.selection ?? SelectionController();
   bool get _standalone => widget.selection == null;
 
+  /// The Acoustic Network view's state (kept while the tab lives, as
+  /// library.py keeps its `_net_*` fields).
+  late final network = NetworkController(
+    library: controller,
+    player: widget.player,
+    haptics: widget.haptics,
+  );
+
   /// The search box. `show_filtered` (the Search landing) sets the query
   /// from outside, so the box follows the controller.
   late final _search = TextEditingController(text: controller.query);
@@ -106,6 +116,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
     _libraryMessages?.cancel();
     controller.removeListener(_syncSearch);
     _search.dispose();
+    network.dispose();
     if (_standalone) selection.dispose();
     super.dispose();
   }
@@ -166,9 +177,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
     return Scaffold(
       appBar: AppBar(
         title: ListenableBuilder(
-          listenable: Listenable.merge([controller, browse]),
+          listenable: Listenable.merge([controller, browse, network]),
           builder: (context, _) =>
-              _Header(controller: controller, browse: browse),
+              _Header(controller: controller, browse: browse, network: network),
         ),
         actions: [
           ListenableBuilder(
@@ -254,6 +265,14 @@ class _LibraryScreenState extends State<LibraryScreen> {
                               )
                             : browse.view == LibraryView.tracks
                             ? _tracksList()
+                            : browse.view == LibraryView.network
+                            ? NetworkView(
+                                controller: network,
+                                player: widget.player,
+                                onAddToPlaylist: controller.canWrite
+                                    ? (t) => _addToPlaylist([t])
+                                    : null,
+                              )
                             : BrowseList(
                                 controller: browse,
                                 player: widget.player,
@@ -353,6 +372,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
       ],
     );
     return switch (browse.view) {
+      // library.py hides the sort button in the Network view.
+      LibraryView.network => const SizedBox.shrink(),
       LibraryView.tracks || LibraryView.albums => menu(
         LibrarySort.values,
         controller.sort,
@@ -645,9 +666,14 @@ class _SelectionBar extends StatelessWidget {
 }
 
 class _Header extends StatelessWidget {
-  const _Header({required this.controller, required this.browse});
+  const _Header({
+    required this.controller,
+    required this.browse,
+    required this.network,
+  });
   final LibraryController controller;
   final BrowseController browse;
+  final NetworkController network;
 
   @override
   Widget build(BuildContext context) {
@@ -658,6 +684,9 @@ class _Header extends StatelessWidget {
         if (b.view == LibraryView.tracks)
           '${c.visible.length} / ${c.total} tracks'
               '${c.closestMatch ? ' (closest match)' : ''}'
+        else if (b.view == LibraryView.network)
+          // library.py: "n TRACKS", the coordinate rows the graph read.
+          '${network.trackCount} tracks'
         else if (!b.loading || b.rows.isNotEmpty)
           '${b.shown} / ${b.total} ${b.view.label.toLowerCase()}'
               '${b.closestMatch ? ' (closest match)' : ''}',
