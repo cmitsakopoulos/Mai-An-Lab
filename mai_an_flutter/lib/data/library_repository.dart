@@ -8,11 +8,14 @@ import '../core/db_worker.dart';
 import '../core/py_text.dart';
 import '../player/dsp.dart';
 import '../stations/station.dart';
+import 'browse_queries.dart';
 import 'library_schema.dart';
 import 'play_ledger.dart';
+import 'playlists.dart';
 import 'scan_writes.dart';
 
 export 'library_schema.dart' show kGeometryVersion;
+export 'playlists.dart' show PlaylistRow;
 export 'scan_writes.dart' show ScannedTrack;
 
 class Track {
@@ -26,6 +29,9 @@ class Track {
     required this.format,
     this.trackNum,
     this.addedDate,
+    this.albumId,
+    this.artistId,
+    this.bitrate,
   });
 
   final int id;
@@ -39,6 +45,15 @@ class Track {
 
   /// Unix seconds (Python `time.time()`), null for rows that predate the column.
   final double? addedDate;
+
+  /// `albums.id` and `artists.id` (via the album), for the library tabs'
+  /// search: an album or artist matches when one of its tracks does. Null
+  /// for rows built from a queue file.
+  final int? albumId;
+  final int? artistId;
+
+  /// kbit/s, as tinytag reports it (the scan stores it); null when unknown.
+  final num? bitrate;
 
   /// ui/widgets.py `fmt_time`: whole seconds, truncated.
   String get durationLabel {
@@ -153,6 +168,44 @@ class LibraryRepository {
   Future<DspFeatures?> dspFeatures(String path) =>
       _db.run(_dspFeaturesJob(path));
 
+  // The Albums, Artists and Genres tabs (browse_queries.dart). Sort modes
+  // are db_manager's sort_map keys.
+  Future<List<AlbumRow>> allAlbums(String sortMode) =>
+      _db.run(allAlbumsJob(sortMode));
+  Future<List<ArtistRow>> allArtists(String sortMode) =>
+      _db.run(allArtistsJob(sortMode));
+  Future<List<GenreRow>> allGenres(String sortMode) =>
+      _db.run(allGenresJob(sortMode));
+  Future<List<ArtistRow>> artistsByGenre(String genre) =>
+      _db.run(artistsByGenreJob(genre));
+  Future<List<AlbumRow>> albumsByArtist(String? artist, {String? genre}) =>
+      _db.run(albumsByArtistJob(artist, genre));
+  Future<List<Track>> tracksByAlbum(String? album, String? artist) =>
+      _db.run(tracksByAlbumJob(album, artist));
+  Future<List<Track>> tracksByGenre(String genre) =>
+      _db.run(tracksByGenreJob(genre));
+
+  // Playlists (playlists.dart). Writes throw on a read-only library.
+  Future<List<PlaylistRow>> allPlaylists(String sortMode) =>
+      _db.run(allPlaylistsJob(sortMode));
+  Future<List<Track>> tracksInPlaylist(int playlistId) =>
+      _db.run(tracksInPlaylistJob(playlistId));
+  Future<int> createPlaylist(String name) {
+    if (!writable) throw StateError('library opened read-only');
+    return _db.run(createPlaylistJob(name));
+  }
+
+  Future<void> addTracksToPlaylist(int playlistId, List<String> paths) =>
+      _write(addTracksToPlaylistJob(playlistId, paths));
+  Future<void> removeTrackFromPlaylist(int playlistId, String path) =>
+      _write(removeTrackFromPlaylistJob(playlistId, path));
+  Future<void> movePlaylistTrack(int playlistId, int from, int to) =>
+      _write(movePlaylistTrackJob(playlistId, from, to));
+  Future<void> updatePlaylist(int playlistId, {String? name, String? color}) =>
+      _write(updatePlaylistJob(playlistId, name: name, color: color));
+  Future<void> deletePlaylist(int playlistId) =>
+      _write(deletePlaylistJob(playlistId));
+
   Future<void> close() => _db.close();
 }
 
@@ -161,33 +214,36 @@ class LibraryRepository {
 /// Same rows as `db_manager.get_all_tracks` (INNER joins: a track whose album
 /// or artist row is missing doesn't show in the Flet app either). Sorting
 /// happens in memory; see track_query.dart.
-List<Track> _selectAllTracks(Database db) {
-  final rows = db.select('''
+List<Track> _selectAllTracks(Database db) => [
+  for (final r in db.select('''
     SELECT t.id, t.path, t.title, t.duration, t.format, t.track_num,
-           t.added_date,
+           t.added_date, t.album_id, al.artist_id, t.bitrate,
            ar.name  AS artist,
            al.title AS album
     FROM tracks t
     JOIN albums  al ON t.album_id = al.id
     JOIN artists ar ON al.artist_id = ar.id
-  ''');
-  return [
-    for (final r in rows)
-      Track(
-        id: r['id'] as int,
-        path: r['path'] as String,
-        // library.py `_track_row` / main.py `_play_track_core`:
-        // `title or basename(path)`, `artist or "Unknown"`, `album or "Unknown"`.
-        title: _or(r['title'] as String?, _basename(r['path'] as String)),
-        artist: _or(r['artist'] as String?, 'Unknown'),
-        album: _or(r['album'] as String?, 'Unknown'),
-        duration: (r['duration'] as num?)?.toDouble() ?? 0,
-        format: (r['format'] as String?) ?? '',
-        trackNum: r['track_num'] as int?,
-        addedDate: (r['added_date'] as num?)?.toDouble(),
-      ),
-  ];
-}
+  '''))
+    trackFromRow(r),
+];
+
+/// A track row with the columns of [_selectAllTracks]. The fallbacks are
+/// library.py `_track_row`'s and main.py `_play_track_core`'s:
+/// `title or basename(path)`, `artist or "Unknown"`, `album or "Unknown"`.
+Track trackFromRow(Row r) => Track(
+  id: r['id'] as int,
+  path: r['path'] as String,
+  title: _or(r['title'] as String?, _basename(r['path'] as String)),
+  artist: _or(r['artist'] as String?, 'Unknown'),
+  album: _or(r['album'] as String?, 'Unknown'),
+  duration: (r['duration'] as num?)?.toDouble() ?? 0,
+  format: (r['format'] as String?) ?? '',
+  trackNum: r['track_num'] as int?,
+  addedDate: (r['added_date'] as num?)?.toDouble(),
+  albumId: r['album_id'] as int?,
+  artistId: r['artist_id'] as int?,
+  bitrate: r['bitrate'] as num?,
+);
 
 /// The database's coordinates were built by an older geometry pipeline. The
 /// Flet app NULLs them on its next open and rebuilds; until then nothing may

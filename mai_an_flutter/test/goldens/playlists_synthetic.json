@@ -1,0 +1,3175 @@
+{
+ "setup": [
+  "INSERT INTO artists (name) VALUES ('Björk'), ('Χάρις Αλεξίου')",
+  "INSERT INTO albums (artist_id, title, genre) VALUES (1, 'Post', 'Electronic'), (2, 'Η Αγάπη', 'Laiko')",
+  "INSERT INTO tracks (album_id, title, track_num, duration, path, format, added_date, bitrate) VALUES (1, 'Song 1', 1, 180.5, '/music/A/1.flac', 'FLAC', 1700000000, 900)",
+  "INSERT INTO tracks (album_id, title, track_num, duration, path, format, added_date, bitrate) VALUES (1, 'Song 2', 2, 181.5, '/music/A/2.flac', 'FLAC', 1700000001, 900)",
+  "INSERT INTO tracks (album_id, title, track_num, duration, path, format, added_date, bitrate) VALUES (1, 'Song 3', 3, 182.5, '/music/A/3.flac', 'FLAC', 1700000002, 900)",
+  "INSERT INTO tracks (album_id, title, track_num, duration, path, format, added_date, bitrate) VALUES (1, 'Song 4', 4, 183.5, '/music/A/4.flac', 'FLAC', 1700000003, 900)",
+  "INSERT INTO tracks (album_id, title, track_num, duration, path, format, added_date, bitrate) VALUES (2, 'Song 5', 5, 184.5, '/music/A/5.flac', 'FLAC', 1700000004, 900)",
+  "INSERT INTO tracks (album_id, title, track_num, duration, path, format, added_date, bitrate) VALUES (2, 'Song 6', 6, 185.5, '/music/A/6.flac', 'FLAC', 1700000005, 900)",
+  "INSERT INTO tracks (album_id, title, track_num, duration, path, format, added_date, bitrate) VALUES (2, 'Song 7', 7, 186.5, '/music/A/7.flac', 'FLAC', 1700000006, 900)"
+ ],
+ "steps": [
+  {
+   "method": "create_playlist",
+   "args": [
+    "Road Trip"
+   ],
+   "created": 1700000100,
+   "result": 1,
+   "error": null,
+   "playlists": [
+    [
+     1,
+     "Road Trip",
+     1700000100,
+     null
+    ]
+   ],
+   "playlist_tracks": [],
+   "listing": {
+    "name": [
+     {
+      "id": 1,
+      "name": "Road Trip",
+      "created": 1700000100,
+      "color": null,
+      "track_count": 0
+     }
+    ],
+    "date": [
+     {
+      "id": 1,
+      "name": "Road Trip",
+      "created": 1700000100,
+      "color": null,
+      "track_count": 0
+     }
+    ]
+   },
+   "tracks": {
+    "1": []
+   }
+  },
+  {
+   "method": "create_playlist",
+   "args": [
+    "  Chill  "
+   ],
+   "created": 1700000300,
+   "result": 2,
+   "error": null,
+   "playlists": [
+    [
+     1,
+     "Road Trip",
+     1700000100,
+     null
+    ],
+    [
+     2,
+     "Chill",
+     1700000300,
+     null
+    ]
+   ],
+   "playlist_tracks": [],
+   "listing": {
+    "name": [
+     {
+      "id": 2,
+      "name": "Chill",
+      "created": 1700000300,
+      "color": null,
+      "track_count": 0
+     },
+     {
+      "id": 1,
+      "name": "Road Trip",
+      "created": 1700000100,
+      "color": null,
+      "track_count": 0
+     }
+    ],
+    "date": [
+     {
+      "id": 2,
+      "name": "Chill",
+      "created": 1700000300,
+      "color": null,
+      "track_count": 0
+     },
+     {
+      "id": 1,
+      "name": "Road Trip",
+      "created": 1700000100,
+      "color": null,
+      "track_count": 0
+     }
+    ]
+   },
+   "tracks": {
+    "2": [],
+    "1": []
+   }
+  },
+  {
+   "method": "create_playlist",
+   "args": [
+    "road trip"
+   ],
+   "created": null,
+   "result": null,
+   "error": "UNIQUE constraint failed: playlists.name",
+   "playlists": [
+    [
+     1,
+     "Road Trip",
+     1700000100,
+     null
+    ],
+    [
+     2,
+     "Chill",
+     1700000300,
+     null
+    ]
+   ],
+   "playlist_tracks": [],
+   "listing": {
+    "name": [
+     {
+      "id": 2,
+      "name": "Chill",
+      "created": 1700000300,
+      "color": null,
+      "track_count": 0
+     },
+     {
+      "id": 1,
+      "name": "Road Trip",
+      "created": 1700000100,
+      "color": null,
+      "track_count": 0
+     }
+    ],
+    "date": [
+     {
+      "id": 2,
+      "name": "Chill",
+      "created": 1700000300,
+      "color": null,
+      "track_count": 0
+     },
+     {
+      "id": 1,
+      "name": "Road Trip",
+      "created": 1700000100,
+      "color": null,
+      "track_count": 0
+     }
+    ]
+   },
+   "tracks": {
+    "2": [],
+    "1": []
+   }
+  },
+  {
+   "method": "create_playlist",
+   "args": [
+    "Ελληνικά"
+   ],
+   "created": 1700000200,
+   "result": 3,
+   "error": null,
+   "playlists": [
+    [
+     1,
+     "Road Trip",
+     1700000100,
+     null
+    ],
+    [
+     2,
+     "Chill",
+     1700000300,
+     null
+    ],
+    [
+     3,
+     "Ελληνικά",
+     1700000200,
+     null
+    ]
+   ],
+   "playlist_tracks": [],
+   "listing": {
+    "name": [
+     {
+      "id": 2,
+      "name": "Chill",
+      "created": 1700000300,
+      "color": null,
+      "track_count": 0
+     },
+     {
+      "id": 1,
+      "name": "Road Trip",
+      "created": 1700000100,
+      "color": null,
+      "track_count": 0
+     },
+     {
+      "id": 3,
+      "name": "Ελληνικά",
+      "created": 1700000200,
+      "color": null,
+      "track_count": 0
+     }
+    ],
+    "date": [
+     {
+      "id": 2,
+      "name": "Chill",
+      "created": 1700000300,
+      "color": null,
+      "track_count": 0
+     },
+     {
+      "id": 3,
+      "name": "Ελληνικά",
+      "created": 1700000200,
+      "color": null,
+      "track_count": 0
+     },
+     {
+      "id": 1,
+      "name": "Road Trip",
+      "created": 1700000100,
+      "color": null,
+      "track_count": 0
+     }
+    ]
+   },
+   "tracks": {
+    "2": [],
+    "1": [],
+    "3": []
+   }
+  },
+  {
+   "method": "add_track_to_playlist",
+   "args": [
+    1,
+    "/music/A/1.flac"
+   ],
+   "created": null,
+   "result": null,
+   "error": null,
+   "playlists": [
+    [
+     1,
+     "Road Trip",
+     1700000100,
+     null
+    ],
+    [
+     2,
+     "Chill",
+     1700000300,
+     null
+    ],
+    [
+     3,
+     "Ελληνικά",
+     1700000200,
+     null
+    ]
+   ],
+   "playlist_tracks": [
+    [
+     1,
+     1,
+     "/music/A/1.flac",
+     0
+    ]
+   ],
+   "listing": {
+    "name": [
+     {
+      "id": 2,
+      "name": "Chill",
+      "created": 1700000300,
+      "color": null,
+      "track_count": 0
+     },
+     {
+      "id": 1,
+      "name": "Road Trip",
+      "created": 1700000100,
+      "color": null,
+      "track_count": 1
+     },
+     {
+      "id": 3,
+      "name": "Ελληνικά",
+      "created": 1700000200,
+      "color": null,
+      "track_count": 0
+     }
+    ],
+    "date": [
+     {
+      "id": 2,
+      "name": "Chill",
+      "created": 1700000300,
+      "color": null,
+      "track_count": 0
+     },
+     {
+      "id": 3,
+      "name": "Ελληνικά",
+      "created": 1700000200,
+      "color": null,
+      "track_count": 0
+     },
+     {
+      "id": 1,
+      "name": "Road Trip",
+      "created": 1700000100,
+      "color": null,
+      "track_count": 1
+     }
+    ]
+   },
+   "tracks": {
+    "2": [],
+    "1": [
+     "/music/A/1.flac"
+    ],
+    "3": []
+   }
+  },
+  {
+   "method": "add_track_to_playlist",
+   "args": [
+    1,
+    "/music/A/2.flac"
+   ],
+   "created": null,
+   "result": null,
+   "error": null,
+   "playlists": [
+    [
+     1,
+     "Road Trip",
+     1700000100,
+     null
+    ],
+    [
+     2,
+     "Chill",
+     1700000300,
+     null
+    ],
+    [
+     3,
+     "Ελληνικά",
+     1700000200,
+     null
+    ]
+   ],
+   "playlist_tracks": [
+    [
+     1,
+     1,
+     "/music/A/1.flac",
+     0
+    ],
+    [
+     2,
+     1,
+     "/music/A/2.flac",
+     1
+    ]
+   ],
+   "listing": {
+    "name": [
+     {
+      "id": 2,
+      "name": "Chill",
+      "created": 1700000300,
+      "color": null,
+      "track_count": 0
+     },
+     {
+      "id": 1,
+      "name": "Road Trip",
+      "created": 1700000100,
+      "color": null,
+      "track_count": 2
+     },
+     {
+      "id": 3,
+      "name": "Ελληνικά",
+      "created": 1700000200,
+      "color": null,
+      "track_count": 0
+     }
+    ],
+    "date": [
+     {
+      "id": 2,
+      "name": "Chill",
+      "created": 1700000300,
+      "color": null,
+      "track_count": 0
+     },
+     {
+      "id": 3,
+      "name": "Ελληνικά",
+      "created": 1700000200,
+      "color": null,
+      "track_count": 0
+     },
+     {
+      "id": 1,
+      "name": "Road Trip",
+      "created": 1700000100,
+      "color": null,
+      "track_count": 2
+     }
+    ]
+   },
+   "tracks": {
+    "2": [],
+    "1": [
+     "/music/A/1.flac",
+     "/music/A/2.flac"
+    ],
+    "3": []
+   }
+  },
+  {
+   "method": "add_track_to_playlist",
+   "args": [
+    1,
+    "/music/A/3.flac"
+   ],
+   "created": null,
+   "result": null,
+   "error": null,
+   "playlists": [
+    [
+     1,
+     "Road Trip",
+     1700000100,
+     null
+    ],
+    [
+     2,
+     "Chill",
+     1700000300,
+     null
+    ],
+    [
+     3,
+     "Ελληνικά",
+     1700000200,
+     null
+    ]
+   ],
+   "playlist_tracks": [
+    [
+     1,
+     1,
+     "/music/A/1.flac",
+     0
+    ],
+    [
+     2,
+     1,
+     "/music/A/2.flac",
+     1
+    ],
+    [
+     3,
+     1,
+     "/music/A/3.flac",
+     2
+    ]
+   ],
+   "listing": {
+    "name": [
+     {
+      "id": 2,
+      "name": "Chill",
+      "created": 1700000300,
+      "color": null,
+      "track_count": 0
+     },
+     {
+      "id": 1,
+      "name": "Road Trip",
+      "created": 1700000100,
+      "color": null,
+      "track_count": 3
+     },
+     {
+      "id": 3,
+      "name": "Ελληνικά",
+      "created": 1700000200,
+      "color": null,
+      "track_count": 0
+     }
+    ],
+    "date": [
+     {
+      "id": 2,
+      "name": "Chill",
+      "created": 1700000300,
+      "color": null,
+      "track_count": 0
+     },
+     {
+      "id": 3,
+      "name": "Ελληνικά",
+      "created": 1700000200,
+      "color": null,
+      "track_count": 0
+     },
+     {
+      "id": 1,
+      "name": "Road Trip",
+      "created": 1700000100,
+      "color": null,
+      "track_count": 3
+     }
+    ]
+   },
+   "tracks": {
+    "2": [],
+    "1": [
+     "/music/A/1.flac",
+     "/music/A/2.flac",
+     "/music/A/3.flac"
+    ],
+    "3": []
+   }
+  },
+  {
+   "method": "add_track_to_playlist",
+   "args": [
+    1,
+    "/music/A/4.flac"
+   ],
+   "created": null,
+   "result": null,
+   "error": null,
+   "playlists": [
+    [
+     1,
+     "Road Trip",
+     1700000100,
+     null
+    ],
+    [
+     2,
+     "Chill",
+     1700000300,
+     null
+    ],
+    [
+     3,
+     "Ελληνικά",
+     1700000200,
+     null
+    ]
+   ],
+   "playlist_tracks": [
+    [
+     1,
+     1,
+     "/music/A/1.flac",
+     0
+    ],
+    [
+     2,
+     1,
+     "/music/A/2.flac",
+     1
+    ],
+    [
+     3,
+     1,
+     "/music/A/3.flac",
+     2
+    ],
+    [
+     4,
+     1,
+     "/music/A/4.flac",
+     3
+    ]
+   ],
+   "listing": {
+    "name": [
+     {
+      "id": 2,
+      "name": "Chill",
+      "created": 1700000300,
+      "color": null,
+      "track_count": 0
+     },
+     {
+      "id": 1,
+      "name": "Road Trip",
+      "created": 1700000100,
+      "color": null,
+      "track_count": 4
+     },
+     {
+      "id": 3,
+      "name": "Ελληνικά",
+      "created": 1700000200,
+      "color": null,
+      "track_count": 0
+     }
+    ],
+    "date": [
+     {
+      "id": 2,
+      "name": "Chill",
+      "created": 1700000300,
+      "color": null,
+      "track_count": 0
+     },
+     {
+      "id": 3,
+      "name": "Ελληνικά",
+      "created": 1700000200,
+      "color": null,
+      "track_count": 0
+     },
+     {
+      "id": 1,
+      "name": "Road Trip",
+      "created": 1700000100,
+      "color": null,
+      "track_count": 4
+     }
+    ]
+   },
+   "tracks": {
+    "2": [],
+    "1": [
+     "/music/A/1.flac",
+     "/music/A/2.flac",
+     "/music/A/3.flac",
+     "/music/A/4.flac"
+    ],
+    "3": []
+   }
+  },
+  {
+   "method": "add_track_to_playlist",
+   "args": [
+    1,
+    "/music/A/2.flac"
+   ],
+   "created": null,
+   "result": null,
+   "error": null,
+   "playlists": [
+    [
+     1,
+     "Road Trip",
+     1700000100,
+     null
+    ],
+    [
+     2,
+     "Chill",
+     1700000300,
+     null
+    ],
+    [
+     3,
+     "Ελληνικά",
+     1700000200,
+     null
+    ]
+   ],
+   "playlist_tracks": [
+    [
+     1,
+     1,
+     "/music/A/1.flac",
+     0
+    ],
+    [
+     2,
+     1,
+     "/music/A/2.flac",
+     1
+    ],
+    [
+     3,
+     1,
+     "/music/A/3.flac",
+     2
+    ],
+    [
+     4,
+     1,
+     "/music/A/4.flac",
+     3
+    ]
+   ],
+   "listing": {
+    "name": [
+     {
+      "id": 2,
+      "name": "Chill",
+      "created": 1700000300,
+      "color": null,
+      "track_count": 0
+     },
+     {
+      "id": 1,
+      "name": "Road Trip",
+      "created": 1700000100,
+      "color": null,
+      "track_count": 4
+     },
+     {
+      "id": 3,
+      "name": "Ελληνικά",
+      "created": 1700000200,
+      "color": null,
+      "track_count": 0
+     }
+    ],
+    "date": [
+     {
+      "id": 2,
+      "name": "Chill",
+      "created": 1700000300,
+      "color": null,
+      "track_count": 0
+     },
+     {
+      "id": 3,
+      "name": "Ελληνικά",
+      "created": 1700000200,
+      "color": null,
+      "track_count": 0
+     },
+     {
+      "id": 1,
+      "name": "Road Trip",
+      "created": 1700000100,
+      "color": null,
+      "track_count": 4
+     }
+    ]
+   },
+   "tracks": {
+    "2": [],
+    "1": [
+     "/music/A/1.flac",
+     "/music/A/2.flac",
+     "/music/A/3.flac",
+     "/music/A/4.flac"
+    ],
+    "3": []
+   }
+  },
+  {
+   "method": "add_track_to_playlist",
+   "args": [
+    2,
+    "/music/A/3.flac"
+   ],
+   "created": null,
+   "result": null,
+   "error": null,
+   "playlists": [
+    [
+     1,
+     "Road Trip",
+     1700000100,
+     null
+    ],
+    [
+     2,
+     "Chill",
+     1700000300,
+     null
+    ],
+    [
+     3,
+     "Ελληνικά",
+     1700000200,
+     null
+    ]
+   ],
+   "playlist_tracks": [
+    [
+     1,
+     1,
+     "/music/A/1.flac",
+     0
+    ],
+    [
+     2,
+     1,
+     "/music/A/2.flac",
+     1
+    ],
+    [
+     3,
+     1,
+     "/music/A/3.flac",
+     2
+    ],
+    [
+     4,
+     1,
+     "/music/A/4.flac",
+     3
+    ],
+    [
+     6,
+     2,
+     "/music/A/3.flac",
+     0
+    ]
+   ],
+   "listing": {
+    "name": [
+     {
+      "id": 2,
+      "name": "Chill",
+      "created": 1700000300,
+      "color": null,
+      "track_count": 1
+     },
+     {
+      "id": 1,
+      "name": "Road Trip",
+      "created": 1700000100,
+      "color": null,
+      "track_count": 4
+     },
+     {
+      "id": 3,
+      "name": "Ελληνικά",
+      "created": 1700000200,
+      "color": null,
+      "track_count": 0
+     }
+    ],
+    "date": [
+     {
+      "id": 2,
+      "name": "Chill",
+      "created": 1700000300,
+      "color": null,
+      "track_count": 1
+     },
+     {
+      "id": 3,
+      "name": "Ελληνικά",
+      "created": 1700000200,
+      "color": null,
+      "track_count": 0
+     },
+     {
+      "id": 1,
+      "name": "Road Trip",
+      "created": 1700000100,
+      "color": null,
+      "track_count": 4
+     }
+    ]
+   },
+   "tracks": {
+    "2": [
+     "/music/A/3.flac"
+    ],
+    "1": [
+     "/music/A/1.flac",
+     "/music/A/2.flac",
+     "/music/A/3.flac",
+     "/music/A/4.flac"
+    ],
+    "3": []
+   }
+  },
+  {
+   "method": "add_track_to_playlist",
+   "args": [
+    2,
+    "/music/A/5.flac"
+   ],
+   "created": null,
+   "result": null,
+   "error": null,
+   "playlists": [
+    [
+     1,
+     "Road Trip",
+     1700000100,
+     null
+    ],
+    [
+     2,
+     "Chill",
+     1700000300,
+     null
+    ],
+    [
+     3,
+     "Ελληνικά",
+     1700000200,
+     null
+    ]
+   ],
+   "playlist_tracks": [
+    [
+     1,
+     1,
+     "/music/A/1.flac",
+     0
+    ],
+    [
+     2,
+     1,
+     "/music/A/2.flac",
+     1
+    ],
+    [
+     3,
+     1,
+     "/music/A/3.flac",
+     2
+    ],
+    [
+     4,
+     1,
+     "/music/A/4.flac",
+     3
+    ],
+    [
+     6,
+     2,
+     "/music/A/3.flac",
+     0
+    ],
+    [
+     7,
+     2,
+     "/music/A/5.flac",
+     1
+    ]
+   ],
+   "listing": {
+    "name": [
+     {
+      "id": 2,
+      "name": "Chill",
+      "created": 1700000300,
+      "color": null,
+      "track_count": 2
+     },
+     {
+      "id": 1,
+      "name": "Road Trip",
+      "created": 1700000100,
+      "color": null,
+      "track_count": 4
+     },
+     {
+      "id": 3,
+      "name": "Ελληνικά",
+      "created": 1700000200,
+      "color": null,
+      "track_count": 0
+     }
+    ],
+    "date": [
+     {
+      "id": 2,
+      "name": "Chill",
+      "created": 1700000300,
+      "color": null,
+      "track_count": 2
+     },
+     {
+      "id": 3,
+      "name": "Ελληνικά",
+      "created": 1700000200,
+      "color": null,
+      "track_count": 0
+     },
+     {
+      "id": 1,
+      "name": "Road Trip",
+      "created": 1700000100,
+      "color": null,
+      "track_count": 4
+     }
+    ]
+   },
+   "tracks": {
+    "2": [
+     "/music/A/3.flac",
+     "/music/A/5.flac"
+    ],
+    "1": [
+     "/music/A/1.flac",
+     "/music/A/2.flac",
+     "/music/A/3.flac",
+     "/music/A/4.flac"
+    ],
+    "3": []
+   }
+  },
+  {
+   "method": "add_track_to_playlist",
+   "args": [
+    1,
+    "/not/in/library.mp3"
+   ],
+   "created": null,
+   "result": null,
+   "error": null,
+   "playlists": [
+    [
+     1,
+     "Road Trip",
+     1700000100,
+     null
+    ],
+    [
+     2,
+     "Chill",
+     1700000300,
+     null
+    ],
+    [
+     3,
+     "Ελληνικά",
+     1700000200,
+     null
+    ]
+   ],
+   "playlist_tracks": [
+    [
+     1,
+     1,
+     "/music/A/1.flac",
+     0
+    ],
+    [
+     2,
+     1,
+     "/music/A/2.flac",
+     1
+    ],
+    [
+     3,
+     1,
+     "/music/A/3.flac",
+     2
+    ],
+    [
+     4,
+     1,
+     "/music/A/4.flac",
+     3
+    ],
+    [
+     6,
+     2,
+     "/music/A/3.flac",
+     0
+    ],
+    [
+     7,
+     2,
+     "/music/A/5.flac",
+     1
+    ],
+    [
+     8,
+     1,
+     "/not/in/library.mp3",
+     4
+    ]
+   ],
+   "listing": {
+    "name": [
+     {
+      "id": 2,
+      "name": "Chill",
+      "created": 1700000300,
+      "color": null,
+      "track_count": 2
+     },
+     {
+      "id": 1,
+      "name": "Road Trip",
+      "created": 1700000100,
+      "color": null,
+      "track_count": 5
+     },
+     {
+      "id": 3,
+      "name": "Ελληνικά",
+      "created": 1700000200,
+      "color": null,
+      "track_count": 0
+     }
+    ],
+    "date": [
+     {
+      "id": 2,
+      "name": "Chill",
+      "created": 1700000300,
+      "color": null,
+      "track_count": 2
+     },
+     {
+      "id": 3,
+      "name": "Ελληνικά",
+      "created": 1700000200,
+      "color": null,
+      "track_count": 0
+     },
+     {
+      "id": 1,
+      "name": "Road Trip",
+      "created": 1700000100,
+      "color": null,
+      "track_count": 5
+     }
+    ]
+   },
+   "tracks": {
+    "2": [
+     "/music/A/3.flac",
+     "/music/A/5.flac"
+    ],
+    "1": [
+     "/music/A/1.flac",
+     "/music/A/2.flac",
+     "/music/A/3.flac",
+     "/music/A/4.flac"
+    ],
+    "3": []
+   }
+  },
+  {
+   "method": "move_playlist_track",
+   "args": [
+    1,
+    0,
+    2
+   ],
+   "created": null,
+   "result": null,
+   "error": null,
+   "playlists": [
+    [
+     1,
+     "Road Trip",
+     1700000100,
+     null
+    ],
+    [
+     2,
+     "Chill",
+     1700000300,
+     null
+    ],
+    [
+     3,
+     "Ελληνικά",
+     1700000200,
+     null
+    ]
+   ],
+   "playlist_tracks": [
+    [
+     1,
+     1,
+     "/music/A/1.flac",
+     2
+    ],
+    [
+     2,
+     1,
+     "/music/A/2.flac",
+     0
+    ],
+    [
+     3,
+     1,
+     "/music/A/3.flac",
+     1
+    ],
+    [
+     4,
+     1,
+     "/music/A/4.flac",
+     3
+    ],
+    [
+     6,
+     2,
+     "/music/A/3.flac",
+     0
+    ],
+    [
+     7,
+     2,
+     "/music/A/5.flac",
+     1
+    ]
+   ],
+   "listing": {
+    "name": [
+     {
+      "id": 2,
+      "name": "Chill",
+      "created": 1700000300,
+      "color": null,
+      "track_count": 2
+     },
+     {
+      "id": 1,
+      "name": "Road Trip",
+      "created": 1700000100,
+      "color": null,
+      "track_count": 4
+     },
+     {
+      "id": 3,
+      "name": "Ελληνικά",
+      "created": 1700000200,
+      "color": null,
+      "track_count": 0
+     }
+    ],
+    "date": [
+     {
+      "id": 2,
+      "name": "Chill",
+      "created": 1700000300,
+      "color": null,
+      "track_count": 2
+     },
+     {
+      "id": 3,
+      "name": "Ελληνικά",
+      "created": 1700000200,
+      "color": null,
+      "track_count": 0
+     },
+     {
+      "id": 1,
+      "name": "Road Trip",
+      "created": 1700000100,
+      "color": null,
+      "track_count": 4
+     }
+    ]
+   },
+   "tracks": {
+    "2": [
+     "/music/A/3.flac",
+     "/music/A/5.flac"
+    ],
+    "1": [
+     "/music/A/2.flac",
+     "/music/A/3.flac",
+     "/music/A/1.flac",
+     "/music/A/4.flac"
+    ],
+    "3": []
+   }
+  },
+  {
+   "method": "move_playlist_track",
+   "args": [
+    1,
+    3,
+    0
+   ],
+   "created": null,
+   "result": null,
+   "error": null,
+   "playlists": [
+    [
+     1,
+     "Road Trip",
+     1700000100,
+     null
+    ],
+    [
+     2,
+     "Chill",
+     1700000300,
+     null
+    ],
+    [
+     3,
+     "Ελληνικά",
+     1700000200,
+     null
+    ]
+   ],
+   "playlist_tracks": [
+    [
+     1,
+     1,
+     "/music/A/1.flac",
+     3
+    ],
+    [
+     2,
+     1,
+     "/music/A/2.flac",
+     1
+    ],
+    [
+     3,
+     1,
+     "/music/A/3.flac",
+     2
+    ],
+    [
+     4,
+     1,
+     "/music/A/4.flac",
+     0
+    ],
+    [
+     6,
+     2,
+     "/music/A/3.flac",
+     0
+    ],
+    [
+     7,
+     2,
+     "/music/A/5.flac",
+     1
+    ]
+   ],
+   "listing": {
+    "name": [
+     {
+      "id": 2,
+      "name": "Chill",
+      "created": 1700000300,
+      "color": null,
+      "track_count": 2
+     },
+     {
+      "id": 1,
+      "name": "Road Trip",
+      "created": 1700000100,
+      "color": null,
+      "track_count": 4
+     },
+     {
+      "id": 3,
+      "name": "Ελληνικά",
+      "created": 1700000200,
+      "color": null,
+      "track_count": 0
+     }
+    ],
+    "date": [
+     {
+      "id": 2,
+      "name": "Chill",
+      "created": 1700000300,
+      "color": null,
+      "track_count": 2
+     },
+     {
+      "id": 3,
+      "name": "Ελληνικά",
+      "created": 1700000200,
+      "color": null,
+      "track_count": 0
+     },
+     {
+      "id": 1,
+      "name": "Road Trip",
+      "created": 1700000100,
+      "color": null,
+      "track_count": 4
+     }
+    ]
+   },
+   "tracks": {
+    "2": [
+     "/music/A/3.flac",
+     "/music/A/5.flac"
+    ],
+    "1": [
+     "/music/A/4.flac",
+     "/music/A/2.flac",
+     "/music/A/3.flac",
+     "/music/A/1.flac"
+    ],
+    "3": []
+   }
+  },
+  {
+   "method": "move_playlist_track",
+   "args": [
+    1,
+    10,
+    -5
+   ],
+   "created": null,
+   "result": null,
+   "error": null,
+   "playlists": [
+    [
+     1,
+     "Road Trip",
+     1700000100,
+     null
+    ],
+    [
+     2,
+     "Chill",
+     1700000300,
+     null
+    ],
+    [
+     3,
+     "Ελληνικά",
+     1700000200,
+     null
+    ]
+   ],
+   "playlist_tracks": [
+    [
+     1,
+     1,
+     "/music/A/1.flac",
+     0
+    ],
+    [
+     2,
+     1,
+     "/music/A/2.flac",
+     2
+    ],
+    [
+     3,
+     1,
+     "/music/A/3.flac",
+     3
+    ],
+    [
+     4,
+     1,
+     "/music/A/4.flac",
+     1
+    ],
+    [
+     6,
+     2,
+     "/music/A/3.flac",
+     0
+    ],
+    [
+     7,
+     2,
+     "/music/A/5.flac",
+     1
+    ]
+   ],
+   "listing": {
+    "name": [
+     {
+      "id": 2,
+      "name": "Chill",
+      "created": 1700000300,
+      "color": null,
+      "track_count": 2
+     },
+     {
+      "id": 1,
+      "name": "Road Trip",
+      "created": 1700000100,
+      "color": null,
+      "track_count": 4
+     },
+     {
+      "id": 3,
+      "name": "Ελληνικά",
+      "created": 1700000200,
+      "color": null,
+      "track_count": 0
+     }
+    ],
+    "date": [
+     {
+      "id": 2,
+      "name": "Chill",
+      "created": 1700000300,
+      "color": null,
+      "track_count": 2
+     },
+     {
+      "id": 3,
+      "name": "Ελληνικά",
+      "created": 1700000200,
+      "color": null,
+      "track_count": 0
+     },
+     {
+      "id": 1,
+      "name": "Road Trip",
+      "created": 1700000100,
+      "color": null,
+      "track_count": 4
+     }
+    ]
+   },
+   "tracks": {
+    "2": [
+     "/music/A/3.flac",
+     "/music/A/5.flac"
+    ],
+    "1": [
+     "/music/A/1.flac",
+     "/music/A/4.flac",
+     "/music/A/2.flac",
+     "/music/A/3.flac"
+    ],
+    "3": []
+   }
+  },
+  {
+   "method": "move_playlist_track",
+   "args": [
+    3,
+    0,
+    1
+   ],
+   "created": null,
+   "result": null,
+   "error": null,
+   "playlists": [
+    [
+     1,
+     "Road Trip",
+     1700000100,
+     null
+    ],
+    [
+     2,
+     "Chill",
+     1700000300,
+     null
+    ],
+    [
+     3,
+     "Ελληνικά",
+     1700000200,
+     null
+    ]
+   ],
+   "playlist_tracks": [
+    [
+     1,
+     1,
+     "/music/A/1.flac",
+     0
+    ],
+    [
+     2,
+     1,
+     "/music/A/2.flac",
+     2
+    ],
+    [
+     3,
+     1,
+     "/music/A/3.flac",
+     3
+    ],
+    [
+     4,
+     1,
+     "/music/A/4.flac",
+     1
+    ],
+    [
+     6,
+     2,
+     "/music/A/3.flac",
+     0
+    ],
+    [
+     7,
+     2,
+     "/music/A/5.flac",
+     1
+    ]
+   ],
+   "listing": {
+    "name": [
+     {
+      "id": 2,
+      "name": "Chill",
+      "created": 1700000300,
+      "color": null,
+      "track_count": 2
+     },
+     {
+      "id": 1,
+      "name": "Road Trip",
+      "created": 1700000100,
+      "color": null,
+      "track_count": 4
+     },
+     {
+      "id": 3,
+      "name": "Ελληνικά",
+      "created": 1700000200,
+      "color": null,
+      "track_count": 0
+     }
+    ],
+    "date": [
+     {
+      "id": 2,
+      "name": "Chill",
+      "created": 1700000300,
+      "color": null,
+      "track_count": 2
+     },
+     {
+      "id": 3,
+      "name": "Ελληνικά",
+      "created": 1700000200,
+      "color": null,
+      "track_count": 0
+     },
+     {
+      "id": 1,
+      "name": "Road Trip",
+      "created": 1700000100,
+      "color": null,
+      "track_count": 4
+     }
+    ]
+   },
+   "tracks": {
+    "2": [
+     "/music/A/3.flac",
+     "/music/A/5.flac"
+    ],
+    "1": [
+     "/music/A/1.flac",
+     "/music/A/4.flac",
+     "/music/A/2.flac",
+     "/music/A/3.flac"
+    ],
+    "3": []
+   }
+  },
+  {
+   "method": "remove_track_from_playlist",
+   "args": [
+    1,
+    "/music/A/3.flac"
+   ],
+   "created": null,
+   "result": null,
+   "error": null,
+   "playlists": [
+    [
+     1,
+     "Road Trip",
+     1700000100,
+     null
+    ],
+    [
+     2,
+     "Chill",
+     1700000300,
+     null
+    ],
+    [
+     3,
+     "Ελληνικά",
+     1700000200,
+     null
+    ]
+   ],
+   "playlist_tracks": [
+    [
+     1,
+     1,
+     "/music/A/1.flac",
+     0
+    ],
+    [
+     2,
+     1,
+     "/music/A/2.flac",
+     2
+    ],
+    [
+     4,
+     1,
+     "/music/A/4.flac",
+     1
+    ],
+    [
+     6,
+     2,
+     "/music/A/3.flac",
+     0
+    ],
+    [
+     7,
+     2,
+     "/music/A/5.flac",
+     1
+    ]
+   ],
+   "listing": {
+    "name": [
+     {
+      "id": 2,
+      "name": "Chill",
+      "created": 1700000300,
+      "color": null,
+      "track_count": 2
+     },
+     {
+      "id": 1,
+      "name": "Road Trip",
+      "created": 1700000100,
+      "color": null,
+      "track_count": 3
+     },
+     {
+      "id": 3,
+      "name": "Ελληνικά",
+      "created": 1700000200,
+      "color": null,
+      "track_count": 0
+     }
+    ],
+    "date": [
+     {
+      "id": 2,
+      "name": "Chill",
+      "created": 1700000300,
+      "color": null,
+      "track_count": 2
+     },
+     {
+      "id": 3,
+      "name": "Ελληνικά",
+      "created": 1700000200,
+      "color": null,
+      "track_count": 0
+     },
+     {
+      "id": 1,
+      "name": "Road Trip",
+      "created": 1700000100,
+      "color": null,
+      "track_count": 3
+     }
+    ]
+   },
+   "tracks": {
+    "2": [
+     "/music/A/3.flac",
+     "/music/A/5.flac"
+    ],
+    "1": [
+     "/music/A/1.flac",
+     "/music/A/4.flac",
+     "/music/A/2.flac"
+    ],
+    "3": []
+   }
+  },
+  {
+   "method": "remove_track_from_playlist",
+   "args": [
+    1,
+    "/never/added.mp3"
+   ],
+   "created": null,
+   "result": null,
+   "error": null,
+   "playlists": [
+    [
+     1,
+     "Road Trip",
+     1700000100,
+     null
+    ],
+    [
+     2,
+     "Chill",
+     1700000300,
+     null
+    ],
+    [
+     3,
+     "Ελληνικά",
+     1700000200,
+     null
+    ]
+   ],
+   "playlist_tracks": [
+    [
+     1,
+     1,
+     "/music/A/1.flac",
+     0
+    ],
+    [
+     2,
+     1,
+     "/music/A/2.flac",
+     2
+    ],
+    [
+     4,
+     1,
+     "/music/A/4.flac",
+     1
+    ],
+    [
+     6,
+     2,
+     "/music/A/3.flac",
+     0
+    ],
+    [
+     7,
+     2,
+     "/music/A/5.flac",
+     1
+    ]
+   ],
+   "listing": {
+    "name": [
+     {
+      "id": 2,
+      "name": "Chill",
+      "created": 1700000300,
+      "color": null,
+      "track_count": 2
+     },
+     {
+      "id": 1,
+      "name": "Road Trip",
+      "created": 1700000100,
+      "color": null,
+      "track_count": 3
+     },
+     {
+      "id": 3,
+      "name": "Ελληνικά",
+      "created": 1700000200,
+      "color": null,
+      "track_count": 0
+     }
+    ],
+    "date": [
+     {
+      "id": 2,
+      "name": "Chill",
+      "created": 1700000300,
+      "color": null,
+      "track_count": 2
+     },
+     {
+      "id": 3,
+      "name": "Ελληνικά",
+      "created": 1700000200,
+      "color": null,
+      "track_count": 0
+     },
+     {
+      "id": 1,
+      "name": "Road Trip",
+      "created": 1700000100,
+      "color": null,
+      "track_count": 3
+     }
+    ]
+   },
+   "tracks": {
+    "2": [
+     "/music/A/3.flac",
+     "/music/A/5.flac"
+    ],
+    "1": [
+     "/music/A/1.flac",
+     "/music/A/4.flac",
+     "/music/A/2.flac"
+    ],
+    "3": []
+   }
+  },
+  {
+   "method": "delete_tracks_by_paths",
+   "args": [
+    [
+     "/music/A/2.flac"
+    ]
+   ],
+   "created": null,
+   "result": null,
+   "error": null,
+   "playlists": [
+    [
+     1,
+     "Road Trip",
+     1700000100,
+     null
+    ],
+    [
+     2,
+     "Chill",
+     1700000300,
+     null
+    ],
+    [
+     3,
+     "Ελληνικά",
+     1700000200,
+     null
+    ]
+   ],
+   "playlist_tracks": [
+    [
+     1,
+     1,
+     "/music/A/1.flac",
+     0
+    ],
+    [
+     4,
+     1,
+     "/music/A/4.flac",
+     1
+    ],
+    [
+     6,
+     2,
+     "/music/A/3.flac",
+     0
+    ],
+    [
+     7,
+     2,
+     "/music/A/5.flac",
+     1
+    ]
+   ],
+   "listing": {
+    "name": [
+     {
+      "id": 2,
+      "name": "Chill",
+      "created": 1700000300,
+      "color": null,
+      "track_count": 2
+     },
+     {
+      "id": 1,
+      "name": "Road Trip",
+      "created": 1700000100,
+      "color": null,
+      "track_count": 2
+     },
+     {
+      "id": 3,
+      "name": "Ελληνικά",
+      "created": 1700000200,
+      "color": null,
+      "track_count": 0
+     }
+    ],
+    "date": [
+     {
+      "id": 2,
+      "name": "Chill",
+      "created": 1700000300,
+      "color": null,
+      "track_count": 2
+     },
+     {
+      "id": 3,
+      "name": "Ελληνικά",
+      "created": 1700000200,
+      "color": null,
+      "track_count": 0
+     },
+     {
+      "id": 1,
+      "name": "Road Trip",
+      "created": 1700000100,
+      "color": null,
+      "track_count": 2
+     }
+    ]
+   },
+   "tracks": {
+    "2": [
+     "/music/A/3.flac",
+     "/music/A/5.flac"
+    ],
+    "1": [
+     "/music/A/1.flac",
+     "/music/A/4.flac"
+    ],
+    "3": []
+   }
+  },
+  {
+   "method": "sql",
+   "args": [
+    "DELETE FROM tracks WHERE path = ?",
+    [
+     "/music/A/4.flac"
+    ]
+   ],
+   "created": null,
+   "result": null,
+   "error": null,
+   "playlists": [
+    [
+     1,
+     "Road Trip",
+     1700000100,
+     null
+    ],
+    [
+     2,
+     "Chill",
+     1700000300,
+     null
+    ],
+    [
+     3,
+     "Ελληνικά",
+     1700000200,
+     null
+    ]
+   ],
+   "playlist_tracks": [
+    [
+     1,
+     1,
+     "/music/A/1.flac",
+     0
+    ],
+    [
+     4,
+     1,
+     "/music/A/4.flac",
+     1
+    ],
+    [
+     6,
+     2,
+     "/music/A/3.flac",
+     0
+    ],
+    [
+     7,
+     2,
+     "/music/A/5.flac",
+     1
+    ]
+   ],
+   "listing": {
+    "name": [
+     {
+      "id": 2,
+      "name": "Chill",
+      "created": 1700000300,
+      "color": null,
+      "track_count": 2
+     },
+     {
+      "id": 1,
+      "name": "Road Trip",
+      "created": 1700000100,
+      "color": null,
+      "track_count": 2
+     },
+     {
+      "id": 3,
+      "name": "Ελληνικά",
+      "created": 1700000200,
+      "color": null,
+      "track_count": 0
+     }
+    ],
+    "date": [
+     {
+      "id": 2,
+      "name": "Chill",
+      "created": 1700000300,
+      "color": null,
+      "track_count": 2
+     },
+     {
+      "id": 3,
+      "name": "Ελληνικά",
+      "created": 1700000200,
+      "color": null,
+      "track_count": 0
+     },
+     {
+      "id": 1,
+      "name": "Road Trip",
+      "created": 1700000100,
+      "color": null,
+      "track_count": 2
+     }
+    ]
+   },
+   "tracks": {
+    "2": [
+     "/music/A/3.flac",
+     "/music/A/5.flac"
+    ],
+    "1": [
+     "/music/A/1.flac"
+    ],
+    "3": []
+   }
+  },
+  {
+   "method": "move_playlist_track",
+   "args": [
+    1,
+    0,
+    1
+   ],
+   "created": null,
+   "result": null,
+   "error": null,
+   "playlists": [
+    [
+     1,
+     "Road Trip",
+     1700000100,
+     null
+    ],
+    [
+     2,
+     "Chill",
+     1700000300,
+     null
+    ],
+    [
+     3,
+     "Ελληνικά",
+     1700000200,
+     null
+    ]
+   ],
+   "playlist_tracks": [
+    [
+     1,
+     1,
+     "/music/A/1.flac",
+     0
+    ],
+    [
+     6,
+     2,
+     "/music/A/3.flac",
+     0
+    ],
+    [
+     7,
+     2,
+     "/music/A/5.flac",
+     1
+    ]
+   ],
+   "listing": {
+    "name": [
+     {
+      "id": 2,
+      "name": "Chill",
+      "created": 1700000300,
+      "color": null,
+      "track_count": 2
+     },
+     {
+      "id": 1,
+      "name": "Road Trip",
+      "created": 1700000100,
+      "color": null,
+      "track_count": 1
+     },
+     {
+      "id": 3,
+      "name": "Ελληνικά",
+      "created": 1700000200,
+      "color": null,
+      "track_count": 0
+     }
+    ],
+    "date": [
+     {
+      "id": 2,
+      "name": "Chill",
+      "created": 1700000300,
+      "color": null,
+      "track_count": 2
+     },
+     {
+      "id": 3,
+      "name": "Ελληνικά",
+      "created": 1700000200,
+      "color": null,
+      "track_count": 0
+     },
+     {
+      "id": 1,
+      "name": "Road Trip",
+      "created": 1700000100,
+      "color": null,
+      "track_count": 1
+     }
+    ]
+   },
+   "tracks": {
+    "2": [
+     "/music/A/3.flac",
+     "/music/A/5.flac"
+    ],
+    "1": [
+     "/music/A/1.flac"
+    ],
+    "3": []
+   }
+  },
+  {
+   "method": "update_playlist",
+   "args": [
+    2,
+    "Chill Out",
+    "#FF5555"
+   ],
+   "created": null,
+   "result": null,
+   "error": null,
+   "playlists": [
+    [
+     1,
+     "Road Trip",
+     1700000100,
+     null
+    ],
+    [
+     2,
+     "Chill Out",
+     1700000300,
+     "#FF5555"
+    ],
+    [
+     3,
+     "Ελληνικά",
+     1700000200,
+     null
+    ]
+   ],
+   "playlist_tracks": [
+    [
+     1,
+     1,
+     "/music/A/1.flac",
+     0
+    ],
+    [
+     6,
+     2,
+     "/music/A/3.flac",
+     0
+    ],
+    [
+     7,
+     2,
+     "/music/A/5.flac",
+     1
+    ]
+   ],
+   "listing": {
+    "name": [
+     {
+      "id": 2,
+      "name": "Chill Out",
+      "created": 1700000300,
+      "color": "#FF5555",
+      "track_count": 2
+     },
+     {
+      "id": 1,
+      "name": "Road Trip",
+      "created": 1700000100,
+      "color": null,
+      "track_count": 1
+     },
+     {
+      "id": 3,
+      "name": "Ελληνικά",
+      "created": 1700000200,
+      "color": null,
+      "track_count": 0
+     }
+    ],
+    "date": [
+     {
+      "id": 2,
+      "name": "Chill Out",
+      "created": 1700000300,
+      "color": "#FF5555",
+      "track_count": 2
+     },
+     {
+      "id": 3,
+      "name": "Ελληνικά",
+      "created": 1700000200,
+      "color": null,
+      "track_count": 0
+     },
+     {
+      "id": 1,
+      "name": "Road Trip",
+      "created": 1700000100,
+      "color": null,
+      "track_count": 1
+     }
+    ]
+   },
+   "tracks": {
+    "2": [
+     "/music/A/3.flac",
+     "/music/A/5.flac"
+    ],
+    "1": [
+     "/music/A/1.flac"
+    ],
+    "3": []
+   }
+  },
+  {
+   "method": "update_playlist",
+   "args": [
+    2,
+    "",
+    null
+   ],
+   "created": null,
+   "result": null,
+   "error": null,
+   "playlists": [
+    [
+     1,
+     "Road Trip",
+     1700000100,
+     null
+    ],
+    [
+     2,
+     "Chill Out",
+     1700000300,
+     "#FF5555"
+    ],
+    [
+     3,
+     "Ελληνικά",
+     1700000200,
+     null
+    ]
+   ],
+   "playlist_tracks": [
+    [
+     1,
+     1,
+     "/music/A/1.flac",
+     0
+    ],
+    [
+     6,
+     2,
+     "/music/A/3.flac",
+     0
+    ],
+    [
+     7,
+     2,
+     "/music/A/5.flac",
+     1
+    ]
+   ],
+   "listing": {
+    "name": [
+     {
+      "id": 2,
+      "name": "Chill Out",
+      "created": 1700000300,
+      "color": "#FF5555",
+      "track_count": 2
+     },
+     {
+      "id": 1,
+      "name": "Road Trip",
+      "created": 1700000100,
+      "color": null,
+      "track_count": 1
+     },
+     {
+      "id": 3,
+      "name": "Ελληνικά",
+      "created": 1700000200,
+      "color": null,
+      "track_count": 0
+     }
+    ],
+    "date": [
+     {
+      "id": 2,
+      "name": "Chill Out",
+      "created": 1700000300,
+      "color": "#FF5555",
+      "track_count": 2
+     },
+     {
+      "id": 3,
+      "name": "Ελληνικά",
+      "created": 1700000200,
+      "color": null,
+      "track_count": 0
+     },
+     {
+      "id": 1,
+      "name": "Road Trip",
+      "created": 1700000100,
+      "color": null,
+      "track_count": 1
+     }
+    ]
+   },
+   "tracks": {
+    "2": [
+     "/music/A/3.flac",
+     "/music/A/5.flac"
+    ],
+    "1": [
+     "/music/A/1.flac"
+    ],
+    "3": []
+   }
+  },
+  {
+   "method": "update_playlist",
+   "args": [
+    2,
+    "ROAD TRIP",
+    null
+   ],
+   "created": null,
+   "result": null,
+   "error": "UNIQUE constraint failed: playlists.name",
+   "playlists": [
+    [
+     1,
+     "Road Trip",
+     1700000100,
+     null
+    ],
+    [
+     2,
+     "Chill Out",
+     1700000300,
+     "#FF5555"
+    ],
+    [
+     3,
+     "Ελληνικά",
+     1700000200,
+     null
+    ]
+   ],
+   "playlist_tracks": [
+    [
+     1,
+     1,
+     "/music/A/1.flac",
+     0
+    ],
+    [
+     6,
+     2,
+     "/music/A/3.flac",
+     0
+    ],
+    [
+     7,
+     2,
+     "/music/A/5.flac",
+     1
+    ]
+   ],
+   "listing": {
+    "name": [
+     {
+      "id": 2,
+      "name": "Chill Out",
+      "created": 1700000300,
+      "color": "#FF5555",
+      "track_count": 2
+     },
+     {
+      "id": 1,
+      "name": "Road Trip",
+      "created": 1700000100,
+      "color": null,
+      "track_count": 1
+     },
+     {
+      "id": 3,
+      "name": "Ελληνικά",
+      "created": 1700000200,
+      "color": null,
+      "track_count": 0
+     }
+    ],
+    "date": [
+     {
+      "id": 2,
+      "name": "Chill Out",
+      "created": 1700000300,
+      "color": "#FF5555",
+      "track_count": 2
+     },
+     {
+      "id": 3,
+      "name": "Ελληνικά",
+      "created": 1700000200,
+      "color": null,
+      "track_count": 0
+     },
+     {
+      "id": 1,
+      "name": "Road Trip",
+      "created": 1700000100,
+      "color": null,
+      "track_count": 1
+     }
+    ]
+   },
+   "tracks": {
+    "2": [
+     "/music/A/3.flac",
+     "/music/A/5.flac"
+    ],
+    "1": [
+     "/music/A/1.flac"
+    ],
+    "3": []
+   }
+  },
+  {
+   "method": "update_playlist",
+   "args": [
+    3,
+    null,
+    "#55FFFF"
+   ],
+   "created": null,
+   "result": null,
+   "error": null,
+   "playlists": [
+    [
+     1,
+     "Road Trip",
+     1700000100,
+     null
+    ],
+    [
+     2,
+     "Chill Out",
+     1700000300,
+     "#FF5555"
+    ],
+    [
+     3,
+     "Ελληνικά",
+     1700000200,
+     "#55FFFF"
+    ]
+   ],
+   "playlist_tracks": [
+    [
+     1,
+     1,
+     "/music/A/1.flac",
+     0
+    ],
+    [
+     6,
+     2,
+     "/music/A/3.flac",
+     0
+    ],
+    [
+     7,
+     2,
+     "/music/A/5.flac",
+     1
+    ]
+   ],
+   "listing": {
+    "name": [
+     {
+      "id": 2,
+      "name": "Chill Out",
+      "created": 1700000300,
+      "color": "#FF5555",
+      "track_count": 2
+     },
+     {
+      "id": 1,
+      "name": "Road Trip",
+      "created": 1700000100,
+      "color": null,
+      "track_count": 1
+     },
+     {
+      "id": 3,
+      "name": "Ελληνικά",
+      "created": 1700000200,
+      "color": "#55FFFF",
+      "track_count": 0
+     }
+    ],
+    "date": [
+     {
+      "id": 2,
+      "name": "Chill Out",
+      "created": 1700000300,
+      "color": "#FF5555",
+      "track_count": 2
+     },
+     {
+      "id": 3,
+      "name": "Ελληνικά",
+      "created": 1700000200,
+      "color": "#55FFFF",
+      "track_count": 0
+     },
+     {
+      "id": 1,
+      "name": "Road Trip",
+      "created": 1700000100,
+      "color": null,
+      "track_count": 1
+     }
+    ]
+   },
+   "tracks": {
+    "2": [
+     "/music/A/3.flac",
+     "/music/A/5.flac"
+    ],
+    "1": [
+     "/music/A/1.flac"
+    ],
+    "3": []
+   }
+  },
+  {
+   "method": "add_track_to_playlist",
+   "args": [
+    3,
+    "/music/A/7.flac"
+   ],
+   "created": null,
+   "result": null,
+   "error": null,
+   "playlists": [
+    [
+     1,
+     "Road Trip",
+     1700000100,
+     null
+    ],
+    [
+     2,
+     "Chill Out",
+     1700000300,
+     "#FF5555"
+    ],
+    [
+     3,
+     "Ελληνικά",
+     1700000200,
+     "#55FFFF"
+    ]
+   ],
+   "playlist_tracks": [
+    [
+     1,
+     1,
+     "/music/A/1.flac",
+     0
+    ],
+    [
+     6,
+     2,
+     "/music/A/3.flac",
+     0
+    ],
+    [
+     7,
+     2,
+     "/music/A/5.flac",
+     1
+    ],
+    [
+     9,
+     3,
+     "/music/A/7.flac",
+     0
+    ]
+   ],
+   "listing": {
+    "name": [
+     {
+      "id": 2,
+      "name": "Chill Out",
+      "created": 1700000300,
+      "color": "#FF5555",
+      "track_count": 2
+     },
+     {
+      "id": 1,
+      "name": "Road Trip",
+      "created": 1700000100,
+      "color": null,
+      "track_count": 1
+     },
+     {
+      "id": 3,
+      "name": "Ελληνικά",
+      "created": 1700000200,
+      "color": "#55FFFF",
+      "track_count": 1
+     }
+    ],
+    "date": [
+     {
+      "id": 2,
+      "name": "Chill Out",
+      "created": 1700000300,
+      "color": "#FF5555",
+      "track_count": 2
+     },
+     {
+      "id": 3,
+      "name": "Ελληνικά",
+      "created": 1700000200,
+      "color": "#55FFFF",
+      "track_count": 1
+     },
+     {
+      "id": 1,
+      "name": "Road Trip",
+      "created": 1700000100,
+      "color": null,
+      "track_count": 1
+     }
+    ]
+   },
+   "tracks": {
+    "2": [
+     "/music/A/3.flac",
+     "/music/A/5.flac"
+    ],
+    "1": [
+     "/music/A/1.flac"
+    ],
+    "3": [
+     "/music/A/7.flac"
+    ]
+   }
+  },
+  {
+   "method": "add_track_to_playlist",
+   "args": [
+    3,
+    "/music/A/6.flac"
+   ],
+   "created": null,
+   "result": null,
+   "error": null,
+   "playlists": [
+    [
+     1,
+     "Road Trip",
+     1700000100,
+     null
+    ],
+    [
+     2,
+     "Chill Out",
+     1700000300,
+     "#FF5555"
+    ],
+    [
+     3,
+     "Ελληνικά",
+     1700000200,
+     "#55FFFF"
+    ]
+   ],
+   "playlist_tracks": [
+    [
+     1,
+     1,
+     "/music/A/1.flac",
+     0
+    ],
+    [
+     6,
+     2,
+     "/music/A/3.flac",
+     0
+    ],
+    [
+     7,
+     2,
+     "/music/A/5.flac",
+     1
+    ],
+    [
+     9,
+     3,
+     "/music/A/7.flac",
+     0
+    ],
+    [
+     10,
+     3,
+     "/music/A/6.flac",
+     1
+    ]
+   ],
+   "listing": {
+    "name": [
+     {
+      "id": 2,
+      "name": "Chill Out",
+      "created": 1700000300,
+      "color": "#FF5555",
+      "track_count": 2
+     },
+     {
+      "id": 1,
+      "name": "Road Trip",
+      "created": 1700000100,
+      "color": null,
+      "track_count": 1
+     },
+     {
+      "id": 3,
+      "name": "Ελληνικά",
+      "created": 1700000200,
+      "color": "#55FFFF",
+      "track_count": 2
+     }
+    ],
+    "date": [
+     {
+      "id": 2,
+      "name": "Chill Out",
+      "created": 1700000300,
+      "color": "#FF5555",
+      "track_count": 2
+     },
+     {
+      "id": 3,
+      "name": "Ελληνικά",
+      "created": 1700000200,
+      "color": "#55FFFF",
+      "track_count": 2
+     },
+     {
+      "id": 1,
+      "name": "Road Trip",
+      "created": 1700000100,
+      "color": null,
+      "track_count": 1
+     }
+    ]
+   },
+   "tracks": {
+    "2": [
+     "/music/A/3.flac",
+     "/music/A/5.flac"
+    ],
+    "1": [
+     "/music/A/1.flac"
+    ],
+    "3": [
+     "/music/A/7.flac",
+     "/music/A/6.flac"
+    ]
+   }
+  },
+  {
+   "method": "delete_playlist",
+   "args": [
+    1
+   ],
+   "created": null,
+   "result": null,
+   "error": null,
+   "playlists": [
+    [
+     2,
+     "Chill Out",
+     1700000300,
+     "#FF5555"
+    ],
+    [
+     3,
+     "Ελληνικά",
+     1700000200,
+     "#55FFFF"
+    ]
+   ],
+   "playlist_tracks": [
+    [
+     6,
+     2,
+     "/music/A/3.flac",
+     0
+    ],
+    [
+     7,
+     2,
+     "/music/A/5.flac",
+     1
+    ],
+    [
+     9,
+     3,
+     "/music/A/7.flac",
+     0
+    ],
+    [
+     10,
+     3,
+     "/music/A/6.flac",
+     1
+    ]
+   ],
+   "listing": {
+    "name": [
+     {
+      "id": 2,
+      "name": "Chill Out",
+      "created": 1700000300,
+      "color": "#FF5555",
+      "track_count": 2
+     },
+     {
+      "id": 3,
+      "name": "Ελληνικά",
+      "created": 1700000200,
+      "color": "#55FFFF",
+      "track_count": 2
+     }
+    ],
+    "date": [
+     {
+      "id": 2,
+      "name": "Chill Out",
+      "created": 1700000300,
+      "color": "#FF5555",
+      "track_count": 2
+     },
+     {
+      "id": 3,
+      "name": "Ελληνικά",
+      "created": 1700000200,
+      "color": "#55FFFF",
+      "track_count": 2
+     }
+    ]
+   },
+   "tracks": {
+    "2": [
+     "/music/A/3.flac",
+     "/music/A/5.flac"
+    ],
+    "3": [
+     "/music/A/7.flac",
+     "/music/A/6.flac"
+    ]
+   }
+  },
+  {
+   "method": "delete_playlist",
+   "args": [
+    99
+   ],
+   "created": null,
+   "result": null,
+   "error": null,
+   "playlists": [
+    [
+     2,
+     "Chill Out",
+     1700000300,
+     "#FF5555"
+    ],
+    [
+     3,
+     "Ελληνικά",
+     1700000200,
+     "#55FFFF"
+    ]
+   ],
+   "playlist_tracks": [
+    [
+     6,
+     2,
+     "/music/A/3.flac",
+     0
+    ],
+    [
+     7,
+     2,
+     "/music/A/5.flac",
+     1
+    ],
+    [
+     9,
+     3,
+     "/music/A/7.flac",
+     0
+    ],
+    [
+     10,
+     3,
+     "/music/A/6.flac",
+     1
+    ]
+   ],
+   "listing": {
+    "name": [
+     {
+      "id": 2,
+      "name": "Chill Out",
+      "created": 1700000300,
+      "color": "#FF5555",
+      "track_count": 2
+     },
+     {
+      "id": 3,
+      "name": "Ελληνικά",
+      "created": 1700000200,
+      "color": "#55FFFF",
+      "track_count": 2
+     }
+    ],
+    "date": [
+     {
+      "id": 2,
+      "name": "Chill Out",
+      "created": 1700000300,
+      "color": "#FF5555",
+      "track_count": 2
+     },
+     {
+      "id": 3,
+      "name": "Ελληνικά",
+      "created": 1700000200,
+      "color": "#55FFFF",
+      "track_count": 2
+     }
+    ]
+   },
+   "tracks": {
+    "2": [
+     "/music/A/3.flac",
+     "/music/A/5.flac"
+    ],
+    "3": [
+     "/music/A/7.flac",
+     "/music/A/6.flac"
+    ]
+   }
+  }
+ ],
+ "searches": {
+  "": {
+   "closest": false,
+   "names": [
+    "Chill Out",
+    "Road Trip",
+    "Ελληνικά"
+   ]
+  },
+  "chill": {
+   "closest": false,
+   "names": [
+    "Chill Out"
+   ]
+  },
+  "TRIP": {
+   "closest": false,
+   "names": [
+    "Road Trip"
+   ]
+  },
+  "rood trap": {
+   "closest": true,
+   "names": [
+    "Road Trip"
+   ]
+  },
+  "zzzz": {
+   "closest": true,
+   "names": []
+  }
+ }
+}

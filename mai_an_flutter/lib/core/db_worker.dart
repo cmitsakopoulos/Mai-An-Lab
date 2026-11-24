@@ -121,7 +121,10 @@ class DbWorker {
         out.send((id, true, job(db)));
       } catch (e, st) {
         // Covers both a failing query and a result that can't cross isolates.
-        out.send((id, false, ('$e', '$st')));
+        // SQLite's own message alone ("UNIQUE constraint failed: …"), as
+        // str() of Python's sqlite3 errors gives it: the screens show it.
+        final text = e is SqliteException ? e.message : '$e';
+        out.send((id, false, (text, '$st')));
       }
     });
   }

@@ -1,0 +1,1172 @@
+{
+ "genres": [
+  {
+   "tag": "",
+   "color": "#8A93A0",
+   "group": [
+    "",
+    ""
+   ]
+  },
+  {
+   "tag": "rock",
+   "color": "#40C4FF",
+   "group": [
+    "Rock",
+    "Rock"
+   ]
+  },
+  {
+   "tag": "Classic Rock",
+   "color": "#40C4FF",
+   "group": [
+    "Rock",
+    "Rock"
+   ]
+  },
+  {
+   "tag": "alternative rock",
+   "color": "#7C4DFF",
+   "group": [
+    "Alt",
+    "Alt"
+   ]
+  },
+  {
+   "tag": "indierock",
+   "color": "#7C4DFF",
+   "group": [
+    "Alt",
+    "Alt"
+   ]
+  },
+  {
+   "tag": "hardrock",
+   "color": "#FF5252",
+   "group": [
+    "Metal",
+    "Metal"
+   ]
+  },
+  {
+   "tag": "hard rock",
+   "color": "#FF5252",
+   "group": [
+    "Metal",
+    "Metal"
+   ]
+  },
+  {
+   "tag": "newwave",
+   "color": "#7C4DFF",
+   "group": [
+    "Alt",
+    "Alt"
+   ]
+  },
+  {
+   "tag": "new wave",
+   "color": "#7C4DFF",
+   "group": [
+    "Alt",
+    "Alt"
+   ]
+  },
+  {
+   "tag": "postpunk",
+   "color": "#7C4DFF",
+   "group": [
+    "Alt",
+    "Alt"
+   ]
+  },
+  {
+   "tag": "punk",
+   "color": "#7C4DFF",
+   "group": [
+    "Alt",
+    "Alt"
+   ]
+  },
+  {
+   "tag": "shoegaze",
+   "color": "#7C4DFF",
+   "group": [
+    "Alt",
+    "Alt"
+   ]
+  },
+  {
+   "tag": "house",
+   "color": "#76FF03",
+   "group": [
+    "Electronic",
+    "Electronic"
+   ]
+  },
+  {
+   "tag": "deephouse",
+   "color": "#76FF03",
+   "group": [
+    "Electronic",
+    "Electronic"
+   ]
+  },
+  {
+   "tag": "techno",
+   "color": "#76FF03",
+   "group": [
+    "Electronic",
+    "Electronic"
+   ]
+  },
+  {
+   "tag": "entechno",
+   "color": "#B388FF",
+   "group": [
+    "Folk/Cntry",
+    "Folk/Cntry"
+   ]
+  },
+  {
+   "tag": "Έντεχνο",
+   "color": "#B388FF",
+   "group": [
+    "Folk/Cntry",
+    "Folk/Cntry"
+   ]
+  },
+  {
+   "tag": "laiko",
+   "color": "#B388FF",
+   "group": [
+    "Folk/Cntry",
+    "Folk/Cntry"
+   ]
+  },
+  {
+   "tag": "λαϊκό",
+   "color": "#B388FF",
+   "group": [
+    "Folk/Cntry",
+    "Folk/Cntry"
+   ]
+  },
+  {
+   "tag": "laïka",
+   "color": "#B388FF",
+   "group": [
+    "Folk/Cntry",
+    "Folk/Cntry"
+   ]
+  },
+  {
+   "tag": "rebetiko",
+   "color": "#B388FF",
+   "group": [
+    "Folk/Cntry",
+    "Folk/Cntry"
+   ]
+  },
+  {
+   "tag": "greek",
+   "color": "#FF80AB",
+   "group": [
+    "Pop",
+    "Pop"
+   ]
+  },
+  {
+   "tag": "greekfolk",
+   "color": "#B388FF",
+   "group": [
+    "Folk/Cntry",
+    "Folk/Cntry"
+   ]
+  },
+  {
+   "tag": "greek pop",
+   "color": "#FF80AB",
+   "group": [
+    "Pop",
+    "Pop"
+   ]
+  },
+  {
+   "tag": "pop",
+   "color": "#FF80AB",
+   "group": [
+    "Pop",
+    "Pop"
+   ]
+  },
+  {
+   "tag": "dancepop",
+   "color": "#FF80AB",
+   "group": [
+    "Pop",
+    "Pop"
+   ]
+  },
+  {
+   "tag": "synthpop",
+   "color": "#FF80AB",
+   "group": [
+    "Pop",
+    "Pop"
+   ]
+  },
+  {
+   "tag": "folkpop",
+   "color": "#B388FF",
+   "group": [
+    "Folk/Cntry",
+    "Folk/Cntry"
+   ]
+  },
+  {
+   "tag": "kpop",
+   "color": "#FF80AB",
+   "group": [
+    "Pop",
+    "Pop"
+   ]
+  },
+  {
+   "tag": "k-pop",
+   "color": "#E040FB",
+   "group": [
+    "Asian-Pop",
+    "Asian-Pop"
+   ]
+  },
+  {
+   "tag": "jpop",
+   "color": "#E040FB",
+   "group": [
+    "Asian-Pop",
+    "Asian-Pop"
+   ]
+  },
+  {
+   "tag": "mandopop",
+   "color": "#E040FB",
+   "group": [
+    "Asian-Pop",
+    "Asian-Pop"
+   ]
+  },
+  {
+   "tag": "hiphop",
+   "color": "#FFD740",
+   "group": [
+    "Hip-Hop",
+    "Hip-Hop"
+   ]
+  },
+  {
+   "tag": "hip hop",
+   "color": "#FFD740",
+   "group": [
+    "Hip-Hop",
+    "Hip-Hop"
+   ]
+  },
+  {
+   "tag": "alternativehiphop",
+   "color": "#FFD740",
+   "group": [
+    "Hip-Hop",
+    "Hip-Hop"
+   ]
+  },
+  {
+   "tag": "rap",
+   "color": "#FFD740",
+   "group": [
+    "Hip-Hop",
+    "Hip-Hop"
+   ]
+  },
+  {
+   "tag": "poprap",
+   "color": "#FFD740",
+   "group": [
+    "Hip-Hop",
+    "Hip-Hop"
+   ]
+  },
+  {
+   "tag": "trap",
+   "color": "#FFD740",
+   "group": [
+    "Hip-Hop",
+    "Hip-Hop"
+   ]
+  },
+  {
+   "tag": "drill",
+   "color": "#FFD740",
+   "group": [
+    "Hip-Hop",
+    "Hip-Hop"
+   ]
+  },
+  {
+   "tag": "grime",
+   "color": "#FFD740",
+   "group": [
+    "Hip-Hop",
+    "Hip-Hop"
+   ]
+  },
+  {
+   "tag": "rnb",
+   "color": "#FF6E40",
+   "group": [
+    "Soul/R&B",
+    "Soul/R&B"
+   ]
+  },
+  {
+   "tag": "r&b",
+   "color": "#FF6E40",
+   "group": [
+    "Soul/R&B",
+    "Soul/R&B"
+   ]
+  },
+  {
+   "tag": "rhythmandblues",
+   "color": "#FF6E40",
+   "group": [
+    "Soul/R&B",
+    "Soul/R&B"
+   ]
+  },
+  {
+   "tag": "rhythm and blues",
+   "color": "#FF6E40",
+   "group": [
+    "Soul/R&B",
+    "Soul/R&B"
+   ]
+  },
+  {
+   "tag": "soul",
+   "color": "#FF6E40",
+   "group": [
+    "Soul/R&B",
+    "Soul/R&B"
+   ]
+  },
+  {
+   "tag": "neosoul",
+   "color": "#FF6E40",
+   "group": [
+    "Soul/R&B",
+    "Soul/R&B"
+   ]
+  },
+  {
+   "tag": "funk",
+   "color": "#FF6E40",
+   "group": [
+    "Soul/R&B",
+    "Soul/R&B"
+   ]
+  },
+  {
+   "tag": "jazz",
+   "color": "#26C6DA",
+   "group": [
+    "Jazz",
+    "Jazz"
+   ]
+  },
+  {
+   "tag": "jazzfunk",
+   "color": "#FF6E40",
+   "group": [
+    "Soul/R&B",
+    "Soul/R&B"
+   ]
+  },
+  {
+   "tag": "blues",
+   "color": "#B388FF",
+   "group": [
+    "Folk/Cntry",
+    "Folk/Cntry"
+   ]
+  },
+  {
+   "tag": "bluesrock",
+   "color": "#B388FF",
+   "group": [
+    "Folk/Cntry",
+    "Folk/Cntry"
+   ]
+  },
+  {
+   "tag": "country",
+   "color": "#B388FF",
+   "group": [
+    "Folk/Cntry",
+    "Folk/Cntry"
+   ]
+  },
+  {
+   "tag": "americana",
+   "color": "#B388FF",
+   "group": [
+    "Folk/Cntry",
+    "Folk/Cntry"
+   ]
+  },
+  {
+   "tag": "folk",
+   "color": "#B388FF",
+   "group": [
+    "Folk/Cntry",
+    "Folk/Cntry"
+   ]
+  },
+  {
+   "tag": "folkmetal",
+   "color": "#B388FF",
+   "group": [
+    "Folk/Cntry",
+    "Folk/Cntry"
+   ]
+  },
+  {
+   "tag": "metal",
+   "color": "#FF5252",
+   "group": [
+    "Metal",
+    "Metal"
+   ]
+  },
+  {
+   "tag": "heavymetal",
+   "color": "#FF5252",
+   "group": [
+    "Metal",
+    "Metal"
+   ]
+  },
+  {
+   "tag": "reggae",
+   "color": "#66BB6A",
+   "group": [
+    "Reggae",
+    "Reggae"
+   ]
+  },
+  {
+   "tag": "reggaeton",
+   "color": "#FF7043",
+   "group": [
+    "Latin",
+    "Latin"
+   ]
+  },
+  {
+   "tag": "dancehall",
+   "color": "#66BB6A",
+   "group": [
+    "Reggae",
+    "Reggae"
+   ]
+  },
+  {
+   "tag": "latin",
+   "color": "#FF7043",
+   "group": [
+    "Latin",
+    "Latin"
+   ]
+  },
+  {
+   "tag": "salsa",
+   "color": "#FF7043",
+   "group": [
+    "Latin",
+    "Latin"
+   ]
+  },
+  {
+   "tag": "bossanova",
+   "color": "#FF7043",
+   "group": [
+    "Latin",
+    "Latin"
+   ]
+  },
+  {
+   "tag": "fado",
+   "color": "#B388FF",
+   "group": [
+    "Folk/Cntry",
+    "Folk/Cntry"
+   ]
+  },
+  {
+   "tag": "morna",
+   "color": "#B388FF",
+   "group": [
+    "Folk/Cntry",
+    "Folk/Cntry"
+   ]
+  },
+  {
+   "tag": "worldmusic",
+   "color": "#B388FF",
+   "group": [
+    "Folk/Cntry",
+    "Folk/Cntry"
+   ]
+  },
+  {
+   "tag": "classical",
+   "color": "#FFFFFF",
+   "group": [
+    "Classical",
+    "Classical"
+   ]
+  },
+  {
+   "tag": "soundtrack",
+   "color": "#5C6BC0",
+   "group": [
+    "Soundtrack",
+    "Soundtrack"
+   ]
+  },
+  {
+   "tag": "filmscore",
+   "color": "#5C6BC0",
+   "group": [
+    "Soundtrack",
+    "Soundtrack"
+   ]
+  },
+  {
+   "tag": "disco",
+   "color": "#F50057",
+   "group": [
+    "Disco",
+    "Disco"
+   ]
+  },
+  {
+   "tag": "gospel",
+   "color": "#BA68C8",
+   "group": [
+    "Gospel",
+    "Gospel"
+   ]
+  },
+  {
+   "tag": "electronic",
+   "color": "#76FF03",
+   "group": [
+    "Electronic",
+    "Electronic"
+   ]
+  },
+  {
+   "tag": "electronica",
+   "color": "#76FF03",
+   "group": [
+    "Electronic",
+    "Electronic"
+   ]
+  },
+  {
+   "tag": "edm",
+   "color": "#76FF03",
+   "group": [
+    "Electronic",
+    "Electronic"
+   ]
+  },
+  {
+   "tag": "ambient",
+   "color": "#76FF03",
+   "group": [
+    "Electronic",
+    "Electronic"
+   ]
+  },
+  {
+   "tag": "triphop",
+   "color": "#76FF03",
+   "group": [
+    "Electronic",
+    "Electronic"
+   ]
+  },
+  {
+   "tag": "drumandbass",
+   "color": "#76FF03",
+   "group": [
+    "Electronic",
+    "Electronic"
+   ]
+  },
+  {
+   "tag": "dubstep",
+   "color": "#76FF03",
+   "group": [
+    "Electronic",
+    "Electronic"
+   ]
+  },
+  {
+   "tag": "experimental",
+   "color": "#26C6DA",
+   "group": [
+    "experimental",
+    "Experimental"
+   ]
+  },
+  {
+   "tag": "garage",
+   "color": "#B388FF",
+   "group": [
+    "garage",
+    "Garage"
+   ]
+  },
+  {
+   "tag": "singersongwriter",
+   "color": "#00E5FF",
+   "group": [
+    "singersongwriter",
+    "Singersongwriter"
+   ]
+  },
+  {
+   "tag": "βραζιλιάνικο",
+   "color": "#F50057",
+   "group": [
+    "βραζιλιάνικο",
+    "Βραζιλιάνικο"
+   ]
+  },
+  {
+   "tag": "ελληνικά",
+   "color": "#26C6DA",
+   "group": [
+    "ελληνικά",
+    "Ελληνικά"
+   ]
+  },
+  {
+   "tag": "Musiques du monde",
+   "color": "#B388FF",
+   "group": [
+    "Folk/Cntry",
+    "Folk/Cntry"
+   ]
+  },
+  {
+   "tag": "Pop/Rock",
+   "color": "#40C4FF",
+   "group": [
+    "Rock",
+    "Rock"
+   ]
+  },
+  {
+   "tag": "Électronique",
+   "color": "#76FF03",
+   "group": [
+    "Electronic",
+    "Electronic"
+   ]
+  },
+  {
+   "tag": "Métal",
+   "color": "#FF5252",
+   "group": [
+    "Metal",
+    "Metal"
+   ]
+  },
+  {
+   "tag": "Hip-Hop",
+   "color": "#FFD740",
+   "group": [
+    "Hip-Hop",
+    "Hip-Hop"
+   ]
+  },
+  {
+   "tag": "Trip-Hop",
+   "color": "#76FF03",
+   "group": [
+    "Electronic",
+    "Electronic"
+   ]
+  },
+  {
+   "tag": "Laiko",
+   "color": "#B388FF",
+   "group": [
+    "Folk/Cntry",
+    "Folk/Cntry"
+   ]
+  },
+  {
+   "tag": "Divers",
+   "color": "#8A93A0",
+   "group": [
+    "",
+    ""
+   ]
+  },
+  {
+   "tag": "DIVERS",
+   "color": "#8A93A0",
+   "group": [
+    "",
+    ""
+   ]
+  },
+  {
+   "tag": "Pop, Rock",
+   "color": "#40C4FF",
+   "group": [
+    "Rock",
+    "Rock"
+   ]
+  },
+  {
+   "tag": "Rock, Pop",
+   "color": "#40C4FF",
+   "group": [
+    "Rock",
+    "Rock"
+   ]
+  },
+  {
+   "tag": "Rock, Metal, Pop",
+   "color": "#FF5252",
+   "group": [
+    "Metal",
+    "Metal"
+   ]
+  },
+  {
+   "tag": "Pop, Rock, Metal",
+   "color": "#FF5252",
+   "group": [
+    "Metal",
+    "Metal"
+   ]
+  },
+  {
+   "tag": "Shoegaze",
+   "color": "#7C4DFF",
+   "group": [
+    "Alt",
+    "Alt"
+   ]
+  },
+  {
+   "tag": "post-punk",
+   "color": "#7C4DFF",
+   "group": [
+    "Alt",
+    "Alt"
+   ]
+  },
+  {
+   "tag": "Neo-Soul / R&B",
+   "color": "#FF6E40",
+   "group": [
+    "Soul/R&B",
+    "Soul/R&B"
+   ]
+  },
+  {
+   "tag": "K-Pop",
+   "color": "#E040FB",
+   "group": [
+    "Asian-Pop",
+    "Asian-Pop"
+   ]
+  },
+  {
+   "tag": "musique diverse",
+   "color": "#8A93A0",
+   "group": [
+    "",
+    ""
+   ]
+  },
+  {
+   "tag": "Ambient; Drone",
+   "color": "#76FF03",
+   "group": [
+    "Electronic",
+    "Electronic"
+   ]
+  },
+  {
+   "tag": "World Music",
+   "color": "#B388FF",
+   "group": [
+    "Folk/Cntry",
+    "Folk/Cntry"
+   ]
+  },
+  {
+   "tag": "Synthpop+Coldwave",
+   "color": "#FF80AB",
+   "group": [
+    "Pop",
+    "Pop"
+   ]
+  },
+  {
+   "tag": "Bombas",
+   "color": "#BA68C8",
+   "group": [
+    "bombas",
+    "Bombas"
+   ]
+  },
+  {
+   "tag": "Bombas, Laikopop",
+   "color": "#B388FF",
+   "group": [
+    "Folk/Cntry",
+    "Folk/Cntry"
+   ]
+  },
+  {
+   "tag": "  Rebetiko  ",
+   "color": "#B388FF",
+   "group": [
+    "Folk/Cntry",
+    "Folk/Cntry"
+   ]
+  },
+  {
+   "tag": "Chanson Française",
+   "color": "#00E5FF",
+   "group": [
+    "chansonfrançaise",
+    "Chanson Française"
+   ]
+  },
+  {
+   "tag": "Vaporwave",
+   "color": "#FF3D00",
+   "group": [
+    "vaporwave",
+    "Vaporwave"
+   ]
+  },
+  {
+   "tag": "Lo-Fi",
+   "color": "#FF9100",
+   "group": [
+    "lofi",
+    "Lo-Fi"
+   ]
+  },
+  {
+   "tag": "Lo-fi / Chillhop",
+   "color": "#FF9100",
+   "group": [
+    "lofi",
+    "Lo-Fi / Chillhop"
+   ]
+  },
+  {
+   "tag": "Afrobeats & Amapiano",
+   "color": "#00E5FF",
+   "group": [
+    "World",
+    "World"
+   ]
+  },
+  {
+   "tag": "Nu Jazz",
+   "color": "#26C6DA",
+   "group": [
+    "Jazz",
+    "Jazz"
+   ]
+  },
+  {
+   "tag": "drum'n'bass",
+   "color": "#76FF03",
+   "group": [
+    "Electronic",
+    "Electronic"
+   ]
+  },
+  {
+   "tag": "Indie",
+   "color": "#7C4DFF",
+   "group": [
+    "Alt",
+    "Alt"
+   ]
+  },
+  {
+   "tag": "Indie Folk",
+   "color": "#B388FF",
+   "group": [
+    "Folk/Cntry",
+    "Folk/Cntry"
+   ]
+  },
+  {
+   "tag": "Μπαλάντα",
+   "color": "#BA68C8",
+   "group": [
+    "μπαλάντα",
+    "Μπαλάντα"
+   ]
+  },
+  {
+   "tag": "Ελληνικό Ροκ",
+   "color": "#00E5FF",
+   "group": [
+    "ελληνικόροκ",
+    "Ελληνικό Ροκ"
+   ]
+  },
+  {
+   "tag": "Alt,Electronic,Hip-Hop,Pop",
+   "color": "#FFD740",
+   "group": [
+    "Hip-Hop",
+    "Hip-Hop"
+   ]
+  },
+  {
+   "tag": "Alt,Metal,Rock",
+   "color": "#FF5252",
+   "group": [
+    "Metal",
+    "Metal"
+   ]
+  },
+  {
+   "tag": "Electronic,Hip-Hop",
+   "color": "#FFD740",
+   "group": [
+    "Hip-Hop",
+    "Hip-Hop"
+   ]
+  },
+  {
+   "tag": "Classical,Folk/Cntry,Jazz",
+   "color": "#FFFFFF",
+   "group": [
+    "Classical",
+    "Classical"
+   ]
+  },
+  {
+   "tag": "Other",
+   "color": "#8A93A0",
+   "group": [
+    "",
+    ""
+   ]
+  },
+  {
+   "tag": "Unknown",
+   "color": "#8A93A0",
+   "group": [
+    "",
+    ""
+   ]
+  },
+  {
+   "tag": "Various Artists",
+   "color": "#8A93A0",
+   "group": [
+    "",
+    ""
+   ]
+  },
+  {
+   "tag": "Special Purpose Artist",
+   "color": "#8A93A0",
+   "group": [
+    "",
+    ""
+   ]
+  },
+  {
+   "tag": "Autre",
+   "color": "#8A93A0",
+   "group": [
+    "",
+    ""
+   ]
+  },
+  {
+   "tag": "+",
+   "color": "#8A93A0",
+   "group": [
+    "",
+    ""
+   ]
+  },
+  {
+   "tag": "/ ,",
+   "color": "#8A93A0",
+   "group": [
+    "",
+    ""
+   ]
+  },
+  {
+   "tag": "Σ",
+   "color": "#FF6E40",
+   "group": [
+    "σ",
+    "Σ"
+   ]
+  },
+  {
+   "tag": "ΟΔΟΣ",
+   "color": "#FFD740",
+   "group": [
+    "οδος",
+    "Οδος"
+   ]
+  },
+  {
+   "tag": "Alt",
+   "color": "#B388FF",
+   "group": [
+    "alt",
+    "Alt"
+   ]
+  },
+  {
+   "tag": "Asian-Pop",
+   "color": "#FF80AB",
+   "group": [
+    "Pop",
+    "Pop"
+   ]
+  },
+  {
+   "tag": "Classical",
+   "color": "#FFFFFF",
+   "group": [
+    "Classical",
+    "Classical"
+   ]
+  },
+  {
+   "tag": "Disco",
+   "color": "#F50057",
+   "group": [
+    "Disco",
+    "Disco"
+   ]
+  },
+  {
+   "tag": "Electronic",
+   "color": "#76FF03",
+   "group": [
+    "Electronic",
+    "Electronic"
+   ]
+  },
+  {
+   "tag": "Folk/Cntry",
+   "color": "#B388FF",
+   "group": [
+    "Folk/Cntry",
+    "Folk/Cntry"
+   ]
+  },
+  {
+   "tag": "Gospel",
+   "color": "#BA68C8",
+   "group": [
+    "Gospel",
+    "Gospel"
+   ]
+  },
+  {
+   "tag": "Jazz",
+   "color": "#26C6DA",
+   "group": [
+    "Jazz",
+    "Jazz"
+   ]
+  },
+  {
+   "tag": "Latin",
+   "color": "#FF7043",
+   "group": [
+    "Latin",
+    "Latin"
+   ]
+  },
+  {
+   "tag": "Metal",
+   "color": "#FF5252",
+   "group": [
+    "Metal",
+    "Metal"
+   ]
+  },
+  {
+   "tag": "Pop",
+   "color": "#FF80AB",
+   "group": [
+    "Pop",
+    "Pop"
+   ]
+  },
+  {
+   "tag": "Reggae",
+   "color": "#66BB6A",
+   "group": [
+    "Reggae",
+    "Reggae"
+   ]
+  },
+  {
+   "tag": "Rock",
+   "color": "#40C4FF",
+   "group": [
+    "Rock",
+    "Rock"
+   ]
+  },
+  {
+   "tag": "Soul/R&B",
+   "color": "#FF6E40",
+   "group": [
+    "Soul/R&B",
+    "Soul/R&B"
+   ]
+  },
+  {
+   "tag": "Soundtrack",
+   "color": "#5C6BC0",
+   "group": [
+    "Soundtrack",
+    "Soundtrack"
+   ]
+  }
+ ]
+}

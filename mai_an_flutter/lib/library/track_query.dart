@@ -5,10 +5,10 @@ import '../data/library_repository.dart';
 /// (`db_manager.get_all_tracks` sort_map; the default comes from config
 /// `general.library_sort`, falling back to "date").
 enum LibrarySort {
-  date('Recently added'),
-  artist('Artist'),
-  album('Album'),
-  track('Title');
+  date('Date Added'),
+  artist('Artist (A–Z)'),
+  album('Album (A–Z)'),
+  track('Track (A–Z)');
 
   const LibrarySort(this.label);
   final String label;
@@ -87,20 +87,52 @@ double bigramSimilarity(String query, String target) {
 /// The Flet app's last-resort search: when nothing matches, rank every track
 /// by its best field score and keep those ≥ 0.25 ("CLOSEST MATCH").
 /// [tracks] is already in display order; equal scores keep that order.
-List<Track> closestMatches(List<Track> tracks, String rawQuery) {
+List<Track> closestMatches(List<Track> tracks, String rawQuery) =>
+    closestBy(tracks, rawQuery, (t) => [t.title, t.album, t.artist]);
+
+/// [closestMatches] for any row: [fields] are the texts a row is scored on
+/// (its best one counts).
+List<T> closestBy<T>(
+  List<T> rows,
+  String rawQuery,
+  List<String> Function(T) fields,
+) {
   final scored = <(double, int)>[];
-  for (var i = 0; i < tracks.length; i++) {
-    final t = tracks[i];
-    final s = [
-      bigramSimilarity(rawQuery, t.title),
-      bigramSimilarity(rawQuery, t.album),
-      bigramSimilarity(rawQuery, t.artist),
-    ].reduce((a, b) => a > b ? a : b);
+  for (var i = 0; i < rows.length; i++) {
+    final s = fields(
+      rows[i],
+    ).map((f) => bigramSimilarity(rawQuery, f)).reduce((a, b) => a > b ? a : b);
     if (s >= 0.25) scored.add((s, i));
   }
   scored.sort((a, b) {
     final c = b.$1.compareTo(a.$1);
     return c != 0 ? c : a.$2.compareTo(b.$2);
   });
-  return [for (final (_, i) in scored) tracks[i]];
+  return [for (final (_, i) in scored) rows[i]];
+}
+
+/// One library view's search: rows whose folded key holds every query word,
+/// or whose id [matchedIds] reports (an album or artist matching through its
+/// tracks); when none do, [closestBy] over [fields]. [rows] carry their
+/// folded keys and are in display order. Returns the rows to show and
+/// whether they are the closest-match fallback.
+(List<T>, bool) searchRows<T>(
+  List<(T, String)> rows,
+  String rawQuery, {
+  required List<String> Function(T) fields,
+  Set<int> Function(List<String> words)? matchedIds,
+  int Function(T)? id,
+}) {
+  final words = queryWords(rawQuery);
+  if (words.isEmpty) return ([for (final (r, _) in rows) r], false);
+  final ids = matchedIds?.call(words) ?? const <int>{};
+  final hits = [
+    for (final (r, key) in rows)
+      if (words.every(key.contains) || (id != null && ids.contains(id(r)))) r,
+  ];
+  if (hits.isNotEmpty) return (hits, false);
+  return (
+    closestBy([for (final (r, _) in rows) r], rawQuery.trim(), fields),
+    true,
+  );
 }
