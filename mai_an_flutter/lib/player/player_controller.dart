@@ -124,6 +124,7 @@ class PlayerController extends ChangeNotifier {
     }
     _repeat = Repeat.parse(prefs['repeat_mode']);
     _op(() => backend.setRepeat(_repeat));
+    backend.remoteControls = (next: next, previous: previous);
     _changesSub = backend.changes.listen((_) => _onBackendChange());
     _failSub = backend.failures.listen(_onFailure);
     _listenSub = backend.listens.listen(
@@ -283,7 +284,12 @@ class PlayerController extends ChangeNotifier {
   }
 
   void previous() {
-    if (position.value > const Duration(seconds: 3)) {
+    // The player's own position when nothing is pending: [position] isn't
+    // ticked in the background, where the notification's Previous lands.
+    final at = (_pending > 0 || _needsPush || stopped)
+        ? position.value
+        : backend.position;
+    if (at > const Duration(seconds: 3)) {
       seek(Duration.zero);
       return;
     }
@@ -935,6 +941,7 @@ class PlayerController extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    backend.remoteControls = null;
     _changesSub?.cancel();
     _failSub?.cancel();
     _listenSub?.cancel();

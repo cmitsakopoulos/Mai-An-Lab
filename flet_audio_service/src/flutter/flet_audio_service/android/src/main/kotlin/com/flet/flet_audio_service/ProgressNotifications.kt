@@ -119,7 +119,7 @@ object ProgressNotifications {
     fun navigateTargetFor(job: String): String = when (job) {
         "download" -> "downloads"
         "sync" -> "sync"
-        "dsp" -> "library"
+        "dsp" -> "audio"
         "metadata" -> "workbench"
         else -> "home"
     }

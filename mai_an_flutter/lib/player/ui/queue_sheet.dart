@@ -1,15 +1,20 @@
 import 'package:flutter/material.dart';
 
+import '../../ui/frost.dart';
+import '../../ui/sliding_segmented.dart';
 import '../../ui/tokens.dart';
-import '../playback_backend.dart';
 import '../autoplay.dart';
+import '../playback_backend.dart';
 import '../player_controller.dart';
 import '../queue_entry.dart';
-import 'autoplay_sheet.dart';
+import 'queue_roadmap.dart';
+
+enum _QueueViewMode { list, roadmap }
 
 /// ui/player/queue_sheet.py: "Playing Next". The playing row and the next
-/// rows in play order (15 at most, as in Flet), reorderable outside shuffle.
-class QueueSheet extends StatelessWidget {
+/// rows in play order (15 at most, as in Flet), reorderable outside shuffle,
+/// with an alternative live Roadmap view for visual steering.
+class QueueSheet extends StatefulWidget {
   const QueueSheet({super.key, required this.player});
 
   final PlayerController player;
@@ -17,7 +22,7 @@ class QueueSheet extends StatelessWidget {
   static const visibleRows = 15;
 
   static Future<void> open(BuildContext context, PlayerController player) =>
-      showModalBottomSheet<void>(
+      showFrostedSheet<void>(
         context: context,
         isScrollControlled: true,
         useSafeArea: true,
@@ -27,6 +32,14 @@ class QueueSheet extends StatelessWidget {
         ),
         builder: (_) => QueueSheet(player: player),
       );
+
+  @override
+  State<QueueSheet> createState() => _QueueSheetState();
+}
+
+class _QueueSheetState extends State<QueueSheet> {
+  PlayerController get player => widget.player;
+  _QueueViewMode _mode = _QueueViewMode.list;
 
   @override
   Widget build(BuildContext context) {
@@ -42,7 +55,10 @@ class QueueSheet extends StatelessWidget {
           // lists it.
           final rows = q.isEmpty
               ? const <(int, QueueEntry)>[]
-              : q.upcoming(player.shuffleIndices).take(visibleRows).toList();
+              : q
+                    .upcoming(player.shuffleIndices)
+                    .take(QueueSheet.visibleRows)
+                    .toList();
           final notice = _notice(player);
           // Auto-play, Apple Music style: above the first recommendation, or
           // at the end while the next block is on its way.
@@ -79,9 +95,11 @@ class QueueSheet extends StatelessWidget {
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          const Text(
-                            'Playing Next',
-                            style: TextStyle(
+                          Text(
+                            _mode == _QueueViewMode.list
+                                ? 'Playing Next'
+                                : 'Queue Roadmap',
+                            style: const TextStyle(
                               color: Tokens.text,
                               fontSize: 17,
                               fontWeight: FontWeight.w600,
@@ -123,90 +141,123 @@ class QueueSheet extends StatelessWidget {
                   ],
                 ),
               ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 2, 16, 10),
+                child: SlidingSegmented<_QueueViewMode>(
+                  selected: _mode,
+                  accent: accent,
+                  height: 36,
+                  iconSize: 16,
+                  onSelect: (m) => setState(() => _mode = m),
+                  segments: const [
+                    Segment(
+                      value: _QueueViewMode.list,
+                      label: 'List',
+                      icon: Icons.format_list_bulleted_rounded,
+                    ),
+                    Segment(
+                      value: _QueueViewMode.roadmap,
+                      label: 'Roadmap',
+                      icon: Icons.hub_rounded,
+                    ),
+                  ],
+                ),
+              ),
               const Divider(color: Tokens.borderSubtle, height: 1),
-              if (notice != null)
-                Container(
-                  margin: const EdgeInsets.symmetric(
-                    horizontal: 12,
-                    vertical: 6,
-                  ),
-                  padding: const EdgeInsets.symmetric(
-                    vertical: 8,
-                    horizontal: 12,
-                  ),
-                  decoration: BoxDecoration(
-                    color: accent.withValues(alpha: 0.1),
-                    border: Border.all(color: accent.withValues(alpha: 0.2)),
-                    borderRadius: BorderRadius.circular(Tokens.radiusCard),
-                  ),
-                  child: Row(
-                    children: [
-                      Icon(notice.$1, color: accent, size: 16),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Text(
-                          notice.$2,
-                          style: TextStyle(
-                            color: accent,
-                            fontSize: 12,
-                            fontWeight: FontWeight.w500,
+              if (_mode == _QueueViewMode.roadmap)
+                Expanded(child: QueueRoadmap(player: player))
+              else ...[
+                if (notice != null)
+                  Container(
+                    margin: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 6,
+                    ),
+                    padding: const EdgeInsets.symmetric(
+                      vertical: 8,
+                      horizontal: 12,
+                    ),
+                    decoration: BoxDecoration(
+                      color: accent.withValues(alpha: 0.1),
+                      border: Border.all(color: accent.withValues(alpha: 0.2)),
+                      borderRadius: BorderRadius.circular(Tokens.radiusCard),
+                    ),
+                    child: Row(
+                      children: [
+                        Icon(notice.$1, color: accent, size: 16),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            notice.$2,
+                            style: TextStyle(
+                              color: accent,
+                              fontSize: 12,
+                              fontWeight: FontWeight.w500,
+                            ),
                           ),
                         ),
-                      ),
-                    ],
+                      ],
+                    ),
                   ),
-                ),
-              Expanded(
-                child: rows.isEmpty
-                    ? const Center(
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(
-                              Icons.queue_music_rounded,
-                              color: Tokens.dim,
-                              size: 48,
-                            ),
-                            SizedBox(height: 8),
-                            Text(
-                              'Queue is empty',
-                              style: TextStyle(color: Tokens.dim, fontSize: 14),
-                            ),
-                          ],
-                        ),
-                      )
-                    : ReorderableListView.builder(
-                        buildDefaultDragHandles: false,
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 12,
-                          vertical: 6,
-                        ),
-                        itemCount: rows.length + (header == null ? 0 : 1),
-                        onReorder: (a, b) {
-                          if (a == header) return;
-                          _reorder(rows, toTrack(a), toTrack(b));
-                        },
-                        itemBuilder: (context, c) {
-                          if (c == header) {
-                            return _AutoPlayHeader(
-                              key: const ValueKey('q_autoplay_header'),
-                              autoplay: ap!,
-                              pending: pending,
+                Expanded(
+                  child: rows.isEmpty
+                      ? const Center(
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                Icons.queue_music_rounded,
+                                color: Tokens.dim,
+                                size: 48,
+                              ),
+                              SizedBox(height: 8),
+                              Text(
+                                'Queue is empty',
+                                style: TextStyle(
+                                  color: Tokens.dim,
+                                  fontSize: 14,
+                                ),
+                              ),
+                            ],
+                          ),
+                        )
+                      : ReorderableListView.builder(
+                          buildDefaultDragHandles: false,
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 6,
+                          ),
+                          itemCount: rows.length + (header == null ? 0 : 1),
+                          onReorder: (a, b) {
+                            if (a == header) return;
+                            _reorder(rows, toTrack(a), toTrack(b));
+                          },
+                          itemBuilder: (context, c) {
+                            if (c == header) {
+                              return _AutoPlayHeader(
+                                key: const ValueKey('q_autoplay_header'),
+                                autoplay: ap!,
+                                pending: pending,
+                                onOpenRoadmap: () => setState(
+                                  () => _mode = _QueueViewMode.roadmap,
+                                ),
+                              );
+                            }
+                            final pos =
+                                header != null && header < c ? c - 1 : c;
+                            final (i, row) = rows[pos];
+                            return _QueueRow(
+                              key: ObjectKey(row),
+                              player: player,
+                              row: row,
+                              position: pos,
+                              dragIndex: c,
+                              active: i == q.currentIndex,
                             );
-                          }
-                          final pos = header != null && header < c ? c - 1 : c;
-                          final (i, row) = rows[pos];
-                          return _QueueRow(
-                            key: ObjectKey(row),
-                            player: player,
-                            row: row,
-                            position: pos,
-                            dragIndex: c,
-                            active: i == q.currentIndex,
-                          );
-                        },
-                      ),
-              ),
+                          },
+                        ),
+                ),
+              ],
             ],
           );
         },
@@ -282,6 +333,7 @@ class _QueueRow extends StatelessWidget {
     final curArtist = player.nowPlaying?.artist ?? '';
     final sameArtist =
         !active && curArtist.isNotEmpty && row.artist == curArtist;
+    final sameArtistAccent = CategoryPalette.of(context).track;
     final showArtist =
         row.artist.trim().toLowerCase() != row.title.trim().toLowerCase();
     return Padding(
@@ -295,7 +347,7 @@ class _QueueRow extends StatelessWidget {
             color: active
                 ? accent.withValues(alpha: 0.12)
                 : sameArtist
-                ? Tokens.libTrack.withValues(alpha: 0.06)
+                ? sameArtistAccent.withValues(alpha: 0.06)
                 : Tokens.surface2,
             border: Border.all(
               color: active
@@ -346,7 +398,7 @@ class _QueueRow extends StatelessWidget {
                         color: active
                             ? accent
                             : sameArtist
-                            ? Tokens.libTrack
+                            ? sameArtistAccent
                             : Tokens.dim,
                         fontSize: 11,
                       ),
@@ -380,16 +432,19 @@ class _QueueRow extends StatelessWidget {
   }
 }
 
-/// `_autoplay_header`: tap for the Auto-play sheet.
+/// Auto-play divider in the queue list: tapping switches to the live Roadmap
+/// view instead of opening the old Auto-play pop-up.
 class _AutoPlayHeader extends StatelessWidget {
   const _AutoPlayHeader({
     super.key,
     required this.autoplay,
     required this.pending,
+    required this.onOpenRoadmap,
   });
 
   final AutoPlay autoplay;
   final bool pending;
+  final VoidCallback onOpenRoadmap;
 
   @override
   Widget build(BuildContext context) {
@@ -399,9 +454,10 @@ class _AutoPlayHeader extends StatelessWidget {
         ? 'finding similar songs…'
         : (label.isNotEmpty ? 'from $label' : 'similar songs');
     return InkWell(
-      onTap: () => AutoPlaySheet.open(context, autoplay),
+      borderRadius: BorderRadius.circular(10),
+      onTap: onOpenRoadmap,
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(10, 12, 6, 4),
+        padding: const EdgeInsets.fromLTRB(10, 12, 6, 6),
         child: Row(
           children: [
             Icon(Icons.all_inclusive_rounded, color: cyan, size: 14),
@@ -423,14 +479,48 @@ class _AutoPlayHeader extends StatelessWidget {
                 style: const TextStyle(color: Tokens.dim, fontSize: 12),
               ),
             ),
-            const Icon(
-              Icons.chevron_right_rounded,
-              color: Tokens.dim,
-              size: 16,
+            const SizedBox(width: 6),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+              decoration: BoxDecoration(
+                color: cyan.withValues(alpha: 0.14),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: cyan.withValues(alpha: 0.3)),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.hub_rounded, color: cyan, size: 12),
+                  const SizedBox(width: 4),
+                  Text(
+                    'Roadmap',
+                    style: TextStyle(
+                      color: cyan,
+                      fontSize: 10.5,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ],
+              ),
             ),
           ],
         ),
       ),
     );
   }
+}
+
+/// "Title — Artist" of the track the station is playing from, or "".
+String anchorLabel(AutoPlay autoplay) {
+  final path = autoplay.anchor;
+  if (path.isEmpty) return '';
+  for (final t in autoplay.player.queue.entries) {
+    if (t.path == path) {
+      final artist = t.data['artist_name']?.toString() ?? '';
+      return artist.isNotEmpty ? '${t.title} — $artist' : t.title;
+    }
+  }
+  final base = path.split('/').last;
+  final dot = base.lastIndexOf('.');
+  return dot > 0 ? base.substring(0, dot) : base;
 }

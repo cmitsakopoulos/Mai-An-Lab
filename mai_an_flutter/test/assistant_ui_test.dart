@@ -397,7 +397,7 @@ void main() {
 
         // Enter API key + pick Casual Mate preset -> floating save button appears.
         await tester.enterText(
-          find.widgetWithText(TextField, 'Google Gemini API Key'),
+          find.byKey(const ValueKey('gemini_api_key')),
           'AIzaTestKey',
         );
         await tester.tap(find.text('Casual Mate'));
@@ -459,7 +459,6 @@ void main() {
 
       await tester.tap(find.text('Enable Jarvis Tab'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('SAVE APPEARANCE SETTINGS'));
       for (var i = 0; i < 40; i++) {
         await tester.runAsync(
           () => Future<void>.delayed(const Duration(milliseconds: 10)),

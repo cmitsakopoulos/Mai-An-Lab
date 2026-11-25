@@ -200,7 +200,7 @@ void main() {
       await tester.pump();
       expect(find.text('SEARCH RESULTS (2)'), findsOneWidget);
       expect(
-        find.text('[DEVELOPER TOOLS] Wipe database, compute DSP & PCA'),
+        find.text('[SYSTEM] Wipe database, compute DSP & PCA'),
         findsOneWidget,
       );
       await tester.enterText(find.byType(TextField), 'xyzzy');
@@ -216,50 +216,49 @@ void main() {
       expect(find.text('Settings'), findsOneWidget);
     });
 
-    testWidgets('Appearance saves what Flet saves, plus library_sort', (
+    testWidgets('Appearance saves immediately, plus library_sort & glass_opacity', (
       tester,
     ) async {
       await pumpSettings(tester, initial: SettingsPage.appearance);
       expect(find.text('SAVE APPEARANCE SETTINGS'), findsNothing);
+      expect(find.text('Glass Opacity'), findsOneWidget);
+
+      // Tap Green accent swatch (at top in Glass & Color card).
+      await tester.tap(find.byTooltip('Green'));
+      await tester.pumpAndSettle();
+
+      // Open Default Library Sort frosted picker and pick Artist (A–Z).
+      await tester.dragUntilVisible(
+        find.text('Date Added'),
+        find.byType(ListView).first,
+        const Offset(0, -100),
+      );
+      await tester.tap(find.text('Date Added'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Artist (A–Z)').last);
+      await tester.pumpAndSettle();
+
+      // Toggle Albums chip in Library Views card.
       await tester.dragUntilVisible(
         find.text('Albums'),
         find.byType(ListView).first,
         const Offset(0, -100),
       );
-      // Clear of the save bar that the first change brings up.
-      await tester.drag(find.byType(ListView).first, const Offset(0, -150));
-      await tester.pumpAndSettle();
       await tester.tap(find.text('Albums'));
-      await tester.pump();
-      // Back to the stored value: nothing to save.
-      await tester.tap(find.text('Albums'));
-      await tester.pump();
-      expect(find.text('SAVE APPEARANCE SETTINGS'), findsNothing);
-      await tester.tap(find.text('Albums'));
-      await tester.dragUntilVisible(
-        find.byTooltip('Green'),
-        find.byType(ListView).first,
-        const Offset(0, -100),
+      await settle(
+        tester,
+        () =>
+            library.sort == LibrarySort.artist &&
+            config.config.libraryTabs.visible.contains('albums') &&
+            config.config.accent == const Color(0xFF30D158),
       );
-      await tester.tap(find.byTooltip('Green'));
-      await tester.dragUntilVisible(
-        find.text('Date Added'),
-        find.byType(ListView).first,
-        const Offset(0, 100),
-      );
-      await tester.ensureVisible(find.text('Date Added'));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Date Added'));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Artist (A–Z)').last);
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('SAVE APPEARANCE SETTINGS'));
-      await settle(tester, () => library.sort == LibrarySort.artist);
-      await settle(tester);
+
       final t = fileToml();
-      expect((t['appearance']! as Map)['show_albums'], true);
-      expect((t['appearance']! as Map)['accent_color'], '#30D158');
-      expect((t['appearance']! as Map)['show_jarvis'], true);
+      final app = t['appearance']! as Map;
+      expect(app['show_albums'], true);
+      expect(app['accent_color'], '#30D158');
+      expect(app['show_jarvis'], true);
+      expect(app['glass_opacity'], closeTo(Tokens.defaultGlassOpacity, 0.01));
       expect((t['landing']! as Map)['show_search_history'], true);
       expect(t['general'], {
         'startup_page': 'Library',
@@ -269,11 +268,6 @@ void main() {
       expect(config.config.libraryTabs.visible, contains('albums'));
       expect(config.config.accent, const Color(0xFF30D158));
       expect(library.sort, LibrarySort.artist);
-      expect(
-        find.text('Appearance and interface settings saved.'),
-        findsOneWidget,
-      );
-      expect(find.text('SAVE APPEARANCE SETTINGS'), findsNothing);
     });
 
     testWidgets('Haptics writes every change at once', (tester) async {
@@ -367,6 +361,28 @@ void main() {
       expect((dsp['custom_presets'] as Map).keys, ['Custom']);
     });
 
+    testWidgets('Audio & DSP: Rebuild All asks before recomputing', (
+      tester,
+    ) async {
+      await pumpSettings(tester, initial: SettingsPage.audio, height: 1200);
+      await settle(
+        tester,
+        () => find.text('Rebuild All').evaluate().isNotEmpty,
+      );
+      await tester.tap(find.text('Rebuild All'));
+      await tester.pumpAndSettle();
+      expect(find.text('Rebuild Acoustic Index?'), findsOneWidget);
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      expect(find.text('Rebuild Acoustic Index?'), findsNothing);
+      expect(library.analysis.running, isFalse);
+      // Canceling leaves existing DSP features intact.
+      final db = sqlite3.open(dbPath, mode: OpenMode.readOnly);
+      final row = db.select('SELECT timbre FROM play_counts').single;
+      db.close();
+      expect(row['timbre'], isNotNull);
+    });
+
     testWidgets('Database Management clears the index after asking', (
       tester,
     ) async {
@@ -405,6 +421,8 @@ void main() {
         find.byType(ListView).first,
         const Offset(0, -200),
       );
+      await tester.ensureVisible(find.text('SAVE CONFIG FILE'));
+      await tester.pump();
       await tester.tap(find.text('SAVE CONFIG FILE'));
       await settle(tester, () => config.config.startupPage == 'Search');
       expect(

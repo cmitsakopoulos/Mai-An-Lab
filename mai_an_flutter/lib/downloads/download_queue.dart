@@ -149,6 +149,20 @@ class DownloadQueue implements Listenable, TransferQueue {
   /// covers exactly the failures it reports.
   final _batchFailedIds = <String>[];
 
+  /// Brief post-batch summary shown in [ActivityPill] before fading out.
+  ({String title, String detail, bool hasFailures})? lastBatchOutcome;
+  Timer? _outcomeTimer;
+
+  /// Dismisses the post-batch completion pill immediately.
+  void clearOutcome() {
+    _outcomeTimer?.cancel();
+    _outcomeTimer = null;
+    if (lastBatchOutcome != null) {
+      lastBatchOutcome = null;
+      _notify();
+    }
+  }
+
   /// Tests hold the worker to inspect queued jobs (Python replaces
   /// `_ensure_worker`).
   @visibleForTesting
@@ -399,6 +413,7 @@ class DownloadQueue implements Listenable, TransferQueue {
 
   Future<void> _workerLoop() async {
     isProcessing = true;
+    clearOutcome();
     final notifier = _notifier = ProgressNotifier(
       'download',
       'Downloads',
@@ -440,8 +455,25 @@ class DownloadQueue implements Listenable, TransferQueue {
       _cancel = false;
       // Also on a crash: an unfinished notifier would keep the native task
       // service (and its wakelock) running.
+      final summary = _batchSummary();
+      final done = _batchCounts[JobState.done]!;
+      final failed = _batchCounts[JobState.failed]!;
+      if (done > 0 || failed > 0) {
+        _outcomeTimer?.cancel();
+        lastBatchOutcome = (
+          title: failed > 0
+              ? (done > 0 ? 'Downloads finished with errors' : 'Download failed')
+              : 'Downloads complete',
+          detail: summary,
+          hasFailures: failed > 0,
+        );
+        _outcomeTimer = Timer(
+          Duration(milliseconds: failed > 0 ? 5500 : 4000),
+          clearOutcome,
+        );
+      }
       notifier.finish(
-        _batchSummary(),
+        summary,
         retryableFailures().isNotEmpty ? ('Retry', 'downloads:retry') : null,
       );
       _notifier = null;
@@ -484,11 +516,16 @@ class DownloadQueue implements Listenable, TransferQueue {
     if (job.artist.isNotEmpty) head += ' — ${job.artist}';
     final count = total > 1 ? '${finished + 1} of $total' : '';
     final text = [
-      head,
       count,
       job.status,
+      if (job.detail.isNotEmpty) job.detail,
     ].where((p) => p.isNotEmpty).join(' · ');
-    notifier.update(finished * 100 + pct.toInt(), total * 100, text);
+    notifier.update(
+      finished * 100 + pct.toInt(),
+      total * 100,
+      text.isEmpty ? 'Downloading…' : text,
+      title: head,
+    );
   }
 
   /// The done notification's text; empty (the notification is removed)

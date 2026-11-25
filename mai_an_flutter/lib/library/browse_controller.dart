@@ -10,7 +10,6 @@ import 'track_query.dart';
 /// The Library tab's views. Bar order and the initial view follow library.py
 /// (`_visible_view_modes`, `__init__`).
 enum LibraryView {
-  network('Network'),
   playlists('Playlists'),
   genres('Genres'),
   artists('Artists'),
@@ -32,14 +31,13 @@ enum LibraryView {
   }
 
   /// library.py's starting view: the first shown of tracks, albums, artists,
-  /// genres, playlists, network.
+  /// genres, playlists.
   static LibraryView initial(List<LibraryView> shown) => [
     tracks,
     albums,
     artists,
     genres,
     playlists,
-    network,
   ].firstWhere(shown.contains, orElse: () => shown.first);
 }
 
@@ -303,7 +301,7 @@ class BrowseController extends ChangeNotifier {
   void _reset() {
     _generation++;
     _expanded.clear();
-    if (view == LibraryView.tracks || view == LibraryView.network) {
+    if (view == LibraryView.tracks) {
       rows = const [];
       notifyListeners();
       return;
@@ -371,7 +369,7 @@ class BrowseController extends ChangeNotifier {
             ),
             if (queryWords(library.query).isEmpty) const NewPlaylistNode(),
           ];
-        case LibraryView.tracks || LibraryView.network:
+        case LibraryView.tracks:
           return;
       }
       // Rows left open across a reload (a playlist edited) open again.

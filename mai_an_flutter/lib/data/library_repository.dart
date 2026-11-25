@@ -334,6 +334,7 @@ class LibraryRepository {
   }) => _db.run(neighborsJob(path, k, edgeKind: edgeKind));
   Future<List<NetworkTrackRow>> pcaCoordsForPaths(List<String> paths) =>
       _db.run(pcaCoordsForPathsJob(paths));
+  Future<List<NetworkTrackRow>> allPcaCoords() => _db.run(allPcaCoordsJob);
 
   // The assistant's queries and writes (assistant_queries.dart).
   Future<int> totalTracks() => _db.run(totalTracksJob);

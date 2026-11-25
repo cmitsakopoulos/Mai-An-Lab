@@ -46,12 +46,41 @@ class LibraryController extends ChangeNotifier
 
   /// library.py `_do_compute_dsp`: the Library's analysis, its snackbars
   /// on this screen's [messages].
-  Future<void> analyseLibrary() => analysis.run(
-    DspEntry.library,
-    notice: (n) {
-      if (!_disposed) _messages.add(n.text);
-    },
-  );
+  Future<void> analyseLibrary() async {
+    await analysis.run(
+      DspEntry.library,
+      notice: (n) {
+        if (!_disposed) _messages.add(n.text);
+      },
+    );
+    await refreshDspCoverage();
+  }
+
+  /// Live DSP feature coverage (cached on load, scan, and analysis finish)
+  /// so Audio & DSP, Now Playing Auto-Play, etc. always know exact counts.
+  int dspTotal = 0;
+  int dspMissing = 0;
+  int get dspAnalysed => (dspTotal - dspMissing).clamp(0, dspTotal);
+
+  /// Optional callback returning `dsp.auto_analyse` from config. When true,
+  /// newly indexed tracks trigger background on-phone DSP analysis automatically.
+  bool Function()? autoAnalyseEnabled;
+
+  Future<void> refreshDspCoverage() async {
+    final repo = _repo;
+    if (repo == null || _disposed) return;
+    try {
+      final (t, m) = await repo.featureCoverage();
+      if (_disposed) return;
+      if (t != dspTotal || m != dspMissing) {
+        dspTotal = t;
+        dspMissing = m;
+        notifyListeners();
+      }
+    } catch (e) {
+      debugPrint('DSP coverage refresh failed: $e');
+    }
+  }
 
   final Future<LibraryRepository> Function() _open;
   LibraryRepository? _repo;
@@ -164,6 +193,7 @@ class LibraryController extends ChangeNotifier
       graphError = '$e';
     }
     if (!_stations.isCompleted) _stations.complete(graph);
+    await refreshDspCoverage();
     notifyListeners();
   }
 
@@ -263,9 +293,18 @@ class LibraryController extends ChangeNotifier
     // library.py `_on_scan_complete`: a scan that indexed anything may have
     // brought new artists — the automatic metadata trigger.
     if ((count ?? 0) > 0) onIndexed?.call();
-    if (quiet) {
-      if ((count ?? 0) > 0) await _announceUnanalysed(repo);
-    } else if (count != null) {
+    await refreshDspCoverage();
+    if ((count ?? 0) > 0) {
+      if ((autoAnalyseEnabled?.call() ?? false) &&
+          dspMissing > 0 &&
+          !analysis.running) {
+        cancelAlert('scan');
+        unawaited(analyseLibrary());
+      } else if (quiet) {
+        await _announceUnanalysed(repo);
+      }
+    }
+    if (!quiet && count != null) {
       _messages.add(
         count > 0
             ? 'Scan complete. Indexed $count items.'

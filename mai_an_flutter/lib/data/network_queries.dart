@@ -38,6 +38,7 @@ class NetworkTrackRow {
     required this.path,
     required this.coords,
     required this.playCount,
+    this.clusterId,
     this.title,
     this.duration,
     this.artist,
@@ -48,6 +49,7 @@ class NetworkTrackRow {
   final String path;
   final List<double>? coords;
   final int? playCount;
+  final int? clusterId;
   final String? title;
   final double? duration;
   final String? artist;
@@ -151,6 +153,7 @@ DbJob<List<NetworkTrackRow>> pcaCoordsForPathsJob(List<String> paths) => (db) {
         path: r['path'] as String,
         coords: _floats(r['pca_coords']),
         playCount: r['play_count'] as int?,
+        clusterId: r['cluster_id'] as int?,
         title: r['title'] as String?,
         duration: (r['duration'] as num?)?.toDouble(),
         artist: r['artist'] as String?,
@@ -159,6 +162,38 @@ DbJob<List<NetworkTrackRow>> pcaCoordsForPathsJob(List<String> paths) => (db) {
       ),
   ];
 };
+
+/// All analysed tracks with PCA coordinates, for grouping distant clusters
+/// around the playing track on the Queue Roadmap.
+List<NetworkTrackRow> allPcaCoordsJob(Database db) {
+  final rows = db.select('''
+            SELECT pc.track_path AS path, pc.pca_coords, pc.cluster_id,
+                   pc.count AS play_count,
+                   t.title, t.duration,
+                   ar.name  AS artist,
+                   al.title AS album,
+                   al.genre AS genre
+            FROM play_counts pc
+            INNER JOIN tracks  t  ON t.path  = pc.track_path
+            LEFT JOIN albums  al ON al.id   = t.album_id
+            LEFT JOIN artists ar ON ar.id   = al.artist_id
+            WHERE pc.pca_coords IS NOT NULL
+        ''');
+  return [
+    for (final r in rows)
+      NetworkTrackRow(
+        path: r['path'] as String,
+        coords: _floats(r['pca_coords']),
+        playCount: r['play_count'] as int?,
+        clusterId: r['cluster_id'] as int?,
+        title: r['title'] as String?,
+        duration: (r['duration'] as num?)?.toDouble(),
+        artist: r['artist'] as String?,
+        album: r['album'] as String?,
+        genre: r['genre'] as String?,
+      ),
+  ];
+}
 
 List<double>? _floats(Object? blob) {
   if (blob is! Uint8List || blob.lengthInBytes % 4 != 0) return null;

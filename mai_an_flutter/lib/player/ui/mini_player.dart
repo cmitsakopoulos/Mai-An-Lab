@@ -1,16 +1,21 @@
 import 'package:flutter/material.dart';
 
+import '../../ui/frost.dart';
 import '../../ui/tokens.dart';
 import '../player_controller.dart';
+import 'art_tint.dart';
 import 'artwork.dart';
 import 'now_playing.dart';
 
-/// ui/player/mini_player.py: the floating card above the bottom edge.
-/// Hidden until something has played; dimmed when playback stopped.
+/// ui/player/mini_player.py: the floating frosted glass pill above the bottom
+/// tab bar. Hidden until something has played; dimmed when playback stopped.
 class MiniPlayer extends StatelessWidget {
-  const MiniPlayer({super.key, required this.player});
+  const MiniPlayer({super.key, required this.player, this.grouped = false});
 
   final PlayerController player;
+
+  /// True when inside [AppShell]'s bottom [BackdropGroup].
+  final bool grouped;
 
   @override
   Widget build(BuildContext context) {
@@ -21,32 +26,19 @@ class MiniPlayer extends StatelessWidget {
         if (!player.hasEverPlayed || row == null) {
           return const SizedBox.shrink();
         }
-        final accent = Theme.of(context).colorScheme.primary;
-        return AnimatedOpacity(
-          duration: const Duration(milliseconds: 200),
-          curve: Curves.easeOut,
-          opacity: player.stopped ? 0.55 : 1,
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(10, 0, 10, 8),
-            child: AnimatedContainer(
-              duration: const Duration(milliseconds: 200),
-              decoration: BoxDecoration(
-                color: Tokens.surface,
-                borderRadius: BorderRadius.circular(18),
-                border: Border.all(
-                  color: player.playing
-                      ? Colors.white.withValues(alpha: 0.7)
-                      : Tokens.border,
-                ),
-                boxShadow: const [
-                  BoxShadow(
-                    blurRadius: 16,
-                    spreadRadius: -2,
-                    color: Color(0x4D000000),
-                  ),
-                ],
-              ),
-              clipBehavior: Clip.antiAlias,
+        final base = Theme.of(context).colorScheme.primary;
+        final hPad = Tokens.dockPad(context);
+        return ArtTint(
+          path: player.art,
+          fallback: base,
+          builder: (context, accent) => AnimatedOpacity(
+            duration: Tokens.motionBase,
+            curve: Tokens.curveIn,
+            opacity: player.stopped ? 0.55 : 1,
+            child: GlassSurface(
+              radius: 20,
+              grouped: grouped,
+              margin: EdgeInsets.fromLTRB(hPad, 0, hPad, 8),
               child: Stack(
                 children: [
                   GestureDetector(
@@ -58,7 +50,7 @@ class MiniPlayer extends StatelessWidget {
                       }
                     },
                     child: Padding(
-                      padding: const EdgeInsets.fromLTRB(10, 12, 10, 8),
+                      padding: const EdgeInsets.fromLTRB(10, 10, 6, 8),
                       child: Row(
                         children: [
                           Artwork(
@@ -69,10 +61,11 @@ class MiniPlayer extends StatelessWidget {
                             placeholderSize: 22,
                             cacheWidth: 128,
                           ),
-                          const SizedBox(width: 8),
+                          const SizedBox(width: 10),
                           Expanded(
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
+                              mainAxisSize: MainAxisSize.min,
                               children: [
                                 Text(
                                   row.title,
@@ -123,22 +116,28 @@ class MiniPlayer extends StatelessWidget {
                       ),
                     ),
                   ),
-                  // Progress along the top edge.
+                  // Accent-colored progress hairline along the top edge so it
+                  // stays legible even over dark album art.
                   Positioned(
                     top: 0,
-                    left: 14,
-                    right: 14,
+                    left: 16,
+                    right: 16,
                     child: ValueListenableBuilder(
                       valueListenable: player.position,
                       builder: (context, pos, _) {
                         final d = player.duration.inMilliseconds;
-                        return LinearProgressIndicator(
-                          value: d > 0
-                              ? (pos.inMilliseconds / d).clamp(0.0, 1.0)
-                              : 0,
-                          minHeight: 2,
-                          color: accent,
-                          backgroundColor: Colors.transparent,
+                        return ClipRRect(
+                          borderRadius: BorderRadius.circular(2),
+                          child: LinearProgressIndicator(
+                            value: d > 0
+                                ? (pos.inMilliseconds / d).clamp(0.0, 1.0)
+                                : 0,
+                            minHeight: 2.5,
+                            color: base,
+                            backgroundColor: Colors.white.withValues(
+                              alpha: 0.08,
+                            ),
+                          ),
                         );
                       },
                     ),

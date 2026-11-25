@@ -807,11 +807,28 @@ class AudioPlayerHandler extends BaseAudioHandler
     await _player.seek(position);
   }
 
+  RemoteControls? _remote;
   @override
-  Future<void> skipToNext() => _player.seekToNext();
+  set remoteControls(RemoteControls? controls) => _remote = controls;
+
+  // audio_service calls these for the notification, lockscreen, headset and
+  // car buttons (the app's own skips use skipTo). Moving just_audio directly
+  // went behind the controller's back: the queue only caught up when the
+  // player's index was mirrored, Previous always left the track (no 3 s
+  // restart), and Next at the end of the queue never asked auto-play.
+  @override
+  Future<void> skipToNext() async {
+    final remote = _remote;
+    if (remote != null) return remote.next();
+    await _player.seekToNext();
+  }
 
   @override
-  Future<void> skipToPrevious() => _player.seekToPrevious();
+  Future<void> skipToPrevious() async {
+    final remote = _remote;
+    if (remote != null) return remote.previous();
+    await _player.seekToPrevious();
+  }
 
   @override
   Future<void> skipToQueueItem(int index) =>

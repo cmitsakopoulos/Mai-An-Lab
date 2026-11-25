@@ -333,7 +333,7 @@ void main() {
     expect(c.stopped, isTrue);
   });
 
-  test('each negative steers; two replace the buffer once', () async {
+  test('each early skip steers; two replace the buffer once', () async {
     await enable();
     await advance(1); // /r/1 playing
     final st = lib.stations.first;
@@ -341,25 +341,49 @@ void main() {
     expect(st.rejected, [
       ['/r/1'],
     ]);
-    c.removeRow(c.queue.entries[2]); // the listener removes /r/2
+    await advance(2); // /r/2 playing
+    final before = ap.bufferPaths();
+    backend.listenEvents.add((path: '/r/2', listenedS: 4, durationS: 200));
     expect(st.rejected, [
       ['/r/1'],
       ['/r/2'],
     ]);
     await drain();
-    expect(ap.bufferPaths(), ['/r/5', '/r/6', '/r/7', '/r/8']);
+    expect(lib.stations, hasLength(1));
+    expect(ap.bufferPaths().toSet().intersection(before.toSet()), isEmpty);
+    expect(ap.bufferPaths(), hasLength(AutoPlay.bufferTarget));
     expect(nativePaths(), paths());
   });
 
-  test('one removal steers the station and tops up', () async {
+  test('removals steer and top up behind the rows showing', () async {
     await enable();
+    expect(ap.bufferPaths(), ['/r/1', '/r/2', '/r/3', '/r/4']);
     c.removeRow(c.queue.entries[2]); // /r/2
+    await drain();
+    c.removeRow(c.queue.entries[2]); // /r/3
     await drain();
     expect(lib.stations.first.rejected, [
       ['/r/2'],
+      ['/r/3'],
     ]);
-    expect(ap.bufferPaths(), ['/r/1', '/r/3', '/r/4', '/r/5']);
+    // Never a rebuild: the rows left keep their order, new ones go after.
+    expect(ap.bufferPaths(), ['/r/1', '/r/4', '/r/5', '/r/6']);
+    expect(nativePaths(), paths());
   });
+
+  test(
+    'a removed recommendation never comes back from a new station',
+    () async {
+      await enable();
+      c.removeRow(c.queue.entries[2]); // /r/2
+      await drain();
+      await c.playTrack(libAbc[1], context: libAbc); // a new station
+      await drain();
+      expect(lib.opens.last.$1, '/lib/b');
+      expect(lib.opens.last.$2['avoid'] as Set<String>, contains('/r/2'));
+      expect(ap.bufferPaths(), isNot(contains('/r/2')));
+    },
+  );
 
   test(
     'a listen through pulls the station; library skips are not negatives',

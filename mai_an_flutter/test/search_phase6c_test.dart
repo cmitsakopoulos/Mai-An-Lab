@@ -262,6 +262,8 @@ class _FakePlaybackBackend implements PlaybackBackend {
   @override
   Future<void> skipToPrevious() async {}
   @override
+  set remoteControls(RemoteControls? controls) {}
+  @override
   Future<void> setRepeat(Repeat mode) async {}
   @override
   Future<void> setShuffle(bool enabled) async {}

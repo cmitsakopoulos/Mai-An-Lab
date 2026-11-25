@@ -4,8 +4,10 @@ import 'package:flutter/material.dart';
 
 import '../data/library_repository.dart';
 import '../player/ui/artwork.dart';
+import '../ui/format_badge.dart';
 import '../ui/tokens.dart';
 import 'track_row.dart';
+import '../ui/frost.dart';
 
 /// What the long-press menu can do; a null action is shown disabled.
 typedef TrackMenuActions = ({
@@ -30,7 +32,7 @@ Future<void> showTrackMenu(
   VoidCallback? send,
 }) async {
   final accent = Theme.of(context).colorScheme.primary;
-  final picked = await showModalBottomSheet<VoidCallback>(
+  final picked = await showFrostedSheet<VoidCallback>(
     context: context,
     backgroundColor: Tokens.surface,
     showDragHandle: true,
@@ -85,7 +87,7 @@ Future<void> showTrackMenu(
                 Icons.playlist_add_rounded,
                 'Add to Playlist',
                 a.addToPlaylist,
-                iconColor: Tokens.libPlaylist,
+                iconColor: CategoryPalette.of(context).playlist,
               ),
               if (redownload != null)
                 item(
@@ -126,7 +128,6 @@ class TrackMenuCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final accent = Theme.of(context).colorScheme.primary;
     final t = track;
     final sub = TrackRow.subtitle(t);
     final bitrate = t.bitrate;
@@ -185,27 +186,7 @@ class TrackMenuCard extends StatelessWidget {
                   spacing: 8,
                   crossAxisAlignment: WrapCrossAlignment.center,
                   children: [
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 6,
-                        vertical: 1,
-                      ),
-                      decoration: BoxDecoration(
-                        color: accent.withValues(alpha: 0.22),
-                        border: Border.all(
-                          color: accent.withValues(alpha: 0.35),
-                        ),
-                        borderRadius: BorderRadius.circular(4),
-                      ),
-                      child: Text(
-                        t.formatBadge,
-                        style: TextStyle(
-                          fontSize: 9,
-                          fontWeight: FontWeight.w700,
-                          color: accent,
-                        ),
-                      ),
-                    ),
+                    FormatBadge(label: t.formatBadge, compact: true),
                     if (t.duration > 0)
                       Text(
                         t.durationLabel,

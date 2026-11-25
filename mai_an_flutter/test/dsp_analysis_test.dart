@@ -225,7 +225,7 @@ void main() {
       expect(a.running, isFalse);
       expect(bridge.calls.first, {'cancel': 'scan'});
       final progress = bridge.calls.where((c) => c['job'] == 'dsp');
-      expect(progress.first['title'], 'Analysing library');
+      expect(progress.first['title'], 'Analysing library (1 / 3)');
       expect(progress.first['cancellable'], isTrue);
       expect(progress.last, containsPair('done', true));
       expect(

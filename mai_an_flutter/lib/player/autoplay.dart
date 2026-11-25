@@ -48,6 +48,11 @@ class AutoPlay extends ChangeNotifier {
   /// The queue auto-play set aside.
   List<QueueEntry> held = [];
   final Queue<String> history = Queue();
+
+  /// Recommendations the listener removed this session, oldest first. Never
+  /// offered again, even by a new station (Flet's station forgot them when
+  /// it reopened, so a removed song came back).
+  final LinkedHashSet<String> removed = LinkedHashSet();
   List<String> _negatives = [];
   int _taken = 0;
   bool _startedOver = false;
@@ -96,6 +101,7 @@ class AutoPlay extends ChangeNotifier {
   /// aside and replace the pending buffer.
   void start(String path) {
     if (!enabled || path.isEmpty) return;
+    debugPrint('AutoPlay: new station from $path');
     _reset(path);
     _setAside();
     _scheduleFill(bufferTarget, replace: true);
@@ -194,15 +200,23 @@ class AutoPlay extends ChangeNotifier {
     if (enabled && _isAutoplay(path)) _negative(path);
   }
 
-  /// The listener removed a recommendation (call AFTER the row is gone).
+  /// The listener removed a recommendation (call AFTER the row is gone):
+  /// steer away from it and top up behind the rows still showing. Unlike an
+  /// early skip it never replans: replacing the list the listener is editing
+  /// swapped the rows under their finger (Flet counted it as a negative).
   void reject(String path) {
     if (path.isEmpty) return;
-    station?.exclude([path]);
-    if (enabled && !_negative(path)) {
-      final have = _pendingRows().length;
-      if (!_fillBusy() && have < bufferTarget) {
-        _scheduleFill(bufferTarget - have);
-      }
+    removed
+      ..remove(path)
+      ..add(path);
+    while (removed.length > historyLen) {
+      removed.remove(removed.first);
+    }
+    station?.reject([path]);
+    if (!enabled) return;
+    final have = _pendingRows().length;
+    if (!_fillBusy() && have < bufferTarget) {
+      _scheduleFill(bufferTarget - have);
     }
   }
 
@@ -309,6 +323,7 @@ class AutoPlay extends ChangeNotifier {
     if (_negatives.length >= negativesToReplan) {
       _negatives = [];
       if (station != null) {
+        debugPrint('AutoPlay: $negativesToReplan early skips; new buffer');
         _gen++;
         _filling = false;
         _scheduleFill(bufferTarget, replace: true);
@@ -331,7 +346,7 @@ class AutoPlay extends ChangeNotifier {
     );
     final cur = player.currentPath;
     if (cur.isNotEmpty) avoid.add(cur);
-    return avoid;
+    return avoid..addAll(removed);
   }
 
   int _insertAfter() {
@@ -413,8 +428,12 @@ class AutoPlay extends ChangeNotifier {
     bool appendAndPlay = false,
   }) async {
     try {
-      final (paths, opened) = await _take(n, gen);
+      final (taken, opened) = await _take(n, gen);
       if (gen != _gen || !enabled) return;
+      final paths = [
+        for (final p in taken)
+          if (!removed.contains(p)) p,
+      ];
       final batch = await _tracks(paths);
       if (gen != _gen || !enabled) return;
       if (batch.isEmpty && opened) {

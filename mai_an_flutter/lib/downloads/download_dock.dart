@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../ui/tokens.dart';
 import 'download_queue.dart';
+import '../ui/frost.dart';
 
 /// ui/player/download_dock.py: the app-wide download surface. A collapsed
 /// pill above the mini player while anything is active, and a full-height
@@ -45,12 +46,12 @@ class DownloadPill extends StatelessWidget {
         final shown = active > 0;
         return AnimatedSlide(
           offset: shown ? Offset.zero : const Offset(0, 0.3),
-          duration: const Duration(milliseconds: 220),
-          curve: Curves.easeOutCubic,
+          duration: Tokens.motionBase,
+          curve: Tokens.curveIn,
           child: AnimatedOpacity(
             opacity: shown ? 1 : 0,
-            duration: const Duration(milliseconds: 180),
-            curve: Curves.easeOut,
+            duration: Tokens.motionFast,
+            curve: Tokens.curveIn,
             // Flet hides it outright when idle; no space is kept.
             child: shown ? _pill(context, active) : const SizedBox.shrink(),
           ),
@@ -75,15 +76,13 @@ class DownloadPill extends StatelessWidget {
       headline = '$active queued';
       detail = 'Waiting to start…';
     }
-    return Padding(
-      padding: const EdgeInsets.only(left: 10, right: 10, bottom: 6),
+    final hPad = Tokens.dockPad(context);
+    return GlassSurface(
+      radius: 16,
+      grouped: true,
+      margin: EdgeInsets.fromLTRB(hPad, 0, hPad, 8),
       child: Material(
-        color: Tokens.surface,
-        clipBehavior: Clip.antiAlias,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(14),
-          side: const BorderSide(color: Tokens.borderSubtle),
-        ),
+        type: MaterialType.transparency,
         child: InkWell(
           onTap: () => showDownloadSheet(context, queue, onSnack),
           child: Stack(
@@ -162,7 +161,7 @@ Future<void> showDownloadSheet(
   BuildContext context,
   DownloadQueue queue,
   void Function(String text) onSnack,
-) => showModalBottomSheet<void>(
+) => showFrostedSheet<void>(
   context: context,
   isScrollControlled: true,
   useSafeArea: true,

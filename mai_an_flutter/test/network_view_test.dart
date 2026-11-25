@@ -8,12 +8,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mai_an_lab/core/haptics.dart';
 import 'package:mai_an_lab/data/library_repository.dart';
-import 'package:mai_an_lab/library/browse_controller.dart';
 import 'package:mai_an_lab/library/library_controller.dart';
-import 'package:mai_an_lab/library/library_screen.dart';
 import 'package:mai_an_lab/library/network_controller.dart';
+import 'package:mai_an_lab/player/autoplay.dart';
 import 'package:mai_an_lab/player/player_controller.dart';
 import 'package:mai_an_lab/player/queue_store.dart';
+import 'package:mai_an_lab/player/ui/queue_sheet.dart';
 import 'package:mai_an_lab/ui/tokens.dart';
 
 import 'fake_backend.dart';
@@ -263,10 +263,57 @@ void main() {
     });
   });
 
-  testWidgets('no coordinates: Compute DSP Features starts the analysis', (
+  testWidgets('QueueSheet: switches to Roadmap with Distance slider', (
     tester,
   ) async {
-    tester.view.physicalSize = const Size(360 * 3, 760 * 3);
+    tester.view.physicalSize = const Size(390 * 3, 844 * 3);
+    tester.view.devicePixelRatio = 3;
+    addTearDown(tester.view.reset);
+    final path = (await tester.runAsync(() => _library(dir)))!;
+    final lib = LibraryController(
+      () => LibraryRepository.open(path, writable: true),
+    );
+    await tester.runAsync(lib.load);
+    final p = PlayerController(
+      backend: FakeBackend(),
+      store: QueueStore(dir.path),
+      prefs: Prefs(dir.path),
+      libraryTracks: () async => lib.visible,
+    );
+    p.autoplay = AutoPlay(player: p, library: lib);
+    await tester.runAsync(() => p.playTrack(lib.visible.first, context: lib.visible));
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: Tokens.theme(),
+        home: Scaffold(body: QueueSheet(player: p)),
+      ),
+    );
+    await tester.pump();
+    expect(find.text('Playing Next'), findsOneWidget);
+    expect(find.text('Roadmap'), findsOneWidget);
+
+    await tester.tap(find.text('Roadmap'));
+    for (var i = 0; i < 10; i++) {
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 30)),
+      );
+      await tester.pump(const Duration(milliseconds: 60));
+    }
+    expect(find.text('Queue Roadmap'), findsOneWidget);
+    expect(find.text('Distance'), findsOneWidget);
+    expect(find.byType(Slider), findsOneWidget);
+    expect(tester.takeException(), isNull);
+
+    await tester.pumpWidget(const SizedBox());
+    p.dispose();
+    lib.dispose();
+  });
+
+  testWidgets('QueueSheet Roadmap: no PCA shows unavailable state', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(390 * 3, 844 * 3);
     tester.view.devicePixelRatio = 3;
     addTearDown(tester.view.reset);
     final path = (await tester.runAsync(() => _library(dir, coords: false)))!;
@@ -275,116 +322,33 @@ void main() {
       pcmDecoder: () async => null,
     );
     await tester.runAsync(lib.load);
-    final browse = BrowseController(
-      lib,
-      views: const [LibraryView.network, LibraryView.tracks],
+    final p = PlayerController(
+      backend: FakeBackend(),
+      store: QueueStore(dir.path),
+      prefs: Prefs(dir.path),
+      libraryTracks: () async => lib.visible,
     );
+    p.autoplay = AutoPlay(player: p, library: lib);
+
     await tester.pumpWidget(
       MaterialApp(
         theme: Tokens.theme(),
-        home: LibraryScreen(
-          controller: lib,
-          browse: browse,
-          player: ValueNotifier(null),
-          haptics: quiet,
-        ),
+        home: Scaffold(body: QueueSheet(player: p)),
       ),
     );
-    Future<void> settle() async {
-      for (var i = 0; i < 8; i++) {
-        await tester.runAsync(
-          () => Future<void>.delayed(const Duration(milliseconds: 30)),
-        );
-        await tester.pump(const Duration(milliseconds: 100));
-      }
+    await tester.pump();
+    await tester.tap(find.text('Roadmap'));
+    for (var i = 0; i < 10; i++) {
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 30)),
+      );
+      await tester.pump(const Duration(milliseconds: 60));
     }
-
-    await tester.tap(find.text('Network'));
-    await settle();
-    expect(find.text('Acoustic Network Graph'), findsOneWidget);
-    // No decoder on this host: the Flet error, as a snackbar.
-    await tester.tap(find.text('Compute DSP Features'));
-    await settle();
-    expect(
-      find.text('Audio service not ready — native analyser unavailable.'),
-      findsOneWidget,
-    );
+    expect(find.text('Acoustic Roadmap Unavailable'), findsOneWidget);
     expect(tester.takeException(), isNull);
+
     await tester.pumpWidget(const SizedBox());
+    p.dispose();
     lib.dispose();
-  });
-
-  testWidgets('the screen: bar, graph, readout, chips, list, collapse', (
-    tester,
-  ) async {
-    tester.view.physicalSize = const Size(360 * 3, 760 * 3);
-    tester.view.devicePixelRatio = 3;
-    addTearDown(tester.view.reset);
-    final path = (await tester.runAsync(() => _library(dir)))!;
-    final lib = LibraryController(
-      () => LibraryRepository.open(path, writable: true),
-    );
-    // load() returns once the station graphs are built.
-    await tester.runAsync(lib.load);
-    final browse = BrowseController(
-      lib,
-      views: const [LibraryView.network, LibraryView.tracks],
-    );
-    await tester.pumpWidget(
-      MaterialApp(
-        theme: Tokens.theme(),
-        home: LibraryScreen(
-          controller: lib,
-          browse: browse,
-          player: ValueNotifier(null),
-          haptics: quiet,
-        ),
-      ),
-    );
-    Future<void> settle() async {
-      for (var i = 0; i < 12; i++) {
-        await tester.runAsync(
-          () => Future<void>.delayed(const Duration(milliseconds: 30)),
-        );
-        await tester.pump(const Duration(milliseconds: 100));
-      }
-    }
-
-    await tester.tap(find.text('Network'));
-    await settle();
-    expect(find.text('GRAPH WALK'), findsOneWidget);
-    expect(find.text('Explore'), findsOneWidget);
-    expect(find.text('Density: 24'), findsOneWidget);
-    expect(find.textContaining('· seed'), findsOneWidget);
-    expect(find.byTooltip('Sort'), findsNothing);
-    expect(find.textContaining('tracks'), findsWidgets);
-    expect(tester.takeException(), isNull);
-
-    // The mode chip: Now Playing, nothing queued (no player).
-    await tester.tap(find.text('Explore'));
-    await settle();
-    expect(find.text('Now Playing'), findsOneWidget);
-    expect(find.text('UP NEXT'), findsOneWidget);
-    expect(find.text('Nothing queued ahead of this track.'), findsOneWidget);
-
-    // Back to explore; collapse the graph, then bring it back.
-    await tester.tap(find.text('Now Playing'));
-    await settle();
-    expect(find.text('Density: 24'), findsOneWidget);
-    await tester.tap(find.byIcon(Icons.keyboard_arrow_down_rounded));
-    await settle();
-    expect(find.text('Density: 24'), findsNothing);
-    await tester.tap(find.byIcon(Icons.keyboard_arrow_up_rounded));
-    await settle();
-    expect(find.text('Density: 24'), findsOneWidget);
-
-    // Density from the chip's menu.
-    await tester.tap(find.text('Density: 24'));
-    await settle();
-    await tester.tap(find.text('Density: 12 tracks'));
-    await settle();
-    expect(find.text('Density: 12'), findsOneWidget);
-    expect(tester.takeException(), isNull);
-    await tester.pumpWidget(const SizedBox());
   });
 }

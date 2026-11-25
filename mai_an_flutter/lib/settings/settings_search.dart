@@ -48,7 +48,7 @@ const kSettingEntries = [
     page: SettingsPage.companion,
     title: 'Companion & Sync',
     subtitle: 'Wireless feature offload and device transfers',
-    category: 'GENERAL',
+    category: 'LIBRARY & SYNC',
     icon: Icons.sync_rounded,
     keywords: [
       'companion', 'sync', 'offload', 'dsp', 'mac', 'android', 'wireless', //
@@ -59,7 +59,7 @@ const kSettingEntries = [
     page: SettingsPage.storage,
     title: 'Storage & Paths',
     subtitle: 'Library and download locations',
-    category: 'GENERAL',
+    category: 'LIBRARY & SYNC',
     icon: Icons.storage_rounded,
     keywords: [
       'download', 'path', 'folder', 'directory', 'streamrip', 'location', //
@@ -71,7 +71,7 @@ const kSettingEntries = [
     page: SettingsPage.account,
     title: 'Authentication',
     subtitle: 'Qobuz & Deezer credentials',
-    category: 'GENERAL',
+    category: 'SERVICES & AI',
     icon: Icons.lock_person_rounded,
     keywords: [
       'qobuz', 'deezer', 'arl', 'token', 'login', 'auth', 'credentials', //
@@ -83,7 +83,7 @@ const kSettingEntries = [
     page: SettingsPage.assistant,
     title: 'AI Assistant (Jarvis)',
     subtitle: 'Google Gemini API key, providers & LLM settings',
-    category: 'GENERAL',
+    category: 'SERVICES & AI',
     icon: Icons.smart_toy_rounded,
     keywords: [
       'gemini', 'ollama', 'api key', 'llm', 'jarvis', 'ai', 'assistant', //
@@ -96,13 +96,14 @@ const kSettingEntries = [
   SettingEntry(
     page: SettingsPage.appearance,
     title: 'Appearance',
-    subtitle: 'Accent colors and UI behavior',
-    category: 'CUSTOMISATION',
+    subtitle: 'Glass opacity, accent colors and UI behavior',
+    category: 'LOOK & FEEL',
     icon: Icons.palette_rounded,
     keywords: [
       'accent', 'color', 'theme', 'dark', 'light', 'visual', 'ui', //
       'appearance', 'font', 'startup', 'sort', 'landing', 'default sort',
       'history', 'stats', 'display', 'style', 'pill', 'pills', 'tabs', 'glow',
+      'glass', 'opacity', 'transparency', 'blur', 'solid', 'frosted',
       'most played', 'most listened', 'top artists', 'top genres',
     ],
   ),
@@ -110,7 +111,7 @@ const kSettingEntries = [
     page: SettingsPage.audio,
     title: 'Audio & DSP',
     subtitle: 'Equalizer, presets & dynamism enhancement',
-    category: 'CUSTOMISATION',
+    category: 'LOOK & FEEL',
     icon: Icons.graphic_eq_rounded,
     keywords: [
       'eq', 'equalizer', 'bands', 'gain', 'dynamism', 'preset', 'acoustic', //
@@ -123,7 +124,7 @@ const kSettingEntries = [
     page: SettingsPage.haptics,
     title: 'Haptic Feedback',
     subtitle: 'Vibration settings and intensity controls',
-    category: 'CUSTOMISATION',
+    category: 'LOOK & FEEL',
     icon: Icons.vibration_rounded,
     keywords: [
       'vibration', 'haptic', 'intensity', 'feedback', 'touch', 'tactile', //
@@ -134,7 +135,7 @@ const kSettingEntries = [
     page: SettingsPage.metadata,
     title: 'Metadata',
     subtitle: 'Fix artist tags that power Auto-Play recommendations',
-    category: 'LIBRARY INTELLIGENCE',
+    category: 'LIBRARY & SYNC',
     icon: Icons.label_important_rounded,
     keywords: [
       'metadata', 'artist', 'tags', 'workbench', 'wizard', 'enrichment', //
@@ -146,7 +147,7 @@ const kSettingEntries = [
     page: SettingsPage.permissions,
     title: 'Permissions',
     subtitle: 'Notifications, audio, and file access',
-    category: 'DEVELOPER TOOLS',
+    category: 'SYSTEM',
     icon: Icons.shield_outlined,
     keywords: [
       'permissions', 'audio', 'mic', 'microphone', 'record', //
@@ -158,7 +159,7 @@ const kSettingEntries = [
     page: SettingsPage.database,
     title: 'Database Management',
     subtitle: 'Wipe database, compute DSP & PCA',
-    category: 'DEVELOPER TOOLS',
+    category: 'SYSTEM',
     icon: Icons.dns_rounded,
     keywords: [
       'database', 'db', 'wipe', 'reset', 'pca', 'dsp computation', //
@@ -170,7 +171,7 @@ const kSettingEntries = [
     page: SettingsPage.advanced,
     title: 'Advanced',
     subtitle: 'Edit TOML config and data maintenance',
-    category: 'DEVELOPER TOOLS',
+    category: 'SYSTEM',
     icon: Icons.terminal_rounded,
     keywords: [
       'toml', 'config', 'advanced', 'raw', 'editor', 'maintenance', //
@@ -183,7 +184,7 @@ const kSettingEntries = [
     page: SettingsPage.about,
     title: 'About',
     subtitle: 'App version and developer info',
-    category: 'ABOUT',
+    category: 'SYSTEM',
     icon: Icons.info_outline_rounded,
     keywords: [
       'about', 'version', 'developer', 'info', 'github', 'release', //

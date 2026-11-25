@@ -8,6 +8,9 @@ import '../downloads/quality_selector.dart';
 import '../library/browse_controller.dart';
 import '../player/ui/artwork.dart';
 import '../settings/settings_search.dart';
+import '../ui/frost.dart';
+import '../ui/sliding_segmented.dart';
+import '../ui/toast.dart';
 import '../ui/tokens.dart';
 import 'landing_controller.dart';
 import 'local_search.dart';
@@ -130,22 +133,7 @@ class _SearchScreenState extends State<SearchScreen> {
       return;
     }
     if (!mounted) return;
-    final accent = Theme.of(context).colorScheme.primary;
-    ScaffoldMessenger.of(context)
-      ..hideCurrentSnackBar()
-      ..showSnackBar(
-        SnackBar(
-          content: icon == null
-              ? Text(message)
-              : Row(
-                  children: [
-                    Icon(icon, size: 18, color: accent),
-                    const SizedBox(width: 8),
-                    Expanded(child: Text(message)),
-                  ],
-                ),
-        ),
-      );
+    showAppToast(context, message, icon: icon);
   }
 
   Future<void> _submitSearch(String raw, {SearchViewMode? mode}) async {
@@ -343,11 +331,11 @@ class _SearchScreenState extends State<SearchScreen> {
                         : ListenableBuilder(
                             listenable: widget.landing,
                             builder: (context, _) => ListView(
-                              padding: const EdgeInsets.fromLTRB(
-                                16,
+                              padding: EdgeInsets.fromLTRB(
+                                Tokens.pagePad(context),
                                 10,
-                                16,
-                                100,
+                                Tokens.pagePad(context),
+                                24 + ShellInsets.bottomOf(context),
                               ),
                               children: _cards(context, ctrl),
                             ),
@@ -381,10 +369,13 @@ class _SearchScreenState extends State<SearchScreen> {
             if (ctrl.hasActiveQuery &&
                 ctrl.viewMode != SearchViewMode.all &&
                 ctrl.totalPages > 1)
-              SearchPaginationBar(
-                currentPage: ctrl.currentPage,
-                totalPages: ctrl.totalPages,
-                onChangePage: _changePage,
+              Padding(
+                padding: EdgeInsets.only(bottom: ShellInsets.bottomOf(context)),
+                child: SearchPaginationBar(
+                  currentPage: ctrl.currentPage,
+                  totalPages: ctrl.totalPages,
+                  onChangePage: _changePage,
+                ),
               ),
           ],
         );
@@ -408,7 +399,12 @@ class _SearchScreenState extends State<SearchScreen> {
     if (ctrl.remotePending) {
       return ListView(
         controller: _resultsScroll,
-        padding: const EdgeInsets.fromLTRB(12, 76, 12, 100),
+        padding: EdgeInsets.fromLTRB(
+          Tokens.pagePad(context),
+          76,
+          Tokens.pagePad(context),
+          24 + ShellInsets.bottomOf(context),
+        ),
         children: [
           if (hasLocalForMode)
             LocalLibrarySection(
@@ -485,7 +481,12 @@ class _SearchScreenState extends State<SearchScreen> {
 
     return ListView(
       controller: _resultsScroll,
-      padding: const EdgeInsets.fromLTRB(12, 8, 12, 100),
+      padding: EdgeInsets.fromLTRB(
+        Tokens.pagePad(context),
+        8,
+        Tokens.pagePad(context),
+        24 + ShellInsets.bottomOf(context),
+      ),
       children: children,
     );
   }
@@ -810,9 +811,8 @@ class _SearchScreenState extends State<SearchScreen> {
     LibraryView view,
     String Function(MostPlayedGroup) subtitle,
   ) {
-    final color = view == LibraryView.artists
-        ? Tokens.libArtist
-        : Tokens.libGenre;
+    final palette = CategoryPalette.of(context);
+    final color = view == LibraryView.artists ? palette.artist : palette.genre;
     return Column(
       children: [
         for (final (i, r) in rows.indexed)
@@ -835,6 +835,7 @@ class _SearchScreenState extends State<SearchScreen> {
 
   /// `_get_library_stats_content`: two rows of two.
   Widget _stats(LibraryCounts c) {
+    final palette = CategoryPalette.of(context);
     Widget card(
       String label,
       int count,
@@ -861,21 +862,21 @@ class _SearchScreenState extends State<SearchScreen> {
               c.tracks,
               'Audio tracks in library',
               Icons.music_note_rounded,
-              null, // the accent
+              palette.track,
               LibraryView.tracks,
             ),
-            const SizedBox(width: 10),
+            const SizedBox(width: 12),
             card(
               'Albums',
               c.albums,
               'Full-length releases',
               Icons.album_rounded,
-              Tokens.libAlbum,
+              palette.album,
               LibraryView.albums,
             ),
           ],
         ),
-        const SizedBox(height: 10),
+        const SizedBox(height: 12),
         Row(
           children: [
             card(
@@ -883,16 +884,16 @@ class _SearchScreenState extends State<SearchScreen> {
               c.artists,
               'Catalogued creators',
               Icons.person_rounded,
-              Tokens.libArtist,
+              palette.artist,
               LibraryView.artists,
             ),
-            const SizedBox(width: 10),
+            const SizedBox(width: 12),
             card(
               'Playlists',
               c.playlists,
               'Curated mixes & sets',
               Icons.queue_music_rounded,
-              Tokens.libPlaylist,
+              palette.playlist,
               LibraryView.playlists,
             ),
           ],
@@ -909,7 +910,7 @@ Future<String?> showRecentSearchesSheet(
   List<String> searches,
 ) {
   if (searches.isEmpty) return Future<String?>.value(null);
-  return showModalBottomSheet<String>(
+  return showFrostedSheet<String>(
     context: context,
     backgroundColor: Tokens.surface,
     shape: const RoundedRectangleBorder(
@@ -1050,12 +1051,18 @@ class _SearchModeBar extends StatelessWidget {
   final bool unifiedPills;
   final ValueChanged<SearchViewMode> onSelect;
 
-  Color _accentFor(SearchViewMode mode, Color primary) {
-    if (unifiedPills || mode == SearchViewMode.all) return primary;
+  Color _accentFor(
+    SearchViewMode mode,
+    Color primary,
+    CategoryPalette palette,
+  ) {
+    if (unifiedPills || palette.unified || mode == SearchViewMode.all) {
+      return primary;
+    }
     return switch (mode) {
-      SearchViewMode.artists => Tokens.libArtist,
-      SearchViewMode.albums => Tokens.libAlbum,
-      SearchViewMode.tracks => Tokens.libTrack,
+      SearchViewMode.artists => palette.artist,
+      SearchViewMode.albums => palette.album,
+      SearchViewMode.tracks => palette.track,
       SearchViewMode.all => primary,
     };
   }
@@ -1063,49 +1070,26 @@ class _SearchModeBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final primary = Theme.of(context).colorScheme.primary;
-    const order = [
-      SearchViewMode.all,
-      SearchViewMode.artists,
-      SearchViewMode.albums,
-      SearchViewMode.tracks,
-    ];
-    return Row(
-      children: [
-        for (final mode in order) ...[
-          if (mode != SearchViewMode.all) const SizedBox(width: 6),
-          Expanded(
-            child: InkWell(
-              borderRadius: BorderRadius.circular(Tokens.radiusPill),
-              onTap: () => onSelect(mode),
-              child: Container(
-                height: 36,
-                alignment: Alignment.center,
-                decoration: BoxDecoration(
-                  color: mode == selected
-                      ? _accentFor(mode, primary).withValues(alpha: 0.16)
-                      : Tokens.surface2,
-                  borderRadius: BorderRadius.circular(Tokens.radiusPill),
-                  border: Border.all(
-                    color: mode == selected
-                        ? _accentFor(mode, primary).withValues(alpha: 0.45)
-                        : Tokens.borderSubtle,
-                  ),
-                ),
-                child: Text(
-                  mode.label,
-                  style: TextStyle(
-                    color: mode == selected
-                        ? _accentFor(mode, primary)
-                        : Tokens.dim,
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ),
-            ),
+    final palette = CategoryPalette.of(context);
+    return SlidingSegmented<SearchViewMode>(
+      segments: [
+        for (final mode in const [
+          SearchViewMode.all,
+          SearchViewMode.artists,
+          SearchViewMode.albums,
+          SearchViewMode.tracks,
+        ])
+          Segment(
+            value: mode,
+            label: mode.label,
+            color: _accentFor(mode, primary, palette),
           ),
-        ],
       ],
+      selected: selected,
+      onSelect: onSelect,
+      accent: primary,
+      height: 38,
+      fontSize: 12,
     );
   }
 }
@@ -1371,14 +1355,9 @@ class LandingCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final accent = Theme.of(context).colorScheme.primary;
-    return Container(
+    return GlassCard(
       margin: const EdgeInsets.only(bottom: 16),
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: Tokens.surface,
-        border: Border.all(color: Tokens.borderSubtle),
-        borderRadius: BorderRadius.circular(Tokens.radiusCard),
-      ),
+      flat: Tokens.surface,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -1582,65 +1561,52 @@ class _StatCard extends StatelessWidget {
     final c = color ?? Theme.of(context).colorScheme.primary;
     return Tooltip(
       message: 'View $label in Library',
-      child: Material(
-        color: Tokens.surface2,
-        shape: RoundedRectangleBorder(
-          side: const BorderSide(color: Tokens.borderSubtle),
-          borderRadius: BorderRadius.circular(Tokens.radiusCard),
-        ),
-        clipBehavior: Clip.antiAlias,
-        child: InkWell(
-          onTap: onTap,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+      child: GlassCard(
+        onTap: onTap,
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
               children: [
-                Row(
-                  children: [
-                    _IconBadge(icon: icon, color: c, alpha: 0.14),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: Text(
-                        label.toUpperCase(),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          color: Tokens.dim,
-                          fontSize: 11,
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
+                _IconBadge(icon: icon, color: c, alpha: 0.14),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    label.toUpperCase(),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: Tokens.dim,
+                      fontSize: 11,
+                      fontWeight: FontWeight.w700,
                     ),
-                    Icon(
-                      Icons.arrow_forward_ios_rounded,
-                      color: Tokens.dim.withValues(alpha: 0.35),
-                      size: 11,
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 5),
-                Text(
-                  thousands(count),
-                  style: const TextStyle(
-                    color: Tokens.text,
-                    fontSize: 20,
-                    fontWeight: FontWeight.bold,
                   ),
                 ),
-                const SizedBox(height: 1),
-                Text(
-                  subtitle,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    color: Tokens.textTertiary,
-                    fontSize: 10,
-                  ),
+                Icon(
+                  Icons.arrow_forward_ios_rounded,
+                  color: Tokens.dim.withValues(alpha: 0.35),
+                  size: 11,
                 ),
               ],
             ),
-          ),
+            const SizedBox(height: 5),
+            Text(
+              thousands(count),
+              style: const TextStyle(
+                color: Tokens.text,
+                fontSize: 20,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 1),
+            Text(
+              subtitle,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(color: Tokens.textTertiary, fontSize: 10),
+            ),
+          ],
         ),
       ),
     );

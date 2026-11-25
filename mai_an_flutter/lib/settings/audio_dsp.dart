@@ -4,10 +4,13 @@ import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
+import '../analysis/library_analysis.dart';
 import '../core/py_num.dart';
+import '../library/library_dialogs.dart' show confirmDelete;
 import '../player/dsp.dart';
+import '../ui/sliding_segmented.dart';
 import '../ui/tokens.dart';
-import 'groups.dart' show SwitchRow, SettingsDropdown;
+import 'groups.dart' show InsetSwitchRow, SettingsSection;
 import 'settings_page.dart';
 
 const kSystemPresets = [
@@ -46,6 +49,7 @@ class _AudioDspGroupState extends State<AudioDspGroup> {
 
   late bool _dynamism;
   late bool _eq;
+  late bool _autoAnalyse;
 
   /// `_eq_preset_type_radio`: "system" or "custom".
   String _type = 'system';
@@ -71,11 +75,13 @@ class _AudioDspGroupState extends State<AudioDspGroup> {
     final cfg = DspConfig.fromToml(d.config.raw['dsp']);
     _dynamism = cfg.dynamismEnabled;
     _eq = cfg.equalizerEnabled;
+    _autoAnalyse = cfg.autoAnalyse;
     _custom = Map.of(cfg.customPresets);
     _refreshPresets(cfg.activePreset);
     _loadGains();
     _loadBands();
     _checkDynamism();
+    unawaited(d.library.refreshDspCoverage());
   }
 
   @override
@@ -174,6 +180,39 @@ class _AudioDspGroupState extends State<AudioDspGroup> {
     setState(() => _dynamism = v);
     await _write({'dynamism_enabled': v});
     d.player.value?.reapplyDsp();
+  }
+
+  Future<void> _onAutoAnalyse(bool v) async {
+    setState(() => _autoAnalyse = v);
+    await _write({'auto_analyse': v});
+  }
+
+  Future<void> _runAnalysis(DspEntry entry) async {
+    await d.library.analysis.run(
+      entry,
+      notice: (n) {
+        if (!mounted) return;
+        showSettingsSnack(context, n.text);
+      },
+    );
+    await d.library.refreshDspCoverage();
+    if (mounted) await _checkDynamism();
+  }
+
+  Future<void> _confirmRebuildAll() async {
+    final total = d.library.dspTotal;
+    final ok = await confirmDelete(
+      context,
+      title: 'Rebuild Acoustic Index?',
+      message:
+          'This will purge all existing DSP features and recompute '
+          '${total > 0 ? 'all $total tracks' : 'every track'} in your library '
+          'from scratch. Depending on library size, this may take a while.\n\n'
+          'Your audio files and play counts will NOT be touched.',
+      confirmLabel: 'Rebuild All',
+    );
+    if (!ok || !mounted) return;
+    await _runAnalysis(DspEntry.recomputeAll);
   }
 
   Future<void> _onEqualizer(bool v) async {
@@ -334,99 +373,337 @@ class _AudioDspGroupState extends State<AudioDspGroup> {
     final custom = _type == 'custom';
     final customNames = _custom.keys.where((n) => n != 'Custom').toList()
       ..sort();
+    final hasNonZero = _gains.any((g) => g.abs() >= 0.05);
+
     return GroupBody(
       spacing: 20,
       children: [
-        const Dim('Real-time digital signal processing adjustments.'),
-        SettingsCard(
-          radius: 10,
+        // 1. Acoustic Index (DSP feature coverage & auto-analysis)
+        ListenableBuilder(
+          listenable: Listenable.merge([d.library, d.library.analysis]),
+          builder: (context, _) {
+            final lib = d.library;
+            final analysis = lib.analysis;
+            final total = lib.dspTotal;
+            final missing = lib.dspMissing;
+            final analysed = lib.dspAnalysed;
+            final ratio = total > 0 ? (analysed / total).clamp(0.0, 1.0) : 0.0;
+            final allReady = total > 0 && missing == 0;
+            final canRun = lib.canWrite && total > 0;
+
+            final badgeText = analysis.running
+                ? 'Analysing…'
+                : total == 0
+                ? 'No Tracks'
+                : allReady
+                ? 'All Ready'
+                : '$missing pending';
+            final badgeColor = analysis.running
+                ? accent
+                : allReady
+                ? Tokens.accentGreen
+                : Tokens.amber;
+
+            return SettingsSection(
+              label: 'ACOUSTIC INDEX',
+              trailing: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                decoration: BoxDecoration(
+                  color: badgeColor.withValues(alpha: 0.16),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text(
+                  badgeText,
+                  style: TextStyle(
+                    color: badgeColor,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          total == 0
+                              ? 'Add tracks to build acoustic features'
+                              : '$analysed / $total tracks indexed',
+                          style: const TextStyle(
+                            color: Tokens.text,
+                            fontSize: 14,
+                            fontWeight: FontWeight.w600,
+                            fontFeatures: [FontFeature.tabularFigures()],
+                          ),
+                        ),
+                      ),
+                      if (total > 0)
+                        Text(
+                          '${(ratio * 100).round()}%',
+                          style: TextStyle(
+                            color: badgeColor,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w700,
+                            fontFeatures: const [FontFeature.tabularFigures()],
+                          ),
+                        ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(3),
+                    child: LinearProgressIndicator(
+                      value: analysis.running ? analysis.progress : ratio,
+                      minHeight: 5,
+                      color: badgeColor,
+                      backgroundColor: Tokens.surface2,
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  Dim(
+                    analysis.running
+                        ? (analysis.status.isEmpty
+                              ? 'Analysing acoustic features…'
+                              : analysis.status)
+                        : 'Powers Auto-Play similarity walks, Dynamic Punchiness, and Acoustic Network.',
+                    size: 11,
+                  ),
+                  const SizedBox(height: 12),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [
+                      if (analysis.running)
+                        Material(
+                          color: Tokens.accentRed.withValues(alpha: 0.16),
+                          borderRadius: BorderRadius.circular(10),
+                          child: InkWell(
+                            borderRadius: BorderRadius.circular(10),
+                            onTap: analysis.cancel,
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 14,
+                                vertical: 9,
+                              ),
+                              decoration: BoxDecoration(
+                                borderRadius: BorderRadius.circular(10),
+                                border: Border.all(
+                                  color: Tokens.accentRed.withValues(
+                                    alpha: 0.45,
+                                  ),
+                                ),
+                              ),
+                              child: const Text(
+                                'Cancel Analysis',
+                                style: TextStyle(
+                                  color: Tokens.accentRed,
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                            ),
+                          ),
+                        )
+                      else if (missing > 0) ...[
+                        Material(
+                          color: canRun ? accent : Tokens.surface2,
+                          borderRadius: BorderRadius.circular(10),
+                          child: InkWell(
+                            borderRadius: BorderRadius.circular(10),
+                            onTap: canRun
+                                ? () => unawaited(
+                                    _runAnalysis(DspEntry.settings),
+                                  )
+                                : null,
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 14,
+                                vertical: 9,
+                              ),
+                              child: Text(
+                                'Analyse $missing Track${missing == 1 ? '' : 's'}',
+                                style: TextStyle(
+                                  color: canRun ? Colors.black : Tokens.dim,
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w800,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                        if (analysed > 0)
+                          TextButton(
+                            onPressed: canRun
+                                ? () => unawaited(_confirmRebuildAll())
+                                : null,
+                            child: const Text(
+                              'Rebuild All',
+                              style: TextStyle(color: Tokens.dim, fontSize: 12),
+                            ),
+                          ),
+                      ] else
+                        OutlinedButton.icon(
+                          icon: const Icon(Icons.refresh_rounded, size: 16),
+                          label: const Text(
+                            'Rebuild Acoustic Index',
+                            style: TextStyle(fontSize: 12),
+                          ),
+                          style: OutlinedButton.styleFrom(
+                            foregroundColor: Tokens.dim,
+                            side: const BorderSide(color: Tokens.borderSubtle),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                          ),
+                          onPressed: canRun
+                              ? () => unawaited(_confirmRebuildAll())
+                              : null,
+                        ),
+                    ],
+                  ),
+                  const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 10),
+                    child: Divider(height: 1, color: Tokens.borderSubtle),
+                  ),
+                  InsetSwitchRow(
+                    label: 'Auto-analyse new tracks',
+                    subtitle:
+                        'Automatically compute DSP features after scans & downloads',
+                    value: _autoAnalyse,
+                    onChanged: _onAutoAnalyse,
+                  ),
+                ],
+              ),
+            );
+          },
+        ),
+
+        // 2. Dynamic Punchiness
+        SettingsSection(
+          label: 'DYNAMIC PUNCHINESS',
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              const CardTitle(Icons.graphic_eq_rounded, 'Dynamic Punchiness'),
-              const SizedBox(height: 10),
-              const Dim(
-                'Automatically enhance output gain based on track energy and '
-                'beat strength to increase dynamic punchiness of rhythmic '
-                'tracks.',
-              ),
-              const SizedBox(height: 10),
               Opacity(
-                opacity: _dynamismAvailable ? 1 : 0.4,
-                child: SwitchRow(
-                  value: _dynamism,
+                opacity: _dynamismAvailable ? 1 : 0.45,
+                child: InsetSwitchRow(
                   label: 'Enable Dynamism Enhancement',
+                  subtitle:
+                      'Automatically boost output gain from track energy & beat strength',
+                  value: _dynamism,
                   onChanged: _dynamismAvailable ? _onDynamism : null,
                 ),
               ),
               if (_dynamismNote != null) ...[
                 const SizedBox(height: 10),
-                Dim(_dynamismNote!, size: 11, color: Tokens.amber),
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 8,
+                  ),
+                  decoration: BoxDecoration(
+                    color: Tokens.amber.withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(
+                      color: Tokens.amber.withValues(alpha: 0.35),
+                    ),
+                  ),
+                  child: Dim(_dynamismNote!, size: 11, color: Tokens.amber),
+                ),
               ],
               _BoostCard(deps: d),
             ],
           ),
         ),
-        SettingsCard(
-          radius: 10,
+
+        // 2. 5-Band Equalizer
+        SettingsSection(
+          label: 'EQUALIZER',
+          trailing: _eq && hasNonZero
+              ? GestureDetector(
+                  onTap: () => _onPreset('Flat'),
+                  child: Text(
+                    'Reset Flat',
+                    style: TextStyle(
+                      color: accent,
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                )
+              : null,
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              const CardTitle(Icons.tune_rounded, 'Equalizer'),
-              const SizedBox(height: 10),
-              const Dim(
-                'Boost or cut specific frequency bands to match your '
-                'headphones or genre preferences.',
-              ),
-              const SizedBox(height: 10),
-              SwitchRow(
-                value: _eq,
+              InsetSwitchRow(
                 label: 'Enable 5-Band Equalizer',
+                subtitle:
+                    'Shape frequency bands to match your headphones or genre',
+                value: _eq,
                 onChanged: _onEqualizer,
               ),
-              const SizedBox(height: 15),
-              RadioGroup<String>(
-                groupValue: _type,
-                onChanged: (v) {
-                  if (v != null) _onType(v);
-                },
-                child: Wrap(
-                  spacing: 20,
-                  children: [
-                    for (final (v, label) in const [
-                      ('system', 'System Presets'),
-                      ('custom', 'Custom Presets'),
-                    ])
-                      InkWell(
-                        onTap: () => _onType(v),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Radio<String>(
-                              value: v,
-                              fillColor: WidgetStatePropertyAll(accent),
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 12),
+                child: Divider(height: 1, color: Tokens.borderSubtle),
+              ),
+              SlidingSegmented<String>(
+                selected: _type,
+                accent: accent,
+                onSelect: _onType,
+                segments: const [
+                  Segment(value: 'system', label: 'System Presets'),
+                  Segment(value: 'custom', label: 'Custom Presets'),
+                ],
+              ),
+              const SizedBox(height: 12),
+              SizedBox(
+                height: 36,
+                child: ListView.separated(
+                  scrollDirection: Axis.horizontal,
+                  itemCount: _options.length,
+                  separatorBuilder: (_, _) => const SizedBox(width: 8),
+                  itemBuilder: (context, idx) {
+                    final name = _options[idx];
+                    final selected = name == _preset;
+                    return Material(
+                      color: selected
+                          ? accent.withValues(alpha: 0.20)
+                          : Tokens.surface2,
+                      borderRadius: BorderRadius.circular(10),
+                      child: InkWell(
+                        borderRadius: BorderRadius.circular(10),
+                        onTap: () => _onPreset(name),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 13),
+                          alignment: Alignment.center,
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(10),
+                            border: Border.all(
+                              color: selected
+                                  ? accent.withValues(alpha: 0.7)
+                                  : Tokens.borderSubtle,
                             ),
-                            Text(
-                              label,
-                              style: const TextStyle(
-                                color: Tokens.text,
-                                fontSize: 12,
-                              ),
+                          ),
+                          child: Text(
+                            name,
+                            style: TextStyle(
+                              color: selected ? accent : Tokens.text,
+                              fontSize: 12,
+                              fontWeight: selected
+                                  ? FontWeight.w700
+                                  : FontWeight.w500,
                             ),
-                          ],
+                          ),
                         ),
                       ),
-                  ],
+                    );
+                  },
                 ),
               ),
-              const SizedBox(height: 15),
-              SettingsDropdown(
-                label: 'Equalizer Preset',
-                value: _preset,
-                options: [for (final o in _options) (o, o)],
-                onChanged: _onPreset,
-              ),
-              const SizedBox(height: 15),
+              const SizedBox(height: 14),
               EqCurve(
                 freqs: _freqs,
                 gains: _gains,
@@ -436,23 +713,42 @@ class _AudioDspGroupState extends State<AudioDspGroup> {
                 onChanged: _onCurve,
                 onEnd: () => _saveGainsAs('Custom'),
               ),
-              const SizedBox(height: 15),
+              const SizedBox(height: 16),
               for (var i = 0; i < _gains.length; i++)
                 Padding(
-                  padding: const EdgeInsets.only(bottom: 15),
+                  padding: const EdgeInsets.only(bottom: 12),
                   child: Row(
                     children: [
-                      SizedBox(width: 60, child: Dim(_freqLabel(_freqs[i]))),
+                      SizedBox(
+                        width: 56,
+                        child: Text(
+                          _freqLabel(_freqs[i]),
+                          style: const TextStyle(
+                            color: Tokens.dim,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                            fontFeatures: [FontFeature.tabularFigures()],
+                          ),
+                        ),
+                      ),
                       Expanded(
-                        child: Slider(
-                          min: _minDb,
-                          max: _maxDb,
-                          divisions: ((_maxDb - _minDb) * 2).toInt(),
-                          value: _gains[i].clamp(_minDb, _maxDb).toDouble(),
-                          onChanged: _eq ? (v) => _onSlider(i, v) : null,
-                          onChangeEnd: _eq
-                              ? (_) => _saveGainsAs('Custom')
-                              : null,
+                        child: SliderTheme(
+                          data: SliderTheme.of(context).copyWith(
+                            activeTrackColor: _eq ? accent : Tokens.dim,
+                            inactiveTrackColor: Tokens.surface2,
+                            thumbColor: _eq ? Tokens.text : Tokens.dim,
+                            trackHeight: 4,
+                          ),
+                          child: Slider(
+                            min: _minDb,
+                            max: _maxDb,
+                            divisions: ((_maxDb - _minDb) * 2).toInt(),
+                            value: _gains[i].clamp(_minDb, _maxDb).toDouble(),
+                            onChanged: _eq ? (v) => _onSlider(i, v) : null,
+                            onChangeEnd: _eq
+                                ? (_) => _saveGainsAs('Custom')
+                                : null,
+                          ),
                         ),
                       ),
                       const SizedBox(width: 10),
@@ -466,6 +762,10 @@ class _AudioDspGroupState extends State<AudioDspGroup> {
                   ),
                 ),
               if (custom) ...[
+                const Padding(
+                  padding: EdgeInsets.only(top: 4, bottom: 12),
+                  child: Divider(height: 1, color: Tokens.borderSubtle),
+                ),
                 Row(
                   children: [
                     Expanded(
@@ -476,30 +776,73 @@ class _AudioDspGroupState extends State<AudioDspGroup> {
                           fontSize: 13,
                         ),
                         decoration: InputDecoration(
-                          labelText: 'Save Custom Preset',
-                          hintText: 'Enter preset name',
-                          labelStyle: TextStyle(color: accent, fontSize: 11),
-                          isDense: true,
+                          hintText: 'Save Custom Preset',
+                          hintStyle: const TextStyle(
+                            color: Tokens.textTertiary,
+                            fontSize: 13,
+                          ),
+                          filled: true,
+                          fillColor: Tokens.surface2,
+                          contentPadding: const EdgeInsets.symmetric(
+                            horizontal: 14,
+                            vertical: 11,
+                          ),
+                          enabledBorder: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(12),
+                            borderSide: const BorderSide(
+                              color: Tokens.borderSubtle,
+                            ),
+                          ),
+                          focusedBorder: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(12),
+                            borderSide: BorderSide(color: accent, width: 1.3),
+                          ),
                           border: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(10),
+                            borderRadius: BorderRadius.circular(12),
+                            borderSide: const BorderSide(
+                              color: Tokens.borderSubtle,
+                            ),
                           ),
                         ),
                       ),
                     ),
                     const SizedBox(width: 10),
-                    OnyxButton(label: 'SAVE', width: 90, onTap: _savePreset),
+                    Material(
+                      color: accent,
+                      borderRadius: BorderRadius.circular(12),
+                      child: InkWell(
+                        borderRadius: BorderRadius.circular(12),
+                        onTap: _savePreset,
+                        child: const Padding(
+                          padding: EdgeInsets.symmetric(
+                            horizontal: 18,
+                            vertical: 12,
+                          ),
+                          child: Text(
+                            'SAVE',
+                            style: TextStyle(
+                              color: Colors.black,
+                              fontSize: 12,
+                              fontWeight: FontWeight.w800,
+                              letterSpacing: 0.5,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
                   ],
                 ),
                 if (customNames.isNotEmpty) ...[
-                  const SizedBox(height: 15),
-                  const AccentLabel('Custom Presets'),
-                  const SizedBox(height: 5),
+                  const SizedBox(height: 16),
+                  const AccentLabel('SAVED CUSTOM PRESETS', size: 11),
+                  const SizedBox(height: 6),
                   for (final name in customNames)
                     Padding(
                       padding: const EdgeInsets.only(top: 8),
                       child: _PresetCard(
                         name: name,
                         gains: _custom[name]!,
+                        active: name == _preset,
                         onApply: () => _applyPreset(name),
                         onDelete: () => _deletePreset(name),
                       ),
@@ -509,6 +852,7 @@ class _AudioDspGroupState extends State<AudioDspGroup> {
             ],
           ),
         ),
+        const SizedBox(height: 24),
       ],
     );
   }
@@ -628,8 +972,8 @@ class _GainFieldState extends State<_GainField> {
 
   @override
   Widget build(BuildContext context) => SizedBox(
-    width: 75,
-    height: 30,
+    width: 72,
+    height: 32,
     child: TextField(
       controller: _c,
       focusNode: _focus,
@@ -639,15 +983,20 @@ class _GainFieldState extends State<_GainField> {
         color: Tokens.text,
         fontSize: 11,
         fontWeight: FontWeight.w700,
+        fontFeatures: [FontFeature.tabularFigures()],
       ),
       decoration: InputDecoration(
         isDense: true,
         filled: true,
         fillColor: Tokens.surface2,
-        contentPadding: const EdgeInsets.symmetric(vertical: 4, horizontal: 6),
+        contentPadding: const EdgeInsets.symmetric(vertical: 7, horizontal: 8),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(8),
+          borderSide: const BorderSide(color: Tokens.borderSubtle),
+        ),
         border: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(5),
-          borderSide: BorderSide.none,
+          borderRadius: BorderRadius.circular(8),
+          borderSide: const BorderSide(color: Tokens.borderSubtle),
         ),
       ),
       onSubmitted: widget.onSubmit,
@@ -659,12 +1008,14 @@ class _PresetCard extends StatelessWidget {
   const _PresetCard({
     required this.name,
     required this.gains,
+    required this.active,
     required this.onApply,
     required this.onDelete,
   });
 
   final String name;
   final List<double> gains;
+  final bool active;
   final VoidCallback onApply, onDelete;
 
   @override
@@ -674,13 +1025,15 @@ class _PresetCard extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       decoration: BoxDecoration(
-        color: Tokens.text.withValues(alpha: 0.04),
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: Tokens.border),
+        color: active ? accent.withValues(alpha: 0.12) : Tokens.surface2,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: active ? accent.withValues(alpha: 0.5) : Tokens.borderSubtle,
+        ),
       ),
       child: Row(
         children: [
-          Icon(Icons.equalizer_rounded, color: accent, size: 16),
+          Icon(Icons.equalizer_rounded, color: accent, size: 17),
           const SizedBox(width: 10),
           Expanded(
             child: Column(
@@ -688,26 +1041,26 @@ class _PresetCard extends StatelessWidget {
               children: [
                 Text(
                   name,
-                  style: const TextStyle(
-                    color: Tokens.text,
+                  style: TextStyle(
+                    color: active ? accent : Tokens.text,
                     fontSize: 13,
-                    fontWeight: FontWeight.bold,
+                    fontWeight: FontWeight.w600,
                   ),
                 ),
                 const SizedBox(height: 2),
-                Dim('Gains: [$text] dB', size: 10),
+                Dim('[$text] dB', size: 10),
               ],
             ),
           ),
           IconButton(
-            icon: const Icon(Icons.play_arrow_rounded, size: 18),
+            icon: const Icon(Icons.play_arrow_rounded, size: 19),
             color: accent,
             tooltip: 'Apply Preset',
             onPressed: onApply,
           ),
           IconButton(
-            icon: const Icon(Icons.delete_outline_rounded, size: 18),
-            color: const Color(0xFFFF4444),
+            icon: const Icon(Icons.delete_outline_rounded, size: 19),
+            color: Tokens.accentRed,
             tooltip: 'Delete Preset',
             onPressed: onDelete,
           ),
@@ -783,12 +1136,16 @@ class _EqCurveState extends State<EqCurve> {
   Widget build(BuildContext context) {
     final accent = Theme.of(context).colorScheme.primary;
     return Container(
-      height: 200,
+      height: 196,
       padding: const EdgeInsets.all(10),
       decoration: BoxDecoration(
-        color: Colors.black,
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: Colors.white.withValues(alpha: 0.15)),
+        gradient: const LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [Color(0xFF141416), Color(0xFF0A0A0C)],
+        ),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: Tokens.borderSubtle),
       ),
       child: LayoutBuilder(
         builder: (context, box) {

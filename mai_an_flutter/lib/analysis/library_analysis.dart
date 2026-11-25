@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 
 import '../core/db_worker.dart';
@@ -55,15 +57,60 @@ class DspAnalysis extends ChangeNotifier {
   /// `_analyzer_status`.
   String status = '';
 
+  /// Structured progress fields for [ActivityPill] clean 2-line rendering.
+  int doneCount = 0;
+  int totalCount = 0;
+  int failedCount = 0;
+  String? etaText;
+  String stageTitle = '';
+
+  /// Brief completion/error summary shown in [ActivityPill] after a run ends.
+  ({String title, String detail, bool isError})? lastOutcome;
+  Timer? _outcomeTimer;
+
   bool _cancelled = false;
   bool _disposed = false;
 
   /// The in-app Cancel (the notification has its own).
   void cancel() => _cancelled = true;
 
-  void _set({double? progress, required String status}) {
+  /// Dismisses the post-run completion banner immediately.
+  void clearOutcome() {
+    _outcomeTimer?.cancel();
+    _outcomeTimer = null;
+    if (lastOutcome != null) {
+      lastOutcome = null;
+      if (!_disposed) notifyListeners();
+    }
+  }
+
+  void _setOutcome({
+    required String title,
+    required String detail,
+    bool isError = false,
+  }) {
+    _outcomeTimer?.cancel();
+    lastOutcome = (title: title, detail: detail, isError: isError);
+    _outcomeTimer = Timer(const Duration(seconds: 4), clearOutcome);
+    if (!_disposed) notifyListeners();
+  }
+
+  void _set({
+    double? progress,
+    required String status,
+    String? stageTitle,
+    int? doneCount,
+    int? totalCount,
+    int? failedCount,
+    String? etaText,
+  }) {
     this.progress = progress;
     this.status = status;
+    if (stageTitle != null) this.stageTitle = stageTitle;
+    if (doneCount != null) this.doneCount = doneCount;
+    if (totalCount != null) this.totalCount = totalCount;
+    if (failedCount != null) this.failedCount = failedCount;
+    this.etaText = etaText;
     if (!_disposed) notifyListeners();
   }
 
@@ -87,7 +134,13 @@ class DspAnalysis extends ChangeNotifier {
     }
     // The "not analysed yet" card is being acted on.
     if (entry == DspEntry.library) cancelAlert('scan', bridge: _bridge);
+    clearOutcome();
     running = true;
+    doneCount = 0;
+    totalCount = 0;
+    failedCount = 0;
+    etaText = null;
+    stageTitle = 'Analysing library';
     _cancelled = false;
     var timedOut = false;
     try {
@@ -159,7 +212,14 @@ class DspAnalysis extends ChangeNotifier {
               'while.',
             );
         }
-        _set(progress: 0, status: 'Analysing 1 / $total tracks...');
+        _set(
+          progress: 0,
+          status: 'Analysing 1 / $total tracks...',
+          stageTitle: 'Analysing library',
+          doneCount: 0,
+          totalCount: total,
+          failedCount: 0,
+        );
         final clock = Stopwatch()..start();
         try {
           result = await bulkAnalyzeLibrary(
@@ -169,20 +229,33 @@ class DspAnalysis extends ChangeNotifier {
             cancelled: () => _cancelled,
             analyse: analyse,
             progress: (done, total, current, failures) {
+              final osText = dspProgressText(
+                done,
+                total,
+                failures,
+                clock.elapsed,
+              );
               notifier?.update(
                 done,
                 total,
-                dspProgressText(done, total, failures, clock.elapsed),
+                osText,
+                title: 'Analysing library ($done / $total)',
               );
-              var eta = '';
+              String? eta;
               if (done > 0 && total > done) {
                 final perTrack = clock.elapsed.inMicroseconds / 1e6 / done;
-                eta = ' (${formatEta(perTrack * (total - done))})';
+                eta = formatEta(perTrack * (total - done));
               }
               final suffix = failures > 0 ? ' ($failures failed)' : '';
+              final etaSuffix = eta != null ? ' ($eta)' : '';
               _set(
                 progress: total > 0 ? done / total : 0.0,
-                status: 'Analysing $done / $total$suffix$eta...',
+                status: 'Analysing $done / $total$suffix$etaSuffix...',
+                stageTitle: 'Analysing library',
+                doneCount: done,
+                totalCount: total,
+                failedCount: failures,
+                etaText: eta,
               );
             },
           );
@@ -190,6 +263,11 @@ class DspAnalysis extends ChangeNotifier {
           debugPrint('DSP compute: bulk_analyze_library failed: $e');
           say('DSP analysis failed: ${err(e)}', DspNoticeKind.error);
           notifier?.finish('Analysis failed: ${err(e)}');
+          _setOutcome(
+            title: 'Analysis failed',
+            detail: err(e),
+            isError: true,
+          );
           return null;
         }
         if (_cancelled) {
@@ -199,12 +277,25 @@ class DspAnalysis extends ChangeNotifier {
                       'reached. Start it again later to continue.'
                 : 'Analysis cancelled.',
           );
+          if (timedOut) {
+            _setOutcome(
+              title: 'Analysis paused',
+              detail: 'Background limit reached — resume anytime.',
+              isError: true,
+            );
+          }
           return result;
         }
       }
 
-      _set(status: 'Linking similar tracks...');
-      notifier?.stage('Linking similar tracks…');
+      _set(
+        status: 'Linking similar tracks...',
+        stageTitle: 'Linking similar tracks…',
+        doneCount: result.total,
+        totalCount: result.total,
+        failedCount: result.failed,
+      );
+      notifier?.stage('Linking similar tracks…', title: 'Building acoustic map');
       var graphOk = true;
       try {
         await _host.rebuildSimilarityGraph();
@@ -216,6 +307,11 @@ class DspAnalysis extends ChangeNotifier {
         }
         if (entry != DspEntry.library) {
           notifier?.finish('Graph rebuild failed: ${err(e)}');
+          _setOutcome(
+            title: 'Graph rebuild failed',
+            detail: err(e),
+            isError: true,
+          );
           return result;
         }
       }
@@ -228,8 +324,24 @@ class DspAnalysis extends ChangeNotifier {
               : 'Analysed ${result.total} tracks$suffix; graph rebuild '
                     'failed.',
         );
+        if (result.total > 0) {
+          _setOutcome(
+            title: graphOk ? 'Acoustic index ready' : 'Analysed with issues',
+            detail: graphOk
+                ? '${result.total} tracks analysed$suffix · Auto-Play ready'
+                : '${result.total} tracks analysed$suffix · Graph rebuild failed',
+            isError: !graphOk || result.failed > 0,
+          );
+        }
       } else {
         notifier?.finish('Analysis complete. Similarity walks are ready.');
+        _setOutcome(
+          title: 'Acoustic index ready',
+          detail: result.total > 0
+              ? '${result.total} tracks analysed · Auto-Play ready'
+              : 'Similarity graph rebuilt.',
+          isError: result.failed > 0,
+        );
         say(
           entry == DspEntry.recomputeAll
               ? 'DSP features, edges, and PCA space recomputed.'
@@ -242,12 +354,18 @@ class DspAnalysis extends ChangeNotifier {
       running = false;
       progress = null;
       status = '';
+      doneCount = 0;
+      totalCount = 0;
+      failedCount = 0;
+      etaText = null;
+      stageTitle = '';
       if (!_disposed) notifyListeners();
     }
   }
 
   @override
   void dispose() {
+    _outcomeTimer?.cancel();
     _disposed = true;
     _cancelled = true;
     super.dispose();

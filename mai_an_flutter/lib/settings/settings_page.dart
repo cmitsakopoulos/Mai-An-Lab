@@ -16,6 +16,8 @@ import 'config_controller.dart';
 import 'groups.dart';
 import 'settings_search.dart';
 import 'sync_hub.dart';
+import '../ui/frost.dart';
+import '../ui/toast.dart';
 
 export 'settings_search.dart' show SettingsPage;
 
@@ -166,20 +168,21 @@ class SubpageFrame extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final accent = Theme.of(context).colorScheme.primary;
+    final hPad = Tokens.pagePad(context);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Padding(
-          padding: const EdgeInsets.fromLTRB(18, 12, 28, 0),
+          padding: EdgeInsets.fromLTRB(hPad - 6, 8, hPad, 8),
           child: Row(
             children: [
               IconButton(
-                icon: const Icon(Icons.arrow_back_ios_new_rounded, size: 16),
+                icon: const Icon(Icons.arrow_back_ios_new_rounded, size: 17),
                 color: accent,
                 tooltip: 'Back',
                 onPressed: onBack,
               ),
-              const SizedBox(width: 10),
+              const SizedBox(width: 4),
               Expanded(
                 child: Text(
                   title,
@@ -187,7 +190,7 @@ class SubpageFrame extends StatelessWidget {
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
                     color: Tokens.text,
-                    fontSize: 18,
+                    fontSize: 20,
                     fontWeight: FontWeight.w700,
                   ),
                 ),
@@ -195,7 +198,6 @@ class SubpageFrame extends StatelessWidget {
             ],
           ),
         ),
-        const SizedBox(height: 15),
         Expanded(child: child),
       ],
     );
@@ -222,10 +224,11 @@ class GroupBody extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final hPad = Tokens.pagePad(context);
     return Stack(
       children: [
         ListView(
-          padding: const EdgeInsets.fromLTRB(28, 0, 28, 100),
+          padding: EdgeInsets.fromLTRB(hPad, 4, hPad, 100),
           children: [
             for (final (i, c) in children.indexed) ...[
               if (i > 0) SizedBox(height: spacing),
@@ -321,13 +324,10 @@ class SettingsCard extends StatelessWidget {
   final Color borderColor;
 
   @override
-  Widget build(BuildContext context) => Container(
+  Widget build(BuildContext context) => GlassCard(
     padding: EdgeInsets.all(padding),
-    decoration: BoxDecoration(
-      color: Tokens.surface2,
-      borderRadius: BorderRadius.circular(radius),
-      border: Border.all(color: borderColor),
-    ),
+    radius: radius,
+    flatBorder: borderColor,
     child: child,
   );
 }
@@ -343,8 +343,8 @@ class CardTitle extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Row(
     children: [
-      Icon(icon, color: Theme.of(context).colorScheme.primary, size: 20),
-      const SizedBox(width: 10),
+      Icon(icon, color: Tokens.dim, size: 20),
+      const SizedBox(width: 12),
       Expanded(
         child: Text(
           title,
@@ -405,22 +405,14 @@ void showSnackOn(
   Color? color,
 }) {
   icon ??= color == null ? null : Icons.notifications_rounded;
-  final Widget content = icon == null
-      ? Text(text)
-      : Row(
-          children: [
-            Icon(
-              icon,
-              size: 20,
-              color: color ?? Theme.of(m.context).colorScheme.primary,
-            ),
-            const SizedBox(width: 10),
-            Expanded(child: Text(text)),
-          ],
-        );
+  final overlay = Overlay.maybeOf(m.context, rootOverlay: true);
+  if (overlay != null) {
+    showAppToastOn(overlay, text, icon: icon, color: color);
+    return;
+  }
   m
     ..hideCurrentSnackBar()
-    ..showSnackBar(SnackBar(content: content));
+    ..showSnackBar(SnackBar(content: Text(text)));
 }
 
 // ---------------------------------------------------------------------------
@@ -462,58 +454,94 @@ class _HubState extends State<_Hub> {
   SettingEntry _entry(SettingsPage p) =>
       kSettingEntries.firstWhere((e) => e.page == p);
 
-  Widget _item(SettingEntry e, {String? subtitle}) => _HubItem(
-    icon: e.icon,
-    title: e.title,
-    subtitle: subtitle ?? e.subtitle,
-    onTap: () => widget.onOpen(e.page),
-  );
+  static Color _badgeColor(SettingsPage p, Color accent) => switch (p) {
+    SettingsPage.appearance => Tokens.libArtist,
+    SettingsPage.audio => Tokens.libAlbum,
+    SettingsPage.haptics => Tokens.libGenre,
+    SettingsPage.storage => Tokens.libPlaylist,
+    SettingsPage.metadata => Tokens.libTrack,
+    SettingsPage.companion => const Color(0xFF64D2FF),
+    SettingsPage.account => Tokens.amber,
+    SettingsPage.assistant => accent,
+    SettingsPage.permissions => const Color(0xFF30D158),
+    SettingsPage.database => const Color(0xFFFF453A),
+    SettingsPage.advanced => const Color(0xFF8E8E93),
+    SettingsPage.about => const Color(0xFF636366),
+  };
+
+  Widget _group(
+    BuildContext context,
+    String label,
+    List<SettingEntry> entries, {
+    bool showCategoryInSub = false,
+  }) {
+    final accent = Theme.of(context).colorScheme.primary;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 22),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(left: 4, bottom: 8),
+            child: AccentLabel(label, size: 11),
+          ),
+          GlassCard(
+            padding: EdgeInsets.zero,
+            radius: Tokens.radiusCard + 2,
+            child: Column(
+              children: [
+                for (final (i, e) in entries.indexed) ...[
+                  if (i > 0)
+                    const Divider(
+                      height: 1,
+                      indent: 58,
+                      color: Tokens.borderSubtle,
+                    ),
+                  _HubItem(
+                    icon: e.icon,
+                    badgeColor: _badgeColor(e.page, accent),
+                    title: e.title,
+                    subtitle: showCategoryInSub
+                        ? '[${e.category}] ${e.subtitle}'
+                        : e.subtitle,
+                    onTap: () => widget.onOpen(e.page),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
     final query = widget.search.text.trim().toLowerCase();
-    final children = <Widget>[
-      const Text(
-        'Settings',
-        style: TextStyle(
-          color: Tokens.text,
-          fontSize: 32,
-          fontWeight: FontWeight.w900,
-        ),
-      ),
-      const SizedBox(height: 12),
-      _SearchBox(controller: widget.search),
-      const SizedBox(height: 16),
-    ];
+    final hPad = Tokens.pagePad(context);
+    final children = <Widget>[];
     if (query.isEmpty) {
-      Widget section(String label) => Padding(
-        padding: const EdgeInsets.only(bottom: 12),
-        child: AccentLabel(label, size: 11),
-      );
-      const divider = Divider(color: Tokens.border, height: 30);
       children.addAll([
-        section('GENERAL'),
-        if (widget.hasSync) _item(_entry(SettingsPage.companion)),
-        _item(_entry(SettingsPage.storage)),
-        _item(_entry(SettingsPage.account)),
-        _item(_entry(SettingsPage.assistant)),
-        divider,
-        section('CUSTOMISATION'),
-        _item(_entry(SettingsPage.appearance)),
-        _item(_entry(SettingsPage.audio)),
-        _item(_entry(SettingsPage.haptics)),
-        if (widget.hasWorkbench) ...[
-          divider,
-          section('LIBRARY INTELLIGENCE'),
-          _item(_entry(SettingsPage.metadata)),
-        ],
-        divider,
-        section('DEVELOPER TOOLS'),
-        _item(_entry(SettingsPage.permissions)),
-        _item(_entry(SettingsPage.database)),
-        _item(_entry(SettingsPage.advanced)),
-        divider,
-        _item(_entry(SettingsPage.about)),
+        _group(context, 'LOOK & FEEL', [
+          _entry(SettingsPage.appearance),
+          _entry(SettingsPage.audio),
+          _entry(SettingsPage.haptics),
+        ]),
+        _group(context, 'LIBRARY & SYNC', [
+          _entry(SettingsPage.storage),
+          if (widget.hasWorkbench) _entry(SettingsPage.metadata),
+          if (widget.hasSync) _entry(SettingsPage.companion),
+        ]),
+        _group(context, 'SERVICES & AI', [
+          _entry(SettingsPage.account),
+          _entry(SettingsPage.assistant),
+        ]),
+        _group(context, 'SYSTEM', [
+          _entry(SettingsPage.permissions),
+          _entry(SettingsPage.database),
+          _entry(SettingsPage.advanced),
+          _entry(SettingsPage.about),
+        ]),
       ]);
     } else {
       final matches = [
@@ -524,14 +552,13 @@ class _HubState extends State<_Hub> {
       ];
       if (matches.isNotEmpty) {
         children.add(
-          Padding(
-            padding: const EdgeInsets.only(bottom: 12),
-            child: AccentLabel('SEARCH RESULTS (${matches.length})', size: 11),
+          _group(
+            context,
+            'SEARCH RESULTS (${matches.length})',
+            matches,
+            showCategoryInSub: true,
           ),
         );
-        for (final m in matches) {
-          children.add(_item(m, subtitle: '[${m.category}] ${m.subtitle}'));
-        }
       } else {
         children.add(
           Padding(
@@ -559,9 +586,57 @@ class _HubState extends State<_Hub> {
         );
       }
     }
-    return ListView(
-      padding: const EdgeInsets.fromLTRB(28, 20, 28, 35),
-      children: children,
+
+    const topChromeHeight = 148.0;
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        ListView(
+          padding: EdgeInsets.fromLTRB(hPad, topChromeHeight, hPad, 32),
+          children: children,
+        ),
+        Positioned(
+          top: 0,
+          left: 0,
+          right: 0,
+          child: DecoratedBox(
+            decoration: const BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                stops: [0.0, 0.65, 1.0],
+                colors: [
+                  Tokens.bg,
+                  Color(0xCC000000),
+                  Color(0x00000000),
+                ],
+              ),
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Padding(
+                  padding: EdgeInsets.fromLTRB(hPad + 2, 12, hPad, 14),
+                  child: const Text(
+                    'Settings',
+                    style: TextStyle(
+                      color: Tokens.text,
+                      fontSize: 30,
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: -0.5,
+                    ),
+                  ),
+                ),
+                Padding(
+                  padding: EdgeInsets.fromLTRB(hPad, 0, hPad, 16),
+                  child: _SearchBox(controller: widget.search),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ],
     );
   }
 }
@@ -574,108 +649,113 @@ class _SearchBox extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final accent = Theme.of(context).colorScheme.primary;
-    return Container(
-      padding: const EdgeInsets.only(left: 12, right: 6),
-      decoration: BoxDecoration(
-        color: Tokens.surface2,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: Tokens.border, width: 1.5),
-      ),
-      child: Row(
-        children: [
-          Icon(Icons.search_rounded, color: accent, size: 18),
-          const SizedBox(width: 4),
-          Expanded(
-            child: TextField(
-              controller: controller,
-              cursorColor: accent,
-              style: const TextStyle(color: Tokens.text, fontSize: 13),
-              decoration: const InputDecoration(
-                hintText: 'Search settings...',
-                hintStyle: TextStyle(color: Tokens.dim, fontSize: 13),
-                filled: false,
-                border: InputBorder.none,
-                contentPadding: EdgeInsets.symmetric(
-                  horizontal: 4,
-                  vertical: 12,
+    return GlassSurface(
+      radius: Tokens.radiusPill,
+      padding: const EdgeInsets.only(left: 16, right: 8),
+      child: SizedBox(
+        height: 50,
+        child: Row(
+          children: [
+            Icon(Icons.search_rounded, color: accent, size: 20),
+            const SizedBox(width: 8),
+            Expanded(
+              child: TextField(
+                controller: controller,
+                cursorColor: accent,
+                style: const TextStyle(color: Tokens.text, fontSize: 15),
+                decoration: const InputDecoration(
+                  hintText: 'Search settings...',
+                  hintStyle: TextStyle(color: Tokens.dim, fontSize: 15),
+                  filled: false,
+                  border: InputBorder.none,
+                  enabledBorder: InputBorder.none,
+                  focusedBorder: InputBorder.none,
+                  isDense: true,
+                  contentPadding: EdgeInsets.symmetric(
+                    horizontal: 2,
+                    vertical: 14,
+                  ),
                 ),
               ),
             ),
-          ),
-          if (controller.text.isNotEmpty)
-            IconButton(
-              icon: const Icon(Icons.close, size: 16),
-              color: Tokens.dim,
-              tooltip: 'Clear',
-              onPressed: controller.clear,
-            ),
-        ],
+            if (controller.text.isNotEmpty)
+              IconButton(
+                icon: const Icon(Icons.close_rounded, size: 18),
+                color: Tokens.dim,
+                tooltip: 'Clear',
+                constraints: const BoxConstraints.tightFor(
+                  width: 36,
+                  height: 36,
+                ),
+                padding: EdgeInsets.zero,
+                onPressed: controller.clear,
+              ),
+          ],
+        ),
       ),
     );
   }
 }
 
-/// ui/widgets.py `HubSettingItem`.
+/// Apple-style grouped hub row with a rounded-square tinted icon badge.
 class _HubItem extends StatelessWidget {
   const _HubItem({
     required this.icon,
+    required this.badgeColor,
     required this.title,
     required this.subtitle,
     required this.onTap,
   });
 
   final IconData icon;
+  final Color badgeColor;
   final String title, subtitle;
   final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 12),
-      child: Material(
-        color: Tokens.surface,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(Tokens.radiusCard),
-          side: const BorderSide(color: Tokens.borderSubtle),
-        ),
-        clipBehavior: Clip.antiAlias,
-        child: InkWell(
-          onTap: onTap,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-            child: Row(
-              children: [
-                Icon(
-                  icon,
-                  color: Theme.of(context).colorScheme.primary,
-                  size: 22,
+    return Material(
+      type: MaterialType.transparency,
+      child: InkWell(
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+          child: Row(
+            children: [
+              Container(
+                width: 32,
+                height: 32,
+                decoration: BoxDecoration(
+                  color: badgeColor.withValues(alpha: 0.18),
+                  borderRadius: BorderRadius.circular(9),
                 ),
-                const SizedBox(width: 16),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        title,
-                        style: const TextStyle(
-                          color: Tokens.text,
-                          fontSize: 15,
-                          fontWeight: FontWeight.w600,
-                        ),
+                child: Icon(icon, color: badgeColor, size: 18),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      style: const TextStyle(
+                        color: Tokens.text,
+                        fontSize: 15,
+                        fontWeight: FontWeight.w600,
                       ),
-                      const SizedBox(height: 2),
-                      Dim(subtitle),
-                    ],
-                  ),
+                    ),
+                    const SizedBox(height: 2),
+                    Dim(subtitle, size: 12),
+                  ],
                 ),
-                const SizedBox(width: 16),
-                Icon(
-                  Icons.chevron_right_rounded,
-                  color: Tokens.dim.withValues(alpha: 0.4),
-                  size: 18,
-                ),
-              ],
-            ),
+              ),
+              const SizedBox(width: 8),
+              Icon(
+                Icons.chevron_right_rounded,
+                color: Tokens.dim.withValues(alpha: 0.45),
+                size: 18,
+              ),
+            ],
           ),
         ),
       ),

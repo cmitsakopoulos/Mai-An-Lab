@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import 'analysis/library_analysis.dart';
 import 'assistant/assistant_controller.dart';
 import 'assistant/assistant_screen.dart';
 import 'core/haptics.dart';
@@ -23,6 +24,10 @@ import 'search/search_controller.dart';
 import 'search/search_history.dart';
 import 'search/search_screen.dart';
 import 'settings/settings_page.dart';
+import 'ui/activity_pill.dart';
+import 'ui/frost.dart';
+import 'ui/sliding_segmented.dart';
+import 'ui/toast.dart';
 import 'ui/tokens.dart';
 
 const _appChannel = MethodChannel('mai_an/app');
@@ -144,6 +149,9 @@ class AppShellState extends State<AppShell> {
     if (widget.settings?.workbench != null) {
       widget.router?.register('workbench', _openWorkbenchRoute);
     }
+    if (widget.settings != null) {
+      widget.router?.register('audio', _openAudioRoute);
+    }
     if (widget.onboarding case final flow?) {
       WidgetsBinding.instance.addPostFrameCallback((_) => _onboard(flow));
     }
@@ -242,6 +250,9 @@ class AppShellState extends State<AppShell> {
     if (widget.settings?.workbench != null) {
       widget.router?.unregister('workbench');
     }
+    if (widget.settings != null) {
+      widget.router?.unregister('audio');
+    }
     selection.dispose();
     super.dispose();
   }
@@ -262,10 +273,18 @@ class AppShellState extends State<AppShell> {
     if (t == AppTab.jarvis) widget.assistant?.onShow().ignore();
   }
 
+  void _openAudioRoute(String action) {
+    WidgetsBinding.instance
+      ..addPostFrameCallback((_) {
+        if (!mounted || widget.settings == null) return;
+        openSettings(context, widget.settings!, initial: SettingsPage.audio);
+      })
+      ..ensureVisualUpdate();
+  }
+
   void _snack(String text) {
-    ScaffoldMessenger.of(context)
-      ..hideCurrentSnackBar()
-      ..showSnackBar(SnackBar(content: Text(text)));
+    if (!mounted) return;
+    showAppToast(context, text);
   }
 
   /// main.py `play_track(path)` with no source: the Library's tracks view,
@@ -358,75 +377,134 @@ class AppShellState extends State<AppShell> {
         _appChannel.invokeMethod('moveTaskToBack').ignore();
       },
       child: Scaffold(
-        body: Stack(
-          fit: StackFit.expand,
-          children: [
-            if (_hasJarvis)
+        extendBody: true,
+        body: _ShellInsetsProvider(
+          player: widget.player,
+          downloads: widget.downloads,
+          analysis: widget.library.analysis,
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              if (_hasJarvis)
+                _FadeTab(
+                  active: tab == AppTab.jarvis,
+                  child: AssistantScreen(
+                    controller: widget.assistant!,
+                    onOpenSettings: _openSettings,
+                  ),
+                ),
               _FadeTab(
-                active: tab == AppTab.jarvis,
-                child: AssistantScreen(
-                  controller: widget.assistant!,
+                active: tab == AppTab.search,
+                child: SearchScreen(
+                  landing: widget.landing,
+                  controller: widget.searchController,
+                  downloads: widget.downloads,
+                  unifiedPills: widget.unifiedPills,
+                  onPlayTrack: _playPath,
+                  onOpenInLibrary: openInLibrary,
+                  searchHistory: widget.searchHistory,
                   onOpenSettings: _openSettings,
                 ),
               ),
-            _FadeTab(
-              active: tab == AppTab.search,
-              child: SearchScreen(
-                landing: widget.landing,
-                controller: widget.searchController,
-                downloads: widget.downloads,
-                unifiedPills: widget.unifiedPills,
-                onPlayTrack: _playPath,
-                onOpenInLibrary: openInLibrary,
-                searchHistory: widget.searchHistory,
-                onOpenSettings: _openSettings,
+              _FadeTab(
+                active: tab == AppTab.library,
+                child: LibraryScreen(
+                  controller: widget.library,
+                  browse: widget.browse,
+                  unifiedPills: widget.unifiedPills,
+                  player: widget.player,
+                  haptics: widget.haptics,
+                  selection: selection,
+                  onOpenSettings: _openSettings,
+                  sync: widget.settings?.sync,
+                  onRedownloadTrack: widget.searchController == null
+                      ? null
+                      : _redownloadTrack,
+                  onEditArtist: widget.settings?.workbench == null
+                      ? null
+                      : (name) => _openWorkbench(artist: name),
+                  onCurateGenre: widget.settings?.workbench == null
+                      ? null
+                      : (name) => _openWorkbench(genre: name),
+                ),
               ),
-            ),
-            _FadeTab(
-              active: tab == AppTab.library,
-              child: LibraryScreen(
-                controller: widget.library,
-                browse: widget.browse,
-                unifiedPills: widget.unifiedPills,
-                player: widget.player,
-                haptics: widget.haptics,
-                selection: selection,
-                onOpenSettings: _openSettings,
-                sync: widget.settings?.sync,
-                onRedownloadTrack: widget.searchController == null
-                    ? null
-                    : _redownloadTrack,
-                onEditArtist: widget.settings?.workbench == null
-                    ? null
-                    : (name) => _openWorkbench(artist: name),
-                onCurateGenre: widget.settings?.workbench == null
-                    ? null
-                    : (name) => _openWorkbench(genre: name),
-              ),
-            ),
-          ],
+            ],
+          ),
         ),
-        bottomNavigationBar: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            if (widget.downloads case final q?)
-              DownloadPill(queue: q, onSnack: _snack),
-            ValueListenableBuilder(
-              valueListenable: widget.player,
-              builder: (context, player, _) => player == null
-                  ? const SizedBox.shrink()
-                  : MiniPlayer(player: player),
-            ),
-            _TabBar(tab: tab, showJarvis: _hasJarvis, onSelect: switchTab),
-          ],
+        bottomNavigationBar: BackdropGroup(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ActivityPill(
+                analysis: widget.library.analysis,
+                downloads: widget.downloads,
+                onSnack: _snack,
+                onOpenAudioSettings: widget.settings == null
+                    ? null
+                    : () => _openSettings?.call(SettingsPage.audio),
+                grouped: true,
+              ),
+              ValueListenableBuilder(
+                valueListenable: widget.player,
+                builder: (context, player, _) => player == null
+                    ? const SizedBox.shrink()
+                    : MiniPlayer(player: player, grouped: true),
+              ),
+              _TabBar(tab: tab, showJarvis: _hasJarvis, onSelect: switchTab),
+            ],
+          ),
         ),
       ),
     );
   }
 }
 
-/// main.py `_nav`: no pill, a hairline on top, labels always shown, the
-/// accent indicator at about a third.
+/// Computes the live height of the floating bottom pills and shares it via
+/// [ShellInsets] so scrollable tabs pad their tails cleanly.
+class _ShellInsetsProvider extends StatelessWidget {
+  const _ShellInsetsProvider({
+    required this.player,
+    required this.downloads,
+    required this.analysis,
+    required this.child,
+  });
+
+  final ValueListenable<PlayerController?> player;
+  final DownloadQueue? downloads;
+  final DspAnalysis analysis;
+  final Widget child;
+
+  static const _tabBarHeight = 58.0; // 48 pill + 10 bottom gap
+  static const _miniPlayerHeight = 72.0; // ~64 pill + 8 gap
+  static const _activityPillHeight = 66.0; // unified ActivityPill + 8 gap
+
+  @override
+  Widget build(BuildContext context) {
+    final safeBottom = MediaQuery.paddingOf(context).bottom;
+    return ValueListenableBuilder<PlayerController?>(
+      valueListenable: player,
+      builder: (context, p, _) {
+        final listenables = <Listenable>[?p, ?downloads, analysis];
+        return ListenableBuilder(
+          listenable: Listenable.merge(listenables),
+          builder: (context, _) {
+            final hasMini =
+                p != null && p.hasEverPlayed && p.nowPlaying != null;
+            final hasActivity = ActivityPill.isVisible(analysis, downloads);
+            final bottom =
+                safeBottom +
+                _tabBarHeight +
+                (hasMini ? _miniPlayerHeight : 0) +
+                (hasActivity ? _activityPillHeight : 0);
+            return ShellInsets(bottom: bottom, child: child);
+          },
+        );
+      },
+    );
+  }
+}
+
+/// The floating bottom bar: a frosted glass pill hovering over scrolling content.
 class _TabBar extends StatelessWidget {
   const _TabBar({
     required this.tab,
@@ -441,39 +519,38 @@ class _TabBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final accent = Theme.of(context).colorScheme.primary;
+    final hPad = Tokens.dockPad(context);
     final tabs = [if (showJarvis) AppTab.jarvis, AppTab.search, AppTab.library];
-    final selectedIndex = tabs.indexOf(tab).clamp(0, tabs.length - 1);
-    return DecoratedBox(
-      decoration: const BoxDecoration(
-        border: Border(top: BorderSide(color: Tokens.borderSubtle, width: 0.5)),
-      ),
-      child: NavigationBar(
-        selectedIndex: selectedIndex,
-        onDestinationSelected: (i) => onSelect(tabs[i]),
-        backgroundColor: Tokens.surface,
-        indicatorColor: accent.withValues(alpha: 0x55 / 0xFF),
-        elevation: 0,
-        labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
-        labelTextStyle: const WidgetStatePropertyAll(
-          TextStyle(fontSize: 11, fontWeight: FontWeight.w500),
+    return SafeArea(
+      top: false,
+      child: Padding(
+        padding: EdgeInsets.fromLTRB(hPad, 0, hPad, 10),
+        child: SlidingSegmented<AppTab>(
+          segments: [
+            for (final t in tabs)
+              Segment(
+                value: t,
+                label: switch (t) {
+                  AppTab.jarvis => 'Jarvis',
+                  AppTab.search => 'Search',
+                  AppTab.library => 'Library',
+                },
+                icon: switch (t) {
+                  AppTab.jarvis => Icons.auto_awesome_rounded,
+                  AppTab.search => Icons.search_rounded,
+                  AppTab.library => Icons.library_music_rounded,
+                },
+              ),
+          ],
+          selected: tab,
+          onSelect: onSelect,
+          accent: accent,
+          height: 48,
+          fontSize: 12,
+          iconSize: 20,
+          hPad: 10,
+          grouped: true,
         ),
-        destinations: [
-          if (showJarvis)
-            const NavigationDestination(
-              icon: Icon(Icons.auto_awesome_rounded),
-              selectedIcon: Icon(Icons.auto_awesome_rounded),
-              label: 'Jarvis',
-            ),
-          const NavigationDestination(
-            icon: Icon(Icons.search_rounded),
-            label: 'Search',
-          ),
-          const NavigationDestination(
-            icon: Icon(Icons.library_music_outlined),
-            selectedIcon: Icon(Icons.library_music_rounded),
-            label: 'Library',
-          ),
-        ],
       ),
     );
   }
@@ -510,8 +587,8 @@ class _FadeTabState extends State<_FadeTab> {
         ignoring: !active,
         child: AnimatedOpacity(
           opacity: active ? 1 : 0,
-          duration: Duration(milliseconds: active ? 220 : 160),
-          curve: active ? Curves.easeOutQuad : Curves.easeInQuad,
+          duration: active ? Tokens.motionBase : Tokens.motionFast,
+          curve: active ? Tokens.curveIn : Tokens.curveOut,
           onEnd: () {
             if (!widget.active && mounted) {
               setState(() => _offstage = true);

@@ -252,8 +252,8 @@ class LocalLibrarySection extends StatelessWidget {
 
       // One of each type first, then fill up to previewRows.
       void addTrack(Track t) => rows.add(_trackRow(context, t));
-      void addAlbum(AlbumRow a) => rows.add(_albumRow(a));
-      void addArtist(ArtistRow a) => rows.add(_artistRow(a));
+      void addAlbum(AlbumRow a) => rows.add(_albumRow(context, a));
+      void addArtist(ArtistRow a) => rows.add(_artistRow(context, a));
 
       if (matches.tracks.isNotEmpty && rows.length < previewRows) {
         addTrack(matches.tracks.first);
@@ -288,14 +288,14 @@ class LocalLibrarySection extends StatelessWidget {
       if (matchCount == 0) return const SizedBox.shrink();
       seeAllView = LibraryView.albums;
       for (final a in matches.albums.take(previewRows)) {
-        rows.add(_albumRow(a));
+        rows.add(_albumRow(context, a));
       }
     } else {
       matchCount = matches.artists.length;
       if (matchCount == 0) return const SizedBox.shrink();
       seeAllView = LibraryView.artists;
       for (final a in matches.artists.take(previewRows)) {
-        rows.add(_artistRow(a));
+        rows.add(_artistRow(context, a));
       }
     }
 
@@ -431,13 +431,14 @@ class LocalLibrarySection extends StatelessWidget {
 
   Widget _trackRow(BuildContext context, Track t) {
     final accent = Theme.of(context).colorScheme.primary;
+    final palette = CategoryPalette.of(context);
     final sub = [
       if (t.artist.isNotEmpty) t.artist,
       if (t.album.isNotEmpty) t.album,
     ].join(' · ');
     return _rowShell(
       icon: Icons.music_note_rounded,
-      iconColor: Tokens.libTrack,
+      iconColor: palette.track,
       title: t.title.isEmpty ? 'Unknown' : t.title,
       subtitle: sub,
       onTap: () => onOpenInLibrary(LibraryView.tracks, t.title),
@@ -454,7 +455,7 @@ class LocalLibrarySection extends StatelessWidget {
     );
   }
 
-  Widget _albumRow(AlbumRow a) {
+  Widget _albumRow(BuildContext context, AlbumRow a) {
     final n = a.trackCount ?? 0;
     final artist = a.artist ?? '';
     final title = (a.title == null || a.title!.isEmpty) ? 'Unknown' : a.title!;
@@ -464,14 +465,14 @@ class LocalLibrarySection extends StatelessWidget {
     ].join(' · ');
     return _rowShell(
       icon: Icons.album_rounded,
-      iconColor: Tokens.libAlbum,
+      iconColor: CategoryPalette.of(context).album,
       title: title,
       subtitle: sub,
       onTap: () => onOpenInLibrary(LibraryView.albums, title),
     );
   }
 
-  Widget _artistRow(ArtistRow a) {
+  Widget _artistRow(BuildContext context, ArtistRow a) {
     final albums = a.albumCount ?? 0;
     final tracks = a.trackCount ?? 0;
     final name = (a.name == null || a.name!.isEmpty) ? 'Unknown' : a.name!;
@@ -480,7 +481,7 @@ class LocalLibrarySection extends StatelessWidget {
         '$tracks track${tracks != 1 ? 's' : ''}';
     return _rowShell(
       icon: Icons.person_rounded,
-      iconColor: Tokens.libArtist,
+      iconColor: CategoryPalette.of(context).artist,
       title: name,
       subtitle: sub,
       onTap: () => onOpenInLibrary(LibraryView.artists, name),

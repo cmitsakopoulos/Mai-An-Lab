@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../ui/tokens.dart';
 import 'download_queue.dart';
+import '../ui/frost.dart';
 
 /// Port of `StreamripApp/ui/player/quality_selector.py`: single-item and batch
 /// download quality picker that honours Settings → Storage → Default Download
@@ -108,7 +109,7 @@ Future<String?> showQualitySelectorBatch(
       : '${records.first['ui_title'] ?? records.first['name'] ?? ''}';
   final hiResSub = hiresSubtitle(records);
 
-  final picked = await showModalBottomSheet<String>(
+  final picked = await showFrostedSheet<String>(
     context: context,
     backgroundColor: Tokens.surface,
     shape: const RoundedRectangleBorder(

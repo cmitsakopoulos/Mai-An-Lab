@@ -17,12 +17,12 @@ import 'browse_controller.dart';
 import 'browse_view.dart';
 import 'library_controller.dart';
 import 'library_dialogs.dart';
-import 'network_controller.dart';
-import 'network_view.dart';
 import 'selection.dart';
 import 'track_menu.dart';
 import 'track_query.dart';
 import 'track_row.dart';
+import '../ui/frost.dart';
+import '../ui/toast.dart';
 
 const _appChannel = MethodChannel('mai_an/app');
 
@@ -92,14 +92,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
       widget.selection ?? SelectionController();
   bool get _standalone => widget.selection == null;
 
-  /// The Acoustic Network view's state (kept while the tab lives, as
-  /// library.py keeps its `_net_*` fields).
-  late final network = NetworkController(
-    library: controller,
-    player: widget.player,
-    haptics: widget.haptics,
-  );
-
   /// The search box. `show_filtered` (the Search landing) sets the query
   /// from outside, so the box follows the controller.
   late final _search = TextEditingController(text: controller.query);
@@ -124,9 +116,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
   void _snack(String text) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context)
-      ..hideCurrentSnackBar()
-      ..showSnackBar(SnackBar(content: Text(text)));
+    showAppToast(context, text);
   }
 
   @override
@@ -136,7 +126,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
     _libraryMessages?.cancel();
     controller.removeListener(_syncSearch);
     _search.dispose();
-    network.dispose();
     if (_standalone) selection.dispose();
     super.dispose();
   }
@@ -196,129 +185,162 @@ class _LibraryScreenState extends State<LibraryScreen> {
   Widget _screen() {
     return Scaffold(
       appBar: AppBar(
+        titleSpacing: Tokens.pagePad(context),
         title: ListenableBuilder(
-          listenable: Listenable.merge([controller, browse, network]),
+          listenable: Listenable.merge([controller, browse]),
           builder: (context, _) =>
-              _Header(controller: controller, browse: browse, network: network),
+              _Header(controller: controller, browse: browse),
         ),
         actions: [
           ListenableBuilder(
             listenable: Listenable.merge([controller, browse]),
             builder: (context, _) => _sortMenu(),
           ),
-          // library.py's scan button (Flet: refresh icon in the accent).
           ListenableBuilder(
             listenable: controller,
             builder: (context, _) => controller.canScan
                 ? IconButton(
-                    icon: const Icon(Icons.refresh),
+                    icon: const Icon(Icons.refresh_rounded, size: 22),
                     color: Theme.of(context).colorScheme.primary,
                     tooltip: 'Scan library',
+                    visualDensity: VisualDensity.compact,
                     onPressed: controller.scanning ? null : controller.scan,
                   )
                 : const SizedBox.shrink(),
           ),
           if (widget.onOpenSettings case final open?)
             IconButton(
-              icon: const Icon(Icons.settings_outlined, size: 22),
+              icon: const Icon(Icons.settings_outlined, size: 21),
               color: Tokens.dim,
               tooltip: 'Settings',
+              visualDensity: VisualDensity.compact,
               onPressed: () => open(),
             ),
+          const SizedBox(width: 6),
         ],
       ),
-      body: Column(
-        children: [
-          Expanded(
-            child: ListenableBuilder(
-              listenable: controller,
-              builder: (context, _) => switch (controller.state) {
-                LoadState.loading => const Center(
-                  child: CircularProgressIndicator(),
-                ),
-                LoadState.error => _ErrorView(message: controller.error ?? ''),
-                LoadState.ready => Column(
-                  children: [
-                    Padding(
-                      padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
-                      child: TextField(
-                        controller: _search,
-                        onChanged: controller.setQuery,
-                        decoration: const InputDecoration(
-                          hintText: 'Search artists, albums, tracks…',
-                          prefixIcon: Icon(Icons.search, color: Tokens.dim),
-                          isDense: true,
-                        ),
-                      ),
+      body: ListenableBuilder(
+        listenable: Listenable.merge([controller, browse, selection]),
+        builder: (context, _) {
+          final shellBottom = ShellInsets.bottomOf(context);
+          final hPad = Tokens.pagePad(context);
+          final showViewBar = browse.views.length >= 2;
+          final topChromeHeight =
+              56.0 +
+              (showViewBar ? 50.0 : 0.0) +
+              (controller.scanning ? 40.0 : 0.0) +
+              4.0;
+          final listBottomPad =
+              shellBottom + (selection.active ? 72.0 : 0.0) + 16.0;
+
+          final content = switch (controller.state) {
+            LoadState.loading => const Center(
+              child: CircularProgressIndicator(),
+            ),
+            LoadState.error => _ErrorView(message: controller.error ?? ''),
+            LoadState.ready => Stack(
+              fit: StackFit.expand,
+              children: [
+                if (controller.total == 0 && !controller.scanning)
+                  Padding(
+                    padding: EdgeInsets.only(
+                      top: topChromeHeight,
+                      bottom: shellBottom,
                     ),
-                    ListenableBuilder(
-                      listenable: browse,
-                      builder: (context, _) => browse.views.length < 2
-                          ? const SizedBox.shrink()
-                          : Padding(
-                              padding: const EdgeInsets.fromLTRB(14, 0, 14, 8),
-                              child: ViewBar(
-                                views: browse.views,
-                                selected: browse.view,
-                                unified: widget.unifiedPills,
-                                onSelect: browse.setView,
+                    child: _EmptyLibrary(
+                      onEnterPaths: widget.onOpenSettings == null
+                          ? null
+                          : () =>
+                                widget.onOpenSettings!(SettingsPage.storage),
+                    ),
+                  )
+                else if (browse.view == LibraryView.tracks)
+                  _tracksList(
+                    topPadding: topChromeHeight,
+                    bottomPadding: listBottomPad,
+                  )
+                else
+                  BrowseList(
+                    controller: browse,
+                    player: widget.player,
+                    onPlayTrack: _playInContext,
+                    onTrackMenu: _trackMenu,
+                    onAlbumMenu: _albumMenu,
+                    onPlayGenre: _playGenre,
+                    selection: selection,
+                    onCreatePlaylist: _createPlaylist,
+                    onEditPlaylist: _editPlaylist,
+                    onDeletePlaylist: _deletePlaylist,
+                    onRemoveFromPlaylist: _removeFromPlaylist,
+                    onEditArtist: widget.onEditArtist,
+                    onCurateGenre: widget.onCurateGenre,
+                    topPadding: topChromeHeight,
+                    bottomPadding: listBottomPad,
+                  ),
+                Positioned(
+                  top: 0,
+                  left: 0,
+                  right: 0,
+                  child: BackdropGroup(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        GlassSurface(
+                          radius: Tokens.radiusPill,
+                          grouped: true,
+                          margin: EdgeInsets.fromLTRB(hPad, 4, hPad, 8),
+                          child: TextField(
+                            controller: _search,
+                            onChanged: controller.setQuery,
+                            decoration: const InputDecoration(
+                              hintText: 'Search artists, albums, tracks…',
+                              prefixIcon: Icon(
+                                Icons.search,
+                                color: Tokens.dim,
+                              ),
+                              filled: false,
+                              border: InputBorder.none,
+                              enabledBorder: InputBorder.none,
+                              focusedBorder: InputBorder.none,
+                              isDense: true,
+                              contentPadding: EdgeInsets.symmetric(
+                                vertical: 11,
+                                horizontal: 4,
                               ),
                             ),
+                          ),
+                        ),
+                        if (showViewBar)
+                          Padding(
+                            padding: EdgeInsets.fromLTRB(hPad, 0, hPad, 8),
+                            child: ViewBar(
+                              views: browse.views,
+                              selected: browse.view,
+                              unified: widget.unifiedPills,
+                              onSelect: browse.setView,
+                              grouped: true,
+                            ),
+                          ),
+                        if (controller.scanning)
+                          _ScanBanner(controller: controller),
+                      ],
                     ),
-                    ListenableBuilder(
-                      listenable: controller,
-                      builder: (context, _) => controller.scanning
-                          ? _ScanBanner(controller: controller)
-                          : const SizedBox.shrink(),
-                    ),
-                    Expanded(
-                      child: ListenableBuilder(
-                        listenable: Listenable.merge([browse, controller]),
-                        builder: (context, _) =>
-                            controller.total == 0 && !controller.scanning
-                            ? _EmptyLibrary(
-                                onEnterPaths: widget.onOpenSettings == null
-                                    ? null
-                                    : () => widget.onOpenSettings!(
-                                        SettingsPage.storage,
-                                      ),
-                              )
-                            : browse.view == LibraryView.tracks
-                            ? _tracksList()
-                            : browse.view == LibraryView.network
-                            ? NetworkView(
-                                controller: network,
-                                player: widget.player,
-                                onAddToPlaylist: controller.canWrite
-                                    ? (t) => _addToPlaylist([t])
-                                    : null,
-                              )
-                            : BrowseList(
-                                controller: browse,
-                                player: widget.player,
-                                onPlayTrack: _playInContext,
-                                onTrackMenu: _trackMenu,
-                                onAlbumMenu: _albumMenu,
-                                onPlayGenre: _playGenre,
-                                selection: selection,
-                                onCreatePlaylist: _createPlaylist,
-                                onEditPlaylist: _editPlaylist,
-                                onDeletePlaylist: _deletePlaylist,
-                                onRemoveFromPlaylist: _removeFromPlaylist,
-                                onEditArtist: widget.onEditArtist,
-                                onCurateGenre: widget.onCurateGenre,
-                              ),
-                      ),
-                    ),
-                  ],
+                  ),
                 ),
-              },
+              ],
             ),
-          ),
-          ListenableBuilder(
-            listenable: selection,
-            builder: (context, _) => selection.active
-                ? _SelectionBar(
+          };
+
+          return Stack(
+            fit: StackFit.expand,
+            children: [
+              content,
+              if (selection.active)
+                Positioned(
+                  left: 0,
+                  right: 0,
+                  bottom: shellBottom + 8,
+                  child: _SelectionBar(
                     selection: selection,
                     onPlay: () => _selectionPlay(replace: true),
                     onQueue: () => _selectionPlay(replace: false),
@@ -329,22 +351,31 @@ class _LibraryScreenState extends State<LibraryScreen> {
                         ? null
                         : companionTarget(widget.sync!),
                     onSend: () => _send(selection.tracks),
-                  )
-                : const SizedBox.shrink(),
-          ),
-          if (_standalone)
-            ValueListenableBuilder(
-              valueListenable: widget.player,
-              builder: (context, player, _) => player == null
-                  ? const SizedBox.shrink()
-                  : SafeArea(top: false, child: MiniPlayer(player: player)),
-            ),
-        ],
+                  ),
+                ),
+              if (_standalone)
+                Positioned(
+                  left: 0,
+                  right: 0,
+                  bottom: 0,
+                  child: ValueListenableBuilder(
+                    valueListenable: widget.player,
+                    builder: (context, player, _) => player == null
+                        ? const SizedBox.shrink()
+                        : SafeArea(top: false, child: MiniPlayer(player: player)),
+                  ),
+                ),
+            ],
+          );
+        },
       ),
     );
   }
 
-  Widget _tracksList() => ValueListenableBuilder(
+  Widget _tracksList({
+    required double topPadding,
+    required double bottomPadding,
+  }) => ValueListenableBuilder(
     valueListenable: widget.player,
     builder: (context, player, _) => ListenableBuilder(
       // Rebuilds the visible rows when the playing track changes
@@ -356,6 +387,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
             : null;
         final picking = selection.active;
         return ListView.builder(
+          padding: EdgeInsets.only(top: topPadding, bottom: bottomPadding),
           // A fixed extent lets Flutter lay out only the visible rows and
           // jump-scroll without measuring the rest.
           itemExtent: TrackRow.height,
@@ -398,8 +430,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
       ],
     );
     return switch (browse.view) {
-      // library.py hides the sort button in the Network view.
-      LibraryView.network => const SizedBox.shrink(),
       LibraryView.tracks || LibraryView.albums => menu(
         LibrarySort.values,
         controller.sort,
@@ -434,7 +464,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
     final player = widget.player.value;
     final sync = widget.sync;
     final target = sync == null ? null : companionTarget(sync);
-    showModalBottomSheet<void>(
+    showFrostedSheet<void>(
       context: context,
       backgroundColor: Tokens.surface,
       showDragHandle: true,
@@ -685,14 +715,11 @@ class _SelectionBar extends StatelessWidget {
   Widget build(BuildContext context) {
     final accent = Theme.of(context).colorScheme.primary;
     final some = selection.count > 0;
-    return Container(
-      margin: const EdgeInsets.fromLTRB(14, 0, 14, 8),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-      decoration: BoxDecoration(
-        color: Tokens.surface2,
-        border: Border.all(color: Tokens.borderSubtle),
-        borderRadius: BorderRadius.circular(Tokens.radiusCard),
-      ),
+    final hPad = Tokens.dockPad(context);
+    return GlassSurface(
+      radius: Tokens.radiusPill,
+      margin: EdgeInsets.symmetric(horizontal: hPad),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
       child: Row(
         children: [
           IconButton(
@@ -725,7 +752,7 @@ class _SelectionBar extends StatelessWidget {
           ),
           IconButton(
             icon: const Icon(Icons.playlist_add_rounded),
-            color: Tokens.libPlaylist,
+            color: CategoryPalette.of(context).playlist,
             tooltip: 'Add to Playlist',
             onPressed: some && canWritePlaylists ? onAddToPlaylist : null,
           ),
@@ -743,43 +770,57 @@ class _SelectionBar extends StatelessWidget {
 }
 
 class _Header extends StatelessWidget {
-  const _Header({
-    required this.controller,
-    required this.browse,
-    required this.network,
-  });
+  const _Header({required this.controller, required this.browse});
   final LibraryController controller;
   final BrowseController browse;
-  final NetworkController network;
 
   @override
   Widget build(BuildContext context) {
     final c = controller;
     final b = browse;
-    final parts = <String>[
-      if (c.state == LoadState.ready)
-        if (b.view == LibraryView.tracks)
-          '${c.visible.length} / ${c.total} tracks'
-              '${c.closestMatch ? ' (closest match)' : ''}'
-        else if (b.view == LibraryView.network)
-          // library.py: "n TRACKS", the coordinate rows the graph read.
-          '${network.trackCount} tracks'
-        else if (!b.loading || b.rows.isNotEmpty)
-          '${b.shown} / ${b.total} ${b.view.label.toLowerCase()}'
-              '${b.closestMatch ? ' (closest match)' : ''}',
-      if (c.loadTime != null) 'loaded in ${c.loadTime!.inMilliseconds} ms',
-      if (c.graph case final g?) 'graph ${g.length}×${g.dim}',
-      if (c.graphError != null) 'no graph',
-    ];
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+    String? subtitle;
+    if (c.state == LoadState.ready) {
+      if (b.view == LibraryView.tracks) {
+        final filtered = c.visible.length != c.total;
+        subtitle = filtered
+            ? '${c.visible.length} of ${c.total} tracks${c.closestMatch ? ' · closest' : ''}'
+            : '${c.total} track${c.total == 1 ? '' : 's'}';
+      } else if (!b.loading || b.rows.isNotEmpty) {
+        final unit = b.view.label.toLowerCase();
+        final filtered = b.shown != b.total;
+        subtitle = filtered
+            ? '${b.shown} of ${b.total} $unit${b.closestMatch ? ' · closest' : ''}'
+            : '${b.total} $unit';
+      }
+    }
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.baseline,
+      textBaseline: TextBaseline.alphabetic,
       children: [
-        const Text('Library'),
-        if (parts.isNotEmpty)
-          Text(
-            parts.join(' · '),
-            style: const TextStyle(fontSize: 12, color: Tokens.dim),
+        const Text(
+          'Library',
+          style: TextStyle(
+            color: Tokens.text,
+            fontSize: 22,
+            fontWeight: FontWeight.w700,
+            letterSpacing: -0.3,
           ),
+        ),
+        if (subtitle != null) ...[
+          const SizedBox(width: 8),
+          Flexible(
+            child: Text(
+              subtitle,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                color: Tokens.dim,
+                fontSize: 12,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ),
+        ],
       ],
     );
   }
@@ -816,7 +857,7 @@ class _ScanBanner extends StatelessWidget {
   Widget build(BuildContext context) {
     final accent = Theme.of(context).colorScheme.primary;
     return Container(
-      margin: const EdgeInsets.fromLTRB(14, 0, 14, 8),
+      margin: const EdgeInsets.fromLTRB(16, 0, 16, 8),
       padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(12),

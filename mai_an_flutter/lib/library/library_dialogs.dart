@@ -4,6 +4,7 @@ import '../core/py_text.dart';
 import '../data/library_repository.dart';
 import '../ui/tokens.dart';
 import 'browse_view.dart' show playlistColor;
+import '../ui/frost.dart';
 
 /// The Library tab's dialogs: library.py `_create_playlist_dialog` and the
 /// Add to Playlist sheet's own "New Playlist", ui/player/dialogs.py
@@ -112,7 +113,7 @@ class _NameDialogState extends State<_NameDialog> {
           ),
           focusedBorder: OutlineInputBorder(
             borderRadius: BorderRadius.circular(6),
-            borderSide: const BorderSide(color: Tokens.libPlaylist),
+            borderSide: BorderSide(color: CategoryPalette.of(context).playlist),
           ),
         ),
       ),
@@ -170,77 +171,80 @@ class _EditorDialogState extends State<_EditorDialog> {
   }
 
   @override
-  Widget build(BuildContext context) => AlertDialog(
-    backgroundColor: Tokens.surface,
-    title: const Text('Customize Playlist'),
-    content: Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        TextField(
-          controller: _name,
-          decoration: InputDecoration(
-            labelText: 'Playlist Name',
-            fillColor: Tokens.surface,
-            border: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(6),
-              borderSide: const BorderSide(color: Tokens.border),
-            ),
-            focusedBorder: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(6),
-              borderSide: const BorderSide(color: Tokens.libPlaylist),
+  Widget build(BuildContext context) {
+    final playlistAccent = CategoryPalette.of(context).playlist;
+    return AlertDialog(
+      backgroundColor: Tokens.surface,
+      title: const Text('Customize Playlist'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          TextField(
+            controller: _name,
+            decoration: InputDecoration(
+              labelText: 'Playlist Name',
+              fillColor: Tokens.surface,
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(6),
+                borderSide: const BorderSide(color: Tokens.border),
+              ),
+              focusedBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(6),
+                borderSide: BorderSide(color: playlistAccent),
+              ),
             ),
           ),
-        ),
-        const SizedBox(height: 15),
-        const Text(
-          'Accent Color',
-          style: TextStyle(color: Tokens.dim, fontSize: 12),
-        ),
-        const SizedBox(height: 15),
-        Wrap(
-          spacing: 10,
-          runSpacing: 10,
-          children: [
-            for (final c in kPlaylistColors)
-              GestureDetector(
-                onTap: () => setState(() => _color = c),
-                child: Container(
-                  key: ValueKey('color $c'),
-                  width: 24,
-                  height: 24,
-                  decoration: BoxDecoration(
-                    color: playlistColor(c),
-                    shape: BoxShape.circle,
-                    border: Border.all(
-                      width: 2,
-                      color: c == _color ? Tokens.text : Colors.transparent,
+          const SizedBox(height: 15),
+          const Text(
+            'Accent Color',
+            style: TextStyle(color: Tokens.dim, fontSize: 12),
+          ),
+          const SizedBox(height: 15),
+          Wrap(
+            spacing: 10,
+            runSpacing: 10,
+            children: [
+              for (final c in kPlaylistColors)
+                GestureDetector(
+                  onTap: () => setState(() => _color = c),
+                  child: Container(
+                    key: ValueKey('color $c'),
+                    width: 24,
+                    height: 24,
+                    decoration: BoxDecoration(
+                      color: playlistColor(c),
+                      shape: BoxShape.circle,
+                      border: Border.all(
+                        width: 2,
+                        color: c == _color ? Tokens.text : Colors.transparent,
+                      ),
                     ),
                   ),
                 ),
-              ),
-          ],
+            ],
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          style: FilledButton.styleFrom(
+            backgroundColor: playlistAccent,
+            foregroundColor: Tokens.bg,
+          ),
+          onPressed: () {
+            Navigator.pop(context);
+            widget.onSave(_name.text, _color);
+          },
+          child: const Text('Save'),
         ),
       ],
-    ),
-    actions: [
-      TextButton(
-        onPressed: () => Navigator.pop(context),
-        child: const Text('Cancel'),
-      ),
-      FilledButton(
-        style: FilledButton.styleFrom(
-          backgroundColor: Tokens.libPlaylist,
-          foregroundColor: Tokens.bg,
-        ),
-        onPressed: () {
-          Navigator.pop(context);
-          widget.onSave(_name.text, _color);
-        },
-        child: const Text('Save'),
-      ),
-    ],
-  );
+    );
+  }
 }
 
 /// main.py's destructive confirmations: Cancel, and a red Delete. Resolves
@@ -287,7 +291,8 @@ Future<(PlaylistRow?, bool)?> showAddToPlaylistSheet(
   List<PlaylistRow> playlists,
 ) {
   final accent = Theme.of(context).colorScheme.primary;
-  return showModalBottomSheet<(PlaylistRow?, bool)>(
+  final palette = CategoryPalette.of(context);
+  return showFrostedSheet<(PlaylistRow?, bool)>(
     context: context,
     backgroundColor: Tokens.surface,
     builder: (sheet) => SafeArea(
@@ -324,9 +329,9 @@ Future<(PlaylistRow?, bool)?> showAddToPlaylistSheet(
                   const Divider(color: Tokens.border),
                   for (final p in playlists)
                     ListTile(
-                      leading: const Icon(
+                      leading: Icon(
                         Icons.queue_music_rounded,
-                        color: Tokens.libPlaylist,
+                        color: playlistColor(p.color) ?? palette.playlist,
                       ),
                       title: Text(
                         p.displayName,

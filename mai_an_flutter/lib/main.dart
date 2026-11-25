@@ -17,6 +17,7 @@ import 'core/cache_pruner.dart';
 import 'core/config_file.dart';
 import 'core/haptics.dart';
 import 'core/notification_router.dart';
+import 'core/progress_notify.dart';
 import 'data/library_repository.dart';
 import 'data/play_ledger.dart';
 import 'downloads/app_download_host.dart';
@@ -45,6 +46,8 @@ import 'sources/streamrip_search.dart';
 import 'sync/app_sync_host.dart';
 import 'sync/state_bundles.dart';
 import 'sync/sync_manager.dart';
+import 'ui/frost.dart';
+import 'ui/toast.dart';
 import 'ui/tokens.dart';
 
 /// Override with: --dart-define=LIBRARY_DB=/path/library.db
@@ -76,27 +79,18 @@ final _messenger = GlobalKey<ScaffoldMessengerState>();
 /// The root navigator: the Companion manager's PIN and transfer dialogs.
 final _navigator = GlobalKey<NavigatorState>();
 
-/// main.py `show_snackbar(text, icon, color)`: the icon in [color] (the
-/// accent by default) before the text.
+/// main.py `show_snackbar(text, icon, color)`: top-floating frosted toast.
 void _snack(String text, {IconData? icon, Color? color}) {
+  final overlay = _navigator.currentState?.overlay;
+  if (overlay != null) {
+    showAppToastOn(overlay, text, icon: icon, color: color);
+    return;
+  }
   final m = _messenger.currentState;
   if (m == null) return;
-  final content = icon == null
-      ? Text(text)
-      : Row(
-          children: [
-            Icon(
-              icon,
-              size: 20,
-              color: color ?? Theme.of(m.context).colorScheme.primary,
-            ),
-            const SizedBox(width: 10),
-            Expanded(child: Text(text)),
-          ],
-        );
   m
     ..hideCurrentSnackBar()
-    ..showSnackBar(SnackBar(content: content));
+    ..showSnackBar(SnackBar(content: Text(text)));
 }
 
 Future<void> main() async {
@@ -176,7 +170,10 @@ Future<void> main() async {
     qobuzClient: () async =>
         buildSourceClient('qobuz', settings.config.sources),
   );
-  if (writable) library.onIndexed = metadata.schedule;
+  if (writable) {
+    library.onIndexed = metadata.schedule;
+    library.autoAnalyseEnabled = () => settings.config.dsp.autoAnalyse;
+  }
   MetadataResearcher researcherFor(LibraryRepository repo) =>
       MetadataResearcher(
         repo: repo,
@@ -450,8 +447,10 @@ class _MaiAnAppState extends State<MaiAnApp> {
     // Flet's _on_lifecycle: hide/pause = background, resume = foreground.
     // Flutter stops drawing by itself; the player stops its position ticker
     // and saves where it is.
+    ProgressNotifier.appInForeground = true;
     _lifecycle = AppLifecycleListener(
       onHide: () {
+        ProgressNotifier.appInForeground = false;
         widget.player.value?.setForeground(false);
         widget.assistant?.handleAppBackground();
         if (widget.syncHost case final h?) {
@@ -460,6 +459,7 @@ class _MaiAnAppState extends State<MaiAnApp> {
         }
       },
       onShow: () {
+        ProgressNotifier.appInForeground = true;
         widget.player.value?.setForeground(true);
         widget.assistant?.handleAppResume();
         // Pick up listens that finished while in the background.
@@ -500,6 +500,11 @@ class _MaiAnAppState extends State<MaiAnApp> {
         navigatorKey: _navigator,
         theme: Tokens.theme(
           accentColor: widget.config.config.accent ?? Tokens.accent,
+          unifiedCategories: widget.config.config.libraryTabs.unified,
+        ),
+        builder: (context, child) => GlassScope(
+          opacity: widget.config.config.glassOpacity,
+          child: child ?? const SizedBox.shrink(),
         ),
         home: AppShell(
           library: widget.library,

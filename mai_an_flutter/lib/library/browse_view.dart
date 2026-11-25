@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import '../data/browse_queries.dart';
 import '../data/library_repository.dart';
 import '../player/player_controller.dart';
+import '../ui/sliding_segmented.dart';
 import '../ui/tokens.dart';
 import 'browse_controller.dart';
 import 'genre_colors.dart';
@@ -33,6 +34,8 @@ class BrowseList extends StatelessWidget {
     required this.onRemoveFromPlaylist,
     this.onEditArtist,
     this.onCurateGenre,
+    this.topPadding = 0,
+    this.bottomPadding = 20,
   });
 
   final BrowseController controller;
@@ -55,6 +58,9 @@ class BrowseList extends StatelessWidget {
   /// `open_genre_metadata_workbench`: the workbench filtered to a genre
   /// ("" from the empty Genres view: the whole workbench).
   final void Function(String genre)? onCurateGenre;
+
+  final double topPadding;
+  final double bottomPadding;
 
   @override
   Widget build(BuildContext context) {
@@ -93,13 +99,17 @@ class BrowseList extends StatelessWidget {
             builder: (context, _) {
               final playing = p?.stopped == false ? p?.nowPlaying?.path : null;
               final rows = controller.rows;
+              final palette = CategoryPalette.of(context);
               return ReorderableListView.builder(
-                padding: const EdgeInsets.only(bottom: 20),
+                padding: EdgeInsets.only(
+                  top: topPadding,
+                  bottom: bottomPadding,
+                ),
                 buildDefaultDragHandles: false,
                 header: noPlaylists
                     ? _EmptyBrowse(
                         icon: Icons.queue_music_rounded,
-                        accent: Tokens.libPlaylist,
+                        accent: palette.playlist,
                         title: 'No playlists yet.',
                         body: 'Create your first playlist below.',
                         actionIcon: Icons.add_rounded,
@@ -109,7 +119,7 @@ class BrowseList extends StatelessWidget {
                     : noGenres
                     ? _EmptyBrowse(
                         icon: Icons.style_rounded,
-                        accent: Tokens.libGenre,
+                        accent: palette.genre,
                         title: 'No genres found.',
                         body:
                             'Enrich artist tags in Settings to classify genres.',
@@ -352,7 +362,8 @@ class _GenreTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final accent = genreColor(genre.name);
+    final palette = CategoryPalette.of(context);
+    final accent = palette.unified ? palette.genre : genreColor(genre.name);
     return _Tile(
       icon: Icons.style_rounded,
       accent: accent,
@@ -401,27 +412,30 @@ class _ArtistTile extends StatelessWidget {
   final VoidCallback? onEdit;
 
   @override
-  Widget build(BuildContext context) => _Tile(
-    icon: Icons.person_rounded,
-    accent: Tokens.libArtist,
-    indent: depth * 16.0,
-    title: artist.displayName,
-    titleLines: 3,
-    subtitle:
-        '${artist.albumCount ?? 0} albums  ·  ${artist.trackCount ?? 0} tracks',
-    expanded: expanded,
-    tint: 0.07,
-    trailing: [
-      if (onEdit != null)
-        IconButton(
-          icon: const Icon(Icons.edit_outlined, size: 20),
-          color: Tokens.dim.withValues(alpha: 0.6),
-          tooltip: 'Fix artist info',
-          onPressed: onEdit,
-        ),
-    ],
-    onTap: onTap,
-  );
+  Widget build(BuildContext context) {
+    final palette = CategoryPalette.of(context);
+    return _Tile(
+      icon: Icons.person_rounded,
+      accent: palette.atDepth(palette.artist, depth),
+      indent: depth * 16.0,
+      title: artist.displayName,
+      titleLines: 3,
+      subtitle:
+          '${artist.albumCount ?? 0} albums  ·  ${artist.trackCount ?? 0} tracks',
+      expanded: expanded,
+      tint: 0.07,
+      trailing: [
+        if (onEdit != null)
+          IconButton(
+            icon: const Icon(Icons.edit_outlined, size: 20),
+            color: Tokens.dim.withValues(alpha: 0.6),
+            tooltip: 'Fix artist info',
+            onPressed: onEdit,
+          ),
+      ],
+      onTap: onTap,
+    );
+  }
 }
 
 class _AlbumTile extends StatelessWidget {
@@ -441,19 +455,22 @@ class _AlbumTile extends StatelessWidget {
   final VoidCallback onLongPress;
 
   @override
-  Widget build(BuildContext context) => _Tile(
-    icon: Icons.album_rounded,
-    accent: Tokens.libAlbum,
-    indent: depth * 20.0,
-    title: album.displayTitle,
-    titleLines: 3,
-    subtitle: '${album.displayArtist}  ·  ${album.trackCount ?? '?'} tracks',
-    expanded: expanded,
-    tint: 0.06,
-    trailing: const [],
-    onTap: onTap,
-    onLongPress: onLongPress,
-  );
+  Widget build(BuildContext context) {
+    final palette = CategoryPalette.of(context);
+    return _Tile(
+      icon: Icons.album_rounded,
+      accent: palette.atDepth(palette.album, depth),
+      indent: depth * 20.0,
+      title: album.displayTitle,
+      titleLines: 3,
+      subtitle: '${album.displayArtist}  ·  ${album.trackCount ?? '?'} tracks',
+      expanded: expanded,
+      tint: 0.06,
+      trailing: const [],
+      onTap: onTap,
+      onLongPress: onLongPress,
+    );
+  }
 }
 
 /// Flet's `#RRGGBB` playlist colour, or null when unset or malformed.
@@ -481,9 +498,11 @@ class _PlaylistTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final n = playlist.trackCount;
+    final palette = CategoryPalette.of(context);
+    final accent = playlistColor(playlist.color) ?? palette.playlist;
     return _Tile(
       icon: Icons.queue_music_rounded,
-      accent: playlistColor(playlist.color) ?? Tokens.libPlaylist,
+      accent: accent,
       indent: 0,
       title: playlist.displayName,
       titleLines: 3,
@@ -493,7 +512,7 @@ class _PlaylistTile extends StatelessWidget {
       trailing: [
         IconButton(
           icon: const Icon(Icons.edit_outlined, size: 16),
-          color: Tokens.libPlaylist.withValues(alpha: 0.6),
+          color: accent.withValues(alpha: 0.65),
           tooltip: 'Edit playlist',
           onPressed: onEdit,
         ),
@@ -542,26 +561,26 @@ class _NewPlaylistRow extends StatelessWidget {
   final VoidCallback onTap;
 
   @override
-  Widget build(BuildContext context) => ListTile(
-    tileColor: Tokens.libPlaylist.withValues(alpha: 0.05),
-    leading: const Icon(
-      Icons.add_circle_outline_rounded,
-      color: Tokens.libPlaylist,
-    ),
-    title: const Text(
-      'Create New Playlist',
-      style: TextStyle(
-        color: Tokens.libPlaylist,
-        fontWeight: FontWeight.w800,
-        fontSize: 14,
+  Widget build(BuildContext context) {
+    final accent = CategoryPalette.of(context).playlist;
+    return ListTile(
+      tileColor: accent.withValues(alpha: 0.05),
+      leading: Icon(Icons.add_circle_outline_rounded, color: accent),
+      title: Text(
+        'Create New Playlist',
+        style: TextStyle(
+          color: accent,
+          fontWeight: FontWeight.w800,
+          fontSize: 14,
+        ),
       ),
-    ),
-    subtitle: const Text(
-      'Organize your music collection',
-      style: TextStyle(color: Tokens.dim, fontSize: 12),
-    ),
-    onTap: onTap,
-  );
+      subtitle: const Text(
+        'Organize your music collection',
+        style: TextStyle(color: Tokens.dim, fontSize: 12),
+      ),
+      onTap: onTap,
+    );
+  }
 }
 
 /// library.py's `_empty_label` inside a browse view: "No playlists yet."
@@ -630,15 +649,16 @@ class ViewBar extends StatelessWidget {
     required this.selected,
     required this.unified,
     required this.onSelect,
+    this.grouped = false,
   });
 
   final List<LibraryView> views;
   final LibraryView selected;
   final bool unified;
   final ValueChanged<LibraryView> onSelect;
+  final bool grouped;
 
   static IconData icon(LibraryView v) => switch (v) {
-    LibraryView.network => Icons.hub_rounded,
     LibraryView.playlists => Icons.queue_music_rounded,
     LibraryView.genres => Icons.style_rounded,
     LibraryView.artists => Icons.person_rounded,
@@ -646,9 +666,7 @@ class ViewBar extends StatelessWidget {
     LibraryView.tracks => Icons.music_note_rounded,
   };
 
-  /// Null: the accent (library.py's network tab is CYAN).
   static Color? color(LibraryView v) => switch (v) {
-    LibraryView.network => null,
     LibraryView.playlists => Tokens.libPlaylist,
     LibraryView.genres => Tokens.libGenre,
     LibraryView.artists => Tokens.libArtist,
@@ -659,89 +677,24 @@ class ViewBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final cyan = Theme.of(context).colorScheme.primary;
-    final padH = views.length >= 5 ? 4.0 : (views.length == 4 ? 6.0 : 10.0);
-    return Container(
-      height: 40,
-      padding: const EdgeInsets.all(3),
-      decoration: BoxDecoration(
-        color: Tokens.surface,
-        border: Border.all(color: Tokens.borderSubtle),
-        borderRadius: BorderRadius.circular(Tokens.radiusPill),
-      ),
-      child: Row(
-        children: [
-          for (final (i, v) in views.indexed) ...[
-            if (i > 0) const SizedBox(width: 2),
-            Expanded(
-              child: _Segment(
-                label: v.label,
-                icon: icon(v),
-                accent: unified ? cyan : color(v) ?? cyan,
-                active: v == selected,
-                padH: padH,
-                onTap: () => onSelect(v),
-              ),
-            ),
-          ],
-        ],
-      ),
+    final isUnified = unified || CategoryPalette.of(context).unified;
+    return SlidingSegmented<LibraryView>(
+      segments: [
+        for (final v in views)
+          Segment(
+            value: v,
+            label: v.label,
+            icon: icon(v),
+            color: isUnified ? cyan : color(v),
+          ),
+      ],
+      selected: selected,
+      onSelect: onSelect,
+      accent: cyan,
+      height: 42,
+      iconSize: 20,
+      iconOnly: true,
+      grouped: grouped,
     );
   }
-}
-
-class _Segment extends StatelessWidget {
-  const _Segment({
-    required this.label,
-    required this.icon,
-    required this.accent,
-    required this.active,
-    required this.padH,
-    required this.onTap,
-  });
-
-  final String label;
-  final IconData icon;
-  final Color accent;
-  final bool active;
-  final double padH;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) => GestureDetector(
-    behavior: HitTestBehavior.opaque,
-    onTap: onTap,
-    child: AnimatedContainer(
-      duration: const Duration(milliseconds: 140),
-      curve: Curves.easeOut,
-      alignment: Alignment.center,
-      padding: EdgeInsets.symmetric(horizontal: padH, vertical: 6),
-      decoration: BoxDecoration(
-        color: active ? accent.withValues(alpha: 0.14) : Colors.transparent,
-        border: Border.all(
-          color: active ? accent.withValues(alpha: 0.35) : Colors.transparent,
-        ),
-        borderRadius: BorderRadius.circular(Tokens.radiusPill - 4),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, size: 15, color: active ? accent : Tokens.dim),
-          const SizedBox(width: 4),
-          Flexible(
-            child: Text(
-              label,
-              maxLines: 1,
-              softWrap: false,
-              overflow: TextOverflow.fade,
-              style: TextStyle(
-                fontSize: 11,
-                fontWeight: active ? FontWeight.w600 : FontWeight.w500,
-                color: active ? Tokens.text : Tokens.dim,
-              ),
-            ),
-          ),
-        ],
-      ),
-    ),
-  );
 }

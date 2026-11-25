@@ -126,6 +126,12 @@ class ProgressNotifier {
   final Stopwatch _clock;
   void Function()? _onCancel;
 
+  /// Set by `MaiAnApp` via `AppLifecycleListener`. When true, plain completion
+  /// summaries (without an interactive action button like Retry) dismiss the OS
+  /// notification immediately instead of lingering for 12s while the user is
+  /// already looking at the in-app completion pill.
+  static bool appInForeground = false;
+
   /// The cancel handler per job, as the extension keeps them: a newer run's
   /// notifier replaces an older one's, and finishing the older one leaves
   /// the newer one registered.
@@ -175,6 +181,7 @@ class ProgressNotifier {
     int progress,
     int total, {
     required bool done,
+    String? titleOverride,
     NotifyAction? action,
   }) {
     if (!done) posted = true;
@@ -182,7 +189,7 @@ class ProgressNotifier {
     _bridge
         .showProgress(
           job: job,
-          title: title,
+          title: titleOverride ?? title,
           content: content,
           progress: progress,
           total: total,
@@ -200,7 +207,7 @@ class ProgressNotifier {
   /// Progress; throttled, but the first and the last update always go, and
   /// a changed text or percentage goes once the interval has passed.
   /// [total] <= 0 shows an indeterminate bar.
-  void update(int done, int total, String content) {
+  void update(int done, int total, String content, {String? title}) {
     final now = _clock.elapsed;
     final pct = total > 0 ? done * 100 ~/ total : -1;
     final first = _lastAt == null;
@@ -212,24 +219,27 @@ class ProgressNotifier {
     _lastAt = now;
     _lastPct = pct;
     _lastContent = content;
-    _post(content, done, total, done: false);
+    _post(content, done, total, done: false, titleOverride: title);
   }
 
   /// An indeterminate bar with a new message, unthrottled.
-  void stage(String content) {
+  void stage(String content, {String? title}) {
     _lastAt = _clock.elapsed;
     _lastPct = -1;
     _lastContent = content;
-    _post(content, 0, 0, done: false);
+    _post(content, 0, 0, done: false, titleOverride: title);
   }
 
   /// Replace the bar with a short summary, or remove it when [content] is
   /// empty. Nothing happens if nothing was ever shown. [action] adds a
   /// button that opens the app at its target, so it still works after this
-  /// run has ended.
+  /// run has ended. When [appInForeground] is true and there is no [action],
+  /// the OS card is dismissed silently since the in-app pill shows completion.
   void finish([String content = '', NotifyAction? action]) {
     if (posted) {
-      _post(content, 0, 0, done: true, action: content.isEmpty ? null : action);
+      final suppress = appInForeground && action == null;
+      final body = suppress ? '' : content;
+      _post(body, 0, 0, done: true, action: body.isEmpty ? null : action);
     }
     if (identical(_registry[job], this)) _registry.remove(job);
   }

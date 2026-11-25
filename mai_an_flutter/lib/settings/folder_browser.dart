@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../core/py_text.dart';
 import '../ui/tokens.dart';
+import '../ui/frost.dart';
 
 /// settings.py `_browse_android_paths`: a folder navigator over shared
 /// storage. Starts on the bookmarks; each folder offers "Use …" (disabled
@@ -13,7 +14,7 @@ Future<String?> showFolderBrowser(
   BuildContext context, {
   required String label,
   required bool Function(String) isPrivate,
-}) => showModalBottomSheet<String>(
+}) => showFrostedSheet<String>(
   context: context,
   backgroundColor: Tokens.surface,
   isScrollControlled: true,
@@ -244,7 +245,7 @@ Future<String?> showBundleBrowser(
   BuildContext context, {
   required bool import,
   String? appStorage,
-}) => showModalBottomSheet<String>(
+}) => showFrostedSheet<String>(
   context: context,
   backgroundColor: Tokens.surface,
   isScrollControlled: true,

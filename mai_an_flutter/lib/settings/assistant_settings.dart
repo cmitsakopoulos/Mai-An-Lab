@@ -4,6 +4,8 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../assistant/llm_engine.dart';
+import '../ui/frost.dart';
+import '../ui/sliding_segmented.dart';
 import '../ui/tokens.dart';
 import 'groups.dart';
 import 'settings_page.dart';
@@ -36,16 +38,27 @@ class AssistantSettingsGroup extends StatefulWidget {
 }
 
 class _AssistantSettingsGroupState extends State<AssistantSettingsGroup> {
-  static const _providerOptions = [
-    ('gemini', 'Google Gemini API (Cloud)'),
-    ('ollama', 'Local Server (Ollama / LM Studio)'),
-  ];
-
   static const _researchModeOptions = [
-    ('hybrid', 'Smart Hybrid (Web Snippets + Training Weights) [Recommended]'),
-    ('weights', 'Training Weights Only (Memory, Reddit, Forums)'),
-    ('web_snippets', 'Web Search Snippets (DuckDuckGo Lite)'),
-    ('google_grounding', 'Google Search Grounding (Requires Paid Project)'),
+    (
+      'hybrid',
+      'Smart Hybrid',
+      'Web snippets + training weights (Recommended, free)',
+    ),
+    (
+      'weights',
+      'Training Weights Only',
+      'Model memory only — fast, 100% free',
+    ),
+    (
+      'web_snippets',
+      'Web Search Snippets',
+      'Live DuckDuckGo Lite lookups',
+    ),
+    (
+      'google_grounding',
+      'Google Search Grounding',
+      'Native Google Search (requires paid API project)',
+    ),
   ];
 
   static const _personalityPresets = [
@@ -273,29 +286,125 @@ class _AssistantSettingsGroupState extends State<AssistantSettingsGroup> {
     }
   }
 
-  InputDecoration _decoration(
-    BuildContext context,
-    String label, {
-    String? hint,
-  }) {
+  Future<void> _pickModel() async {
     final accent = Theme.of(context).colorScheme.primary;
-    OutlineInputBorder border(Color c) => OutlineInputBorder(
-      borderRadius: BorderRadius.circular(10),
-      borderSide: BorderSide(color: c),
+    final picked = await showFrostedSheet<String>(
+      context: context,
+      showDragHandle: true,
+      isScrollControlled: true,
+      builder: (ctx) => SafeArea(
+        child: ConstrainedBox(
+          constraints: BoxConstraints(
+            maxHeight: MediaQuery.sizeOf(ctx).height * 0.6,
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Padding(
+                padding: EdgeInsets.fromLTRB(20, 4, 20, 12),
+                child: Text(
+                  'Gemini Model',
+                  style: TextStyle(
+                    color: Tokens.text,
+                    fontSize: 16,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+              Flexible(
+                child: ListView(
+                  shrinkWrap: true,
+                  children: [
+                    for (final (id, label) in _modelOptions)
+                      ListTile(
+                        title: Text(
+                          label,
+                          style: TextStyle(
+                            color: id == _model ? accent : Tokens.text,
+                            fontWeight: id == _model
+                                ? FontWeight.w600
+                                : FontWeight.normal,
+                            fontSize: 14,
+                          ),
+                        ),
+                        trailing: id == _model
+                            ? Icon(Icons.check_rounded, color: accent, size: 20)
+                            : null,
+                        onTap: () => Navigator.pop(ctx, id),
+                      ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 8),
+            ],
+          ),
+        ),
+      ),
     );
-    return InputDecoration(
-      labelText: label,
-      hintText: hint,
-      labelStyle: TextStyle(color: accent, fontSize: 11),
-      hintStyle: const TextStyle(color: Tokens.dim, fontSize: 12),
-      filled: true,
-      fillColor: Tokens.surface2,
-      enabledBorder: border(Tokens.border),
-      focusedBorder: border(accent),
-      border: border(Tokens.border),
-      isDense: true,
-    );
+    if (picked != null && mounted) setState(() => _model = picked);
   }
+
+  Future<void> _pickResearchMode() async {
+    final accent = Theme.of(context).colorScheme.primary;
+    final picked = await showFrostedSheet<String>(
+      context: context,
+      showDragHandle: true,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Padding(
+              padding: EdgeInsets.fromLTRB(20, 4, 20, 12),
+              child: Text(
+                'Artist Research Paradigm',
+                style: TextStyle(
+                  color: Tokens.text,
+                  fontSize: 16,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ),
+            for (final (id, title, subtitle) in _researchModeOptions)
+              ListTile(
+                title: Text(
+                  title,
+                  style: TextStyle(
+                    color: id == _researchMode ? accent : Tokens.text,
+                    fontWeight: id == _researchMode
+                        ? FontWeight.w600
+                        : FontWeight.normal,
+                    fontSize: 14,
+                  ),
+                ),
+                subtitle: Text(
+                  subtitle,
+                  style: const TextStyle(color: Tokens.dim, fontSize: 12),
+                ),
+                trailing: id == _researchMode
+                    ? Icon(Icons.check_rounded, color: accent, size: 20)
+                    : null,
+                onTap: () => Navigator.pop(ctx, id),
+              ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+    if (picked != null && mounted) setState(() => _researchMode = picked);
+  }
+
+  String get _researchLabel => _researchModeOptions
+      .firstWhere(
+        (o) => o.$1 == _researchMode,
+        orElse: () => _researchModeOptions.first,
+      )
+      .$2;
+
+  String get _modelLabel => _modelOptions
+      .firstWhere((o) => o.$1 == _model, orElse: () => (_model, _model))
+      .$2;
 
   @override
   Widget build(BuildContext context) {
@@ -308,63 +417,86 @@ class _AssistantSettingsGroupState extends State<AssistantSettingsGroup> {
       saveLabel: 'SAVE ASSISTANT SETTINGS',
       saveIcon: Icons.smart_toy_rounded,
       children: [
-        const Dim(
-          'Configure Large Language Model integration for your voice/chat assistant Jarvis.',
-        ),
-        SettingsCard(
-          radius: 10,
+        // 1. Intelligence & Provider
+        SettingsSection(
+          label: 'JARVIS INTELLIGENCE',
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              const CardTitle(
-                Icons.smart_toy_rounded,
-                'Jarvis AI Intelligence',
-              ),
-              const SizedBox(height: 10),
-              const Dim(
-                'Enable conversational AI, smart playlist curation, and deep library analysis.',
-              ),
-              const SizedBox(height: 10),
-              SwitchRow(
-                value: _llmEnabled,
+              InsetSwitchRow(
                 label: 'Enable LLM Agent Intelligence',
+                subtitle:
+                    'Conversational AI, smart playlist curation & library analysis',
+                value: _llmEnabled,
                 onChanged: (v) => setState(() => _llmEnabled = v),
               ),
-              const SizedBox(height: 12),
-              SettingsDropdown(
-                label: 'AI Provider',
-                value: _provider,
-                options: _providerOptions,
-                onChanged: (v) => setState(() => _provider = v),
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 12),
+                child: Divider(height: 1, color: Tokens.borderSubtle),
               ),
-              const SizedBox(height: 12),
-              if (isGemini) ...[
-                TextField(
-                  controller: _apiKey,
-                  style: const TextStyle(color: Tokens.text, fontSize: 13),
-                  decoration: _decoration(
-                    context,
-                    'Google Gemini API Key',
-                    hint: 'Paste your key from aistudio.google.com',
-                  ),
+              const Text(
+                'AI Provider',
+                style: TextStyle(
+                  color: Tokens.dim,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
                 ),
-                const SizedBox(height: 8),
+              ),
+              const SizedBox(height: 8),
+              SlidingSegmented<String>(
+                selected: isGemini ? 'gemini' : 'ollama',
+                accent: accent,
+                onSelect: (v) => setState(() => _provider = v),
+                segments: const [
+                  Segment(
+                    value: 'gemini',
+                    label: 'Google Gemini',
+                    icon: Icons.auto_awesome_rounded,
+                  ),
+                  Segment(
+                    value: 'ollama',
+                    label: 'Local Server',
+                    icon: Icons.dns_rounded,
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+
+        // 2. Connection
+        SettingsSection(
+          label: isGemini ? 'GEMINI CONNECTION' : 'LOCAL SERVER (OLLAMA / LM STUDIO)',
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              if (isGemini) ...[
+                ModernTextField(
+                  fieldKey: const ValueKey('gemini_api_key'),
+                  label: 'Google Gemini API Key',
+                  controller: _apiKey,
+                  hint: 'Paste your key from aistudio.google.com',
+                  obscureToggle: true,
+                ),
+                const SizedBox(height: 6),
                 const Dim(
-                  '• Free tier API keys can be generated at aistudio.google.com with 0 cost & 0 credit card.',
+                  'Free-tier API keys can be generated at aistudio.google.com with no credit card.',
                   size: 11,
                 ),
-                const SizedBox(height: 12),
+                const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 12),
+                  child: Divider(height: 1, color: Tokens.borderSubtle),
+                ),
                 Row(
                   children: [
                     Expanded(
-                      child: SettingsDropdown(
+                      child: SettingsPickerRow(
                         label: 'Gemini Model',
-                        value: _model,
-                        options: _modelOptions,
-                        onChanged: (v) => setState(() => _model = v),
+                        valueText: _modelLabel,
+                        onTap: _pickModel,
                       ),
                     ),
-                    const SizedBox(width: 6),
+                    const SizedBox(width: 4),
                     IconButton(
                       icon: _loadingModels
                           ? SizedBox(
@@ -375,7 +507,7 @@ class _AssistantSettingsGroupState extends State<AssistantSettingsGroup> {
                                 color: accent,
                               ),
                             )
-                          : const Icon(Icons.refresh_rounded),
+                          : const Icon(Icons.refresh_rounded, size: 20),
                       color: accent,
                       tooltip: 'Load the models your key can use',
                       onPressed: _loadingModels
@@ -384,108 +516,179 @@ class _AssistantSettingsGroupState extends State<AssistantSettingsGroup> {
                     ),
                   ],
                 ),
-                const SizedBox(height: 12),
-                SettingsDropdown(
-                  label: 'Artist Research Paradigm',
-                  value: _researchMode,
-                  options: _researchModeOptions,
-                  onChanged: (v) => setState(() => _researchMode = v),
-                ),
-                const SizedBox(height: 8),
-                const Dim(
-                  '• Smart Hybrid & Training Weights work 100% free with no credit card required.',
-                  size: 11,
+                const Divider(height: 1, color: Tokens.borderSubtle),
+                SettingsPickerRow(
+                  label: 'Research Paradigm',
+                  subtitle: 'How Jarvis researches artists & genres',
+                  valueText: _researchLabel,
+                  onTap: _pickResearchMode,
                 ),
               ] else ...[
-                TextField(
+                ModernTextField(
+                  label: 'Local Endpoint URL',
                   controller: _ollamaUrl,
-                  style: const TextStyle(color: Tokens.text, fontSize: 13),
-                  decoration: _decoration(
-                    context,
-                    'Local Endpoint URL',
-                    hint: defaultOllamaEndpoint,
-                  ),
+                  hint: defaultOllamaEndpoint,
                 ),
-                const SizedBox(height: 12),
-                TextField(
+                const SizedBox(height: 14),
+                ModernTextField(
+                  label: 'Local Model Name',
                   controller: _ollamaModel,
-                  style: const TextStyle(color: Tokens.text, fontSize: 13),
-                  decoration: _decoration(
-                    context,
-                    'Local Model Name',
-                    hint: defaultOllamaModel,
-                  ),
+                  hint: defaultOllamaModel,
                 ),
               ],
-              const Divider(color: Tokens.border, height: 24),
-              const Text(
-                'Jarvis Personality & System Directive',
-                style: TextStyle(
-                  color: Tokens.text,
-                  fontSize: 13,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-              const SizedBox(height: 6),
-              const Dim(
-                'Customize how Jarvis addresses you, speaks, or behaves. Standard tool-calling directives remain active.',
-                size: 11,
-              ),
-              const SizedBox(height: 10),
-              TextField(
-                controller: _personality,
-                minLines: 3,
-                maxLines: 6,
-                style: const TextStyle(color: Tokens.text, fontSize: 12),
-                decoration: _decoration(
-                  context,
-                  'Personality / System Directive Prompt',
-                  hint:
-                      "You are Jarvis, a concise, sophisticated AI assistant embedded in the Mai An Lab high-fidelity music app. Address the user as 'sir'.",
-                ),
-              ),
-              const SizedBox(height: 10),
-              Wrap(
-                spacing: 6,
-                runSpacing: 6,
-                children: [
-                  for (final (label, text, muted) in _personalityPresets)
-                    OutlinedButton(
-                      style: OutlinedButton.styleFrom(
-                        foregroundColor: muted ? Tokens.dim : accent,
-                        side: BorderSide(
-                          color: (muted ? Tokens.dim : accent).withValues(
-                            alpha: muted ? 0.2 : 0.4,
-                          ),
-                        ),
-                      ),
-                      onPressed: () {
-                        _personality.text = text;
-                      },
-                      child: Text(label),
-                    ),
-                ],
-              ),
               const SizedBox(height: 14),
               Align(
                 alignment: Alignment.centerLeft,
-                child: OutlinedButton.icon(
-                  icon: const Icon(Icons.wifi_tethering_rounded),
-                  label: const Text('Test Connection'),
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: accent,
-                    side: BorderSide(color: accent),
+                child: Material(
+                  color: accent.withValues(alpha: 0.14),
+                  borderRadius: BorderRadius.circular(12),
+                  child: InkWell(
+                    borderRadius: BorderRadius.circular(12),
+                    onTap: _testing ? null : () => unawaited(_testConnection()),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 14,
+                        vertical: 10,
+                      ),
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(
+                          color: accent.withValues(alpha: 0.4),
+                        ),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          if (_testing)
+                            SizedBox(
+                              width: 15,
+                              height: 15,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: accent,
+                              ),
+                            )
+                          else
+                            Icon(
+                              Icons.wifi_tethering_rounded,
+                              size: 17,
+                              color: accent,
+                            ),
+                          const SizedBox(width: 8),
+                          Text(
+                            _testing ? 'Testing…' : 'Test Connection',
+                            style: TextStyle(
+                              color: accent,
+                              fontSize: 13,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
                   ),
-                  onPressed: _testing
-                      ? null
-                      : () => unawaited(_testConnection()),
                 ),
               ),
             ],
           ),
         ),
+
+        // 3. Personality & System Directive
+        SettingsSection(
+          label: 'PERSONALITY & DIRECTIVE',
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              const Dim(
+                'Customize how Jarvis addresses you, speaks, or behaves. Standard tool-calling directives remain active.',
+                size: 12,
+              ),
+              const SizedBox(height: 12),
+              ModernTextField(
+                label: 'System Directive Prompt',
+                controller: _personality,
+                minLines: 3,
+                maxLines: 6,
+                hint:
+                    "You are Jarvis, a concise, sophisticated AI assistant embedded in the Mai An Lab high-fidelity music app. Address the user as 'sir'.",
+              ),
+              const SizedBox(height: 12),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  for (final (label, text, muted) in _personalityPresets)
+                    _PresetChip(
+                      label: label,
+                      selected: !muted && _personality.text.trim() == text,
+                      muted: muted,
+                      accent: accent,
+                      onTap: () => _personality.text = text,
+                    ),
+                ],
+              ),
+            ],
+          ),
+        ),
+
         const SizedBox(height: 50),
       ],
+    );
+  }
+}
+
+class _PresetChip extends StatelessWidget {
+  const _PresetChip({
+    required this.label,
+    required this.selected,
+    required this.muted,
+    required this.accent,
+    required this.onTap,
+  });
+
+  final String label;
+  final bool selected;
+  final bool muted;
+  final Color accent;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final fg = selected
+        ? accent
+        : muted
+        ? Tokens.dim
+        : Tokens.text;
+    final bg = selected
+        ? accent.withValues(alpha: 0.18)
+        : Tokens.surface2;
+    final border = selected
+        ? accent.withValues(alpha: 0.65)
+        : muted
+        ? Tokens.borderSubtle
+        : Tokens.border;
+    return Material(
+      color: bg,
+      borderRadius: BorderRadius.circular(10),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(10),
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 7),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: border),
+          ),
+          child: Text(
+            label,
+            style: TextStyle(
+              color: fg,
+              fontSize: 12,
+              fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+            ),
+          ),
+        ),
+      ),
     );
   }
 }

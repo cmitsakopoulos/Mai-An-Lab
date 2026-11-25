@@ -213,8 +213,20 @@ class FakeBackend implements PlaybackBackend {
   @override
   Future<EqualizerInfo?> equalizerInfo() async => null;
 
+  /// Like the handler: the system's buttons go to the controller once it
+  /// has registered, else move the player.
   @override
-  Future<void> skipToNext() async => advance();
+  RemoteControls? remoteControls;
+
   @override
-  Future<void> skipToPrevious() async => advance(-1);
+  Future<void> skipToNext() async {
+    final r = remoteControls;
+    r == null ? advance() : r.next();
+  }
+
+  @override
+  Future<void> skipToPrevious() async {
+    final r = remoteControls;
+    r == null ? advance(-1) : r.previous();
+  }
 }

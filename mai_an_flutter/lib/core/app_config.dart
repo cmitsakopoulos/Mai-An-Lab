@@ -9,6 +9,7 @@ import '../assistant/llm_engine.dart'
 import '../library/track_query.dart';
 import '../player/dsp.dart';
 import '../sources/source_config.dart';
+import '../ui/tokens.dart';
 import 'haptics.dart';
 
 /// The parts of the Flet app's config.toml the port reads so far. Read-only:
@@ -22,6 +23,7 @@ class AppConfig {
     this.haptics = const HapticsConfig(),
     this.libraryTabs = const LibraryTabs(),
     this.showJarvis = true,
+    this.glassOpacity = Tokens.defaultGlassOpacity,
     this.downloadsFolder = '',
     this.startupPage = 'Library',
     this.landing = const LandingSections(),
@@ -52,6 +54,9 @@ class AppConfig {
 
   /// `appearance.show_jarvis`: whether the Jarvis tab appears in the nav bar.
   final bool showJarvis;
+
+  /// `appearance.glass_opacity`: `0.15` (ultra clear) to `1.0` (solid).
+  final double glassOpacity;
 
   /// `[downloads] folder`, unresolved (storage_paths.dart resolves it; the
   /// library folder falls back to it).
@@ -109,6 +114,9 @@ class AppConfig {
         appearance is Map ? appearance['show_jarvis'] : null,
         true,
       ),
+      glassOpacity: parseGlassOpacity(
+        appearance is Map ? appearance['glass_opacity'] : null,
+      ),
       downloadsFolder: switch (doc['downloads']) {
         {'folder': final Object f?} => '$f',
         _ => '',
@@ -125,6 +133,18 @@ class AppConfig {
         true,
       ),
     );
+  }
+
+  static double parseGlassOpacity(Object? raw) {
+    final v = switch (raw) {
+      num n => n.toDouble(),
+      String s => double.tryParse(s.trim()),
+      _ => null,
+    };
+    if (v == null || v.isNaN || v.isInfinite) {
+      return Tokens.defaultGlassOpacity;
+    }
+    return v.clamp(Tokens.minGlassOpacity, Tokens.maxGlassOpacity);
   }
 
   /// ui/tokens.py LEGACY_ACCENT_MAP.
@@ -216,7 +236,7 @@ class LibraryTabs {
     this.unified = false,
   });
 
-  /// Shown views, in bar order (network, playlists, genres, artists, albums,
+  /// Shown views, in bar order (playlists, genres, artists, albums,
   /// tracks); never empty.
   final List<String> visible;
 
@@ -225,12 +245,11 @@ class LibraryTabs {
   final bool unified;
 
   static const order = [
-    'network', 'playlists', 'genres', 'artists', 'albums', 'tracks', //
+    'playlists', 'genres', 'artists', 'albums', 'tracks', //
   ];
 
   /// The defaults of `_visible_view_modes`.
   static const _defaults = {
-    'network': false,
     'playlists': true,
     'genres': true,
     'artists': true,

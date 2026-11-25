@@ -8,6 +8,9 @@
 #                                         bundle's library.db into the app first
 #   tool/install_phone.sh --db FILE       ...or this bundle .zip / library.db
 #   tool/install_phone.sh --release       release build (smooth; for daily use)
+#   tool/install_phone.sh --profile       profile build: release speed, plus
+#                                         DevTools (jank, CPU, memory); then
+#                                         `flutter attach` to measure
 #   tool/install_phone.sh --no-build      reinstall the last APK built
 #   tool/install_phone.sh --grant         grant audio, notification and
 #                                         all-files access without the prompts
@@ -21,8 +24,9 @@
 # Debug vs release: a debug build is slow to scroll but lets --db write into
 # the app's private folder (run-as). A release build is fast but not
 # debuggable, so --db needs a debug build installed at that moment: run
-# `--db` once, then `--release`; the database stays. Both are signed with
-# ~/.android/debug.keystore, so they install over each other.
+# `--db` once, then `--release`; the database stays. All three modes are
+# signed with ~/.android/debug.keystore, so they install over each other.
+# Judge speed (scrolling, DSP seconds per track) only in --profile/--release.
 #
 # Several devices attached: ANDROID_SERIAL=<serial> tool/install_phone.sh
 # Another adb: ADB=/path/to/adb tool/install_phone.sh
@@ -36,6 +40,7 @@ mode=debug build=1 db=0 db_src="" grant=0 logs=0 wifi=""
 while (($#)); do
   case $1 in
     --release) mode=release ;;
+    --profile) mode=profile ;;
     --debug) mode=debug ;;
     --no-build) build=0 ;;
     --db)
@@ -45,14 +50,14 @@ while (($#)); do
     --grant) grant=1 ;;
     --logs) logs=1 ;;
     --wifi) wifi=${2:?--wifi needs IP:PORT}; shift ;;
-    -h|--help) sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "Unknown option: $1 (see --help)" >&2; exit 2 ;;
   esac
   shift
 done
 
-if ((db)) && [[ $mode == release ]]; then
-  echo "--db needs a debug build (release builds are not debuggable)." >&2
+if ((db)) && [[ $mode != debug ]]; then
+  echo "--db needs a debug build ($mode builds are not debuggable)." >&2
   echo "Run '$0 --db' first, then '$0 --release'; the database is kept." >&2
   exit 2
 fi

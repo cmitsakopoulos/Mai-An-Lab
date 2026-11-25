@@ -63,7 +63,7 @@ void main() {
     );
     await tester.pump();
     expect(find.text('First'), findsOneWidget);
-    expect(find.textContaining('2 / 2 tracks'), findsOneWidget);
+    expect(find.text('2 tracks'), findsOneWidget);
 
     Future<void> settle() async {
       await tester.runAsync(
@@ -72,10 +72,10 @@ void main() {
       await tester.pumpAndSettle();
     }
 
-    await tester.tap(find.text('Genres'));
+    await tester.tap(find.byTooltip('Genres'));
     await settle();
     expect(find.text('Electronic'), findsOneWidget);
-    expect(find.textContaining('1 / 1 genres'), findsOneWidget);
+    expect(find.text('1 genres'), findsOneWidget);
     await tester.tap(find.text('Electronic'));
     await settle();
     await tester.tap(find.textContaining('An Artist Whose'));
@@ -84,7 +84,7 @@ void main() {
     await settle();
     expect(find.text('Second'), findsOneWidget);
 
-    await tester.tap(find.text('Albums'));
+    await tester.tap(find.byTooltip('Albums'));
     await settle();
     expect(find.textContaining('A Very Long Album'), findsOneWidget);
     expect(find.text('First'), findsNothing); // expansions don't carry over
@@ -96,7 +96,7 @@ void main() {
     await settle();
     expect(lib.sort, LibrarySort.album);
 
-    await tester.tap(find.text('Artists'));
+    await tester.tap(find.byTooltip('Artists'));
     await settle();
     await tester.tap(find.byIcon(Icons.sort));
     await settle();
@@ -207,7 +207,7 @@ void main() {
     expect(find.textContaining('selected'), findsNothing);
 
     // The playlist, in its own tab.
-    await tester.tap(find.text('Playlists'));
+    await tester.tap(find.byTooltip('Playlists'));
     await settle();
     expect(find.text('2 tracks'), findsOneWidget);
     await tester.tap(find.text('Mix'));
@@ -218,7 +218,7 @@ void main() {
     expect(find.text('1 track'), findsOneWidget);
 
     // Delete Track removes the file and the row.
-    await tester.tap(find.text('Tracks'));
+    await tester.tap(find.byTooltip('Tracks'));
     await settle();
     await tester.longPress(find.text('Second'));
     await settle();
@@ -269,14 +269,14 @@ void main() {
     }
 
     await tester.pumpWidget(screen(workbench: false));
-    await tester.tap(find.text('Artists'));
+    await tester.tap(find.byTooltip('Artists'));
     await settle();
     expect(find.byTooltip('Fix artist info'), findsNothing);
 
     await tester.pumpWidget(screen());
     await settle();
     await tester.tap(find.byTooltip('Fix artist info'));
-    await tester.tap(find.text('Genres'));
+    await tester.tap(find.byTooltip('Genres'));
     await settle();
     await tester.tap(find.byTooltip('Curate Electronic in Workbench'));
     expect(opened, [

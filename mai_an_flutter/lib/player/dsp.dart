@@ -9,12 +9,14 @@ class DspConfig {
   const DspConfig({
     this.equalizerEnabled = false,
     this.dynamismEnabled = false,
+    this.autoAnalyse = true,
     this.activePreset = 'Flat',
     this.customPresets = const {},
   });
 
   final bool equalizerEnabled;
   final bool dynamismEnabled;
+  final bool autoAnalyse;
   final String activePreset;
   final Map<String, List<double>> customPresets;
 
@@ -34,6 +36,9 @@ class DspConfig {
     return DspConfig(
       equalizerEnabled: _truthy(table['equalizer_enabled']),
       dynamismEnabled: _truthy(table['dynamism_enabled']),
+      autoAnalyse: table.containsKey('auto_analyse')
+          ? _truthy(table['auto_analyse'])
+          : true,
       activePreset: preset is String ? preset : 'Flat',
       customPresets: custom,
     );

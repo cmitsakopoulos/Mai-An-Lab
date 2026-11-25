@@ -5,6 +5,7 @@ import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../settings/settings_page.dart';
+import '../ui/frost.dart';
 import '../ui/tokens.dart';
 import 'assistant_controller.dart';
 
@@ -222,7 +223,12 @@ class _AssistantScreenState extends State<AssistantScreen> {
               const Divider(color: Tokens.border, height: 1),
               // Footer input
               Padding(
-                padding: const EdgeInsets.fromLTRB(12, 8, 8, 12),
+                padding: EdgeInsets.fromLTRB(
+                  12,
+                  8,
+                  8,
+                  12 + ShellInsets.bottomOf(context),
+                ),
                 child: Row(
                   children: [
                     if (c.hasVoice) ...[

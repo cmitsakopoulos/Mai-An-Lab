@@ -10,12 +10,16 @@ import 'package:permission_handler/permission_handler.dart';
 import '../analysis/library_analysis.dart';
 import '../core/app_config.dart';
 import '../core/app_version.dart';
+import '../library/browse_controller.dart';
+import '../library/browse_view.dart';
 import '../library/library_dialogs.dart';
 import '../library/track_query.dart';
 import '../player/queue_store.dart';
 import '../scan/library_folder.dart';
 import '../data/state_export.dart' show defaultBundleDir;
 import '../sync/state_bundles.dart' show kSnapshotName;
+import '../ui/frost.dart';
+import '../ui/sliding_segmented.dart';
 import '../ui/tokens.dart';
 import 'folder_browser.dart';
 import 'settings_page.dart';
@@ -112,6 +116,264 @@ class SwitchRow extends StatelessWidget {
       if (trailing != null) ...[const SizedBox(width: 10), trailing!],
     ],
   );
+}
+
+/// Modern Apple-style grouped inset section with an uppercase accent header
+/// above a clean [GlassCard]. Shared by Appearance, AI Assistant, Audio & DSP.
+class SettingsSection extends StatelessWidget {
+  const SettingsSection({
+    super.key,
+    required this.label,
+    required this.child,
+    this.padding = const EdgeInsets.all(16),
+    this.trailing,
+  });
+
+  final String label;
+  final Widget child;
+  final EdgeInsetsGeometry padding;
+  final Widget? trailing;
+
+  @override
+  Widget build(BuildContext context) => Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      Padding(
+        padding: const EdgeInsets.only(left: 4, right: 4, bottom: 8),
+        child: Row(
+          children: [
+            AccentLabel(label, size: 11),
+            if (trailing != null) ...[const Spacer(), trailing!],
+          ],
+        ),
+      ),
+      GlassCard(padding: padding, child: child),
+    ],
+  );
+}
+
+/// Modern right-aligned switch row for grouped inset settings cards.
+class InsetSwitchRow extends StatelessWidget {
+  const InsetSwitchRow({
+    super.key,
+    required this.label,
+    required this.value,
+    required this.onChanged,
+    this.subtitle,
+  });
+
+  final String label;
+  final String? subtitle;
+  final bool value;
+  final ValueChanged<bool>? onChanged;
+
+  @override
+  Widget build(BuildContext context) => InkWell(
+    onTap: onChanged == null ? null : () => onChanged!(!value),
+    borderRadius: BorderRadius.circular(10),
+    child: Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  label,
+                  style: const TextStyle(
+                    color: Tokens.text,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+                if (subtitle != null) ...[
+                  const SizedBox(height: 2),
+                  Dim(subtitle!, size: 11),
+                ],
+              ],
+            ),
+          ),
+          const SizedBox(width: 12),
+          Switch(
+            value: value,
+            activeThumbColor: Theme.of(context).colorScheme.primary,
+            onChanged: onChanged,
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
+/// Tappable picker row showing a label on the left and the current value +
+/// chevron on the right (opens a frosted bottom sheet).
+class SettingsPickerRow extends StatelessWidget {
+  const SettingsPickerRow({
+    super.key,
+    required this.label,
+    required this.valueText,
+    required this.onTap,
+    this.subtitle,
+  });
+
+  final String label;
+  final String valueText;
+  final String? subtitle;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final accent = Theme.of(context).colorScheme.primary;
+    return InkWell(
+      borderRadius: BorderRadius.circular(10),
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        child: Row(
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    label,
+                    style: const TextStyle(
+                      color: Tokens.text,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                  if (subtitle != null) ...[
+                    const SizedBox(height: 2),
+                    Dim(subtitle!, size: 11),
+                  ],
+                ],
+              ),
+            ),
+            const SizedBox(width: 12),
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 165),
+              child: Text(
+                valueText,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                textAlign: TextAlign.right,
+                style: TextStyle(
+                  color: accent,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+            const SizedBox(width: 4),
+            const Icon(
+              Icons.chevron_right_rounded,
+              color: Tokens.dim,
+              size: 18,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Clean stacked-label text field (label sits cleanly above the rounded box
+/// instead of colliding with an OutlineInputBorder floating label).
+class ModernTextField extends StatefulWidget {
+  const ModernTextField({
+    super.key,
+    required this.label,
+    required this.controller,
+    this.hint,
+    this.minLines = 1,
+    this.maxLines = 1,
+    this.obscureToggle = false,
+    this.fieldKey,
+  });
+
+  final String label;
+  final TextEditingController controller;
+  final String? hint;
+  final int minLines;
+  final int maxLines;
+  final bool obscureToggle;
+  final Key? fieldKey;
+
+  @override
+  State<ModernTextField> createState() => _ModernTextFieldState();
+}
+
+class _ModernTextFieldState extends State<ModernTextField> {
+  late bool _obscured = widget.obscureToggle;
+
+  @override
+  Widget build(BuildContext context) {
+    final accent = Theme.of(context).colorScheme.primary;
+    OutlineInputBorder border(Color c, [double width = 1.0]) =>
+        OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: BorderSide(color: c, width: width),
+        );
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(left: 2, bottom: 6),
+          child: Text(
+            widget.label,
+            style: const TextStyle(
+              color: Tokens.dim,
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ),
+        TextField(
+          key: widget.fieldKey,
+          controller: widget.controller,
+          obscureText: _obscured,
+          minLines: _obscured ? 1 : widget.minLines,
+          maxLines: _obscured ? 1 : widget.maxLines,
+          style: const TextStyle(
+            color: Tokens.text,
+            fontSize: 13,
+            height: 1.35,
+          ),
+          decoration: InputDecoration(
+            hintText: widget.hint,
+            hintStyle: const TextStyle(color: Tokens.textTertiary, fontSize: 13),
+            filled: true,
+            fillColor: Tokens.surface2,
+            contentPadding: const EdgeInsets.symmetric(
+              horizontal: 14,
+              vertical: 12,
+            ),
+            enabledBorder: border(Tokens.borderSubtle),
+            focusedBorder: border(accent, 1.3),
+            border: border(Tokens.borderSubtle),
+            suffixIcon: widget.obscureToggle
+                ? IconButton(
+                    icon: Icon(
+                      _obscured
+                          ? Icons.visibility_rounded
+                          : Icons.visibility_off_rounded,
+                      size: 18,
+                      color: Tokens.dim,
+                    ),
+                    tooltip: _obscured ? 'Show key' : 'Hide key',
+                    onPressed: () => setState(() => _obscured = !_obscured),
+                  )
+                : null,
+          ),
+        ),
+      ],
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -449,8 +711,8 @@ class AppearanceGroup extends StatefulWidget {
 }
 
 class _AppearanceGroupState extends State<AppearanceGroup> {
-  late Map<String, Object?> _state = _read();
-  late Map<String, Object?> _baseline = Map.of(_state);
+  late final Map<String, Object?> _state = _read();
+  Future<void> _writeChain = Future<void>.value();
 
   SettingsDeps get d => widget.deps;
 
@@ -468,13 +730,15 @@ class _AppearanceGroupState extends State<AppearanceGroup> {
       'startup_page': c.string('general', 'startup_page', 'Library'),
       'default_sort': c.string('general', 'library_sort', 'date'),
       'pill_style': c.string('appearance', 'pill_style', 'category'),
+      'glass_opacity': AppConfig.parseGlassOpacity(
+        c.value('appearance', 'glass_opacity'),
+      ),
       'most_listened': landing('show_search_history'),
       'library_stats': landing('show_library_stats'),
       'top_artists': landing('show_top_artists'),
       'top_genres': landing('show_top_genres'),
       'new_releases': landing('show_new_releases'),
       'jarvis': tab('jarvis', true),
-      'network': tab('network', false),
       'playlists': tab('playlists', true),
       'genres': tab('genres', true),
       'artists': tab('artists', true),
@@ -502,143 +766,666 @@ class _AppearanceGroupState extends State<AppearanceGroup> {
     final Object o => _pyBool(o),
   };
 
-  void _set(String k, Object? v) => setState(() => _state[k] = v);
-
-  bool get _dirty => !mapEquals(_state, _baseline);
-
-  Future<void> _save() async {
-    final s = _state;
-    await d.config.update({
-      'appearance': {
-        'accent_color': s['accent_color'],
-        'pill_style': s['pill_style'] ?? 'category',
-        'show_jarvis': s['jarvis'],
-        'show_network': s['network'],
-        'show_playlists': s['playlists'],
-        'show_genres': s['genres'],
-        'show_artists': s['artists'],
-        'show_albums': s['albums'],
-        'show_tracks': s['tracks'],
-      },
-      'landing': {
-        'show_search_history': s['most_listened'],
-        'show_library_stats': s['library_stats'],
-        'show_top_artists': s['top_artists'],
-        'show_top_genres': s['top_genres'],
-        'show_new_releases': s['new_releases'],
-      },
-      'general': {
-        'startup_page': s['startup_page'],
-        'default_sort': s['default_sort'],
-        // Flet writes only default_sort here, which nothing reads; the
-        // library's sort is library_sort (PORT_MAP §7).
-        'library_sort': s['default_sort'],
-      },
-    });
-    d.library.setSort(LibrarySort.fromConfig('${s['default_sort']}'));
-    if (!mounted) return;
-    setState(() {
-      _state = _read();
-      _baseline = Map.of(_state);
-    });
-    showSettingsSnack(context, 'Appearance and interface settings saved.');
+  /// Updates local state immediately and persists to config.toml without
+  /// requiring a separate Save button.
+  void _set(String k, Object? v, {bool persist = true}) {
+    setState(() => _state[k] = v);
+    if (persist) _persist();
   }
 
-  Widget _switch(String key, String label, {Widget? trailing}) => SwitchRow(
-    value: _state[key] == true,
-    label: label,
-    onChanged: (v) => _set(key, v),
-    trailing: trailing,
-  );
+  void _persist() {
+    final s = Map<String, Object?>.of(_state);
+    final opacity =
+        ((s['glass_opacity'] as double?) ?? Tokens.defaultGlassOpacity);
+    final roundedOpacity = double.parse(opacity.toStringAsFixed(2));
+    d.library.setSort(LibrarySort.fromConfig('${s['default_sort']}'));
+    _writeChain = _writeChain.then(
+      (_) => d.config.update({
+        'appearance': {
+          'accent_color': s['accent_color'],
+          'pill_style': s['pill_style'] ?? 'category',
+          'glass_opacity': roundedOpacity,
+          'show_jarvis': s['jarvis'],
+          'show_playlists': s['playlists'],
+          'show_genres': s['genres'],
+          'show_artists': s['artists'],
+          'show_albums': s['albums'],
+          'show_tracks': s['tracks'],
+        },
+        'landing': {
+          'show_search_history': s['most_listened'],
+          'show_library_stats': s['library_stats'],
+          'show_top_artists': s['top_artists'],
+          'show_top_genres': s['top_genres'],
+          'show_new_releases': s['new_releases'],
+        },
+        'general': {
+          'startup_page': s['startup_page'],
+          'default_sort': s['default_sort'],
+          'library_sort': s['default_sort'],
+        },
+      }),
+    );
+  }
+
+  Future<void> _pickSort() async {
+    final current = LibrarySort.fromConfig('${_state['default_sort']}');
+    final accent = Theme.of(context).colorScheme.primary;
+    final picked = await showFrostedSheet<LibrarySort>(
+      context: context,
+      showDragHandle: true,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Padding(
+              padding: EdgeInsets.fromLTRB(20, 4, 20, 12),
+              child: Text(
+                'Default Library Sort',
+                style: TextStyle(
+                  color: Tokens.text,
+                  fontSize: 16,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ),
+            const Divider(height: 1, color: Tokens.borderSubtle),
+            for (final s in LibrarySort.values)
+              ListTile(
+                title: Text(
+                  s.label,
+                  style: TextStyle(
+                    color: s == current ? accent : Tokens.text,
+                    fontWeight: s == current
+                        ? FontWeight.w600
+                        : FontWeight.w400,
+                  ),
+                ),
+                trailing: s == current
+                    ? Icon(Icons.check_rounded, color: accent, size: 20)
+                    : null,
+                onTap: () => Navigator.pop(ctx, s),
+              ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+    if (picked != null && mounted) {
+      _set('default_sort', picked.name);
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
-    const divider = Divider(color: Tokens.border, height: 20);
+    final accent =
+        AppConfig.parseAccent('${_state['accent_color']}') ??
+        Theme.of(context).colorScheme.primary;
+    final opacity =
+        (_state['glass_opacity'] as double?) ?? Tokens.defaultGlassOpacity;
+    final isSolid = opacity >= 0.99;
+    final pct = (opacity * 100).round();
+    final sort = LibrarySort.fromConfig('${_state['default_sort']}');
+    final unified = _state['pill_style'] == 'unified';
+
     return GroupBody(
       spacing: 20,
-      onSave: _dirty ? _save : null,
-      saveLabel: 'SAVE APPEARANCE SETTINGS',
-      saveIcon: Icons.palette_rounded,
       children: [
-        const Dim('Customize how the app looks and behaves on startup.'),
-        SettingsDropdown(
-          label: 'Startup Page',
-          value: '${_state['startup_page']}',
-          options: const [('Search', 'Search'), ('Library', 'Library')],
-          onChanged: (v) => _set('startup_page', v),
-        ),
-        SettingsDropdown(
-          label: 'Default Library Sort',
-          value: '${_state['default_sort']}',
-          options: [for (final s in LibrarySort.values) (s.name, s.label)],
-          onChanged: (v) => _set('default_sort', v),
-        ),
-        SettingsDropdown(
-          label: 'Library Pill Styling',
-          value: '${_state['pill_style']}',
-          options: const [
-            ('category', 'Category Tints (Curated Apple Glow)'),
-            ('unified', 'Unified Accent (Monochrome Glow)'),
-          ],
-          onChanged: (v) => _set('pill_style', v),
-        ),
-        divider,
-        const AccentLabel('Landing Page Sections'),
-        _switch('new_releases', 'Show New From Your Artists'),
-        _switch('most_listened', 'Show Most Listened Tracks'),
-        _switch('top_artists', 'Show Most Listened Artists'),
-        _switch('top_genres', 'Show Most Listened Genres'),
-        _switch('library_stats', 'Show Library Stats'),
-        divider,
-        const AccentLabel('Library Tabs Visibility'),
-        _switch(
-          'network',
-          'Acoustic Network',
-          trailing: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-            decoration: BoxDecoration(
-              color: Tokens.amber,
-              borderRadius: BorderRadius.circular(4),
-            ),
-            child: const Text(
-              'EXPERIMENTAL',
-              style: TextStyle(
-                color: Tokens.bg,
-                fontSize: 9,
-                fontWeight: FontWeight.w800,
+        // 1. Glass & Color
+        _AppearanceSection(
+          label: 'GLASS & COLOR',
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _GlassPreview(opacity: opacity, accent: accent),
+              const SizedBox(height: 16),
+              Row(
+                children: [
+                  const Text(
+                    'Glass Opacity',
+                    style: TextStyle(
+                      color: Tokens.text,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const Spacer(),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 3,
+                    ),
+                    decoration: BoxDecoration(
+                      color: accent.withValues(alpha: 0.16),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Text(
+                      isSolid
+                          ? 'Solid (Off)'
+                          : pct == 0
+                          ? '0% (Clear)'
+                          : '$pct%',
+                      style: TextStyle(
+                        color: accent,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                ],
               ),
-            ),
+              SliderTheme(
+                data: SliderTheme.of(context).copyWith(
+                  activeTrackColor: accent,
+                  inactiveTrackColor: Tokens.surface2,
+                  thumbColor: Tokens.text,
+                  trackHeight: 4,
+                ),
+                child: Slider(
+                  value: opacity.clamp(
+                    Tokens.minGlassOpacity,
+                    Tokens.maxGlassOpacity,
+                  ),
+                  min: Tokens.minGlassOpacity,
+                  max: Tokens.maxGlassOpacity,
+                  onChanged: (v) => _set('glass_opacity', v, persist: false),
+                  onChangeEnd: (v) => _set('glass_opacity', v, persist: true),
+                ),
+              ),
+              const Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Dim('Crystal Clear', size: 11),
+                  Dim('Balanced', size: 11),
+                  Dim('Solid', size: 11),
+                ],
+              ),
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 14),
+                child: Divider(height: 1, color: Tokens.borderSubtle),
+              ),
+              const Text(
+                'Accent Color',
+                style: TextStyle(
+                  color: Tokens.text,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: 12),
+              Wrap(
+                spacing: 12,
+                runSpacing: 12,
+                children: [
+                  for (final (name, hex) in kAccentChoices)
+                    _AccentDot(
+                      name: name,
+                      hex: hex,
+                      selected:
+                          hex.toLowerCase() ==
+                          '${_state['accent_color']}'.toLowerCase(),
+                      onTap: () => _set('accent_color', hex),
+                    ),
+                ],
+              ),
+            ],
           ),
         ),
-        _switch('playlists', 'Playlists'),
-        _switch('genres', 'Genres'),
-        _switch('artists', 'Artists'),
-        _switch('albums', 'Albums'),
-        _switch('tracks', 'Tracks'),
-        divider,
-        const AccentLabel('AI Companion'),
-        _switch('jarvis', 'Enable Jarvis Tab'),
-        divider,
-        const AccentLabel('Accent Color'),
-        Wrap(
-          spacing: 12,
-          runSpacing: 12,
-          children: [
-            for (final (name, hex) in kAccentChoices)
-              _AccentDot(
-                name: name,
-                hex: hex,
-                selected:
-                    hex.toLowerCase() ==
-                    '${_state['accent_color']}'.toLowerCase(),
-                onTap: () => _set('accent_color', hex),
+
+        // 2. Navigation & Sort
+        _AppearanceSection(
+          label: 'NAVIGATION & SORT',
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Startup Page',
+                style: TextStyle(
+                  color: Tokens.text,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                ),
               ),
-          ],
+              const SizedBox(height: 8),
+              SlidingSegmented<String>(
+                segments: const [
+                  Segment(
+                    value: 'Library',
+                    label: 'Library',
+                    icon: Icons.library_music_rounded,
+                  ),
+                  Segment(
+                    value: 'Search',
+                    label: 'Search',
+                    icon: Icons.search_rounded,
+                  ),
+                ],
+                selected: '${_state['startup_page']}',
+                onSelect: (v) => _set('startup_page', v),
+                accent: accent,
+                frosted: false,
+                height: 38,
+                fontSize: 12,
+                iconSize: 16,
+              ),
+              const SizedBox(height: 16),
+              const Text(
+                'Category Colors',
+                style: TextStyle(
+                  color: Tokens.text,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: 8),
+              SlidingSegmented<String>(
+                segments: const [
+                  Segment(value: 'category', label: 'Multi-Color'),
+                  Segment(value: 'unified', label: 'Unified Accent'),
+                ],
+                selected: '${_state['pill_style']}',
+                onSelect: (v) => _set('pill_style', v),
+                accent: accent,
+                frosted: false,
+                height: 38,
+                fontSize: 12,
+              ),
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 14),
+                child: Divider(height: 1, color: Tokens.borderSubtle),
+              ),
+              InkWell(
+                borderRadius: BorderRadius.circular(10),
+                onTap: _pickSort,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 4),
+                  child: Row(
+                    children: [
+                      const Expanded(
+                        child: Text(
+                          'Default Library Sort',
+                          style: TextStyle(
+                            color: Tokens.text,
+                            fontSize: 14,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      ),
+                      Text(
+                        sort.label,
+                        style: TextStyle(
+                          color: accent,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      const SizedBox(width: 4),
+                      const Icon(
+                        Icons.chevron_right_rounded,
+                        color: Tokens.dim,
+                        size: 18,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
         ),
-        const SizedBox(height: 50),
+
+        // 3. Library Views (tappable icon chips)
+        _AppearanceSection(
+          label: 'LIBRARY VIEWS',
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Dim(
+                'Tap to show or hide icons in the Library view bar.',
+                size: 12,
+              ),
+              const SizedBox(height: 12),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  for (final (key, view, label, experimental) in const [
+                    ('tracks', LibraryView.tracks, 'Tracks', false),
+                    ('albums', LibraryView.albums, 'Albums', false),
+                    ('artists', LibraryView.artists, 'Artists', false),
+                    ('genres', LibraryView.genres, 'Genres', false),
+                    ('playlists', LibraryView.playlists, 'Playlists', false),
+                  ])
+                    _ViewToggleChip(
+                      icon: ViewBar.icon(view),
+                      label: label,
+                      color: unified
+                          ? accent
+                          : (ViewBar.color(view) ?? accent),
+                      selected: _state[key] == true,
+                      experimental: experimental,
+                      onTap: () => _set(key, !(_state[key] == true)),
+                    ),
+                ],
+              ),
+            ],
+          ),
+        ),
+
+        // 4. Search Landing & AI
+        _AppearanceSection(
+          label: 'SEARCH LANDING & AI',
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+          child: Column(
+            children: [
+              _InsetSwitch(
+                label: 'New From Your Artists',
+                value: _state['new_releases'] == true,
+                onChanged: (v) => _set('new_releases', v),
+              ),
+              const Divider(height: 1, color: Tokens.borderSubtle),
+              _InsetSwitch(
+                label: 'Most Listened Tracks',
+                value: _state['most_listened'] == true,
+                onChanged: (v) => _set('most_listened', v),
+              ),
+              const Divider(height: 1, color: Tokens.borderSubtle),
+              _InsetSwitch(
+                label: 'Most Listened Artists',
+                value: _state['top_artists'] == true,
+                onChanged: (v) => _set('top_artists', v),
+              ),
+              const Divider(height: 1, color: Tokens.borderSubtle),
+              _InsetSwitch(
+                label: 'Most Listened Genres',
+                value: _state['top_genres'] == true,
+                onChanged: (v) => _set('top_genres', v),
+              ),
+              const Divider(height: 1, color: Tokens.borderSubtle),
+              _InsetSwitch(
+                label: 'Library Stats',
+                value: _state['library_stats'] == true,
+                onChanged: (v) => _set('library_stats', v),
+              ),
+              const Divider(height: 1, color: Tokens.borderSubtle),
+              _InsetSwitch(
+                label: 'Enable Jarvis Tab',
+                value: _state['jarvis'] == true,
+                onChanged: (v) => _set('jarvis', v),
+              ),
+            ],
+          ),
+        ),
+
+        const SizedBox(height: 24),
       ],
     );
   }
+}
+
+class _AppearanceSection extends StatelessWidget {
+  const _AppearanceSection({
+    required this.label,
+    required this.child,
+    this.padding = const EdgeInsets.all(16),
+  });
+
+  final String label;
+  final Widget child;
+  final EdgeInsetsGeometry padding;
+
+  @override
+  Widget build(BuildContext context) => Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      Padding(
+        padding: const EdgeInsets.only(left: 4, bottom: 8),
+        child: AccentLabel(label, size: 11),
+      ),
+      GlassCard(padding: padding, child: child),
+    ],
+  );
+}
+
+class _GlassPreview extends StatelessWidget {
+  const _GlassPreview({required this.opacity, required this.accent});
+
+  final double opacity;
+  final Color accent;
+
+  @override
+  Widget build(BuildContext context) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(14),
+      child: SizedBox(
+        height: 92,
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            // Vibrant mock rows behind the glass pill so transparency reads clearly.
+            DecoratedBox(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: [
+                    accent.withValues(alpha: 0.45),
+                    Tokens.libArtist.withValues(alpha: 0.45),
+                    Tokens.libAlbum.withValues(alpha: 0.45),
+                  ],
+                ),
+              ),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 14,
+                  vertical: 10,
+                ),
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    for (final c in [Tokens.libTrack, Tokens.libPlaylist])
+                      Row(
+                        children: [
+                          Container(
+                            width: 28,
+                            height: 28,
+                            decoration: BoxDecoration(
+                              color: c,
+                              borderRadius: BorderRadius.circular(6),
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Container(
+                                  height: 8,
+                                  width: 120,
+                                  decoration: BoxDecoration(
+                                    color: Colors.white.withValues(alpha: 0.75),
+                                    borderRadius: BorderRadius.circular(4),
+                                  ),
+                                ),
+                                const SizedBox(height: 5),
+                                Container(
+                                  height: 6,
+                                  width: 72,
+                                  decoration: BoxDecoration(
+                                    color: Colors.white.withValues(alpha: 0.4),
+                                    borderRadius: BorderRadius.circular(3),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                  ],
+                ),
+              ),
+            ),
+            // Live glass mini-pill floating over the mock content.
+            Center(
+              child: GlassSurface(
+                opacity: opacity,
+                radius: 18,
+                margin: const EdgeInsets.symmetric(horizontal: 14),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 10,
+                ),
+                child: Row(
+                  children: [
+                    Container(
+                      width: 28,
+                      height: 28,
+                      decoration: BoxDecoration(
+                        color: accent.withValues(alpha: 0.25),
+                        borderRadius: BorderRadius.circular(7),
+                      ),
+                      child: Icon(
+                        Icons.music_note_rounded,
+                        color: accent,
+                        size: 16,
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    const Expanded(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Now Playing Preview',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: Tokens.text,
+                              fontSize: 12,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                          Text(
+                            'Floating Glass Pill',
+                            maxLines: 1,
+                            style: TextStyle(color: Tokens.dim, fontSize: 10),
+                          ),
+                        ],
+                      ),
+                    ),
+                    Icon(Icons.play_arrow_rounded, color: accent, size: 22),
+                    const SizedBox(width: 4),
+                    const Icon(
+                      Icons.skip_next_rounded,
+                      color: Tokens.dim,
+                      size: 18,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ViewToggleChip extends StatelessWidget {
+  const _ViewToggleChip({
+    required this.icon,
+    required this.label,
+    required this.color,
+    required this.selected,
+    required this.experimental,
+    required this.onTap,
+  });
+
+  final IconData icon;
+  final String label;
+  final Color color;
+  final bool selected;
+  final bool experimental;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: Tokens.motionFast,
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        decoration: BoxDecoration(
+          color: selected ? color.withValues(alpha: 0.18) : Tokens.surface2,
+          borderRadius: BorderRadius.circular(Tokens.radiusPill),
+          border: Border.all(
+            color: selected
+                ? color.withValues(alpha: 0.55)
+                : Tokens.borderSubtle,
+            width: 1,
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 16, color: selected ? color : Tokens.dim),
+            const SizedBox(width: 6),
+            Text(
+              label,
+              style: TextStyle(
+                color: selected ? Tokens.text : Tokens.dim,
+                fontSize: 12,
+                fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
+              ),
+            ),
+            if (experimental) ...[
+              const SizedBox(width: 6),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                decoration: BoxDecoration(
+                  color: Tokens.amber,
+                  borderRadius: BorderRadius.circular(4),
+                ),
+                child: const Text(
+                  'BETA',
+                  style: TextStyle(
+                    color: Tokens.bg,
+                    fontSize: 8,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _InsetSwitch extends StatelessWidget {
+  const _InsetSwitch({
+    required this.label,
+    required this.value,
+    required this.onChanged,
+  });
+
+  final String label;
+  final bool value;
+  final ValueChanged<bool> onChanged;
+
+  @override
+  Widget build(BuildContext context) => SwitchListTile(
+    value: value,
+    onChanged: onChanged,
+    dense: true,
+    contentPadding: EdgeInsets.zero,
+    title: Text(
+      label,
+      style: const TextStyle(color: Tokens.text, fontSize: 14),
+    ),
+  );
 }
 
 class _AccentDot extends StatelessWidget {
@@ -658,9 +1445,10 @@ class _AccentDot extends StatelessWidget {
     message: name,
     child: GestureDetector(
       onTap: onTap,
-      child: Container(
-        width: 32,
-        height: 32,
+      child: AnimatedContainer(
+        duration: Tokens.motionFast,
+        width: 34,
+        height: 34,
         decoration: BoxDecoration(
           color: AppConfig.parseAccent(hex),
           shape: BoxShape.circle,
@@ -668,6 +1456,9 @@ class _AccentDot extends StatelessWidget {
               ? Border.all(color: Tokens.text, width: 2.5)
               : Border.all(color: const Color(0x26FFFFFF)),
         ),
+        child: selected
+            ? const Icon(Icons.check_rounded, size: 18, color: Tokens.bg)
+            : null,
       ),
     ),
   );
@@ -1080,6 +1871,21 @@ class _DatabaseGroupState extends State<DatabaseGroup> {
     }
   }
 
+  Future<void> _confirmRecomputeAllDsp() async {
+    final ok = await confirmDelete(
+      context,
+      title: 'Recompute All DSP Features?',
+      message:
+          'This will purge all existing DSP features and recompute every track '
+          'in your library from scratch. Depending on library size, this may '
+          'take a while.\n\nYour audio files and play counts will NOT be '
+          'touched.',
+      confirmLabel: 'Recompute All',
+    );
+    if (!ok || !mounted) return;
+    _computeDsp(DspEntry.recomputeAll);
+  }
+
   /// settings.py `_do_compute_dsp` / `_do_recompute_all_dsp`.
   void _computeDsp(DspEntry entry) {
     final messenger = ScaffoldMessenger.of(context);
@@ -1216,7 +2022,7 @@ class _DatabaseGroupState extends State<DatabaseGroup> {
             TextButton.icon(
               icon: const Icon(Icons.replay_rounded),
               label: const Text('Recompute All DSP Features'),
-              onPressed: can ? () => _computeDsp(DspEntry.recomputeAll) : null,
+              onPressed: can ? _confirmRecomputeAllDsp : null,
             ),
             TextButton.icon(
               icon: const Icon(Icons.scatter_plot_rounded),

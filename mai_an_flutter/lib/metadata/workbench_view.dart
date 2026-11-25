@@ -8,6 +8,8 @@ import '../core/py_text.dart';
 import '../core/py_values.dart';
 import '../ui/tokens.dart';
 import 'workbench_controller.dart';
+import '../ui/frost.dart';
+import '../ui/toast.dart';
 
 /// `metadata_workbench.py`'s pane: the hero (status, Sync, Research), the
 /// search and confidence sort, every artist as one table, and the tray
@@ -103,27 +105,16 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
       WbTone.ai => kAiColor,
       WbTone.info => _accent(context),
     };
-    ScaffoldMessenger.of(context)
-      ..hideCurrentSnackBar()
-      ..showSnackBar(
-        SnackBar(
-          content: Row(
-            children: [
-              Icon(
-                tone == WbTone.error
-                    ? Icons.error_outline_rounded
-                    : tone == WbTone.ai
-                    ? Icons.auto_awesome_rounded
-                    : Icons.check_circle_rounded,
-                color: color,
-                size: 20,
-              ),
-              const SizedBox(width: 10),
-              Expanded(child: Text(text)),
-            ],
-          ),
-        ),
-      );
+    showAppToast(
+      context,
+      text,
+      icon: tone == WbTone.error
+          ? Icons.error_outline_rounded
+          : tone == WbTone.ai
+          ? Icons.auto_awesome_rounded
+          : Icons.check_circle_rounded,
+      color: color,
+    );
   }
 
   @override
@@ -1200,7 +1191,7 @@ Future<void> showGenrePicker(
   WorkbenchController c,
   List<String> names,
 ) {
-  return showModalBottomSheet<void>(
+  return showFrostedSheet<void>(
     context: context,
     isScrollControlled: true,
     useSafeArea: true,
@@ -1598,7 +1589,7 @@ Future<void> showArtistEditor(
   WorkbenchController c,
   Map<String, Object?> item,
 ) {
-  return showModalBottomSheet<void>(
+  return showFrostedSheet<void>(
     context: context,
     isScrollControlled: true,
     useSafeArea: true,
@@ -1731,7 +1722,7 @@ class _ArtistEditorState extends State<_ArtistEditor> {
 
   void _snack(String text) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
+    showAppToast(context, text);
   }
 
   Future<void> _answer(Map<String, Object?> r) async {

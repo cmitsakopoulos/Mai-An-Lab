@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../data/library_repository.dart';
+import '../ui/format_badge.dart';
 import '../ui/tokens.dart';
 
 /// library.py `_track_row`: format badge, title, "artist · album", duration.
@@ -71,35 +72,14 @@ class TrackRow extends StatelessWidget {
             children: [
               if (selected case final ticked?)
                 SizedBox(
-                  width: 40,
+                  width: 42,
                   child: Checkbox(
                     value: ticked,
                     onChanged: onTap == null ? null : (_) => onTap!(),
                   ),
                 )
               else
-                Container(
-                  width: 40,
-                  height: 20,
-                  alignment: Alignment.center,
-                  decoration: BoxDecoration(
-                    color: playing
-                        ? accent.withValues(alpha: 0.22)
-                        : Tokens.text.withValues(alpha: 0.08),
-                    border: Border.all(
-                      color: playing ? accent : Tokens.borderSubtle,
-                    ),
-                    borderRadius: BorderRadius.circular(5),
-                  ),
-                  child: Text(
-                    track.formatBadge,
-                    style: TextStyle(
-                      fontSize: 9,
-                      fontWeight: FontWeight.w700,
-                      color: playing ? accent : Tokens.dim,
-                    ),
-                  ),
-                ),
+                FormatBadge(label: track.formatBadge, highlighted: playing),
               const SizedBox(width: 16),
               Expanded(
                 child: Column(

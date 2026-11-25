@@ -159,6 +159,35 @@ void main() {
     await expectInStep();
   });
 
+  test('the notification\'s Next/Previous take the app\'s path', () async {
+    await c.playTrack(library[0], context: library);
+    await c.settled;
+    // audio_service calls the handler's skipToNext/skipToPrevious.
+    await backend.skipToNext();
+    await expectInStep();
+    expect(c.queue.currentIndex, 1);
+    expect(backend.ops.last, 'skip');
+
+    // In the background [position] isn't ticked; Previous reads the
+    // player's and restarts the track past 3 s.
+    c.setForeground(false);
+    backend.position = const Duration(seconds: 40);
+    await backend.skipToPrevious();
+    await c.settled;
+    expect(c.queue.currentIndex, 1);
+    expect(backend.position, Duration.zero);
+    await backend.skipToPrevious();
+    await expectInStep();
+    expect(c.queue.currentIndex, 0);
+
+    // Next at the end of the queue ends it, as in the app.
+    c.playTrackAt(2);
+    await c.settled;
+    await backend.skipToNext();
+    await c.settled;
+    expect(c.stopped, isTrue);
+  });
+
   test('next, previous, repeat', () async {
     await c.playTrack(library[0], context: library);
     c.next();

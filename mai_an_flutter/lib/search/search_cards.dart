@@ -11,10 +11,14 @@ import 'search_controller.dart';
 /// status cards, skeleton rows, unified hero/album/artist cards, expandable
 /// result rows, selection bar, pagination bar, and credentials/error banners.
 
-Color searchRowAccent(String mediaType, Color fallback) => switch (mediaType) {
-  'artist' => Tokens.libArtist,
-  'album' => Tokens.libAlbum,
-  'track' => Tokens.libTrack,
+Color searchRowAccent(
+  String mediaType,
+  Color fallback, {
+  CategoryPalette? palette,
+}) => switch (mediaType) {
+  'artist' => palette?.artist ?? Tokens.libArtist,
+  'album' => palette?.album ?? Tokens.libAlbum,
+  'track' => palette?.track ?? Tokens.libTrack,
   _ => fallback,
 };
 
@@ -593,7 +597,11 @@ class HeroResultCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final primary = Theme.of(context).colorScheme.primary;
     final mType = '${hero['media_type'] ?? 'track'}';
-    final accent = searchRowAccent(mType, primary);
+    final accent = searchRowAccent(
+      mType,
+      primary,
+      palette: CategoryPalette.of(context),
+    );
     final title = stripMarkup(
       '${hero['ui_title'] ?? hero['name'] ?? hero['title'] ?? 'Unknown'}',
     );
@@ -1324,7 +1332,11 @@ class SearchResultRow extends StatelessWidget {
       );
     }
 
-    final accent = searchRowAccent(mType, primary);
+    final accent = searchRowAccent(
+      mType,
+      primary,
+      palette: CategoryPalette.of(context),
+    );
     final selectable = SearchTabController.isSelectable(item);
     final highlighted = playing || previewState != 'idle' || expanded;
     final bg = selected

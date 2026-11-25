@@ -27,6 +27,10 @@ typedef PlaybackFailure = ({
 /// (`play_ledger.parse_lines`' entry).
 typedef Listen = ({String path, double listenedS, double durationS});
 
+/// The player controller's Next and Previous, for the transport buttons
+/// outside the app (notification, lockscreen, headset, car).
+typedef RemoteControls = ({void Function() next, void Function() previous});
+
 /// What the player controller needs from the native player. The Android
 /// implementation is [AudioPlayerHandler] (audio_handler.dart); tests use a
 /// fake that mirrors the playlist in a list.
@@ -81,6 +85,12 @@ abstract interface class PlaybackBackend {
   Future<void> seek(Duration position);
   Future<void> skipToNext();
   Future<void> skipToPrevious();
+
+  /// Where the system's Next/Previous go. Set by the player controller so
+  /// those buttons take the same path as the app's own (queue order, the
+  /// 3 s restart, auto-play at the end); unset, they move the player
+  /// directly.
+  set remoteControls(RemoteControls? controls);
 
   /// Loudness enhancer target gain in dB (Flet `set_loudness_boost`).
   Future<void> setLoudnessBoost(double gainDb);
