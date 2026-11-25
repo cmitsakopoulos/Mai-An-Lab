@@ -109,6 +109,26 @@ abstract final class MaianNative {
   static Future<void> cancelAlert(String key) =>
       _invoke<Object?>('cancelAlertNotification', {'key': key});
 
+  /// MediaCodec decode of [path] to raw int16 LE mono PCM (22050 Hz, up to
+  /// 120 s from the middle) in the app cache: (output file, sample rate).
+  /// Throws on failure, unlike the other calls (the analyser counts it);
+  /// null off Android.
+  static Future<({String path, int sampleRate})?> decodePcm(String path) async {
+    if (!_android) return null;
+    final r = await _channel.invokeMapMethod<String, Object?>('decodePcm', {
+      'path': path,
+    });
+    final out = r?['output_path']?.toString() ?? '';
+    final sr = r?['sample_rate'];
+    if (out.isEmpty || sr is! int || sr <= 0) {
+      throw PlatformException(
+        code: 'DECODE_FAILED',
+        message: 'decoder returned no PCM for $path',
+      );
+    }
+    return (path: out, sampleRate: sr);
+  }
+
   static Future<T?> _invoke<T>(String method, [Object? args]) async {
     if (!_android) return null;
     try {

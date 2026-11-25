@@ -26,6 +26,7 @@ Code the port copies, translates, or depends on, for attribution in Settings →
 | Cyclic Jacobi eigenvalue method (Jacobi 1846; Press et al., *Numerical Recipes* §11.1) | `lib/stations/acoustic_geometry.dart` `_symmetricEigen` | Textbook algorithm | Algorithm only; no code copied |
 | SVD sign convention (`svd_flip`, `u_based_decision=False`) | `lib/stations/acoustic_geometry.dart` | scikit-learn docs | BSD-3-Clause; convention only |
 | Blowfish block cipher (Schneier 1993) & AES-128 block cipher (FIPS 197) for Deezer CDN stream decryption and fallback URL encryption | `lib/sources/deezer_crypto.dart` | Standard published specifications (public domain / NIST FIPS 197) | Specifications only; clean-room pure Dart, bit-verified against `pycryptodomex` |
+| On-phone DSP: radix-2 FFT with real-input packing (Cooley–Tukey 1965), Hann window, Slaney-style mel filterbank, orthonormal DCT-II, median-filter HPSS (Fitzgerald 2010), Krumhansl–Schmuckler key profiles (1982), spectral-flux onset autocorrelation tempo | `lib/analysis/fft.dart`, `lib/analysis/audio_features.dart` | Textbook algorithms, as used by this repository's `utils/dsp.py` | Algorithms only; clean-room pure Dart (no `fftea` or FFI needed), verified against `dsp.py` on synthetic and real audio |
 | FLAC Vorbis Comment/PICTURE, ID3v2.3, and ISO BMFF MP4 `ilst`/`covr` container tag writing | `lib/sources/tagger.dart` | Standard container specs (Xiph FLAC/Vorbis, ID3v2.3, ISO/IEC 14496-12) | Specifications only; clean-room pure Dart (no external tagging package needed), round-trip verified against `tinytag` and `mutagen` |
 
 ## pub.dev dependencies
@@ -35,6 +36,4 @@ Licences ship via Flutter's `LicenseRegistry` (`showLicensePage` in Settings →
 
 ## Candidates for upcoming phases (not yet evaluated)
 
-| Need | Phase | Candidates | Notes |
-|---|---|---|---|
-| On-phone DSP math (`dsp.py`) | 6d | Pure Dart FFT/STFT (e.g. [`fftea`](https://pub.dev/packages/fftea)) vs native C/FFI | Evaluate pure Dart first (`fftea` / typed `Float64List` / `Float32List` on an isolate) against Python's `dsp.py` accuracy and phone runtime before considering native code. |
+None open. (Phase 6d's DSP candidate `fftea` was not needed: a small pure-Dart FFT matched `dsp.py` to ~3e-6 relative on real music.)

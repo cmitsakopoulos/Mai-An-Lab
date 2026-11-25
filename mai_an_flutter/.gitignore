@@ -47,3 +47,4 @@ app.*.map.json
 # tinytag pinned to the APK's version for tool/export_scan_goldens.py
 /tool/.pydeps/
 __pycache__/
+tool/.dsp_cache/

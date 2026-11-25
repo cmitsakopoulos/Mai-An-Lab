@@ -119,9 +119,13 @@ class AppShellState extends State<AppShell> {
   void initState() {
     super.initState();
     _tabShown(tab);
-    // library.py's "n tracks not analysed yet" card opens the Library
-    // (its Analyse button waits for decision B).
-    widget.router?.register('library', (_) => switchTab(AppTab.library));
+    // main.py "library": library.py's "n tracks not analysed yet" card opens
+    // the Library; its Analyse button ("library:analyse") also starts the
+    // on-phone analysis.
+    widget.router?.register('library', (action) {
+      switchTab(AppTab.library);
+      if (action == 'analyse') widget.library.analyseLibrary().ignore();
+    });
     if (widget.downloads case final q?) {
       widget.router?.register(
         'downloads',
@@ -329,8 +333,9 @@ class AppShellState extends State<AppShell> {
                 selection: selection,
                 onOpenSettings: _openSettings,
                 sync: widget.settings?.sync,
-                onRedownloadTrack:
-                    widget.searchController == null ? null : _redownloadTrack,
+                onRedownloadTrack: widget.searchController == null
+                    ? null
+                    : _redownloadTrack,
               ),
             ),
           ],

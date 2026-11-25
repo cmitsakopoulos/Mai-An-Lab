@@ -107,12 +107,18 @@ class ProgressNotifier {
     this.job,
     this.title, {
     void Function()? onCancel,
+    this.onTimeout,
     NotificationBridge? bridge,
     Stopwatch? clock,
   }) : _bridge = bridge ?? NotificationBridge.instance,
        _clock = clock ?? (Stopwatch()..start()) {
     setCancelHandler(onCancel);
   }
+
+  /// LibraryTaskService hit Android 15+'s daily `dataSync` limit and is
+  /// stopping (the Kotlin's `fgs_timeout`): the job should wind down
+  /// cleanly. Only jobs with a Cancel handler are reached.
+  final void Function()? onTimeout;
 
   final String job;
   final String title;
@@ -140,6 +146,16 @@ class ProgressNotifier {
     _registry[job] = this;
     if (_subscribed.add(_bridge)) {
       _bridge.actions.listen((a) {
+        if (a.action == 'fgs_timeout') {
+          for (final n in _registry.values.toList()) {
+            try {
+              n.onTimeout?.call();
+            } catch (e) {
+              debugPrint('on_timeout callback for ${n.job} failed: $e');
+            }
+          }
+          return;
+        }
         if (a.action != 'cancel') return;
         try {
           _registry[a.job]?._onCancel?.call();
@@ -250,6 +266,17 @@ void cancelAlert(String key, {NotificationBridge? bridge}) {
   (bridge ?? NotificationBridge.instance)
       .cancelAlert(key)
       .catchError((Object e) => debugPrint('cancel alert ($key) failed: $e'));
+}
+
+/// `dsp_progress_cb`'s text: "3 / 10 tracks · 1 failed · ~12s left".
+String dspProgressText(int done, int total, int failures, Duration elapsed) {
+  var text = '$done / $total tracks';
+  if (failures > 0) text += ' · $failures failed';
+  if (done > 0 && done < total) {
+    final rate = elapsed.inMicroseconds / 1e6 / done;
+    text += ' · ${formatEta(rate * (total - done))}';
+  }
+  return text;
 }
 
 /// `format_eta`.

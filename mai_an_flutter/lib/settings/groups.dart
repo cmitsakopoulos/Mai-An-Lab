@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 
+import '../analysis/library_analysis.dart';
 import '../core/app_config.dart';
 import '../core/app_version.dart';
 import '../library/library_dialogs.dart';
@@ -146,8 +147,9 @@ class _StorageGroupState extends State<StorageGroup> {
     super.initState();
     _dl.addListener(_changed);
     _lib.addListener(_changed);
-    _quality = _baseQuality =
-        d.config.string('general', 'default_quality', '').toLowerCase();
+    _quality = _baseQuality = d.config
+        .string('general', 'default_quality', '')
+        .toLowerCase();
     _refresh();
   }
 
@@ -167,8 +169,9 @@ class _StorageGroupState extends State<StorageGroup> {
     setState(() {
       _dl.text = _baseDl = download;
       _lib.text = _baseLib = library;
-      _quality = _baseQuality =
-          d.config.string('general', 'default_quality', '').toLowerCase();
+      _quality = _baseQuality = d.config
+          .string('general', 'default_quality', '')
+          .toLowerCase();
     });
   }
 
@@ -970,9 +973,8 @@ class _PermissionsGroupState extends State<PermissionsGroup> {
 // Database Management
 
 /// settings.py `_build_database_management_group`: the maintenance
-/// buttons, and from the compute pipeline Recompute PCA (the build over the
-/// features already stored). Its two DSP buttons analyse on the phone and
-/// wait for decision B.
+/// buttons and the compute pipeline (on-phone DSP compute, a full
+/// recompute, and Recompute PCA over the features already stored).
 class DatabaseGroup extends StatefulWidget {
   const DatabaseGroup({super.key, required this.deps});
 
@@ -1078,10 +1080,48 @@ class _DatabaseGroupState extends State<DatabaseGroup> {
     }
   }
 
+  /// settings.py `_do_compute_dsp` / `_do_recompute_all_dsp`.
+  void _computeDsp(DspEntry entry) {
+    final messenger = ScaffoldMessenger.of(context);
+    final accent = Theme.of(context).colorScheme.primary;
+    d.library.analysis
+        .run(
+          entry,
+          notice: (n) => switch (n.kind) {
+            DspNoticeKind.info => showSnackOn(
+              messenger,
+              n.text,
+              icon:
+                  entry == DspEntry.recomputeAll && n.text.startsWith('Purging')
+                  ? Icons.replay_rounded
+                  : Icons.graphic_eq_rounded,
+            ),
+            DspNoticeKind.success => showSnackOn(
+              messenger,
+              n.text,
+              icon: Icons.check_circle,
+              color: accent,
+            ),
+            DspNoticeKind.error => showSnackOn(
+              messenger,
+              n.text,
+              color: const Color(0xFFFF4444),
+            ),
+          },
+        )
+        .ignore();
+  }
+
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) => ListenableBuilder(
+    listenable: d.library.analysis,
+    builder: (context, _) => _build(context),
+  );
+
+  Widget _build(BuildContext context) {
     final repo = d.library.repository;
-    final can = !_busy && (repo?.writable ?? false);
+    final analysis = d.library.analysis;
+    final can = !_busy && !analysis.running && (repo?.writable ?? false);
     return GroupBody(
       spacing: 15,
       children: [
@@ -1169,13 +1209,35 @@ class _DatabaseGroupState extends State<DatabaseGroup> {
           spacing: 10,
           children: [
             TextButton.icon(
+              icon: const Icon(Icons.play_arrow_rounded),
+              label: const Text('Commence/Continue DSP Compute'),
+              onPressed: can ? () => _computeDsp(DspEntry.settings) : null,
+            ),
+            TextButton.icon(
+              icon: const Icon(Icons.replay_rounded),
+              label: const Text('Recompute All DSP Features'),
+              onPressed: can ? () => _computeDsp(DspEntry.recomputeAll) : null,
+            ),
+            TextButton.icon(
               icon: const Icon(Icons.scatter_plot_rounded),
               label: const Text('Recompute PCA'),
               onPressed: can ? _recomputePca : null,
             ),
           ],
         ),
-        if (_busy) const LinearProgressIndicator(),
+        if (analysis.running) ...[
+          LinearProgressIndicator(value: analysis.progress),
+          Row(
+            children: [
+              Expanded(child: Dim(analysis.status)),
+              TextButton(
+                onPressed: analysis.cancel,
+                child: const Text('Cancel'),
+              ),
+            ],
+          ),
+        ] else if (_busy)
+          const LinearProgressIndicator(),
       ],
     );
   }

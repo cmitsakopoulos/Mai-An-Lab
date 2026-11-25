@@ -3,6 +3,7 @@ import 'dart:typed_data';
 
 import 'package:sqlite3/sqlite3.dart';
 
+import '../analysis/audio_features.dart' show AudioFeatures;
 import 'library_repository.dart' show kFeaturesVersion;
 
 /// The acoustic features of one track, as server.py moves them between the
@@ -84,3 +85,44 @@ void Function(Database) persistFeaturesJob(
     ],
   );
 };
+
+/// db_manager `update_track_features`: an on-phone analysis result stored
+/// against [path] (the row is created if the track was never played).
+void Function(Database) updateTrackFeaturesJob(
+  String path,
+  AudioFeatures f, [
+  int featuresVersion = kFeaturesVersion,
+]) =>
+    (db) => db.execute(
+      '''
+  INSERT INTO play_counts
+      (track_path, count, last_played, bpm, energy, brightness,
+       rolloff, beat_strength, spectral_flatness,
+       spectral_contrast, key_index, timbre, features_version)
+  VALUES (?, 0, strftime('%s','now'), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  ON CONFLICT(track_path) DO UPDATE SET
+      bpm = EXCLUDED.bpm,
+      energy = EXCLUDED.energy,
+      brightness = EXCLUDED.brightness,
+      rolloff = EXCLUDED.rolloff,
+      beat_strength = EXCLUDED.beat_strength,
+      spectral_flatness = EXCLUDED.spectral_flatness,
+      spectral_contrast = EXCLUDED.spectral_contrast,
+      key_index = EXCLUDED.key_index,
+      timbre = EXCLUDED.timbre,
+      features_version = EXCLUDED.features_version
+  ''',
+      [
+        path,
+        f.bpm,
+        f.energy,
+        f.brightness,
+        f.rolloff,
+        f.beatStrength,
+        f.spectralFlatness,
+        f.spectralContrast,
+        f.keyIndex,
+        f.timbreBlob(),
+        featuresVersion,
+      ],
+    );

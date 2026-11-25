@@ -4,6 +4,7 @@ import 'dart:isolate';
 import 'package:flutter/foundation.dart';
 import 'package:sqlite3/sqlite3.dart';
 
+import '../analysis/audio_features.dart' show AudioFeatures;
 import '../core/db_worker.dart';
 import '../core/py_text.dart';
 import '../player/dsp.dart';
@@ -255,9 +256,7 @@ class LibraryRepository {
     DateTime? now,
   }) {
     if (!writable) throw StateError('library opened read-only');
-    return _db.run(
-      logReleaseSyncStartJob(triggerType: triggerType, now: now),
-    );
+    return _db.run(logReleaseSyncStartJob(triggerType: triggerType, now: now));
   }
 
   Future<void> logReleaseSyncFinish(
@@ -400,6 +399,10 @@ class LibraryRepository {
   /// `update_tracks_features_batch`: one batch of offloaded features.
   Future<void> storeFeatureRows(List<FeatureRow> rows) =>
       _write(storeFeatureRowsJob(rows));
+
+  /// `update_track_features`: one track analysed on the phone.
+  Future<void> updateTrackFeatures(String path, AudioFeatures f) =>
+      _write(updateTrackFeaturesJob(path, f));
 
   Future<void> close() => _db.close();
 }

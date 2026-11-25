@@ -263,6 +263,57 @@ void main() {
     });
   });
 
+  testWidgets('no coordinates: Compute DSP Features starts the analysis', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(360 * 3, 760 * 3);
+    tester.view.devicePixelRatio = 3;
+    addTearDown(tester.view.reset);
+    final path = (await tester.runAsync(() => _library(dir, coords: false)))!;
+    final lib = LibraryController(
+      () => LibraryRepository.open(path, writable: true),
+      pcmDecoder: () async => null,
+    );
+    await tester.runAsync(lib.load);
+    final browse = BrowseController(
+      lib,
+      views: const [LibraryView.network, LibraryView.tracks],
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: Tokens.theme(),
+        home: LibraryScreen(
+          controller: lib,
+          browse: browse,
+          player: ValueNotifier(null),
+          haptics: quiet,
+        ),
+      ),
+    );
+    Future<void> settle() async {
+      for (var i = 0; i < 8; i++) {
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 30)),
+        );
+        await tester.pump(const Duration(milliseconds: 100));
+      }
+    }
+
+    await tester.tap(find.text('Network'));
+    await settle();
+    expect(find.text('Acoustic Network Graph'), findsOneWidget);
+    // No decoder on this host: the Flet error, as a snackbar.
+    await tester.tap(find.text('Compute DSP Features'));
+    await settle();
+    expect(
+      find.text('Audio service not ready — native analyser unavailable.'),
+      findsOneWidget,
+    );
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+    lib.dispose();
+  });
+
   testWidgets('the screen: bar, graph, readout, chips, list, collapse', (
     tester,
   ) async {

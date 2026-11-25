@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
+import '../analysis/library_analysis.dart';
 import '../data/library_repository.dart';
 import '../player/player_controller.dart';
 import '../ui/tokens.dart';
@@ -101,24 +102,32 @@ class _NetworkViewState extends State<NetworkView>
           if (mounted) c.ensureBuilt(w, h);
         });
         return ListenableBuilder(
-          listenable: c,
-          builder: (context, _) => switch (c.status) {
-            NetStatus.idle => const Center(child: CircularProgressIndicator()),
-            NetStatus.noCoords => const _SetupCard(),
-            NetStatus.empty => const _EmptyGraph(),
-            NetStatus.ready => Column(
-              children: [
-                if (!c.collapsed) _graphPane(context),
-                Expanded(
-                  child: _TrackPanel(
-                    controller: c,
-                    player: widget.player,
-                    onAddToPlaylist: widget.onAddToPlaylist,
+          listenable: Listenable.merge([c, c.library.analysis]),
+          builder: (context, _) => c.library.analysis.running
+              ? _AnalysingCard(analysis: c.library.analysis)
+              : switch (c.status) {
+                  NetStatus.idle => const Center(
+                    child: CircularProgressIndicator(),
                   ),
-                ),
-              ],
-            ),
-          },
+                  NetStatus.noCoords => _SetupCard(
+                    onCompute: c.library.canWrite
+                        ? c.library.analyseLibrary
+                        : null,
+                  ),
+                  NetStatus.empty => const _EmptyGraph(),
+                  NetStatus.ready => Column(
+                    children: [
+                      if (!c.collapsed) _graphPane(context),
+                      Expanded(
+                        child: _TrackPanel(
+                          controller: c,
+                          player: widget.player,
+                          onAddToPlaylist: widget.onAddToPlaylist,
+                        ),
+                      ),
+                    ],
+                  ),
+                },
         );
       },
     );
@@ -1118,9 +1127,13 @@ class _TrackPanel extends StatelessWidget {
   }
 }
 
-/// No track has coordinates yet.
-class _SetupCard extends StatelessWidget {
-  const _SetupCard();
+/// The frame of the setup and analysing cards.
+class _Card extends StatelessWidget {
+  const _Card({required this.icon, required this.title, required this.body});
+
+  final IconData icon;
+  final String title;
+  final List<Widget> body;
 
   @override
   Widget build(BuildContext context) {
@@ -1143,29 +1156,97 @@ class _SetupCard extends StatelessWidget {
                 color: cyan.withValues(alpha: 0.1),
                 borderRadius: BorderRadius.circular(20),
               ),
-              child: Icon(Icons.hub_rounded, color: cyan, size: 40),
+              child: Icon(icon, color: cyan, size: 40),
             ),
             const SizedBox(height: 12),
-            const Text(
-              'Acoustic Network Graph',
+            Text(
+              title,
               textAlign: TextAlign.center,
-              style: TextStyle(
+              style: const TextStyle(
                 fontSize: 18,
                 fontWeight: FontWeight.w700,
                 color: Tokens.text,
               ),
             ),
-            const SizedBox(height: 12),
-            const Text(
-              'No PCA coordinates found. Please analyze your library first '
-              'to construct the network.',
-              textAlign: TextAlign.center,
-              maxLines: 3,
-              style: TextStyle(fontSize: 13, color: Tokens.dim),
-            ),
+            for (final w in body) ...[const SizedBox(height: 12), w],
           ],
         ),
       ),
+    );
+  }
+}
+
+/// library.py's "Computing Acoustic Features" card, while the on-phone
+/// analysis runs.
+class _AnalysingCard extends StatelessWidget {
+  const _AnalysingCard({required this.analysis});
+
+  final DspAnalysis analysis;
+
+  @override
+  Widget build(BuildContext context) {
+    final cyan = Theme.of(context).colorScheme.primary;
+    final p = analysis.progress;
+    return _Card(
+      icon: Icons.graphic_eq_rounded,
+      title: 'Computing Acoustic Features',
+      body: [
+        Text(
+          analysis.status,
+          textAlign: TextAlign.center,
+          maxLines: 3,
+          style: const TextStyle(fontSize: 13, color: Tokens.dim),
+        ),
+        if (p != null)
+          SizedBox(
+            width: 200,
+            child: LinearProgressIndicator(
+              value: p,
+              color: cyan,
+              backgroundColor: Tokens.surface2,
+            ),
+          )
+        else
+          CircularProgressIndicator(color: cyan),
+        if (p != null)
+          TextButton(onPressed: analysis.cancel, child: const Text('Cancel')),
+      ],
+    );
+  }
+}
+
+/// No track has coordinates yet; its button starts the on-phone analysis
+/// (null for a read-only library).
+class _SetupCard extends StatelessWidget {
+  const _SetupCard({this.onCompute});
+
+  final VoidCallback? onCompute;
+
+  @override
+  Widget build(BuildContext context) {
+    final cyan = Theme.of(context).colorScheme.primary;
+    return _Card(
+      icon: Icons.hub_rounded,
+      title: 'Acoustic Network Graph',
+      body: [
+        const Text(
+          'No PCA coordinates found. Please analyze your library first '
+          'to construct the network.',
+          textAlign: TextAlign.center,
+          maxLines: 3,
+          style: TextStyle(fontSize: 13, color: Tokens.dim),
+        ),
+        if (onCompute != null)
+          FilledButton.icon(
+            onPressed: onCompute,
+            icon: const Icon(Icons.play_arrow_rounded),
+            label: const Text('Compute DSP Features'),
+            style: FilledButton.styleFrom(
+              backgroundColor: cyan,
+              foregroundColor: Tokens.bg,
+            ),
+          ),
+      ],
     );
   }
 }

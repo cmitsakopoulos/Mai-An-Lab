@@ -3,6 +3,8 @@ import 'package:flutter/foundation.dart';
 import 'dart:async';
 import 'dart:io';
 
+import '../analysis/dsp_analyser.dart' show PcmDecoder;
+import '../analysis/library_analysis.dart';
 import '../core/db_worker.dart';
 import '../core/progress_notify.dart';
 import '../data/library_repository.dart';
@@ -26,13 +28,30 @@ enum LoadState { loading, ready, error }
 /// fallback to a "closest match" list. Search runs in memory on every
 /// keystroke, so the Flet 300 ms debounce isn't needed.
 class LibraryController extends ChangeNotifier
-    implements AutoPlayLibrary, OffloadLibrary {
+    implements AutoPlayLibrary, OffloadLibrary, AnalysisHost {
   LibraryController(
     this._open, {
     LibrarySort sort = LibrarySort.date,
     Future<String> Function()? libraryFolder,
+    Future<PcmDecoder?> Function()? pcmDecoder,
   }) : _sort = sort,
-       _libraryFolder = libraryFolder;
+       _libraryFolder = libraryFolder,
+       _pcmDecoder = pcmDecoder;
+
+  final Future<PcmDecoder?> Function()? _pcmDecoder;
+
+  /// The on-phone DSP compute (Settings → Database Management, the Network
+  /// setup card, the "not analysed yet" notification's Analyse).
+  late final DspAnalysis analysis = DspAnalysis(this, decoder: _pcmDecoder);
+
+  /// library.py `_do_compute_dsp`: the Library's analysis, its snackbars
+  /// on this screen's [messages].
+  Future<void> analyseLibrary() => analysis.run(
+    DspEntry.library,
+    notice: (n) {
+      if (!_disposed) _messages.add(n.text);
+    },
+  );
 
   final Future<LibraryRepository> Function() _open;
   LibraryRepository? _repo;
@@ -102,6 +121,7 @@ class LibraryController extends ChangeNotifier
   String get query => _rawQuery;
 
   /// The open database, once loaded (the other library views query it).
+  @override
   LibraryRepository? get repository => _repo;
 
   /// Albums (or, with [byArtist], artists) with a track matching every word:
@@ -264,9 +284,10 @@ class LibraryController extends ChangeNotifier
 
   /// library.py `_announce_unanalysed`: until new tracks are analysed,
   /// auto-play and the similar-track picks can't use them, and nothing
-  /// outside the Library says so. Flet's card has an Analyse button (on-
-  /// phone analysis); the port's has none until decision B.
+  /// outside the Library says so. Its Analyse button starts the on-phone
+  /// analysis (`library:analyse`).
   Future<void> _announceUnanalysed(LibraryRepository repo) async {
+    if (analysis.running) return;
     final int n;
     try {
       n = (await repo.featureCoverage()).$2;
@@ -286,6 +307,7 @@ class LibraryController extends ChangeNotifier
           "so auto-play and similar-track picks can't use "
           '${many ? 'them' : 'it'}.',
       navigateTo: 'library',
+      action: ('Analyse', 'library:analyse'),
       icon: 'dsp',
     );
   }
@@ -502,6 +524,7 @@ class LibraryController extends ChangeNotifier
   @override
   void dispose() {
     _disposed = true;
+    analysis.dispose();
     _messages.close();
     _repo?.close();
     super.dispose();
