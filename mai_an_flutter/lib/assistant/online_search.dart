@@ -24,7 +24,11 @@ ToolHandler buildOnlineSearchHandler({
   OnlineDownloadTrigger? onDownloadItem,
   Duration searchTimeout = const Duration(seconds: 25),
 }) {
-  return (String toolName, Map<String, Object?> args, AssistantRunner runner) async {
+  return (
+    String toolName,
+    Map<String, Object?> args,
+    AssistantRunner runner,
+  ) async {
     final query = '${args['query'] ?? ''}'.trim();
     final wantDownload = pyTruthy(args['download']);
     if (query.isEmpty) {
@@ -125,8 +129,7 @@ Future<AssistantResponse> _executeDownloadItem(
       );
     }
     return AssistantResponse(
-      spoken:
-          "Downloading '${item['title']}' by ${item['artist']} now, sir.",
+      spoken: "Downloading '${item['title']}' by ${item['artist']} now, sir.",
       displayed: 'Started download: **${item['title']}** — ${item['artist']}.',
     );
   } catch (e) {

@@ -39,12 +39,7 @@ const _kMetadataTypes = [
   'isrc',
 ];
 
-const _kZeroPadKeys = {
-  'tracknumber',
-  'discnumber',
-  'tracktotal',
-  'disctotal',
-};
+const _kZeroPadKeys = {'tracknumber', 'discnumber', 'tracktotal', 'disctotal'};
 
 /// Container format supported by [tagFile].
 enum TagContainer { flac, aac, mp3 }
@@ -482,10 +477,9 @@ Uint8List tagMp4Bytes(
   final delta = newMoovSize - moov.size;
 
   // Shift stco/co64 offsets if moov sits before mdat.
-  final adjustedMoovBody =
-      (moovBeforeMdat && delta != 0)
-          ? _adjustChunkOffsets(Uint8List.fromList(rawMoovBody), delta)
-          : rawMoovBody;
+  final adjustedMoovBody = (moovBeforeMdat && delta != 0)
+      ? _adjustChunkOffsets(Uint8List.fromList(rawMoovBody), delta)
+      : rawMoovBody;
 
   final out = BytesBuilder(copy: false);
   for (var i = 0; i < topAtoms.length; i++) {
@@ -617,7 +611,13 @@ Uint8List _buildMp4Udta(TrackMetadata meta, {Uint8List? coverBytes}) {
 
   // ----:com.apple.iTunes:ISRC
   if (meta.isrc != null && meta.isrc!.isNotEmpty) {
-    final mean = _mp4Atom('mean', [0, 0, 0, 0, ...utf8.encode('com.apple.iTunes')]);
+    final mean = _mp4Atom('mean', [
+      0,
+      0,
+      0,
+      0,
+      ...utf8.encode('com.apple.iTunes'),
+    ]);
     final name = _mp4Atom('name', [0, 0, 0, 0, ...utf8.encode('ISRC')]);
     final data = _mp4DataAtom(1, utf8.encode(meta.isrc!));
     ilst.add(_mp4Atom('----', [...mean, ...name, ...data]));
@@ -653,12 +653,10 @@ Uint8List _buildMp4Udta(TrackMetadata meta, {Uint8List? coverBytes}) {
 // ── Binary helpers ────────────────────────────────────────────────────────────
 
 int _readU32BE(Uint8List b, int o) =>
-    ((b[o] << 24) | (b[o + 1] << 16) | (b[o + 2] << 8) | b[o + 3]) &
-    0xFFFFFFFF;
+    ((b[o] << 24) | (b[o + 1] << 16) | (b[o + 2] << 8) | b[o + 3]) & 0xFFFFFFFF;
 
 int _readU32LE(Uint8List b, int o) =>
-    (b[o] | (b[o + 1] << 8) | (b[o + 2] << 16) | (b[o + 3] << 24)) &
-    0xFFFFFFFF;
+    (b[o] | (b[o + 1] << 8) | (b[o + 2] << 16) | (b[o + 3] << 24)) & 0xFFFFFFFF;
 
 int _readU64BE(Uint8List b, int o) =>
     (_readU32BE(b, o) << 32) | _readU32BE(b, o + 4);

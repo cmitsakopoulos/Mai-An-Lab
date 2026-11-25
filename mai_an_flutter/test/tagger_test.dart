@@ -70,7 +70,10 @@ Uint8List _minimalMp4() {
 
   final ftyp = atom('ftyp', [
     ...latin1.encode('M4A '),
-    0, 0, 0, 0,
+    0,
+    0,
+    0,
+    0,
     ...latin1.encode('M4A '),
     ...latin1.encode('isom'),
   ]);
@@ -105,15 +108,44 @@ Uint8List _minimalMp4() {
   final probeMoov = buildMoov(0);
   final mdatPayloadOffset = ftyp.length + probeMoov.length + 8;
   final moov = buildMoov(mdatPayloadOffset);
-  final mdat = atom('mdat', const [0xDE, 0xAD, 0xBE, 0xEF, 0x11, 0x22, 0x33, 0x44]);
+  final mdat = atom('mdat', const [
+    0xDE,
+    0xAD,
+    0xBE,
+    0xEF,
+    0x11,
+    0x22,
+    0x33,
+    0x44,
+  ]);
 
   return Uint8List.fromList([...ftyp, ...moov, ...mdat]);
 }
 
 /// Minimal JPEG SOI..EOI bytes for cover-art embedding tests.
 final _fakeJpeg = Uint8List.fromList([
-  0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01,
-  0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0xFF, 0xD9,
+  0xFF,
+  0xD8,
+  0xFF,
+  0xE0,
+  0x00,
+  0x10,
+  0x4A,
+  0x46,
+  0x49,
+  0x46,
+  0x00,
+  0x01,
+  0x01,
+  0x00,
+  0x00,
+  0x01,
+  0x00,
+  0x01,
+  0x00,
+  0x00,
+  0xFF,
+  0xD9,
 ]);
 
 TrackMetadata _sampleMeta() => const TrackMetadata(
@@ -162,9 +194,9 @@ void main() {
   tearDown(() => dir.deleteSync(recursive: true));
 
   test('flacTagPairs matches Python tagger.py golden output', () {
-    final golden = jsonDecode(
-      File('test/goldens/phase6c.json').readAsStringSync(),
-    ) as Map<String, dynamic>;
+    final golden =
+        jsonDecode(File('test/goldens/phase6c.json').readAsStringSync())
+            as Map<String, dynamic>;
     final expected = [
       for (final pair in golden['flac_tag_pairs'] as List<dynamic>)
         ('${(pair as List)[0]}', '${pair[1]}'),
@@ -172,132 +204,149 @@ void main() {
     expect(flacTagPairs(_sampleMeta()), expected);
   });
 
-  test('FLAC tagging round-trips through TinyTag with cover art and preserves audio', () async {
-    final flacFile = File('${dir.path}/02. Archangel.flac')
-      ..writeAsBytesSync(_minimalFlac());
-    final coverFile = File('${dir.path}/cover.jpg')
-      ..writeAsBytesSync(_fakeJpeg);
+  test(
+    'FLAC tagging round-trips through TinyTag with cover art and preserves audio',
+    () async {
+      final flacFile = File('${dir.path}/02. Archangel.flac')
+        ..writeAsBytesSync(_minimalFlac());
+      final coverFile = File('${dir.path}/cover.jpg')
+        ..writeAsBytesSync(_fakeJpeg);
 
-    await tagFile(flacFile.path, _sampleMeta(), coverFile.path);
+      await tagFile(flacFile.path, _sampleMeta(), coverFile.path);
 
-    final parsed = TinyTag.get(flacFile.path);
-    expect(parsed.title, 'Archangel');
-    expect(parsed.artist, 'Burial');
-    expect(parsed.album, 'Untrue');
-    expect(parsed.albumartist, 'Burial');
-    expect(parsed.year, '2007');
-    expect(parsed.genre, 'Electronic, UK Garage');
-    expect(parsed.composer, 'William Bevan');
-    expect(parsed.track, 2);
-    expect(parsed.trackTotal, 13);
-    expect(parsed.disc, 1);
-    expect(parsed.discTotal, 1);
-    expect(parsed.other['isrc'], ['GBHYP0700002']);
-    expect(parsed.other['copyright'], ['(P) 2007 Hyperdub']);
+      final parsed = TinyTag.get(flacFile.path);
+      expect(parsed.title, 'Archangel');
+      expect(parsed.artist, 'Burial');
+      expect(parsed.album, 'Untrue');
+      expect(parsed.albumartist, 'Burial');
+      expect(parsed.year, '2007');
+      expect(parsed.genre, 'Electronic, UK Garage');
+      expect(parsed.composer, 'William Bevan');
+      expect(parsed.track, 2);
+      expect(parsed.trackTotal, 13);
+      expect(parsed.disc, 1);
+      expect(parsed.discTotal, 1);
+      expect(parsed.other['isrc'], ['GBHYP0700002']);
+      expect(parsed.other['copyright'], ['(P) 2007 Hyperdub']);
 
-    // Embedded PICTURE block contains JPEG bytes and trailing audio survives.
-    final bytes = flacFile.readAsBytesSync();
-    expect(_containsBytes(bytes, _fakeJpeg), isTrue);
-    expect(
-      bytes.sublist(bytes.length - 8),
-      const [0xFF, 0xF8, 0x69, 0x18, 0x00, 0x00, 0xAA, 0xBB],
-    );
-  });
+      // Embedded PICTURE block contains JPEG bytes and trailing audio survives.
+      final bytes = flacFile.readAsBytesSync();
+      expect(_containsBytes(bytes, _fakeJpeg), isTrue);
+      expect(bytes.sublist(bytes.length - 8), const [
+        0xFF,
+        0xF8,
+        0x69,
+        0x18,
+        0x00,
+        0x00,
+        0xAA,
+        0xBB,
+      ]);
+    },
+  );
 
-  test('MP3 ID3v2.3 tagging round-trips through TinyTag with Unicode & cover art', () async {
-    final mp3File = File('${dir.path}/02. Archangel.mp3')
-      ..writeAsBytesSync(_minimalMp3());
-    final coverFile = File('${dir.path}/cover.jpg')
-      ..writeAsBytesSync(_fakeJpeg);
-    const unicodeMeta = TrackMetadata(
-      id: 'trk_u',
-      title: 'Jóga',
-      artist: 'Björk',
-      album: AlbumMetadata(
-        id: 'alb_u',
-        album: 'Homogenic',
+  test(
+    'MP3 ID3v2.3 tagging round-trips through TinyTag with Unicode & cover art',
+    () async {
+      final mp3File = File('${dir.path}/02. Archangel.mp3')
+        ..writeAsBytesSync(_minimalMp3());
+      final coverFile = File('${dir.path}/cover.jpg')
+        ..writeAsBytesSync(_fakeJpeg);
+      const unicodeMeta = TrackMetadata(
+        id: 'trk_u',
+        title: 'Jóga',
         artist: 'Björk',
-        year: '1997',
-        tracktotal: 10,
-        disctotal: 1,
-        genres: ['Electronic'],
-        copyright: '(P) 1997 One Little Indian',
-      ),
-      tracknumber: 2,
-      discnumber: 1,
-      isrc: 'GBBKS9700002',
-      composer: 'Björk Guðmundsdóttir',
-    );
+        album: AlbumMetadata(
+          id: 'alb_u',
+          album: 'Homogenic',
+          artist: 'Björk',
+          year: '1997',
+          tracktotal: 10,
+          disctotal: 1,
+          genres: ['Electronic'],
+          copyright: '(P) 1997 One Little Indian',
+        ),
+        tracknumber: 2,
+        discnumber: 1,
+        isrc: 'GBBKS9700002',
+        composer: 'Björk Guðmundsdóttir',
+      );
 
-    await tagFile(mp3File.path, unicodeMeta, coverFile.path);
+      await tagFile(mp3File.path, unicodeMeta, coverFile.path);
 
-    final parsed = TinyTag.get(mp3File.path);
-    expect(parsed.title, 'Jóga');
-    expect(parsed.artist, 'Björk');
-    expect(parsed.album, 'Homogenic');
-    expect(parsed.albumartist, 'Björk');
-    expect(parsed.year, '1997');
-    expect(parsed.genre, 'Electronic');
-    expect(parsed.composer, 'Björk Guðmundsdóttir');
-    expect(parsed.track, 2);
-    expect(parsed.trackTotal, 10);
-    expect(parsed.disc, 1);
-    expect(parsed.discTotal, 1);
-    expect(parsed.other['isrc'], ['GBBKS9700002']);
-    expect(_containsBytes(mp3File.readAsBytesSync(), _fakeJpeg), isTrue);
+      final parsed = TinyTag.get(mp3File.path);
+      expect(parsed.title, 'Jóga');
+      expect(parsed.artist, 'Björk');
+      expect(parsed.album, 'Homogenic');
+      expect(parsed.albumartist, 'Björk');
+      expect(parsed.year, '1997');
+      expect(parsed.genre, 'Electronic');
+      expect(parsed.composer, 'Björk Guðmundsdóttir');
+      expect(parsed.track, 2);
+      expect(parsed.trackTotal, 10);
+      expect(parsed.disc, 1);
+      expect(parsed.discTotal, 1);
+      expect(parsed.other['isrc'], ['GBBKS9700002']);
+      expect(_containsBytes(mp3File.readAsBytesSync(), _fakeJpeg), isTrue);
 
-    // Re-tagging replaces the prior ID3 header without duplicating audio.
-    await tagFile(mp3File.path, _sampleMeta(), coverFile.path);
-    final retagged = TinyTag.get(mp3File.path);
-    expect(retagged.title, 'Archangel');
-    expect(retagged.artist, 'Burial');
-  });
+      // Re-tagging replaces the prior ID3 header without duplicating audio.
+      await tagFile(mp3File.path, _sampleMeta(), coverFile.path);
+      final retagged = TinyTag.get(mp3File.path);
+      expect(retagged.title, 'Archangel');
+      expect(retagged.artist, 'Burial');
+    },
+  );
 
-  test('MP4/M4A tagging round-trips through TinyTag and shifts stco offsets cleanly', () async {
-    final original = _minimalMp4();
-    final m4aFile = File('${dir.path}/02. Archangel.m4a')
-      ..writeAsBytesSync(original);
-    final coverFile = File('${dir.path}/cover.jpg')
-      ..writeAsBytesSync(_fakeJpeg);
+  test(
+    'MP4/M4A tagging round-trips through TinyTag and shifts stco offsets cleanly',
+    () async {
+      final original = _minimalMp4();
+      final m4aFile = File('${dir.path}/02. Archangel.m4a')
+        ..writeAsBytesSync(original);
+      final coverFile = File('${dir.path}/cover.jpg')
+        ..writeAsBytesSync(_fakeJpeg);
 
-    await tagFile(m4aFile.path, _sampleMeta(), coverFile.path);
+      await tagFile(m4aFile.path, _sampleMeta(), coverFile.path);
 
-    final parsed = TinyTag.get(m4aFile.path);
-    expect(parsed.title, 'Archangel');
-    expect(parsed.artist, 'Burial');
-    expect(parsed.album, 'Untrue');
-    expect(parsed.albumartist, 'Burial');
-    expect(parsed.year, '2007');
-    expect(parsed.genre, 'Electronic, UK Garage');
-    expect(parsed.composer, 'William Bevan');
-    expect(parsed.track, 2);
-    expect(parsed.trackTotal, 13);
-    expect(parsed.disc, 1);
-    expect(parsed.discTotal, 1);
+      final parsed = TinyTag.get(m4aFile.path);
+      expect(parsed.title, 'Archangel');
+      expect(parsed.artist, 'Burial');
+      expect(parsed.album, 'Untrue');
+      expect(parsed.albumartist, 'Burial');
+      expect(parsed.year, '2007');
+      expect(parsed.genre, 'Electronic, UK Garage');
+      expect(parsed.composer, 'William Bevan');
+      expect(parsed.track, 2);
+      expect(parsed.trackTotal, 13);
+      expect(parsed.disc, 1);
+      expect(parsed.discTotal, 1);
 
-    // Verify covr JPEG bytes present and stco chunk offset points at mdat 0xDEADBEEF.
-    final outBytes = m4aFile.readAsBytesSync();
-    expect(_containsBytes(outBytes, _fakeJpeg), isTrue);
-    var stcoPos = -1;
-    for (var i = 0; i < outBytes.length - 16; i++) {
-      if (outBytes[i] == 0x73 &&
-          outBytes[i + 1] == 0x74 &&
-          outBytes[i + 2] == 0x63 &&
-          outBytes[i + 3] == 0x6F) {
-        stcoPos = i;
-        break;
+      // Verify covr JPEG bytes present and stco chunk offset points at mdat 0xDEADBEEF.
+      final outBytes = m4aFile.readAsBytesSync();
+      expect(_containsBytes(outBytes, _fakeJpeg), isTrue);
+      var stcoPos = -1;
+      for (var i = 0; i < outBytes.length - 16; i++) {
+        if (outBytes[i] == 0x73 &&
+            outBytes[i + 1] == 0x74 &&
+            outBytes[i + 2] == 0x63 &&
+            outBytes[i + 3] == 0x6F) {
+          stcoPos = i;
+          break;
+        }
       }
-    }
-    expect(stcoPos, greaterThan(0));
-    final offsetIdx = stcoPos + 12;
-    final chunkOffset =
-        (outBytes[offsetIdx] << 24) |
-        (outBytes[offsetIdx + 1] << 16) |
-        (outBytes[offsetIdx + 2] << 8) |
-        outBytes[offsetIdx + 3];
-    expect(
-      outBytes.sublist(chunkOffset, chunkOffset + 4),
-      const [0xDE, 0xAD, 0xBE, 0xEF],
-    );
-  });
+      expect(stcoPos, greaterThan(0));
+      final offsetIdx = stcoPos + 12;
+      final chunkOffset =
+          (outBytes[offsetIdx] << 24) |
+          (outBytes[offsetIdx + 1] << 16) |
+          (outBytes[offsetIdx + 2] << 8) |
+          outBytes[offsetIdx + 3];
+      expect(outBytes.sublist(chunkOffset, chunkOffset + 4), const [
+        0xDE,
+        0xAD,
+        0xBE,
+        0xEF,
+      ]);
+    },
+  );
 }

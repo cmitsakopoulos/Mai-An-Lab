@@ -14,10 +14,9 @@ import 'track_row.dart';
 /// rows (`_genre_row`, `_artist_row`, `_album_row`, `_playlist_row`, and
 /// `_track_row` under an album or a playlist). Tapping a row opens or closes
 /// it. A playlist's tracks reorder by their drag handle, within their
-/// playlist only (Flet's DragTarget group).
-///
-/// Not here yet: the artist row's "Fix artist info" and the genre row's
-/// "Curate in Workbench" buttons (metadata workbench, phase 7).
+/// playlist only (Flet's DragTarget group). With the metadata workbench
+/// wired in, an artist row carries "Fix artist info" and a genre row
+/// "Curate in Workbench".
 class BrowseList extends StatelessWidget {
   const BrowseList({
     super.key,
@@ -32,6 +31,8 @@ class BrowseList extends StatelessWidget {
     required this.onEditPlaylist,
     required this.onDeletePlaylist,
     required this.onRemoveFromPlaylist,
+    this.onEditArtist,
+    this.onCurateGenre,
   });
 
   final BrowseController controller;
@@ -47,6 +48,13 @@ class BrowseList extends StatelessWidget {
   final void Function(PlaylistRow playlist) onEditPlaylist;
   final void Function(PlaylistRow playlist) onDeletePlaylist;
   final void Function(int playlistId, Track track) onRemoveFromPlaylist;
+
+  /// `open_artist_metadata_editor`: the workbench focused on one artist.
+  final void Function(String artist)? onEditArtist;
+
+  /// `open_genre_metadata_workbench`: the workbench filtered to a genre
+  /// ("" from the empty Genres view: the whole workbench).
+  final void Function(String genre)? onCurateGenre;
 
   @override
   Widget build(BuildContext context) {
@@ -72,6 +80,10 @@ class BrowseList extends StatelessWidget {
             controller.view == LibraryView.playlists &&
             !controller.loading &&
             !controller.rows.any((r) => r is PlaylistNode);
+        final noGenres =
+            controller.view == LibraryView.genres &&
+            !controller.loading &&
+            controller.rows.isEmpty;
         return ValueListenableBuilder(
           valueListenable: player,
           builder: (context, p, _) => ListenableBuilder(
@@ -85,7 +97,28 @@ class BrowseList extends StatelessWidget {
                 padding: const EdgeInsets.only(bottom: 20),
                 buildDefaultDragHandles: false,
                 header: noPlaylists
-                    ? _NoPlaylists(onCreate: onCreatePlaylist)
+                    ? _EmptyBrowse(
+                        icon: Icons.queue_music_rounded,
+                        accent: Tokens.libPlaylist,
+                        title: 'No playlists yet.',
+                        body: 'Create your first playlist below.',
+                        actionIcon: Icons.add_rounded,
+                        actionLabel: 'CREATE PLAYLIST',
+                        onAction: onCreatePlaylist,
+                      )
+                    : noGenres
+                    ? _EmptyBrowse(
+                        icon: Icons.style_rounded,
+                        accent: Tokens.libGenre,
+                        title: 'No genres found.',
+                        body:
+                            'Enrich artist tags in Settings to classify genres.',
+                        actionIcon: Icons.tune_rounded,
+                        actionLabel: 'METADATA WORKBENCH',
+                        onAction: onCurateGenre == null
+                            ? null
+                            : () => onCurateGenre!(''),
+                      )
                     : null,
                 itemCount: rows.length,
                 onReorder: (from, to) => _reorder(rows, from, to),
@@ -173,6 +206,7 @@ class BrowseList extends StatelessWidget {
       expanded: controller.isExpanded(n),
       onTap: () => controller.toggle(n),
       onPlay: () => onPlayGenre(genre),
+      onCurate: onCurateGenre == null ? null : () => onCurateGenre!(genre.name),
     ),
     ArtistNode(:final artist) => _ArtistTile(
       key: ValueKey(n.key),
@@ -180,6 +214,9 @@ class BrowseList extends StatelessWidget {
       depth: n.depth,
       expanded: controller.isExpanded(n),
       onTap: () => controller.toggle(n),
+      onEdit: onEditArtist == null || artist.name == null
+          ? null
+          : () => onEditArtist!(artist.name!),
     ),
     AlbumNode(:final album) => _AlbumTile(
       key: ValueKey(n.key),
@@ -304,12 +341,14 @@ class _GenreTile extends StatelessWidget {
     required this.expanded,
     required this.onTap,
     required this.onPlay,
+    this.onCurate,
   });
 
   final GenreRow genre;
   final bool expanded;
   final VoidCallback onTap;
   final VoidCallback onPlay;
+  final VoidCallback? onCurate;
 
   @override
   Widget build(BuildContext context) {
@@ -332,6 +371,13 @@ class _GenreTile extends StatelessWidget {
           tooltip: 'Play ${genre.name}',
           onPressed: onPlay,
         ),
+        if (onCurate != null)
+          IconButton(
+            icon: const Icon(Icons.tune_rounded, size: 18),
+            color: Tokens.dim.withValues(alpha: 0.6),
+            tooltip: 'Curate ${genre.name} in Workbench',
+            onPressed: onCurate,
+          ),
       ],
       onTap: onTap,
     );
@@ -345,12 +391,14 @@ class _ArtistTile extends StatelessWidget {
     required this.depth,
     required this.expanded,
     required this.onTap,
+    this.onEdit,
   });
 
   final ArtistRow artist;
   final int depth;
   final bool expanded;
   final VoidCallback onTap;
+  final VoidCallback? onEdit;
 
   @override
   Widget build(BuildContext context) => _Tile(
@@ -363,7 +411,15 @@ class _ArtistTile extends StatelessWidget {
         '${artist.albumCount ?? 0} albums  ·  ${artist.trackCount ?? 0} tracks',
     expanded: expanded,
     tint: 0.07,
-    trailing: const [],
+    trailing: [
+      if (onEdit != null)
+        IconButton(
+          icon: const Icon(Icons.edit_outlined, size: 20),
+          color: Tokens.dim.withValues(alpha: 0.6),
+          tooltip: 'Fix artist info',
+          onPressed: onEdit,
+        ),
+    ],
     onTap: onTap,
   );
 }
@@ -508,43 +564,57 @@ class _NewPlaylistRow extends StatelessWidget {
   );
 }
 
-/// library.py's empty state in the Playlists tab: "No playlists yet."
-class _NoPlaylists extends StatelessWidget {
-  const _NoPlaylists({required this.onCreate});
-  final VoidCallback onCreate;
+/// library.py's `_empty_label` inside a browse view: "No playlists yet."
+/// (CREATE PLAYLIST) or "No genres found." (METADATA WORKBENCH, when the
+/// workbench is available).
+class _EmptyBrowse extends StatelessWidget {
+  const _EmptyBrowse({
+    required this.icon,
+    required this.accent,
+    required this.title,
+    required this.body,
+    required this.actionIcon,
+    required this.actionLabel,
+    required this.onAction,
+  });
+  final IconData icon;
+  final Color accent;
+  final String title;
+  final String body;
+  final IconData actionIcon;
+  final String actionLabel;
+  final VoidCallback? onAction;
 
   @override
   Widget build(BuildContext context) => Padding(
     padding: const EdgeInsets.symmetric(vertical: 40),
     child: Column(
       children: [
-        Icon(
-          Icons.queue_music_rounded,
-          color: Tokens.libPlaylist.withValues(alpha: 0.3),
-          size: 80,
-        ),
+        Icon(icon, color: accent.withValues(alpha: 0.3), size: 80),
         const SizedBox(height: 12),
-        const Text(
-          'No playlists yet.',
-          style: TextStyle(
+        Text(
+          title,
+          style: const TextStyle(
             color: Tokens.text,
             fontSize: 20,
             fontWeight: FontWeight.w800,
           ),
         ),
         const SizedBox(height: 12),
-        const Text(
-          'Create your first playlist below.',
+        Text(
+          body,
           textAlign: TextAlign.center,
-          style: TextStyle(color: Tokens.dim, fontSize: 14),
+          style: const TextStyle(color: Tokens.dim, fontSize: 14),
         ),
-        const SizedBox(height: 22),
-        TextButton.icon(
-          onPressed: onCreate,
-          style: TextButton.styleFrom(foregroundColor: Tokens.libPlaylist),
-          icon: const Icon(Icons.add_rounded, size: 16),
-          label: const Text('CREATE PLAYLIST', style: TextStyle(fontSize: 13)),
-        ),
+        if (onAction != null) ...[
+          const SizedBox(height: 22),
+          TextButton.icon(
+            onPressed: onAction,
+            style: TextButton.styleFrom(foregroundColor: accent),
+            icon: Icon(actionIcon, size: 16),
+            label: Text(actionLabel, style: const TextStyle(fontSize: 13)),
+          ),
+        ],
       ],
     ),
   );

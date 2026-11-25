@@ -658,7 +658,11 @@ const _gapThin = 2;
 const _gapNone = 3;
 
 /// `db_manager.get_metadata_gap_artists(limit=2000)`.
-DbJob<List<Map<String, Object?>>> metadataGapArtistsJob(int limit) => (db) {
+/// [everything] lists every artist (complete ones as GAP_NONE).
+DbJob<List<Map<String, Object?>>> metadataGapArtistsJob(
+  int limit, {
+  bool everything = false,
+}) => (db) {
   final rows = db.select(
     'SELECT a.name AS artist_name, a.track_count AS track_count, '
     'e.country AS country, e.genres AS genres, e.source AS source, '
@@ -667,9 +671,9 @@ DbJob<List<Map<String, Object?>>> metadataGapArtistsJob(int limit) => (db) {
     "   WHERE al.artist_id = a.id AND al.genre IS NOT NULL AND al.genre <> '' "
     ') AS raw_file_genres '
     'FROM artists a LEFT JOIN artist_enrichment e ON e.artist_name = a.name '
-    "WHERE (e.artist_name IS NULL OR e.genres IS NULL OR e.genres = '' OR e.genres = '[]' "
-    "       OR e.country IS NULL OR e.country = '') "
-    "  AND (e.source IS NULL OR e.source <> 'manual') "
+    '${everything ? '' : "WHERE (e.artist_name IS NULL OR e.genres IS NULL OR e.genres = '' OR e.genres = '[]' "
+              "       OR e.country IS NULL OR e.country = '') "
+              "  AND (e.source IS NULL OR e.source <> 'manual') "}'
     'ORDER BY a.track_count DESC',
   );
   final out = <(int, int, int, Map<String, Object?>)>[];

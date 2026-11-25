@@ -67,9 +67,13 @@ Map<String, Object?> _normalizeQobuz(
         '';
   }
 
-  final artistRaw = album.containsKey('artist') ? album['artist'] : const <String, Object?>{};
+  final artistRaw = album.containsKey('artist')
+      ? album['artist']
+      : const <String, Object?>{};
   final albumArtist = artistRaw is Map
-      ? (artistRaw.containsKey('name') ? '${artistRaw['name']}' : 'Unknown Artist')
+      ? (artistRaw.containsKey('name')
+            ? '${artistRaw['name']}'
+            : 'Unknown Artist')
       : '$artistRaw';
 
   final genreData = album['genre'];
@@ -117,7 +121,9 @@ Map<String, Object?> _normalizeQobuz(
       'album': album.containsKey('title') ? album['title'] : 'Unknown Album',
       'artist': albumArtist,
       'year': year,
-      'tracktotal': album.containsKey('tracks_count') ? album['tracks_count'] : 1,
+      'tracktotal': album.containsKey('tracks_count')
+          ? album['tracks_count']
+          : 1,
       'disctotal': album.containsKey('media_count') ? album['media_count'] : 1,
       'genres': genres.isNotEmpty ? genres : null,
       'copyright': album['copyright'],

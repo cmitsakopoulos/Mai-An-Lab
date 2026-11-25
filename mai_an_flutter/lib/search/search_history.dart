@@ -12,7 +12,8 @@ class SearchHistoryStore {
 
   static const maxEntries = 10;
 
-  File get file => File('$dataDir${Platform.pathSeparator}recent_searches.json');
+  File get file =>
+      File('$dataDir${Platform.pathSeparator}recent_searches.json');
 
   /// `load_searches()`: returns the saved list, or empty when missing/corrupt.
   Future<List<String>> load() async => loadSync();

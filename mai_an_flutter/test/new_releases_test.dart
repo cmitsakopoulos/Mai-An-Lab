@@ -22,23 +22,23 @@ Future<LibraryRepository> _makeLibrary(Directory dir) async {
   await repo.debugExecute([
     (
       "INSERT INTO artists (id, name) VALUES "
-      "(1, 'Burial'), (2, 'Mad Clip'), "
-      "(3, 'Billy Sio, Mad Clip'), (4, 'Various Artists')",
+          "(1, 'Burial'), (2, 'Mad Clip'), "
+          "(3, 'Billy Sio, Mad Clip'), (4, 'Various Artists')",
       const [],
     ),
     (
       "INSERT INTO albums (id, artist_id, title) VALUES "
-      "(1, 1, 'Untrue'), (2, 2, 'Ksexwrista'), "
-      "(3, 3, 'Duet'), (4, 4, 'Hits')",
+          "(1, 1, 'Untrue'), (2, 2, 'Ksexwrista'), "
+          "(3, 3, 'Duet'), (4, 4, 'Hits')",
       const [],
     ),
     (
       "INSERT INTO tracks (album_id, title, path) VALUES "
-      "(1, 'Song 1', '/m/1.flac'), "
-      "(1, 'Song 2', '/m/2.flac'), "
-      "(2, 'Song 3', '/m/3.flac'), "
-      "(3, 'Song 4', '/m/4.flac'), "
-      "(4, 'Song 5', '/m/5.flac')",
+          "(1, 'Song 1', '/m/1.flac'), "
+          "(1, 'Song 2', '/m/2.flac'), "
+          "(2, 'Song 3', '/m/3.flac'), "
+          "(3, 'Song 4', '/m/4.flac'), "
+          "(4, 'Song 5', '/m/5.flac')",
       const [],
     ),
   ]);
@@ -66,7 +66,8 @@ void main() {
     });
 
     test('levenshteinDistance matches text_match.levenshtein_distance', () {
-      final cases = (golden['levenshtein'] as List).cast<Map<String, dynamic>>();
+      final cases = (golden['levenshtein'] as List)
+          .cast<Map<String, dynamic>>();
       for (final c in cases) {
         expect(
           levenshteinDistance(c['a'] as String, c['b'] as String),
@@ -213,11 +214,9 @@ void main() {
         'artist/9/albums': {'data': <Object?>[]},
       }, calls);
 
-      final res = await fetcher.deezerReleases(
-        'Burial',
-        {'untrue'},
-        knownId: '9',
-      );
+      final res = await fetcher.deezerReleases('Burial', {
+        'untrue',
+      }, knownId: '9');
       expect(res.status, 'ok');
       expect(res.sourceId, '9');
       expect(calls, ['artist/9/albums']);
@@ -252,7 +251,11 @@ void main() {
         },
       );
 
-      final res = await fetcher.deezerReleases('Burial', const {}, knownId: '9');
+      final res = await fetcher.deezerReleases(
+        'Burial',
+        const {},
+        knownId: '9',
+      );
       expect(res.status, 'ok');
       expect(res.releases!.map((r) => r.title), ['Dreamfear']);
       expect(calls.length, 2);
@@ -265,47 +268,53 @@ void main() {
       expect(res.releases, isNull);
     });
 
-    test('MusicBrainz filters secondary types and builds CAA cover URL', () async {
-      final calls = <String>[];
-      final fetcher = makeFetcher({
-        'release-group': {
-          'release-groups': [
-            {
-              'id': 'rg-1',
-              'title': 'New LP',
-              'first-release-date': _daysAgo(today, 15),
-              'primary-type': 'Album',
-              'secondary-types': <Object?>[],
-            },
-            {
-              'id': 'rg-2',
-              'title': 'Live in Athens',
-              'first-release-date': _daysAgo(today, 5),
-              'primary-type': 'Album',
-              'secondary-types': ['Live'],
-            },
-          ],
-        },
-      }, calls);
+    test(
+      'MusicBrainz filters secondary types and builds CAA cover URL',
+      () async {
+        final calls = <String>[];
+        final fetcher = makeFetcher({
+          'release-group': {
+            'release-groups': [
+              {
+                'id': 'rg-1',
+                'title': 'New LP',
+                'first-release-date': _daysAgo(today, 15),
+                'primary-type': 'Album',
+                'secondary-types': <Object?>[],
+              },
+              {
+                'id': 'rg-2',
+                'title': 'Live in Athens',
+                'first-release-date': _daysAgo(today, 5),
+                'primary-type': 'Album',
+                'secondary-types': ['Live'],
+              },
+            ],
+          },
+        }, calls);
 
-      final res = await fetcher.musicBrainzReleases('mb-1');
-      expect(res.status, 'ok');
-      expect(res.sourceId, 'mb-1');
-      expect(res.releases!.length, 1);
-      expect(res.releases!.first.title, 'New LP');
-      expect(res.releases!.first.type, 'album');
-      expect(
-        res.releases!.first.cover,
-        'https://coverartarchive.org/release-group/rg-1/front-250',
-      );
-    });
+        final res = await fetcher.musicBrainzReleases('mb-1');
+        expect(res.status, 'ok');
+        expect(res.sourceId, 'mb-1');
+        expect(res.releases!.length, 1);
+        expect(res.releases!.first.title, 'New LP');
+        expect(res.releases!.first.type, 'album');
+        expect(
+          res.releases!.first.cover,
+          'https://coverartarchive.org/release-group/rg-1/front-250',
+        );
+      },
+    );
 
     test('MusicBrainz 404 is notfound and 503 retries', () async {
       final calls = <String>[];
       final notFoundFetcher = makeFetcher({
         'release-group': const ReleaseHttpResponse(404, '{}'),
       }, calls);
-      expect((await notFoundFetcher.musicBrainzReleases('mb-1')).status, 'notfound');
+      expect(
+        (await notFoundFetcher.musicBrainzReleases('mb-1')).status,
+        'notfound',
+      );
 
       final retryCalls = <String>[];
       final retryFetcher = makeFetcher(
@@ -373,48 +382,51 @@ void main() {
       expect(lookedUp, isEmpty);
     });
 
-    test('network errors are not cached and abort after 3 consecutive errors', () async {
-      await repo.debugExecute([
-        (
-          "INSERT INTO artists (id, name) VALUES (5, 'A1'), (6, 'A2'), (7, 'A3')",
-          const [],
-        ),
-        (
-          "INSERT INTO albums (id, artist_id, title) VALUES (5, 5, 'X'), (6, 6, 'Y'), (7, 7, 'Z')",
-          const [],
-        ),
-        (
-          "INSERT INTO tracks (album_id, title, path) VALUES "
-          "(5, 'T5', '/m/5a.flac'), (6, 'T6', '/m/6a.flac'), (7, 'T7', '/m/7a.flac')",
-          const [],
-        ),
-      ]);
-      var attempts = 0;
-      final fetcher = _StubFetcher(
-        onDeezer: (_, _, _) async {
-          attempts++;
-          return const ReleaseFetchResult(status: 'error');
-        },
-      );
-      final written = await refreshNewReleases(
-        repo,
-        fetcher: fetcher,
-        cooperativeDelay: Duration.zero,
-        clock: () => today,
-      );
-      expect(written, 0);
-      expect(attempts, 3);
-      expect(await repo.artistReleaseCache(), isEmpty);
-      final sync = await repo.latestReleaseSync();
-      expect(sync?.status, 'interrupted');
-      expect(sync?.artistsChecked, 3);
-    });
+    test(
+      'network errors are not cached and abort after 3 consecutive errors',
+      () async {
+        await repo.debugExecute([
+          (
+            "INSERT INTO artists (id, name) VALUES (5, 'A1'), (6, 'A2'), (7, 'A3')",
+            const [],
+          ),
+          (
+            "INSERT INTO albums (id, artist_id, title) VALUES (5, 5, 'X'), (6, 6, 'Y'), (7, 7, 'Z')",
+            const [],
+          ),
+          (
+            "INSERT INTO tracks (album_id, title, path) VALUES "
+                "(5, 'T5', '/m/5a.flac'), (6, 'T6', '/m/6a.flac'), (7, 'T7', '/m/7a.flac')",
+            const [],
+          ),
+        ]);
+        var attempts = 0;
+        final fetcher = _StubFetcher(
+          onDeezer: (_, _, _) async {
+            attempts++;
+            return const ReleaseFetchResult(status: 'error');
+          },
+        );
+        final written = await refreshNewReleases(
+          repo,
+          fetcher: fetcher,
+          cooperativeDelay: Duration.zero,
+          clock: () => today,
+        );
+        expect(written, 0);
+        expect(attempts, 3);
+        expect(await repo.artistReleaseCache(), isEmpty);
+        final sync = await repo.latestReleaseSync();
+        expect(sync?.status, 'interrupted');
+        expect(sync?.artistsChecked, 3);
+      },
+    );
 
     test('MusicBrainz covers artists Deezer cannot identify', () async {
       await repo.debugExecute([
         (
           "INSERT INTO artist_enrichment (artist_name, mbid, status) "
-          "VALUES ('Mad Clip', 'mb-1', 'ok')",
+              "VALUES ('Mad Clip', 'mb-1', 'ok')",
           const [],
         ),
       ]);
@@ -446,86 +458,89 @@ void main() {
       expect(cache['burial']?.source, 'none');
     });
 
-    test('getNewReleases applies ownership, date, variant, and per-artist rules', () async {
-      await repo.saveArtistReleases('Burial', 'deezer', '1', [
-        ReleaseItem(
-          title: 'Untrue (Deluxe)',
-          date: _daysAgo(today, 2),
-          type: 'album',
-          cover: '',
-          source: 'deezer',
-        ), // owned
-        ReleaseItem(
-          title: 'Dreamfear',
-          date: _daysAgo(today, 20),
-          type: 'ep',
-          cover: '',
-          source: 'deezer',
-        ),
-        ReleaseItem(
-          title: 'Antidawn',
-          date: _daysAgo(today, 200),
-          type: 'album',
-          cover: '',
-          source: 'deezer',
-        ),
-        ReleaseItem(
-          title: 'Old Single',
-          date: _daysAgo(today, 100),
-          type: 'single',
-          cover: '',
-          source: 'deezer',
-        ), // stale single
-        ReleaseItem(
-          title: 'Shock (Remix)',
-          date: _daysAgo(today, 1),
-          type: 'single',
-          cover: '',
-          source: 'deezer',
-        ), // variant
-        ReleaseItem(
-          title: 'Future',
-          date: formatIsoDate(today.add(const Duration(days: 9))),
-          type: 'album',
-          cover: '',
-          source: 'deezer',
-        ), // unreleased
-      ]);
-      await repo.saveArtistReleases('Mad Clip', 'deezer', '2', [
-        ReleaseItem(
-          title: 'One',
-          date: _daysAgo(today, 1),
-          type: 'single',
-          cover: '',
-          source: 'deezer',
-        ),
-        ReleaseItem(
-          title: 'Two',
-          date: _daysAgo(today, 2),
-          type: 'single',
-          cover: '',
-          source: 'deezer',
-        ),
-        ReleaseItem(
-          title: 'Three',
-          date: _daysAgo(today, 3),
-          type: 'single',
-          cover: '',
-          source: 'deezer',
-        ),
-      ]);
+    test(
+      'getNewReleases applies ownership, date, variant, and per-artist rules',
+      () async {
+        await repo.saveArtistReleases('Burial', 'deezer', '1', [
+          ReleaseItem(
+            title: 'Untrue (Deluxe)',
+            date: _daysAgo(today, 2),
+            type: 'album',
+            cover: '',
+            source: 'deezer',
+          ), // owned
+          ReleaseItem(
+            title: 'Dreamfear',
+            date: _daysAgo(today, 20),
+            type: 'ep',
+            cover: '',
+            source: 'deezer',
+          ),
+          ReleaseItem(
+            title: 'Antidawn',
+            date: _daysAgo(today, 200),
+            type: 'album',
+            cover: '',
+            source: 'deezer',
+          ),
+          ReleaseItem(
+            title: 'Old Single',
+            date: _daysAgo(today, 100),
+            type: 'single',
+            cover: '',
+            source: 'deezer',
+          ), // stale single
+          ReleaseItem(
+            title: 'Shock (Remix)',
+            date: _daysAgo(today, 1),
+            type: 'single',
+            cover: '',
+            source: 'deezer',
+          ), // variant
+          ReleaseItem(
+            title: 'Future',
+            date: formatIsoDate(today.add(const Duration(days: 9))),
+            type: 'album',
+            cover: '',
+            source: 'deezer',
+          ), // unreleased
+        ]);
+        await repo.saveArtistReleases('Mad Clip', 'deezer', '2', [
+          ReleaseItem(
+            title: 'One',
+            date: _daysAgo(today, 1),
+            type: 'single',
+            cover: '',
+            source: 'deezer',
+          ),
+          ReleaseItem(
+            title: 'Two',
+            date: _daysAgo(today, 2),
+            type: 'single',
+            cover: '',
+            source: 'deezer',
+          ),
+          ReleaseItem(
+            title: 'Three',
+            date: _daysAgo(today, 3),
+            type: 'single',
+            cover: '',
+            source: 'deezer',
+          ),
+        ]);
 
-      final got = await getNewReleases(repo, today: today);
-      expect(
-        [for (final r in got) (r.artist, r.title)],
-        [
-          ('Mad Clip', 'One'),
-          ('Mad Clip', 'Two'),
-          ('Burial', 'Dreamfear'),
-          ('Burial', 'Antidawn'),
-        ],
-      );
-    });
+        final got = await getNewReleases(repo, today: today);
+        expect(
+          [for (final r in got) (r.artist, r.title)],
+          [
+            ('Mad Clip', 'One'),
+            ('Mad Clip', 'Two'),
+            ('Burial', 'Dreamfear'),
+            ('Burial', 'Antidawn'),
+          ],
+        );
+      },
+    );
 
     test('album beats single of same normalized title', () async {
       await repo.saveArtistReleases('Burial', 'deezer', '1', [
@@ -600,7 +615,11 @@ void main() {
 
       // Next day but < 12h elapsed (midnight crossing) -> false.
       final lateNight = DateTime(2026, 11, 24, 23, 0);
-      await repo.logReleaseSyncFinish(logId, status: 'completed', now: lateNight);
+      await repo.logReleaseSyncFinish(
+        logId,
+        status: 'completed',
+        now: lateNight,
+      );
       expect(
         await repo.shouldRunDailyReleaseSync(now: DateTime(2026, 11, 25, 1, 0)),
         isFalse,
@@ -638,35 +657,38 @@ void main() {
       dir.deleteSync(recursive: true);
     });
 
-    test('manual refresh claims running synchronously and ignores double tap', () async {
-      String? seenTrigger;
-      double? seenRefreshAfter;
-      var runs = 0;
-      var refreshedWith = -1;
-      final scheduler = NewReleasesScheduler(
-        repository: () => repo,
-        isEnabled: () => true,
-        runner: (r, {required refreshAfterS, required triggerType}) async {
-          runs++;
-          seenTrigger = triggerType;
-          seenRefreshAfter = refreshAfterS;
-          return 7;
-        },
-      )..onRefreshed = (w) => refreshedWith = w;
+    test(
+      'manual refresh claims running synchronously and ignores double tap',
+      () async {
+        String? seenTrigger;
+        double? seenRefreshAfter;
+        var runs = 0;
+        var refreshedWith = -1;
+        final scheduler = NewReleasesScheduler(
+          repository: () => repo,
+          isEnabled: () => true,
+          runner: (r, {required refreshAfterS, required triggerType}) async {
+            runs++;
+            seenTrigger = triggerType;
+            seenRefreshAfter = refreshAfterS;
+            return 7;
+          },
+        )..onRefreshed = (w) => refreshedWith = w;
 
-      scheduler.triggerManualRefresh();
-      expect(scheduler.isRefreshing, isTrue);
-      scheduler.triggerManualRefresh(); // double tap ignored
+        scheduler.triggerManualRefresh();
+        expect(scheduler.isRefreshing, isTrue);
+        scheduler.triggerManualRefresh(); // double tap ignored
 
-      await Future<void>.delayed(const Duration(milliseconds: 30));
-      expect(runs, 1);
-      expect(seenTrigger, 'manual');
-      expect(seenRefreshAfter, 0.0);
-      expect(scheduler.isRefreshing, isFalse);
-      expect(scheduler.isPending, isFalse);
-      expect(refreshedWith, 7);
-      scheduler.dispose();
-    });
+        await Future<void>.delayed(const Duration(milliseconds: 30));
+        expect(runs, 1);
+        expect(seenTrigger, 'manual');
+        expect(seenRefreshAfter, 0.0);
+        expect(scheduler.isRefreshing, isFalse);
+        expect(scheduler.isPending, isFalse);
+        expect(refreshedWith, 7);
+        scheduler.dispose();
+      },
+    );
 
     test('daily gate skip clears pending and does not notify', () async {
       final now = DateTime(2026, 11, 24, 12);

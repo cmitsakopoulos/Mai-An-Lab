@@ -285,7 +285,8 @@ _computePiTables() {
     return sum;
   }
 
-  final piScaled = (atanRecip(5) * BigInt.from(4) - atanRecip(239)) * BigInt.from(4);
+  final piScaled =
+      (atanRecip(5) * BigInt.from(4) - atanRecip(239)) * BigInt.from(4);
   final fracBits = (piScaled - BigInt.from(3) * scale) >> guardBits;
   final mask32 = BigInt.from(0xFFFFFFFF);
 

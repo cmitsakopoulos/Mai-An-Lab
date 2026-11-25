@@ -554,8 +554,15 @@ class WebResearcher {
     String prompt, {
     bool useGrounding = false,
     Duration? timeoutOverride,
+    Map<String, Object?>? responseSchema,
   }) async {
     final genCfg = <String, Object?>{'temperature': 0.2};
+    // `structured=True`: JSON in the schema's shape (never with the
+    // googleSearch tool, which not every model accepts alongside it).
+    if (responseSchema != null && !useGrounding) {
+      genCfg['responseMimeType'] = 'application/json';
+      genCfg['responseSchema'] = responseSchema;
+    }
     final payload = <String, Object?>{
       'contents': [
         {

@@ -21,9 +21,7 @@ class SettingEntry {
   final List<String> keywords;
 }
 
-/// The hub's groups the port has (settings.py `open_subpage` names). Those
-/// waiting on later phases (Metadata) are left out of the hub and the search
-/// alike.
+/// The hub's groups the port has (settings.py `open_subpage` names).
 enum SettingsPage {
   companion('Companion & Sync'),
   storage('Storage'),
@@ -32,6 +30,7 @@ enum SettingsPage {
   appearance('Appearance'),
   audio('Audio & DSP'),
   haptics('Haptic Feedback'),
+  metadata('Metadata'),
   permissions('Permissions'),
   database('Database Management'),
   advanced('Advanced'),
@@ -129,6 +128,18 @@ const kSettingEntries = [
     keywords: [
       'vibration', 'haptic', 'intensity', 'feedback', 'touch', 'tactile', //
       'drag', 'swipe', 'vibrate', 'motor', 'click',
+    ],
+  ),
+  SettingEntry(
+    page: SettingsPage.metadata,
+    title: 'Metadata',
+    subtitle: 'Fix artist tags that power Auto-Play recommendations',
+    category: 'LIBRARY INTELLIGENCE',
+    icon: Icons.label_important_rounded,
+    keywords: [
+      'metadata', 'artist', 'tags', 'workbench', 'wizard', 'enrichment', //
+      'genre', 'cleaning', 'auto-play', 'recommendations', 'tagger', 'id3',
+      'album artist', 'mbid', 'musicbrainz', 'canonical', 'cleaner',
     ],
   ),
   SettingEntry(

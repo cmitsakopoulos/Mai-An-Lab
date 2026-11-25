@@ -300,7 +300,9 @@ class SearchTabController extends ChangeNotifier {
   int get totalPages {
     if (_viewMode == SearchViewMode.all) return 1;
     final len = _activeTypeList().length;
-    return len == 0 ? 1 : (len + kSearchItemsPerPage - 1) ~/ kSearchItemsPerPage;
+    return len == 0
+        ? 1
+        : (len + kSearchItemsPerPage - 1) ~/ kSearchItemsPerPage;
   }
 
   final Set<String> _expandedNodes = {};
@@ -428,10 +430,9 @@ class SearchTabController extends ChangeNotifier {
   /// Select every selectable item on the current page (or visible Top Songs in
   /// All mode).
   void selectAllOnPage() {
-    final visibleItems =
-        _viewMode == SearchViewMode.all
-            ? tracks.take(4).toList()
-            : [for (final row in currentPageRows()) row.item];
+    final visibleItems = _viewMode == SearchViewMode.all
+        ? tracks.take(4).toList()
+        : [for (final row in currentPageRows()) row.item];
     var added = 0;
     for (final r in visibleItems) {
       if (!isSelectable(r)) continue;
@@ -621,7 +622,11 @@ class SearchTabController extends ChangeNotifier {
         _remoteError = missingHint;
         _searchProgressVisible = false;
         _signal = const SignalState();
-        _sourceCache[_selectedSource] = {'track': [], 'album': [], 'artist': []};
+        _sourceCache[_selectedSource] = {
+          'track': [],
+          'album': [],
+          'artist': [],
+        };
         onSnack?.call(missingHint);
       } else {
         _remotePending = true;
@@ -723,9 +728,7 @@ class SearchTabController extends ChangeNotifier {
   Future<void> _annotateAll(List<Map<String, Object?>> items) async {
     final repo = repository();
     if (repo == null || items.isEmpty) return;
-    await Future.wait([
-      for (final r in items) _annotateOne(repo, r),
-    ]);
+    await Future.wait([for (final r in items) _annotateOne(repo, r)]);
   }
 
   Future<void> _annotateOne(
@@ -804,11 +807,12 @@ class SearchTabController extends ChangeNotifier {
     final source = '${item['source'] ?? _selectedSource}';
     final id = '${item['id'] ?? ''}';
     try {
-      final rawChildren =
-          mType == 'artist'
-              ? await remote.getArtistAlbums(id, source: source)
-              : await remote.getAlbumTracks(id, source: source);
-      final children = [for (final c in rawChildren) Map<String, Object?>.of(c)];
+      final rawChildren = mType == 'artist'
+          ? await remote.getArtistAlbums(id, source: source)
+          : await remote.getAlbumTracks(id, source: source);
+      final children = [
+        for (final c in rawChildren) Map<String, Object?>.of(c),
+      ];
       await _annotateAll(children);
       if (_disposed) return;
       _nodeCache[nid] = children;
@@ -888,18 +892,21 @@ class SearchTabController extends ChangeNotifier {
     _previewCancelled = false;
     _activePreviewKey = key;
     _activePreviewState = 'loading';
-    final title = stripMarkup('${item['ui_title'] ?? item['name'] ?? ''}').trim();
-    final artist = stripMarkup('${item['ui_subtitle'] ?? item['artist'] ?? ''}');
+    final title = stripMarkup(
+      '${item['ui_title'] ?? item['name'] ?? ''}',
+    ).trim();
+    final artist = stripMarkup(
+      '${item['ui_subtitle'] ?? item['artist'] ?? ''}',
+    );
     final source = '${item['source'] ?? _selectedSource}'.toLowerCase();
     final trackId = '${item['id'] ?? ''}';
     final streamable = source != 'deezer';
 
     _previewCardVisible = true;
     _previewStatus = 'Connecting...';
-    _previewDetail =
-        streamable
-            ? "Resolving stream URL for '$title'..."
-            : "Fetching preview for '$title'...";
+    _previewDetail = streamable
+        ? "Resolving stream URL for '$title'..."
+        : "Fetching preview for '$title'...";
     _notify();
 
     try {
@@ -1086,7 +1093,9 @@ class SearchTabController extends ChangeNotifier {
   void _cleanPreviewDir() {
     final base = dataDir;
     if (base == null || base.isEmpty) return;
-    unawaited(_deletePreviewDir(Directory('$base${Platform.pathSeparator}previews')));
+    unawaited(
+      _deletePreviewDir(Directory('$base${Platform.pathSeparator}previews')),
+    );
   }
 
   Future<void> _deletePreviewDir(Directory dir) async {

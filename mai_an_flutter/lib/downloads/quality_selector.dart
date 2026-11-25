@@ -49,7 +49,8 @@ const kQualityTierKeys = {'mp3', 'cd', 'hires'};
 String hiresSubtitle(List<Map<String, Object?>> records) {
   final sources = {
     for (final r in records)
-      ('${r['source'] ?? 'qobuz'}'.isEmpty ? 'qobuz' : '${r['source']}').toLowerCase(),
+      ('${r['source'] ?? 'qobuz'}'.isEmpty ? 'qobuz' : '${r['source']}')
+          .toLowerCase(),
   };
   if (sources.length == 1 && sources.contains('deezer')) {
     return "16-bit FLAC (Deezer's best)";
@@ -102,10 +103,9 @@ Future<String?> showQualitySelectorBatch(
     return preset;
   }
 
-  final subheading =
-      records.length > 1
-          ? '${records.length} items'
-          : '${records.first['ui_title'] ?? records.first['name'] ?? ''}';
+  final subheading = records.length > 1
+      ? '${records.length} items'
+      : '${records.first['ui_title'] ?? records.first['name'] ?? ''}';
   final hiResSub = hiresSubtitle(records);
 
   final picked = await showModalBottomSheet<String>(
@@ -182,7 +182,8 @@ void _submitRecords(
     message = 'Added “$label” to downloads (${tier.toUpperCase()}).';
   } else {
     queue.enqueueMany(records, qualityTier: tier);
-    message = 'Added ${records.length} items to downloads (${tier.toUpperCase()}).';
+    message =
+        'Added ${records.length} items to downloads (${tier.toUpperCase()}).';
   }
   onSnack(message, icon: Icons.download_rounded);
   onDone?.call();

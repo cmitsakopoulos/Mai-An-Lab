@@ -20,7 +20,8 @@ class AlbumMetadata {
   final List<String>? genres;
   final String? copyright;
 
-  String getGenres() => genres != null && genres!.isNotEmpty ? genres!.join(', ') : '';
+  String getGenres() =>
+      genres != null && genres!.isNotEmpty ? genres!.join(', ') : '';
 
   String getCopyright() => copyright ?? '';
 }

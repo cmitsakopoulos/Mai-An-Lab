@@ -421,9 +421,9 @@ class DeezerClient extends SourceClient {
     Map<String, String>? args,
     int retryDepth = 0,
   ]) async {
-    final uri = Uri.parse('https://api.deezer.com/$method').replace(
-      queryParameters: args == null || args.isEmpty ? null : args,
-    );
+    final uri = Uri.parse(
+      'https://api.deezer.com/$method',
+    ).replace(queryParameters: args == null || args.isEmpty ? null : args);
     SourceHttpResponse resp;
     try {
       resp = await _client.request(
@@ -448,7 +448,9 @@ class DeezerClient extends SourceClient {
       }
       final msg = '${err['message'] ?? ''}';
       throw _DeezerApiError(
-        code != null ? 'Deezer API error $code ($method): $msg' : jsonEncode(err),
+        code != null
+            ? 'Deezer API error $code ($method): $msg'
+            : jsonEncode(err),
       );
     }
     return json;

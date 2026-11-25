@@ -318,7 +318,8 @@ class ReleaseFetcher {
       final albumTitles = {
         for (final a in albums) normReleaseText('${a['title'] ?? ''}'),
       };
-      if (ownedTitles.isEmpty || ownedTitles.intersection(albumTitles).isNotEmpty) {
+      if (ownedTitles.isEmpty ||
+          ownedTitles.intersection(albumTitles).isNotEmpty) {
         return ReleaseFetchResult(
           status: 'ok',
           sourceId: '$id',
@@ -362,10 +363,7 @@ class ReleaseFetcher {
           if (resp.statusCode == 200) {
             try {
               final decoded = jsonDecode(resp.body);
-              return (
-                decoded is Map<String, Object?> ? decoded : null,
-                200,
-              );
+              return (decoded is Map<String, Object?> ? decoded : null, 200);
             } catch (_) {
               return (null, -1);
             }
@@ -606,7 +604,10 @@ Future<List<ReleaseItem>> getNewReleases(
   final now = today ?? DateTime.now();
   final todayStr = formatIsoDate(now);
   final cutoff = _cutoffDate(days, now);
-  final singleCutoff = _cutoffDate(days < kSingleDays ? days : kSingleDays, now);
+  final singleCutoff = _cutoffDate(
+    days < kSingleDays ? days : kSingleDays,
+    now,
+  );
 
   final (cache, rawOwnedMap) = await (
     repo.artistReleaseCache(),
@@ -707,10 +708,7 @@ class NewReleasesScheduler extends ChangeNotifier {
   bool get isPending => _pending;
 
   /// `main.py` `ensure_new_releases_refresh`.
-  void ensureRefresh({
-    Duration delay = Duration.zero,
-    bool force = false,
-  }) {
+  void ensureRefresh({Duration delay = Duration.zero, bool force = false}) {
     if (_disposed || _pending || _running) return;
     if (!isEnabled()) return;
     if (!force) _gateCheckedAt = _clock();

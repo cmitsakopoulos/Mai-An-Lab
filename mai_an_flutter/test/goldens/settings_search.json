@@ -347,7 +347,9 @@
   },
   {
    "query": "metadata",
-   "titles": []
+   "titles": [
+    "Metadata"
+   ]
   },
   {
    "query": "sync",
@@ -396,6 +398,7 @@
     "Appearance",
     "Audio & DSP",
     "Haptic Feedback",
+    "Metadata",
     "Permissions",
     "Database Management",
     "Advanced",
@@ -511,7 +514,8 @@
   {
    "query": "tabs",
    "titles": [
-    "Appearance"
+    "Appearance",
+    "Metadata"
    ]
   },
   {
@@ -523,7 +527,8 @@
   {
    "query": "top artists",
    "titles": [
-    "Appearance"
+    "Appearance",
+    "Metadata"
    ]
   },
   {
@@ -595,6 +600,51 @@
    "titles": [
     "Companion & Sync",
     "AI Assistant (Jarvis)"
+   ]
+  },
+  {
+   "query": "workbench",
+   "titles": [
+    "Metadata"
+   ]
+  },
+  {
+   "query": "musicbrainz",
+   "titles": [
+    "AI Assistant (Jarvis)",
+    "Metadata"
+   ]
+  },
+  {
+   "query": "genre",
+   "titles": [
+    "Appearance",
+    "Metadata"
+   ]
+  },
+  {
+   "query": "artist tags",
+   "titles": [
+    "Metadata",
+    "Appearance"
+   ]
+  },
+  {
+   "query": "auto-play",
+   "titles": [
+    "Metadata"
+   ]
+  },
+  {
+   "query": "mbid",
+   "titles": [
+    "Metadata"
+   ]
+  },
+  {
+   "query": "tagger",
+   "titles": [
+    "Metadata"
    ]
   }
  ]

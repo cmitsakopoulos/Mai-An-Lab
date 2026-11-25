@@ -64,6 +64,13 @@ const _genreRules = <(String, List<String>)>[
   ('Pop', ['pop', 'поп', 'greek pop', 'greek']),
 ];
 
+/// `GENRE_BUCKET_LABELS`: every family label, plus the two sentinels.
+final Set<String> genreBucketLabels = {
+  for (final (label, _) in _genreRules) label,
+  'Other',
+  'Unknown',
+};
+
 /// `NON_FAMILIES`: the sentinels [genreBucket] can return.
 const nonFamilies = {'Other', 'Unknown'};
 

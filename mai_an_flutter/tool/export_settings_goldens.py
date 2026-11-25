@@ -33,7 +33,8 @@ from ui.widgets import HubSettingItem  # noqa: E402
 PORTED = {
     "Companion & Sync", "Storage & Paths", "Authentication",
     "AI Assistant (Jarvis)", "Appearance",
-    "Audio & DSP", "Haptic Feedback", "Permissions", "Database Management",
+    "Audio & DSP", "Haptic Feedback", "Metadata", "Permissions",
+    "Database Management",
     "Advanced", "About",
 }
 
@@ -53,7 +54,8 @@ QUERIES = [
     "notification", "audio", "sound", "volume", "preset", "curve", "tabs",
     "glow", "top artists", "onboarding", "demo", "lobotomize",
     "companion", "pairing", "pin", "mac", "offload", "wireless", "server",
-    "pair with mac",
+    "pair with mac", "workbench", "musicbrainz", "genre", "artist tags",
+    "auto-play", "mbid", "tagger",
 ]
 
 

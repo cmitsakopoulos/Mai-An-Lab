@@ -309,7 +309,8 @@ class _FakeDownloadHost implements DownloadHost {
 
 class _DummyAssistantLibrary implements AssistantLibrary {
   @override
-  dynamic noSuchMethod(Invocation invocation) => Future.value(const <Object?>[]);
+  dynamic noSuchMethod(Invocation invocation) =>
+      Future.value(const <Object?>[]);
 }
 
 class _DummyAssistantPlayer implements AssistantPlayer {
@@ -468,23 +469,22 @@ void main() {
           theme: Tokens.theme(),
           home: Scaffold(
             body: Builder(
-              builder:
-                  (ctx) => ElevatedButton(
-                    onPressed: () {
-                      showQualitySelector(
-                        ctx,
-                        record: {
-                          'id': '123',
-                          'source': 'deezer',
-                          'media_type': 'track',
-                          'ui_title': 'Archangel',
-                        },
-                        queue: queue,
-                        onSnack: (m, {icon}) => snacks.add(m),
-                      );
+              builder: (ctx) => ElevatedButton(
+                onPressed: () {
+                  showQualitySelector(
+                    ctx,
+                    record: {
+                      'id': '123',
+                      'source': 'deezer',
+                      'media_type': 'track',
+                      'ui_title': 'Archangel',
                     },
-                    child: const Text('Pick'),
-                  ),
+                    queue: queue,
+                    onSnack: (m, {icon}) => snacks.add(m),
+                  );
+                },
+                child: const Text('Pick'),
+              ),
             ),
           ),
         ),
@@ -519,23 +519,22 @@ void main() {
           theme: Tokens.theme(),
           home: Scaffold(
             body: Builder(
-              builder:
-                  (ctx) => ElevatedButton(
-                    onPressed: () {
-                      showQualitySelectorBatch(
-                        ctx,
-                        records: [
-                          {'id': '1', 'source': 'qobuz', 'ui_title': 'A'},
-                          {'id': '2', 'source': 'qobuz', 'ui_title': 'B'},
-                        ],
-                        queue: queue,
-                        defaultQuality: 'cd',
-                        onSnack: (m, {icon}) => snacks.add(m),
-                        onDone: () => doneCalled = true,
-                      );
-                    },
-                    child: const Text('Batch'),
-                  ),
+              builder: (ctx) => ElevatedButton(
+                onPressed: () {
+                  showQualitySelectorBatch(
+                    ctx,
+                    records: [
+                      {'id': '1', 'source': 'qobuz', 'ui_title': 'A'},
+                      {'id': '2', 'source': 'qobuz', 'ui_title': 'B'},
+                    ],
+                    queue: queue,
+                    defaultQuality: 'cd',
+                    onSnack: (m, {icon}) => snacks.add(m),
+                    onDone: () => doneCalled = true,
+                  );
+                },
+                child: const Text('Batch'),
+              ),
             ),
           ),
         ),
@@ -720,10 +719,16 @@ void main() {
             if (mtype == 'artist') {
               return {
                 'albums': {
-                  'items':
-                      (offset ?? 0) == 0
-                          ? [_qobuzAlbum('a99', 'Kindred EP', 'Burial', tracksCount: 3)]
-                          : const <Object?>[],
+                  'items': (offset ?? 0) == 0
+                      ? [
+                          _qobuzAlbum(
+                            'a99',
+                            'Kindred EP',
+                            'Burial',
+                            tracksCount: 3,
+                          ),
+                        ]
+                      : const <Object?>[],
                 },
               };
             }
@@ -762,8 +767,8 @@ void main() {
 
         final searcher = StreamripSearcher(
           readConfig: () async => cfgCtrl!.config.sources,
-          clientFactory:
-              (source, _) => source == 'deezer' ? deezerClient : qobuzClient,
+          clientFactory: (source, _) =>
+              source == 'deezer' ? deezerClient : qobuzClient,
         );
         final dlHost = _FakeDownloadHost();
         final queue = DownloadQueue(dlHost)..holdWorker = true;
@@ -873,7 +878,9 @@ void main() {
         // 8. Artists tab: expand artist -> Kindred EP + Load More Albums -> expand album -> Loner.
         await tester.tap(find.text('Artists'));
         await tester.pumpAndSettle();
-        await tester.runAsync(() => searchCtrl.toggleNode(searchCtrl.artists.first));
+        await tester.runAsync(
+          () => searchCtrl.toggleNode(searchCtrl.artists.first),
+        );
         await tester.pumpAndSettle();
         expect(find.text('Kindred EP'), findsOneWidget);
         expect(find.text('Load More Albums'), findsOneWidget);
@@ -906,13 +913,12 @@ void main() {
           () => LibraryRepository.open(dbPath, writable: true),
         );
         await tester.runAsync(lib.load);
-        final browse = BrowseController(
-          lib,
-          views: const [LibraryView.tracks],
-        );
+        final browse = BrowseController(lib, views: const [LibraryView.tracks]);
         final landing = LandingController(lib);
         final player = ValueNotifier<PlayerController?>(null);
-        final searchCtrl = SearchTabController(repository: () => lib.repository);
+        final searchCtrl = SearchTabController(
+          repository: () => lib.repository,
+        );
 
         await tester.pumpWidget(
           MaterialApp(
@@ -957,71 +963,71 @@ void main() {
   });
 
   group('Jarvis search_online tool hook', () {
-    test('returns top 5 slim results and gates download behind confirmation', () async {
-      final client = _FakeSourceClient(
-        source: 'qobuz',
-        searchHandler: (mtype, query) async {
-          if (mtype == 'track') {
-            return [
-              {
-                'tracks': {
-                  'items': [
-                    for (var i = 1; i <= 7; i++)
-                      _qobuzTrack('$i', 'Song $i', 'Burial'),
-                  ],
+    test(
+      'returns top 5 slim results and gates download behind confirmation',
+      () async {
+        final client = _FakeSourceClient(
+          source: 'qobuz',
+          searchHandler: (mtype, query) async {
+            if (mtype == 'track') {
+              return [
+                {
+                  'tracks': {
+                    'items': [
+                      for (var i = 1; i <= 7; i++)
+                        _qobuzTrack('$i', 'Song $i', 'Burial'),
+                    ],
+                  },
                 },
-              },
-            ];
-          }
-          return const [];
-        },
-      );
-      final searcher = StreamripSearcher(
-        readConfig: () async => const SourceConfig(),
-        clientFactory: (_, _) => client,
-      );
-      final triggered = <Map<String, Object?>>[];
-      final handler = buildOnlineSearchHandler(
-        searcher: searcher,
-        onDownloadItem: (item) async => triggered.add(item),
-      );
-      final runner = AssistantRunner(
-        library: _DummyAssistantLibrary(),
-        player: _DummyAssistantPlayer(),
-        onlineSearchHandler: handler,
-      );
+              ];
+            }
+            return const [];
+          },
+        );
+        final searcher = StreamripSearcher(
+          readConfig: () async => const SourceConfig(),
+          clientFactory: (_, _) => client,
+        );
+        final triggered = <Map<String, Object?>>[];
+        final handler = buildOnlineSearchHandler(
+          searcher: searcher,
+          onDownloadItem: (item) async => triggered.add(item),
+        );
+        final runner = AssistantRunner(
+          library: _DummyAssistantLibrary(),
+          player: _DummyAssistantPlayer(),
+          onlineSearchHandler: handler,
+        );
 
-      // Empty query
-      final empty = await executeTool('search_online', {'query': ''}, runner);
-      expect(empty['success'], isFalse);
+        // Empty query
+        final empty = await executeTool('search_online', {'query': ''}, runner);
+        expect(empty['success'], isFalse);
 
-      // Search only: capped to 5 slim entries
-      final res = await executeTool(
-        'search_online',
-        {'query': 'Burial'},
-        runner,
-      );
-      expect(res['success'], isTrue);
-      final results = res['results']! as List;
-      expect(results.length, 5);
-      expect((results.first as Map)['title'], 'Song 1');
-      expect((results.first as Map)['url'], 'https://www.qobuz.com/track/1');
+        // Search only: capped to 5 slim entries
+        final res = await executeTool('search_online', {
+          'query': 'Burial',
+        }, runner);
+        expect(res['success'], isTrue);
+        final results = res['results']! as List;
+        expect(results.length, 5);
+        expect((results.first as Map)['title'], 'Song 1');
+        expect((results.first as Map)['url'], 'https://www.qobuz.com/track/1');
 
-      // Download=true: arms confirmation instead of downloading immediately
-      final gated = await executeTool(
-        'search_online',
-        {'query': 'Burial', 'download': true},
-        runner,
-      );
-      expect(gated['awaiting_confirmation'], isTrue);
-      expect(triggered, isEmpty);
+        // Download=true: arms confirmation instead of downloading immediately
+        final gated = await executeTool('search_online', {
+          'query': 'Burial',
+          'download': true,
+        }, runner);
+        expect(gated['awaiting_confirmation'], isTrue);
+        expect(triggered, isEmpty);
 
-      // Confirming ("yes") executes the armed download callback
-      final confirmed = await runner.dispatchText('yes');
-      expect(confirmed.success, isTrue);
-      expect(confirmed.displayed, contains('Started download: **Song 1**'));
-      expect(triggered.length, 1);
-      expect(triggered.first['url'], 'https://www.qobuz.com/track/1');
-    });
+        // Confirming ("yes") executes the armed download callback
+        final confirmed = await runner.dispatchText('yes');
+        expect(confirmed.success, isTrue);
+        expect(confirmed.displayed, contains('Started download: **Song 1**'));
+        expect(triggered.length, 1);
+        expect(triggered.first['url'], 'https://www.qobuz.com/track/1');
+      },
+    );
   });
 }

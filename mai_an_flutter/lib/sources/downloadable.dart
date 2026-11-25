@@ -106,10 +106,7 @@ class DeezerDownloadable extends Downloadable {
   final int quality;
   final String id;
 
-  factory DeezerDownloadable(
-    SourceHttpClient http,
-    Map<String, Object?> info,
-  ) {
+  factory DeezerDownloadable(SourceHttpClient http, Map<String, Object?> info) {
     final rawSizes = info['quality_to_size'];
     final sizes = rawSizes is List
         ? [for (final s in rawSizes) s is num ? s.toInt() : 0]
@@ -162,8 +159,10 @@ class DeezerDownloadable extends Downloadable {
         throw const NonStreamableError('File not found.');
       }
       if (info is Map && info.containsKey('error')) {
-        final msg = '${info['error']} - ${info['message'] ?? ''}'
-            .replaceAll(RegExp(r'^[\s-]+|[\s-]+$'), '');
+        final msg = '${info['error']} - ${info['message'] ?? ''}'.replaceAll(
+          RegExp(r'^[\s-]+|[\s-]+$'),
+          '',
+        );
         throw NonStreamableError(msg);
       }
       throw NonStreamableError('$info');

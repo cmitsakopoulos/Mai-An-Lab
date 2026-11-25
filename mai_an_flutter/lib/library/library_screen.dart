@@ -38,6 +38,8 @@ class LibraryScreen extends StatefulWidget {
     this.onOpenSettings,
     this.sync,
     this.onRedownloadTrack,
+    this.onEditArtist,
+    this.onCurateGenre,
   });
 
   final LibraryController controller;
@@ -68,6 +70,12 @@ class LibraryScreen extends StatefulWidget {
   /// Long-press → Redownload (Different Quality): opens Search tab on Tracks
   /// with `"<title> <artist>"`.
   final ValueChanged<Track>? onRedownloadTrack;
+
+  /// main.py `open_artist_metadata_editor` / `open_genre_metadata_workbench`:
+  /// Settings → Metadata, on an artist or filtered to a genre. Null (no
+  /// writable library) leaves the buttons out.
+  final ValueChanged<String>? onEditArtist;
+  final ValueChanged<String>? onCurateGenre;
 
   @override
   State<LibraryScreen> createState() => _LibraryScreenState();
@@ -297,6 +305,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
                                 onEditPlaylist: _editPlaylist,
                                 onDeletePlaylist: _deletePlaylist,
                                 onRemoveFromPlaylist: _removeFromPlaylist,
+                                onEditArtist: widget.onEditArtist,
+                                onCurateGenre: widget.onCurateGenre,
                               ),
                       ),
                     ),
@@ -526,10 +536,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
         addToPlaylist: writable ? () => _addToPlaylist([t]) : null,
         delete: writable && t.path.isNotEmpty ? () => _deleteTrack(t) : null,
       ),
-      redownload:
-          widget.onRedownloadTrack == null
-              ? null
-              : () => widget.onRedownloadTrack!(t),
+      redownload: widget.onRedownloadTrack == null
+          ? null
+          : () => widget.onRedownloadTrack!(t),
       sendLabel: widget.sync == null
           ? null
           : companionTarget(widget.sync!).label,

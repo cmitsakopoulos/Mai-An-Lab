@@ -7,8 +7,9 @@ sealed class SourceException implements Exception {
   final String? message;
 
   @override
-  String toString() =>
-      message == null || message!.isEmpty ? '$runtimeType' : '$runtimeType: $message';
+  String toString() => message == null || message!.isEmpty
+      ? '$runtimeType'
+      : '$runtimeType: $message';
 }
 
 class AuthenticationError extends SourceException {

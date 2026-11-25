@@ -21,8 +21,8 @@ const _kDefaultColorHex = '#FFFFFF';
 
 String _sourceUrl(String source, String mediaType, String id) =>
     source == 'deezer'
-        ? 'https://www.deezer.com/$mediaType/$id'
-        : 'https://www.qobuz.com/$mediaType/$id';
+    ? 'https://www.deezer.com/$mediaType/$id'
+    : 'https://www.qobuz.com/$mediaType/$id';
 
 int _asInt(Object? value) {
   if (value is int) return value;
@@ -339,7 +339,10 @@ class StreamripSearcher {
   /// Translate raw transport / API errors into concise messages.
   /// Matches `StreamripSearcher._humanize_search_error`.
   static Exception humanizeSearchError(Object exc) {
-    final raw = exc.toString().replaceFirst(RegExp(r'^Exception:\s*'), '').trim();
+    final raw = exc
+        .toString()
+        .replaceFirst(RegExp(r'^Exception:\s*'), '')
+        .trim();
     final msg = raw.isEmpty ? '${exc.runtimeType}' : raw;
     final low = msg.toLowerCase();
     final statusMatch = RegExp(
@@ -412,28 +415,36 @@ class StreamripSearcher {
     if (tracks.isNotEmpty) {
       summaries.addAll(
         SearchResults.fromPages(source, 'track', [
-          {'tracks': {'items': tracks}},
+          {
+            'tracks': {'items': tracks},
+          },
         ]).results,
       );
     }
     if (albums.isNotEmpty) {
       summaries.addAll(
         SearchResults.fromPages(source, 'album', [
-          {'albums': {'items': albums}},
+          {
+            'albums': {'items': albums},
+          },
         ]).results,
       );
     }
     if (artists.isNotEmpty) {
       summaries.addAll(
         SearchResults.fromPages(source, 'artist', [
-          {'artists': {'items': artists}},
+          {
+            'artists': {'items': artists},
+          },
         ]).results,
       );
     }
     if (playlists.isNotEmpty) {
       summaries.addAll(
         SearchResults.fromPages(source, 'playlist', [
-          {'playlists': {'items': playlists}},
+          {
+            'playlists': {'items': playlists},
+          },
         ]).results,
       );
     }

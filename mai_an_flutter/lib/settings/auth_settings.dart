@@ -88,8 +88,9 @@ class _AuthGroupState extends State<AuthGroup> {
     final problems = <String>[];
 
     if (uid.isNotEmpty && token.isNotEmpty) {
-      final appId =
-          _appId.text.trim().isNotEmpty ? _appId.text.trim() : kQobuzDefaultAppId;
+      final appId = _appId.text.trim().isNotEmpty
+          ? _appId.text.trim()
+          : kQobuzDefaultAppId;
       final appSecret = _appSecret.text.trim().isNotEmpty
           ? _appSecret.text.trim()
           : kQobuzDefaultSecret;

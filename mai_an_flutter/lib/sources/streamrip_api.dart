@@ -40,14 +40,46 @@ class ParsedSourceUrl {
 }
 
 final List<(RegExp, String, String)> _kUrlPatterns = [
-  (RegExp(r'qobuz\.com/.*?track/(?:.*/)?(?<id>\w+)(?:[/?#]|$)'), 'track', 'qobuz'),
-  (RegExp(r'qobuz\.com/.*?album/(?:.*/)?(?<id>\w+)(?:[/?#]|$)'), 'album', 'qobuz'),
-  (RegExp(r'qobuz\.com/.*?artist/(?:.*/)?(?<id>\w+)(?:[/?#]|$)'), 'artist', 'qobuz'),
-  (RegExp(r'qobuz\.com/.*?playlist/(?:.*/)?(?<id>\w+)(?:[/?#]|$)'), 'playlist', 'qobuz'),
-  (RegExp(r'deezer\.[a-z.]+/(?:[a-z]{2}/)?track/(?<id>\d+)'), 'track', 'deezer'),
-  (RegExp(r'deezer\.[a-z.]+/(?:[a-z]{2}/)?album/(?<id>\d+)'), 'album', 'deezer'),
-  (RegExp(r'deezer\.[a-z.]+/(?:[a-z]{2}/)?artist/(?<id>\d+)'), 'artist', 'deezer'),
-  (RegExp(r'deezer\.[a-z.]+/(?:[a-z]{2}/)?playlist/(?<id>\d+)'), 'playlist', 'deezer'),
+  (
+    RegExp(r'qobuz\.com/.*?track/(?:.*/)?(?<id>\w+)(?:[/?#]|$)'),
+    'track',
+    'qobuz',
+  ),
+  (
+    RegExp(r'qobuz\.com/.*?album/(?:.*/)?(?<id>\w+)(?:[/?#]|$)'),
+    'album',
+    'qobuz',
+  ),
+  (
+    RegExp(r'qobuz\.com/.*?artist/(?:.*/)?(?<id>\w+)(?:[/?#]|$)'),
+    'artist',
+    'qobuz',
+  ),
+  (
+    RegExp(r'qobuz\.com/.*?playlist/(?:.*/)?(?<id>\w+)(?:[/?#]|$)'),
+    'playlist',
+    'qobuz',
+  ),
+  (
+    RegExp(r'deezer\.[a-z.]+/(?:[a-z]{2}/)?track/(?<id>\d+)'),
+    'track',
+    'deezer',
+  ),
+  (
+    RegExp(r'deezer\.[a-z.]+/(?:[a-z]{2}/)?album/(?<id>\d+)'),
+    'album',
+    'deezer',
+  ),
+  (
+    RegExp(r'deezer\.[a-z.]+/(?:[a-z]{2}/)?artist/(?<id>\d+)'),
+    'artist',
+    'deezer',
+  ),
+  (
+    RegExp(r'deezer\.[a-z.]+/(?:[a-z]{2}/)?playlist/(?<id>\d+)'),
+    'playlist',
+    'deezer',
+  ),
 ];
 
 /// Parse a Qobuz, Deezer, or Companion URL into `(mediaType, id, source)`.
@@ -131,11 +163,10 @@ Future<List<String>> downloadFromSource({
     throw FormatException('Could not parse Qobuz or Deezer URL: $url');
   }
 
-  final client =
-      (clientFactory ?? (s, c) => buildSourceClient(s, c))(
-        parsed.source,
-        config,
-      );
+  final client = (clientFactory ?? (s, c) => buildSourceClient(s, c))(
+    parsed.source,
+    config,
+  );
 
   try {
     await client.login();
@@ -149,8 +180,8 @@ Future<List<String>> downloadFromSource({
       final rawAlbums = meta['albums'];
       final albumList = rawAlbums is Map
           ? (rawAlbums['items'] is List
-              ? rawAlbums['items']! as List<Object?>
-              : const <Object?>[])
+                ? rawAlbums['items']! as List<Object?>
+                : const <Object?>[])
           : (rawAlbums is List ? rawAlbums : const <Object?>[]);
       for (final a in albumList) {
         if (a is! Map || a['id'] == null) continue;
@@ -198,8 +229,9 @@ Future<List<String>> downloadFromSource({
     var downloadedBytes = 0;
     var completedTracks = 0;
     var lastUpdateMs = 0;
-    final maxConn =
-        config.downloads.maxConnections > 0 ? config.downloads.maxConnections : 6;
+    final maxConn = config.downloads.maxConnections > 0
+        ? config.downloads.maxConnections
+        : 6;
     final dlSem = _Semaphore(maxConn);
     final savedPaths = <String>[];
 
@@ -208,7 +240,9 @@ Future<List<String>> downloadFromSource({
       if (!force && now - lastUpdateMs < 100) return;
       lastUpdateMs = now;
       if (progressCallback == null) return;
-      final pct = totalBytes > 0 ? (downloadedBytes / totalBytes * 100).toInt() : 0;
+      final pct = totalBytes > 0
+          ? (downloadedBytes / totalBytes * 100).toInt()
+          : 0;
       final msg =
           '${(downloadedBytes / 1e6).toStringAsFixed(1)}/'
           '${(totalBytes / 1e6).toStringAsFixed(1)} MB • '
@@ -235,20 +269,18 @@ Future<List<String>> downloadFromSource({
             final title = '${norm['title'] ?? 'Unknown'}';
             final trackNum = int.tryParse('${norm['track_number']}') ?? (i + 1);
             final padded = trackNum.toString().padLeft(2, '0');
-            final filename = cleanFilename('$padded. $title.${downloadable.extension}');
+            final filename = cleanFilename(
+              '$padded. $title.${downloadable.extension}',
+            );
             final destPath = normalizeNfc(
               '$downloadDir${Platform.pathSeparator}$filename',
             );
 
             try {
-              await downloadable.download(
-                destPath,
-                (len) {
-                  downloadedBytes += len;
-                  triggerUpdate();
-                },
-                isCancelled: isCancelled,
-              );
+              await downloadable.download(destPath, (len) {
+                downloadedBytes += len;
+                triggerUpdate();
+              }, isCancelled: isCancelled);
               if (isCancelled != null && isCancelled()) {
                 final partial = File(destPath);
                 if (partial.existsSync()) partial.deleteSync();

@@ -32,8 +32,8 @@ class QobuzConfig {
 
   String get effectiveSecret =>
       secrets.isNotEmpty && secrets.first.trim().isNotEmpty
-          ? secrets.first.trim()
-          : kQobuzDefaultSecret;
+      ? secrets.first.trim()
+      : kQobuzDefaultSecret;
 
   static QobuzConfig fromToml(Object? section) {
     final m = section is Map ? section : const <Object?, Object?>{};

@@ -67,16 +67,23 @@ void main() {
       }
     });
 
-    test('Blowfish-CBC 2048-byte stripe decryption matches pycryptodomex bit-for-bit', () {
-      final cases = (golden['blowfish_decrypts'] as List)
-          .cast<Map<String, dynamic>>();
-      for (final c in cases) {
-        final key = deezerBlowfishKey(c['track_id'] as String);
-        final cipher = _hexToBytes(c['cipher_hex'] as String);
-        final plain = deezerBlowfishCbcDecrypt(key, cipher);
-        expect(_bytesToHex(plain), c['plain_hex'], reason: c['track_id'] as String);
-      }
-    });
+    test(
+      'Blowfish-CBC 2048-byte stripe decryption matches pycryptodomex bit-for-bit',
+      () {
+        final cases = (golden['blowfish_decrypts'] as List)
+            .cast<Map<String, dynamic>>();
+        for (final c in cases) {
+          final key = deezerBlowfishKey(c['track_id'] as String);
+          final cipher = _hexToBytes(c['cipher_hex'] as String);
+          final plain = deezerBlowfishCbcDecrypt(key, cipher);
+          expect(
+            _bytesToHex(plain),
+            c['plain_hex'],
+            reason: c['track_id'] as String,
+          );
+        }
+      },
+    );
 
     test('AES-128-ECB fallback encrypted CDN URL matches pycryptodomex', () {
       final cases = (golden['aes_encrypted_urls'] as List)
@@ -124,29 +131,42 @@ void main() {
       }
     });
 
-    test('QobuzSpoofer.parseBundle matches Python regex & timezone ordering', () {
-      final sp = golden['qobuz_spoofer'] as Map<String, dynamic>;
-      final (appId, secrets) = QobuzSpoofer.parseBundle(sp['bundle_js'] as String);
-      expect(appId, sp['app_id']);
-      expect(secrets, (sp['secrets'] as List).cast<String>());
-    });
+    test(
+      'QobuzSpoofer.parseBundle matches Python regex & timezone ordering',
+      () {
+        final sp = golden['qobuz_spoofer'] as Map<String, dynamic>;
+        final (appId, secrets) = QobuzSpoofer.parseBundle(
+          sp['bundle_js'] as String,
+        );
+        expect(appId, sp['app_id']);
+        expect(secrets, (sp['secrets'] as List).cast<String>());
+      },
+    );
   });
 
   group('URL detection goldens', () {
-    test('detectTypeAndId matches Python streamrip_api._detect_type_and_id', () {
-      final cases = (golden['url_cases'] as List).cast<Map<String, dynamic>>();
-      for (final c in cases) {
-        final parsed = detectTypeAndId(c['url'] as String);
-        if (c['media_type'] == null) {
-          expect(parsed, isNull, reason: c['url'] as String);
-        } else {
-          expect(parsed, isNotNull, reason: c['url'] as String);
-          expect(parsed!.mediaType, c['media_type'], reason: c['url'] as String);
-          expect(parsed.id, c['id'], reason: c['url'] as String);
-          expect(parsed.source, c['source'], reason: c['url'] as String);
+    test(
+      'detectTypeAndId matches Python streamrip_api._detect_type_and_id',
+      () {
+        final cases = (golden['url_cases'] as List)
+            .cast<Map<String, dynamic>>();
+        for (final c in cases) {
+          final parsed = detectTypeAndId(c['url'] as String);
+          if (c['media_type'] == null) {
+            expect(parsed, isNull, reason: c['url'] as String);
+          } else {
+            expect(parsed, isNotNull, reason: c['url'] as String);
+            expect(
+              parsed!.mediaType,
+              c['media_type'],
+              reason: c['url'] as String,
+            );
+            expect(parsed.id, c['id'], reason: c['url'] as String);
+            expect(parsed.source, c['source'], reason: c['url'] as String);
+          }
         }
-      }
-    });
+      },
+    );
   });
 
   group('source_metadata goldens', () {
@@ -174,49 +194,72 @@ void main() {
   });
 
   group('SearchResults & StreamripSearcher parsing goldens', () {
-    test('parseResults matches Python for Qobuz and Deezer (including dedup)', () {
-      final sp = golden['search_parsing'] as Map<String, dynamic>;
-      final qRaw = [
-        for (final item in sp['qobuz_raw'] as List)
-          _deepCopyMap(item as Map),
-      ];
-      final dzRaw = [
-        for (final item in sp['deezer_raw'] as List)
-          _deepCopyMap(item as Map),
-      ];
+    test(
+      'parseResults matches Python for Qobuz and Deezer (including dedup)',
+      () {
+        final sp = golden['search_parsing'] as Map<String, dynamic>;
+        final qRaw = [
+          for (final item in sp['qobuz_raw'] as List) _deepCopyMap(item as Map),
+        ];
+        final dzRaw = [
+          for (final item in sp['deezer_raw'] as List)
+            _deepCopyMap(item as Map),
+        ];
 
-      expect(StreamripSearcher.parseResults(qRaw, 'qobuz'), sp['qobuz_parsed']);
-      expect(StreamripSearcher.parseResults(dzRaw, 'deezer'), sp['deezer_parsed']);
-    });
+        expect(
+          StreamripSearcher.parseResults(qRaw, 'qobuz'),
+          sp['qobuz_parsed'],
+        );
+        expect(
+          StreamripSearcher.parseResults(dzRaw, 'deezer'),
+          sp['deezer_parsed'],
+        );
+      },
+    );
 
     test('SearchResults summaries and previews match Python', () {
       final sp = golden['search_parsing'] as Map<String, dynamic>;
       final qRaw = [
-        for (final item in sp['qobuz_raw'] as List)
-          _deepCopyMap(item as Map),
+        for (final item in sp['qobuz_raw'] as List) _deepCopyMap(item as Map),
       ];
       final expected = sp['summaries'] as Map<String, dynamic>;
 
       final tr = SearchResults.fromPages('qobuz', 'track', [
-        {'tracks': {'items': [qRaw[0]]}},
+        {
+          'tracks': {
+            'items': [qRaw[0]],
+          },
+        },
       ]);
       expect(tr.summaries(), expected['track']);
       expect(tr.results.first.preview(), expected['track_preview']);
 
       final al = SearchResults.fromPages('qobuz', 'album', [
-        {'albums': {'items': [qRaw[3]]}},
+        {
+          'albums': {
+            'items': [qRaw[3]],
+          },
+        },
       ]);
       expect(al.summaries(), expected['album']);
       expect(al.results.first.preview(), expected['album_preview']);
 
       final ar = SearchResults.fromPages('qobuz', 'artist', [
-        {'artists': {'items': [qRaw[4]]}},
+        {
+          'artists': {
+            'items': [qRaw[4]],
+          },
+        },
       ]);
       expect(ar.summaries(), expected['artist']);
       expect(ar.results.first.preview(), expected['artist_preview']);
 
       final pl = SearchResults.fromPages('qobuz', 'playlist', [
-        {'playlists': {'items': [qRaw[5]]}},
+        {
+          'playlists': {
+            'items': [qRaw[5]],
+          },
+        },
       ]);
       expect(pl.summaries(), expected['playlist']);
       expect(pl.results.first.preview(), expected['playlist_preview']);
@@ -229,9 +272,9 @@ void main() {
         final Object exc = (c['is_invalid_secret'] as bool)
             ? InvalidAppSecretError(c['input'] as String)
             : Exception(c['input'] as String);
-        final out = StreamripSearcher.humanizeSearchError(exc)
-            .toString()
-            .replaceFirst(RegExp(r'^Exception:\s*'), '');
+        final out = StreamripSearcher.humanizeSearchError(
+          exc,
+        ).toString().replaceFirst(RegExp(r'^Exception:\s*'), '');
         expect(out, c['output'], reason: c['label'] as String);
       }
     });

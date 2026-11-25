@@ -285,10 +285,7 @@ class QobuzClient extends SourceClient {
     final String endpoint;
     if (c.useAuthToken) {
       _sessionHeaders['X-User-Auth-Token'] = c.passwordOrToken;
-      params = {
-        'user_auth_token': c.passwordOrToken,
-        'app_id': appId,
-      };
+      params = {'user_auth_token': c.passwordOrToken, 'app_id': appId};
       endpoint = 'user/get';
     } else {
       var password = c.passwordOrToken;
@@ -305,9 +302,9 @@ class QobuzClient extends SourceClient {
     }
 
     final (status, resp) = await _apiRequest(endpoint, params);
-    if (status == 200 &&
-        (resp['user'] != null || endpoint == 'user/get')) {
-      final uat = resp['user_auth_token'] is String &&
+    if (status == 200 && (resp['user'] != null || endpoint == 'user/get')) {
+      final uat =
+          resp['user_auth_token'] is String &&
               (resp['user_auth_token']! as String).isNotEmpty
           ? resp['user_auth_token']! as String
           : c.passwordOrToken;
@@ -446,16 +443,13 @@ class QobuzClient extends SourceClient {
     if (!const {'track', 'artist', 'album'}.contains(mediaType)) {
       throw ArgumentError('Invalid media type $mediaType');
     }
-    return _paginate(
-      'favorite/getUserFavorites',
-      {'type': '${mediaType}s'},
-      limit: limit,
-    );
+    return _paginate('favorite/getUserFavorites', {
+      'type': '${mediaType}s',
+    }, limit: limit);
   }
 
-  Future<List<Map<String, Object?>>> getUserPlaylists({
-    int limit = 500,
-  }) => _paginate('playlist/getUserPlaylists', {}, limit: limit);
+  Future<List<Map<String, Object?>>> getUserPlaylists({int limit = 500}) =>
+      _paginate('playlist/getUserPlaylists', {}, limit: limit);
 
   @override
   Future<Downloadable> getDownloadable(String itemId, int quality) async {
@@ -589,9 +583,9 @@ class QobuzClient extends SourceClient {
       params['request_sig'] = sig;
     }
 
-    final uri = Uri.parse('$kQobuzBaseUrl/$endpoint').replace(
-      queryParameters: params,
-    );
+    final uri = Uri.parse(
+      '$kQobuzBaseUrl/$endpoint',
+    ).replace(queryParameters: params);
 
     for (var attempt = 0; attempt < retries; attempt++) {
       try {

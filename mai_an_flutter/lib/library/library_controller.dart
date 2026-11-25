@@ -260,6 +260,9 @@ class LibraryController extends ChangeNotifier
     scanGeneration++;
     notifyListeners();
     await reload();
+    // library.py `_on_scan_complete`: a scan that indexed anything may have
+    // brought new artists — the automatic metadata trigger.
+    if ((count ?? 0) > 0) onIndexed?.call();
     if (quiet) {
       if ((count ?? 0) > 0) await _announceUnanalysed(repo);
     } else if (count != null) {
@@ -274,6 +277,9 @@ class LibraryController extends ChangeNotifier
   /// A scan is running, the user's or a quiet one (library.py
   /// `_is_scanning`).
   bool _scanBusy = false;
+
+  /// A scan indexed something (main.py `schedule_metadata_enrichment`).
+  void Function()? onIndexed;
 
   /// Bumped whenever a library scan completes so Jarvis can re-greet if
   /// needed (assistant.py `_init_greeted = False`).

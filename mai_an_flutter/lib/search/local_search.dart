@@ -170,7 +170,9 @@ Future<LocalMatches> loadLocalMatches(
 
   final matchedAlbums = [
     for (final a in allAlbums)
-      if (words.every(fold('${a.title ?? ''}\u0000${a.artist ?? ''}').contains) ||
+      if (words.every(
+            fold('${a.title ?? ''}\u0000${a.artist ?? ''}').contains,
+          ) ||
           matchedAlbumIds.contains(a.id))
         a,
   ];
@@ -353,7 +355,11 @@ class LocalLibrarySection extends StatelessWidget {
                   Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      Icon(Icons.library_music_rounded, color: accent, size: 15),
+                      Icon(
+                        Icons.library_music_rounded,
+                        color: accent,
+                        size: 15,
+                      ),
                       const SizedBox(width: 7),
                       const Text(
                         'In your library',

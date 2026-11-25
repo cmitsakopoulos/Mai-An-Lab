@@ -34,10 +34,9 @@ class ConnectionSignal extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (!state.visible) return const SizedBox.shrink();
-    final activeColor =
-        state.connected
-            ? const Color(0xFF00E676)
-            : Theme.of(context).colorScheme.primary;
+    final activeColor = state.connected
+        ? const Color(0xFF00E676)
+        : Theme.of(context).colorScheme.primary;
     final inactiveColor = activeColor.withValues(alpha: 0.2);
     const heights = [4.0, 7.0, 10.0, 13.0];
     return Row(
@@ -94,17 +93,15 @@ class SourceSegmentedBar extends StatelessWidget {
                   curve: Curves.easeOut,
                   alignment: Alignment.center,
                   decoration: BoxDecoration(
-                    color:
-                        selected == key
-                            ? sourceColor(key).withValues(alpha: 0.2)
-                            : Colors.transparent,
+                    color: selected == key
+                        ? sourceColor(key).withValues(alpha: 0.2)
+                        : Colors.transparent,
                     borderRadius: BorderRadius.circular(Tokens.radiusPill),
-                    border:
-                        selected == key
-                            ? Border.all(
-                              color: sourceColor(key).withValues(alpha: 0.5),
-                            )
-                            : null,
+                    border: selected == key
+                        ? Border.all(
+                            color: sourceColor(key).withValues(alpha: 0.5),
+                          )
+                        : null,
                   ),
                   child: Text(
                     label,
@@ -148,11 +145,7 @@ class SearchOverlayCard extends StatelessWidget {
         border: Border.all(color: accent.withValues(alpha: 0.35)),
         borderRadius: BorderRadius.circular(12),
         boxShadow: const [
-          BoxShadow(
-            blurRadius: 16,
-            spreadRadius: -4,
-            color: Color(0x66000000),
-          ),
+          BoxShadow(blurRadius: 16, spreadRadius: -4, color: Color(0x66000000)),
         ],
       ),
       child: Row(
@@ -613,9 +606,9 @@ class HeroResultCard extends StatelessWidget {
     final isInLibrary = ownership.isInLibrary;
     final subText =
         subtitle.isNotEmpty &&
-                subtitle.trim().toLowerCase() != title.trim().toLowerCase()
-            ? subtitle
-            : '';
+            subtitle.trim().toLowerCase() != title.trim().toLowerCase()
+        ? subtitle
+        : '';
 
     final double radius = mType == 'artist' ? 44 : 12;
     final artwork = Container(
@@ -1087,10 +1080,9 @@ class _UnifiedAlbumShelfState extends State<UnifiedAlbumShelf> {
                             style: IconButton.styleFrom(
                               tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                             ),
-                            tooltip:
-                                owned
-                                    ? 'In library — download again'
-                                    : 'Download album',
+                            tooltip: owned
+                                ? 'In library — download again'
+                                : 'Download album',
                             onPressed: () => widget.onDownload(alb),
                           ),
                         ],
@@ -1335,12 +1327,11 @@ class SearchResultRow extends StatelessWidget {
     final accent = searchRowAccent(mType, primary);
     final selectable = SearchTabController.isSelectable(item);
     final highlighted = playing || previewState != 'idle' || expanded;
-    final bg =
-        selected
-            ? primary.withValues(alpha: 0.20)
-            : highlighted
-            ? accent.withValues(alpha: 0.12)
-            : Colors.transparent;
+    final bg = selected
+        ? primary.withValues(alpha: 0.20)
+        : highlighted
+        ? accent.withValues(alpha: 0.12)
+        : Colors.transparent;
 
     final title = stripMarkup(
       '${item['ui_title'] ?? item['name'] ?? 'Unknown'}',
@@ -1455,24 +1446,24 @@ class SearchResultRow extends StatelessWidget {
               if (!selectionMode) ...[
                 if (mType == 'track')
                   IconButton(
-                    icon:
-                        previewState == 'loading'
-                            ? SizedBox(
-                              width: 16,
-                              height: 16,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                                color: primary,
-                              ),
-                            )
-                            : Icon(
-                              previewState == 'playing'
-                                  ? Icons.pause_circle_filled_rounded
-                                  : Icons.play_circle_filled_rounded,
-                              size: 22,
-                              color:
-                                  previewState != 'idle' ? primary : Tokens.dim,
+                    icon: previewState == 'loading'
+                        ? SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: primary,
                             ),
+                          )
+                        : Icon(
+                            previewState == 'playing'
+                                ? Icons.pause_circle_filled_rounded
+                                : Icons.play_circle_filled_rounded,
+                            size: 22,
+                            color: previewState != 'idle'
+                                ? primary
+                                : Tokens.dim,
+                          ),
                     tooltip: 'Preview',
                     constraints: const BoxConstraints(
                       minWidth: 36,
@@ -1503,23 +1494,22 @@ class SearchResultRow extends StatelessWidget {
                     width: 24,
                     height: 24,
                     child: Center(
-                      child:
-                          loadingChildren
-                              ? SizedBox(
-                                width: 15,
-                                height: 15,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                  color: accent,
-                                ),
-                              )
-                              : Icon(
-                                expanded
-                                    ? Icons.keyboard_arrow_down_rounded
-                                    : Icons.chevron_right_rounded,
-                                color: expanded ? accent : Tokens.dim,
-                                size: 18,
+                      child: loadingChildren
+                          ? SizedBox(
+                              width: 15,
+                              height: 15,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: accent,
                               ),
+                            )
+                          : Icon(
+                              expanded
+                                  ? Icons.keyboard_arrow_down_rounded
+                                  : Icons.chevron_right_rounded,
+                              color: expanded ? accent : Tokens.dim,
+                              size: 18,
+                            ),
                     ),
                   ),
               ],

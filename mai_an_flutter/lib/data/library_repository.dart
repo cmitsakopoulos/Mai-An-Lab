@@ -19,6 +19,8 @@ import 'library_schema.dart';
 import 'play_ledger.dart';
 import 'playlists.dart';
 import 'maintenance.dart';
+import 'metadata_queries.dart';
+import '../metadata/metadata_audit.dart';
 import 'network_queries.dart';
 import 'release_queries.dart';
 import 'scan_writes.dart';
@@ -154,7 +156,23 @@ class LibraryRepository {
         }
       });
 
+  /// Raw rows, for tests that check what the app wrote.
+  @visibleForTesting
+  Future<List<List<Object?>>> debugSelect(
+    String sql, [
+    List<Object?> args = const [],
+  ]) => _db.run(
+    (db) => [
+      for (final r in db.select(sql, args)) [...r.values],
+    ],
+  );
+
   Future<void> _write(void Function(Database) job) {
+    if (!writable) throw StateError('library opened read-only');
+    return _db.run(job);
+  }
+
+  Future<T> _writeR<T>(DbJob<T> job) {
     if (!writable) throw StateError('library opened read-only');
     return _db.run(job);
   }
@@ -362,11 +380,173 @@ class LibraryRepository {
       _db.run(pendingAiResearchJob);
   Future<List<String>> artistSourceGenres(String artistName) =>
       _db.run(artistSourceGenresJob(artistName));
-  Future<List<Map<String, Object?>>> metadataGapArtists({int limit = 2000}) =>
-      _db.run(metadataGapArtistsJob(limit));
+  Future<List<Map<String, Object?>>> metadataGapArtists({
+    int limit = 2000,
+    bool everything = false,
+  }) => _db.run(metadataGapArtistsJob(limit, everything: everything));
   Future<Map<String, Object?>> metadataCoverage({
     List<Map<String, Object?>>? gaps,
   }) => _db.run(metadataCoverageJob(gaps));
+
+  // Artist metadata (phase 7: metadata_queries.dart, metadata_audit.dart).
+
+  Future<List<(String, int)>> artistsNeedingEnrichment({
+    int? limit,
+    bool includeFailed = false,
+    bool retryIncomplete = false,
+  }) => _db.run(
+    artistsNeedingEnrichmentJob(
+      limit: limit,
+      includeFailed: includeFailed,
+      retryIncomplete: retryIncomplete,
+    ),
+  );
+  Future<void> upsertArtistEnrichment(
+    String artistName, {
+    Object? mbid,
+    String? country,
+    String? area,
+    List<Object?>? genres,
+    String source = 'musicbrainz',
+    Object? score,
+    String status = 'ok',
+    bool force = false,
+    Map<String, Object?>? provenance,
+  }) => _write(
+    upsertArtistEnrichmentJob(
+      artistName,
+      mbid: mbid,
+      country: country,
+      area: area,
+      genres: genres,
+      source: source,
+      score: score,
+      status: status,
+      force: force,
+      provenance: provenance,
+    ),
+  );
+  Future<String?> recordEnrichmentFailure(
+    String artistName, {
+    required String source,
+    int maxAttempts = 3,
+  }) => _writeR(
+    recordEnrichmentFailureJob(
+      artistName,
+      source: source,
+      maxAttempts: maxAttempts,
+    ),
+  );
+  Future<void> setManualArtistEnrichment(
+    String artistName, {
+    String? country,
+    List<Object?>? genres,
+    String origin = 'manual',
+  }) => _write(
+    setManualArtistEnrichmentJob(
+      artistName,
+      country: country,
+      genres: genres,
+      origin: origin,
+    ),
+  );
+  Future<int> setManualArtistEnrichmentBulk(
+    List<String> names, {
+    String? country,
+    List<String>? genres,
+  }) => _writeR(
+    setManualArtistEnrichmentBulkJob(names, country: country, genres: genres),
+  );
+  Future<int> setArtistsGenres(
+    List<String> names,
+    List<String> genres, {
+    String? country,
+  }) => _writeR(setArtistsGenresJob(names, genres, country: country));
+  Future<int> bulkTagArtists(
+    List<String> names, {
+    String? genre,
+    String? country,
+  }) => _writeR(bulkTagArtistsJob(names, genre: genre, country: country));
+  Future<int> acceptArtistMatches(List<String> names) =>
+      _writeR(acceptArtistMatchesJob(names));
+  Future<void> confirmArtistMatch(
+    String artistName, {
+    Object? mbid,
+    String? country,
+    String? area,
+    List<Object?>? genres,
+    String status = 'ok',
+    int score = 100,
+  }) => _write(
+    confirmArtistMatchJob(
+      artistName,
+      mbid: mbid,
+      country: country,
+      area: area,
+      genres: genres,
+      status: status,
+      score: score,
+    ),
+  );
+  Future<List<Map<String, Object?>>> genreVocabulary([int limit = 60]) =>
+      _db.run(genreVocabularyJob(limit));
+  Future<List<Map<String, Object?>>> libraryCountries() =>
+      _db.run(libraryCountriesJob);
+  Future<List<Map<String, Object?>>> lowConfidenceArtists([int limit = 200]) =>
+      _db.run(lowConfidenceArtistsJob(limit));
+  Future<Map<String, Object?>?> artistWorkbenchItem(String name) =>
+      _db.run(artistWorkbenchItemJob(name));
+  Future<List<String>> aliasesOf(String canonical) =>
+      _db.run(artistAliasesForJob(canonical));
+  Future<void> rejectAliasPair(String a, String b) =>
+      _write(rejectAliasPairJob(a, b));
+  Future<void> mergeArtists(String alias, String canonical) =>
+      _write(mergeArtistsJob(alias, canonical));
+  Future<void> separateArtist(String alias) => _write(separateArtistJob(alias));
+  Future<void> dismissAuditFlag(String artist, String rule, String value) =>
+      _write(dismissAuditFlagJob(artist, rule, value));
+  Future<Map<String, List<Map<String, Object?>>>> auditFlags() =>
+      _db.run(auditFlagsJob);
+  Future<List<Map<String, Object?>>> duplicateArtists() =>
+      _db.run(duplicateArtistsJob);
+  Future<List<String>> albumTitles(String artist, [int limit = 3]) =>
+      _db.run(albumTitlesJob(artist, limit));
+  Future<void> saveAiResearch(
+    String artistName,
+    Map<String, Object?> payload, {
+    String state = 'pending',
+  }) => _write(saveAiResearchJob(artistName, payload, state: state));
+  Future<void> setAiResearchState(String artistName, String state) =>
+      _write(setAiResearchStateJob(artistName, state));
+  Future<Set<String>> researchedArtistNames() =>
+      _db.run(researchedArtistNamesJob);
+  Future<Map<String, Object?>> artistResearchEvidence(String artist) =>
+      _db.run(artistResearchEvidenceJob(artist));
+  Future<void> acceptAiSuggestion(
+    String artist, {
+    List<String>? genres,
+    String? country,
+  }) => _write(acceptAiSuggestionJob(artist, genres: genres, country: country));
+
+  /// `metadata_enrich._do_refresh_walk_models`: the album genres
+  /// normalised against the enrichment, then the NPMI genre model rebuilt.
+  /// The caller rebuilds the stations' artist graph. Never throws.
+  Future<Map<String, Object?>> refreshWalkModels() async {
+    final out = <String, Object?>{};
+    if (!writable) return out;
+    try {
+      out['genre_fix'] = await _db.run(fixAndNormalizeTrackGenresJob);
+    } catch (e) {
+      debugPrint('track genre normalization failed: $e');
+    }
+    try {
+      out['model_pairs'] = await _db.run(buildGenreAffinityJob);
+    } catch (e) {
+      debugPrint('walk model refresh failed: $e');
+    }
+    debugPrint('refresh_walk_models: $out');
+    return out;
+  }
 
   /// `track_graph.build_metadata_edges`: rewrites the artist tier of
   /// `track_neighbors`. Returns the edge count.

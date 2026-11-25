@@ -27,7 +27,13 @@ class AppConfig {
     this.landing = const LandingSections(),
     this.assistant = const AssistantConfig(),
     this.sources = const SourceConfig(),
+    this.autoEnrichMetadata = true,
   });
+
+  /// `general.auto_enrich_metadata` (main.py `_enrich_metadata_async`): the
+  /// automatic artist-metadata pass at launch and after a scan. No settings
+  /// row writes it; default on.
+  final bool autoEnrichMetadata;
 
   /// `general.library_sort` (Flet library.py: the initial sort).
   final LibrarySort librarySort;
@@ -114,6 +120,10 @@ class AppConfig {
       landing: LandingSections.fromToml(doc['landing']),
       assistant: AssistantConfig.fromToml(doc['assistant']),
       sources: SourceConfig.fromTomlMap(doc),
+      autoEnrichMetadata: LibraryTabs.parseBool(
+        general is Map ? general['auto_enrich_metadata'] : null,
+        true,
+      ),
     );
   }
 

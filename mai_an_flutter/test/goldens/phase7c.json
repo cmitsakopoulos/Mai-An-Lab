@@ -1,0 +1,222 @@
+{
+ "accents": [
+  [
+   "#FFD60A",
+   "Gold"
+  ],
+  [
+   "#64D2FF",
+   "Cyan"
+  ],
+  [
+   "#BF5AF2",
+   "Violet"
+  ],
+  [
+   "#FF375F",
+   "Rose"
+  ],
+  [
+   "#30D158",
+   "Mint"
+  ]
+ ],
+ "startups": [
+  [
+   "Library",
+   "Library"
+  ],
+  [
+   "Search",
+   "Search"
+  ],
+  [
+   "Jarvis",
+   "Jarvis"
+  ]
+ ],
+ "cases": [
+  {
+   "name": "defaults",
+   "input": {
+    "name": "defaults"
+   },
+   "update": {
+    "appearance": {
+     "accent_color": "#FFD60A",
+     "show_jarvis": true,
+     "show_network": false,
+     "show_playlists": true,
+     "show_artists": true,
+     "show_albums": false,
+     "show_tracks": true
+    },
+    "general": {
+     "startup_page": "Library"
+    },
+    "downloads": {
+     "folder": "/storage/emulated/0/Music/Streamrip"
+    }
+   },
+   "prefs": [
+    [
+     "folder_path",
+     "/storage/emulated/0/Music/Streamrip"
+    ],
+    [
+     "library_path",
+     "/storage/emulated/0/Music/Streamrip"
+    ]
+   ],
+   "restart": {
+    "target_tab": 2,
+    "post_message": "Welcome to Mai-An Lab! Enjoy studio-grade listening."
+   },
+   "marker": "1"
+  },
+  {
+   "name": "violet_search_creds",
+   "input": {
+    "name": "violet_search_creds",
+    "accent": "#BF5AF2",
+    "startup": "Search",
+    "folder": "/storage/emulated/0/Music/Mine",
+    "qobuz_user": " someone@example.com ",
+    "qobuz_token": " tok123 ",
+    "deezer_arl": "  arlvalue "
+   },
+   "update": {
+    "appearance": {
+     "accent_color": "#BF5AF2",
+     "show_jarvis": true,
+     "show_network": false,
+     "show_playlists": true,
+     "show_artists": true,
+     "show_albums": false,
+     "show_tracks": true
+    },
+    "general": {
+     "startup_page": "Search"
+    },
+    "downloads": {
+     "folder": "/storage/emulated/0/Music/Mine"
+    },
+    "qobuz": {
+     "use_auth_token": true,
+     "email_or_userid": "someone@example.com",
+     "password_or_token": "tok123",
+     "app_id": "312369995",
+     "secrets": [
+      "e79f8b9be485692b0e5f9dd895826368"
+     ]
+    },
+    "deezer": {
+     "arl": "arlvalue"
+    }
+   },
+   "prefs": [
+    [
+     "folder_path",
+     "/storage/emulated/0/Music/Mine"
+    ],
+    [
+     "library_path",
+     "/storage/emulated/0/Music/Mine"
+    ]
+   ],
+   "restart": {
+    "target_tab": 1,
+    "post_message": "Welcome to Mai-An Lab! Enjoy studio-grade listening."
+   },
+   "marker": "1"
+  },
+  {
+   "name": "jarvis_half_qobuz",
+   "input": {
+    "name": "jarvis_half_qobuz",
+    "accent": "#30D158",
+    "startup": "Jarvis",
+    "folder": "/storage/emulated/0/Music",
+    "qobuz_user": "12345",
+    "qobuz_token": ""
+   },
+   "update": {
+    "appearance": {
+     "accent_color": "#30D158",
+     "show_jarvis": true,
+     "show_network": false,
+     "show_playlists": true,
+     "show_artists": true,
+     "show_albums": false,
+     "show_tracks": true
+    },
+    "general": {
+     "startup_page": "Jarvis"
+    },
+    "downloads": {
+     "folder": "/storage/emulated/0/Music"
+    }
+   },
+   "prefs": [
+    [
+     "folder_path",
+     "/storage/emulated/0/Music"
+    ],
+    [
+     "library_path",
+     "/storage/emulated/0/Music"
+    ]
+   ],
+   "restart": {
+    "target_tab": 0,
+    "post_message": "Welcome to Mai-An Lab! Enjoy studio-grade listening."
+   },
+   "marker": "1"
+  },
+  {
+   "name": "rose_library_deezer",
+   "input": {
+    "name": "rose_library_deezer",
+    "accent": "#FF375F",
+    "startup": "Library",
+    "folder": "/sdcard/Music/Rips",
+    "deezer_arl": "abc"
+   },
+   "update": {
+    "appearance": {
+     "accent_color": "#FF375F",
+     "show_jarvis": true,
+     "show_network": false,
+     "show_playlists": true,
+     "show_artists": true,
+     "show_albums": false,
+     "show_tracks": true
+    },
+    "general": {
+     "startup_page": "Library"
+    },
+    "downloads": {
+     "folder": "/sdcard/Music/Rips"
+    },
+    "deezer": {
+     "arl": "abc"
+    }
+   },
+   "prefs": [
+    [
+     "folder_path",
+     "/sdcard/Music/Rips"
+    ],
+    [
+     "library_path",
+     "/sdcard/Music/Rips"
+    ]
+   ],
+   "restart": {
+    "target_tab": 2,
+    "post_message": "Welcome to Mai-An Lab! Enjoy studio-grade listening."
+   },
+   "marker": "1"
+  }
+ ]
+}

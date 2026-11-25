@@ -28,6 +28,7 @@ class AssistantController extends ChangeNotifier {
     this.player,
     this.loadAssistantConfig,
     this.onlineSearchHandler,
+    this.metadataWriteHandler,
     AssistantRunner? runner,
     this.voice,
     this.onSpeak,
@@ -50,6 +51,9 @@ class AssistantController extends ChangeNotifier {
   final ValueListenable<PlayerController?>? player;
   final FutureOr<AssistantConfig?> Function()? loadAssistantConfig;
   final ToolHandler? onlineSearchHandler;
+
+  /// `research_artist_metadata` / `apply_artist_metadata` (phase 7).
+  final ToolHandler? metadataWriteHandler;
   final AssistantRunner? _customRunner;
 
   /// Voice backend (stage g): TTS + push-to-talk STT + RECORD_AUDIO.
@@ -124,6 +128,7 @@ class AssistantController extends ChangeNotifier {
       player: ControllerAssistantPlayer(pl),
       loadAssistantConfig: loadAssistantConfig,
       onlineSearchHandler: onlineSearchHandler,
+      metadataWriteHandler: metadataWriteHandler,
     );
     return _runner;
   }

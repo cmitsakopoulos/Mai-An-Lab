@@ -9,6 +9,7 @@ import 'package:permission_handler/permission_handler.dart';
 import 'app_shell.dart';
 import 'assistant/assistant_controller.dart';
 import 'assistant/chat_memory.dart';
+import 'assistant/metadata_tools.dart';
 import 'assistant/online_search.dart';
 import 'assistant/voice_service.dart';
 import 'core/app_config.dart';
@@ -23,6 +24,11 @@ import 'downloads/download_history.dart';
 import 'downloads/download_queue.dart';
 import 'library/browse_controller.dart';
 import 'library/library_controller.dart';
+import 'metadata/metadata_ai.dart';
+import 'metadata/metadata_service.dart';
+import 'metadata/workbench_controller.dart';
+import 'onboarding/onboarding.dart';
+import 'onboarding/onboarding_wizard.dart';
 import 'player/audio_handler.dart';
 import 'player/autoplay.dart';
 import 'player/player_controller.dart';
@@ -34,6 +40,7 @@ import 'search/search_controller.dart';
 import 'search/search_history.dart';
 import 'settings/config_controller.dart';
 import 'settings/settings_page.dart';
+import 'sources/streamrip_api.dart' show buildSourceClient;
 import 'sources/streamrip_search.dart';
 import 'sync/app_sync_host.dart';
 import 'sync/state_bundles.dart';
@@ -159,6 +166,33 @@ Future<void> main() async {
   // the Mac side is ported (phase 8).
   final syncPrefs = Prefs(dataDir);
   await syncPrefs.load();
+  // main.py's automatic artist-metadata pass and refresh_walk_models.
+  final metadata = MetadataService(
+    repository: () => library.repository,
+    reloadLibrary: library.reload,
+    autoEnrichEnabled: () => settings.config.autoEnrichMetadata,
+    preferredProvider: () =>
+        syncPrefs.getString('sync_provider', 'musicbrainz'),
+    qobuzClient: () async =>
+        buildSourceClient('qobuz', settings.config.sources),
+  );
+  if (writable) library.onIndexed = metadata.schedule;
+  MetadataResearcher researcherFor(LibraryRepository repo) =>
+      MetadataResearcher(
+        repo: repo,
+        loadConfig: () => settings.config.assistant,
+      );
+  // Settings → Metadata (the workbench); a read-only library has none.
+  final workbench = writable
+      ? WorkbenchController(
+          repository: () => library.repository,
+          service: metadata,
+          researcher: researcherFor,
+          prefs: syncPrefs,
+          qobuzClient: () async =>
+              buildSourceClient('qobuz', settings.config.sources),
+        )
+      : null;
   final searchController = SearchTabController(
     repository: () => library.repository,
     searcher: searcher,
@@ -180,17 +214,19 @@ Future<void> main() async {
       readConfig: () async => settings.config.sources,
       onDownloadItem: (item) async {
         final tier = settings.config.sources.defaultQuality;
-        downloads.enqueue(
-          {
-            'source': 'qobuz',
-            'media_type': item['type'] ?? 'track',
-            'name': item['title'] ?? 'Unknown',
-            'artist': item['artist'] ?? '',
-            'url': item['url'] ?? '',
-          },
-          qualityTier: tier.isEmpty ? 'cd' : tier,
-        );
+        downloads.enqueue({
+          'source': 'qobuz',
+          'media_type': item['type'] ?? 'track',
+          'name': item['title'] ?? 'Unknown',
+          'artist': item['artist'] ?? '',
+          'url': item['url'] ?? '',
+        }, qualityTier: tier.isEmpty ? 'cd' : tier);
       },
+    ),
+    metadataWriteHandler: buildMetadataWriteHandler(
+      repository: () => library.repository,
+      researcher: researcherFor,
+      refreshWalkModels: metadata.refreshWalkModels,
     ),
     voice: FlutterVoiceBackend(),
     onSnack: _snack,
@@ -220,8 +256,20 @@ Future<void> main() async {
     landing.setSections(c.landing);
     haptics.config = c.haptics;
   });
+  // main.py `check_onboarding`: a fresh install (no `.onboarded`; a
+  // restored bundle writes one) opens the setup wizard over the shell.
+  final onboard = writable && await needsOnboarding(dataDir);
+  final storage = onboard ? await storagePathsFor(dataDir) : null;
   runApp(
     MaiAnApp(
+      onboarding: onboard
+          ? (context) => showOnboardingWizard(
+              context,
+              dataDir: dataDir,
+              config: settings,
+              storage: storage!,
+            )
+          : null,
       library: library,
       browse: browse,
       landing: landing,
@@ -247,6 +295,7 @@ Future<void> main() async {
         haptics: haptics,
         sync: sync,
         bundles: bundles,
+        workbench: workbench,
       ),
     ),
   );
@@ -272,6 +321,9 @@ Future<void> main() async {
   if (writable) unawaited(library.ensureGraphBuilt());
   // main.py `ensure_new_releases_refresh` + `_prune_caches_async`.
   if (writable) {
+    // main.py: the artist-metadata catch-up, once per launch and well
+    // behind the UI; then the new-releases daily gate.
+    metadata.scheduleBoot();
     releasesScheduler.ensureRefresh(delay: NewReleasesScheduler.bootDelay);
   }
   unawaited(cachePruner.pruneIfDue());
@@ -347,6 +399,7 @@ class MaiAnApp extends StatefulWidget {
     this.searchController,
     this.searchHistory,
     this.cachePruner,
+    this.onboarding,
   });
 
   final LibraryController library;
@@ -378,6 +431,9 @@ class MaiAnApp extends StatefulWidget {
 
   /// Periodic artwork & preview cache pruner (`_prune_caches_async`).
   final CachePruner? cachePruner;
+
+  /// The first-run wizard; null when the install is set up.
+  final OnboardingFlow? onboarding;
 
   @override
   State<MaiAnApp> createState() => _MaiAnAppState();
@@ -460,6 +516,7 @@ class _MaiAnAppState extends State<MaiAnApp> {
           downloads: widget.downloads,
           searchController: widget.searchController,
           searchHistory: widget.searchHistory,
+          onboarding: widget.onboarding,
         ),
       ),
     );

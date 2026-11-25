@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 
 import '../core/haptics.dart';
 import '../library/library_controller.dart';
+import '../metadata/workbench_controller.dart';
+import '../metadata/workbench_view.dart';
 import '../player/player_controller.dart';
 import '../sync/state_bundles.dart';
 import '../sync/sync_manager.dart';
@@ -27,6 +29,7 @@ class SettingsDeps {
     required this.haptics,
     this.sync,
     this.bundles,
+    this.workbench,
   });
 
   final String dataDir;
@@ -41,6 +44,10 @@ class SettingsDeps {
   /// State bundles (export, import, the backup upload); null leaves them
   /// out (tests).
   final StateBundles? bundles;
+
+  /// The metadata workbench; null leaves Settings → Metadata out (a
+  /// read-only library, tests).
+  final WorkbenchController? workbench;
 }
 
 /// main.py's Settings tab as a pushed page (it sits outside the tab bar in
@@ -104,6 +111,7 @@ class SettingsScreenState extends State<SettingsScreen> {
                     search: _search,
                     onOpen: open,
                     hasSync: widget.deps.sync != null,
+                    hasWorkbench: widget.deps.workbench != null,
                   )
                 : KeyedSubtree(key: ValueKey(page), child: _subpage(page!)),
           ),
@@ -129,6 +137,10 @@ class SettingsScreenState extends State<SettingsScreen> {
       SettingsPage.appearance => AppearanceGroup(deps: d),
       SettingsPage.audio => AudioDspGroup(deps: d),
       SettingsPage.haptics => HapticsGroup(deps: d),
+      SettingsPage.metadata => switch (d.workbench) {
+        final w? => WorkbenchPage(controller: w),
+        null => const Center(child: Dim('The library is read-only.')),
+      },
       SettingsPage.permissions => const PermissionsGroup(),
       SettingsPage.database => DatabaseGroup(deps: d),
       SettingsPage.advanced => AdvancedGroup(deps: d),
@@ -420,11 +432,13 @@ class _Hub extends StatefulWidget {
     required this.search,
     required this.onOpen,
     required this.hasSync,
+    this.hasWorkbench = false,
   });
 
   final TextEditingController search;
   final ValueChanged<SettingsPage> onOpen;
   final bool hasSync;
+  final bool hasWorkbench;
 
   @override
   State<_Hub> createState() => _HubState();
@@ -488,6 +502,11 @@ class _HubState extends State<_Hub> {
         _item(_entry(SettingsPage.appearance)),
         _item(_entry(SettingsPage.audio)),
         _item(_entry(SettingsPage.haptics)),
+        if (widget.hasWorkbench) ...[
+          divider,
+          section('LIBRARY INTELLIGENCE'),
+          _item(_entry(SettingsPage.metadata)),
+        ],
         divider,
         section('DEVELOPER TOOLS'),
         _item(_entry(SettingsPage.permissions)),
@@ -499,7 +518,9 @@ class _HubState extends State<_Hub> {
     } else {
       final matches = [
         for (final e in searchSettings(query))
-          if (widget.hasSync || e.page != SettingsPage.companion) e,
+          if ((widget.hasSync || e.page != SettingsPage.companion) &&
+              (widget.hasWorkbench || e.page != SettingsPage.metadata))
+            e,
       ];
       if (matches.isNotEmpty) {
         children.add(

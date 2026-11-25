@@ -15,5 +15,5 @@
 ///
 /// Build numbers start at `2` (strictly above Flet's `versionCode = 1`) and
 /// increase monotonically on every release build.
-const String kAppVersion = '0.2.0';
-const int kAppBuildNumber = 3;
+const String kAppVersion = '0.3.0';
+const int kAppBuildNumber = 4;

@@ -15,6 +15,7 @@ import 'library/browse_controller.dart';
 import 'library/library_controller.dart';
 import 'library/library_screen.dart';
 import 'library/selection.dart';
+import 'onboarding/onboarding.dart';
 import 'player/player_controller.dart';
 import 'player/ui/mini_player.dart';
 import 'search/landing_controller.dart';
@@ -62,6 +63,7 @@ class AppShell extends StatefulWidget {
     this.downloads,
     this.searchController,
     this.searchHistory,
+    this.onboarding,
   });
 
   final LibraryController library;
@@ -88,6 +90,10 @@ class AppShell extends StatefulWidget {
 
   /// Persisted recent search queries (`recent_searches.json`).
   final SearchHistoryStore? searchHistory;
+
+  /// main.py `show_onboarding_guide`: the first-run wizard, opened over the
+  /// shell after its first frame. Null when the install is set up.
+  final OnboardingFlow? onboarding;
 
   @override
   State<AppShell> createState() => AppShellState();
@@ -134,6 +140,57 @@ class AppShellState extends State<AppShell> {
     }
     if (widget.settings?.sync != null) {
       widget.router?.register('sync', _openSync);
+    }
+    if (widget.settings?.workbench != null) {
+      widget.router?.register('workbench', _openWorkbenchRoute);
+    }
+    if (widget.onboarding case final flow?) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _onboard(flow));
+    }
+  }
+
+  /// `_finish_onboarding`'s `restart_ui(target_tab, post_message)`: the
+  /// chosen accent and views apply as config.toml changes; this lands on
+  /// the chosen tab, welcomes, and indexes the chosen folder.
+  Future<void> _onboard(OnboardingFlow flow) async {
+    if (!mounted) return;
+    final done = await flow(context);
+    if (done == null || !mounted) return;
+    final (startup, _) = done;
+    switchTab(AppTab.fromStartupPage(startup));
+    _snack(kOnboardingWelcome);
+    unawaited(widget.library.scan());
+  }
+
+  /// main.py `_on_notification_navigate`, "workbench": Settings → Metadata,
+  /// and for the cards' buttons, Sync again ("sync") or the suggestions
+  /// selected ("suggestions").
+  void _openWorkbenchRoute(String action) {
+    WidgetsBinding.instance
+      ..addPostFrameCallback((_) {
+        if (!mounted) return;
+        final w = widget.settings!.workbench!;
+        openSettings(context, widget.settings!, initial: SettingsPage.metadata);
+        if (action == 'sync') {
+          w.startSync().ignore();
+        } else if (action == 'suggestions') {
+          // After the page's own reload, which would clear the selection's
+          // source rows.
+          w.reload().then((_) => w.reviewSuggestions()).ignore();
+        }
+      })
+      ..ensureVisualUpdate();
+  }
+
+  /// main.py `open_artist_metadata_editor` / `open_genre_metadata_workbench`.
+  void _openWorkbench({String? artist, String? genre}) {
+    final deps = widget.settings!;
+    final w = deps.workbench!;
+    openSettings(context, deps, initial: SettingsPage.metadata);
+    if (artist != null) {
+      w.focusArtist(artist).ignore();
+    } else {
+      w.filterGenre(genre ?? '').ignore();
     }
   }
 
@@ -182,6 +239,9 @@ class AppShellState extends State<AppShell> {
     widget.router?.unregister('library');
     if (widget.downloads != null) widget.router?.unregister('downloads');
     if (widget.settings?.sync != null) widget.router?.unregister('sync');
+    if (widget.settings?.workbench != null) {
+      widget.router?.unregister('workbench');
+    }
     selection.dispose();
     super.dispose();
   }
@@ -336,6 +396,12 @@ class AppShellState extends State<AppShell> {
                 onRedownloadTrack: widget.searchController == null
                     ? null
                     : _redownloadTrack,
+                onEditArtist: widget.settings?.workbench == null
+                    ? null
+                    : (name) => _openWorkbench(artist: name),
+                onCurateGenre: widget.settings?.workbench == null
+                    ? null
+                    : (name) => _openWorkbench(genre: name),
               ),
             ),
           ],

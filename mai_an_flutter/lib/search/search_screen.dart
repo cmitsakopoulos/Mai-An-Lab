@@ -91,7 +91,9 @@ class _SearchScreenState extends State<SearchScreen> {
   void didUpdateWidget(SearchScreen oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.controller != widget.controller) {
-      (oldWidget.controller ?? _ownedController)?.removeListener(_syncQueryText);
+      (oldWidget.controller ?? _ownedController)?.removeListener(
+        _syncQueryText,
+      );
       if (widget.controller == null && _ownedController == null) {
         _ownedController = SearchTabController(
           repository: () => widget.landing.library.repository,
@@ -133,16 +135,15 @@ class _SearchScreenState extends State<SearchScreen> {
       ..hideCurrentSnackBar()
       ..showSnackBar(
         SnackBar(
-          content:
-              icon == null
-                  ? Text(message)
-                  : Row(
-                    children: [
-                      Icon(icon, size: 18, color: accent),
-                      const SizedBox(width: 8),
-                      Expanded(child: Text(message)),
-                    ],
-                  ),
+          content: icon == null
+              ? Text(message)
+              : Row(
+                  children: [
+                    Icon(icon, size: 18, color: accent),
+                    const SizedBox(width: 8),
+                    Expanded(child: Text(message)),
+                  ],
+                ),
         ),
       );
   }
@@ -170,8 +171,9 @@ class _SearchScreenState extends State<SearchScreen> {
 
   void _searchRelease(ReleaseItem rel) {
     final query = '${rel.artist} ${rel.title}'.trim();
-    final mode =
-        rel.type == 'single' ? SearchViewMode.tracks : SearchViewMode.albums;
+    final mode = rel.type == 'single'
+        ? SearchViewMode.tracks
+        : SearchViewMode.albums;
     unawaited(_submitSearch(query, mode: mode));
   }
 
@@ -267,8 +269,8 @@ class _SearchScreenState extends State<SearchScreen> {
                                   children: [
                                     SourceSegmentedBar(
                                       selected: ctrl.selectedSource,
-                                      onChanged:
-                                          (s) => unawaited(ctrl.setSource(s)),
+                                      onChanged: (s) =>
+                                          unawaited(ctrl.setSource(s)),
                                     ),
                                     const SizedBox(width: 8),
                                     ConnectionSignal(state: ctrl.signal),
@@ -311,21 +313,20 @@ class _SearchScreenState extends State<SearchScreen> {
                         padding: const EdgeInsets.only(right: 8),
                         child: AnimatedSwitcher(
                           duration: const Duration(milliseconds: 160),
-                          child:
-                              ctrl.selectionMode
-                                  ? SearchSelectionBar(
-                                    key: const ValueKey('sel_bar'),
-                                    count: ctrl.selectedCount,
-                                    onExit: ctrl.exitSelection,
-                                    onSelectAll: ctrl.selectAllOnPage,
-                                    onDownload: _downloadSelection,
-                                  )
-                                  : _SearchModeBar(
-                                    key: const ValueKey('mode_bar'),
-                                    selected: ctrl.viewMode,
-                                    unifiedPills: widget.unifiedPills,
-                                    onSelect: ctrl.setViewMode,
-                                  ),
+                          child: ctrl.selectionMode
+                              ? SearchSelectionBar(
+                                  key: const ValueKey('sel_bar'),
+                                  count: ctrl.selectedCount,
+                                  onExit: ctrl.exitSelection,
+                                  onSelectAll: ctrl.selectAllOnPage,
+                                  onDownload: _downloadSelection,
+                                )
+                              : _SearchModeBar(
+                                  key: const ValueKey('mode_bar'),
+                                  selected: ctrl.viewMode,
+                                  unifiedPills: widget.unifiedPills,
+                                  onSelect: ctrl.setViewMode,
+                                ),
                         ),
                       ),
                     ],
@@ -337,22 +338,20 @@ class _SearchScreenState extends State<SearchScreen> {
               child: Stack(
                 children: [
                   Positioned.fill(
-                    child:
-                        ctrl.hasActiveQuery
-                            ? _buildSearchResults(context, ctrl)
-                            : ListenableBuilder(
-                              listenable: widget.landing,
-                              builder:
-                                  (context, _) => ListView(
-                                    padding: const EdgeInsets.fromLTRB(
-                                      16,
-                                      10,
-                                      16,
-                                      100,
-                                    ),
-                                    children: _cards(context, ctrl),
-                                  ),
+                    child: ctrl.hasActiveQuery
+                        ? _buildSearchResults(context, ctrl)
+                        : ListenableBuilder(
+                            listenable: widget.landing,
+                            builder: (context, _) => ListView(
+                              padding: const EdgeInsets.fromLTRB(
+                                16,
+                                10,
+                                16,
+                                100,
+                              ),
+                              children: _cards(context, ctrl),
                             ),
+                          ),
                   ),
                   if (ctrl.searchProgressVisible || ctrl.previewCardVisible)
                     Positioned(
@@ -394,10 +393,9 @@ class _SearchScreenState extends State<SearchScreen> {
   }
 
   Widget _buildSearchResults(BuildContext context, SearchTabController ctrl) {
-    final openAuth =
-        widget.onOpenSettings == null
-            ? null
-            : () => widget.onOpenSettings!(SettingsPage.account);
+    final openAuth = widget.onOpenSettings == null
+        ? null
+        : () => widget.onOpenSettings!(SettingsPage.account);
     final hasLocalForMode = switch (ctrl.viewMode) {
       SearchViewMode.all => ctrl.localMatches.isNotEmpty,
       SearchViewMode.tracks => ctrl.localMatches.tracks.isNotEmpty,
@@ -544,12 +542,11 @@ class _SearchScreenState extends State<SearchScreen> {
       out.add(
         HeroResultCard(
           hero: hero,
-          onTapCard:
-              () => ctrl.setViewMode(switch (mType) {
-                'artist' => SearchViewMode.artists,
-                'album' => SearchViewMode.albums,
-                _ => SearchViewMode.tracks,
-              }),
+          onTapCard: () => ctrl.setViewMode(switch (mType) {
+            'artist' => SearchViewMode.artists,
+            'album' => SearchViewMode.albums,
+            _ => SearchViewMode.tracks,
+          }),
           onDownload: () => _downloadOne(hero),
         ),
       );
@@ -580,10 +577,12 @@ class _SearchScreenState extends State<SearchScreen> {
       );
     }
 
-    final otherArtists =
-        (hero != null && hero['media_type'] == 'artist')
-            ? [for (final a in ctrl.artists) if (!identical(a, hero)) a]
-            : ctrl.artists;
+    final otherArtists = (hero != null && hero['media_type'] == 'artist')
+        ? [
+            for (final a in ctrl.artists)
+              if (!identical(a, hero)) a,
+          ]
+        : ctrl.artists;
     if (otherArtists.isNotEmpty) {
       out.add(
         UnifiedArtistShelf(
@@ -624,7 +623,9 @@ class _SearchScreenState extends State<SearchScreen> {
 
     final startIndex = ctrl.currentPage * kSearchItemsPerPage;
     for (final (i, row) in rows.indexed) {
-      out.add(_buildResultRow(ctrl, startIndex + i, row.item, depth: row.depth));
+      out.add(
+        _buildResultRow(ctrl, startIndex + i, row.item, depth: row.depth),
+      );
     }
   }
 
@@ -991,39 +992,45 @@ class _SearchBarField extends StatelessWidget {
       style: const TextStyle(color: Tokens.text, fontSize: 14),
       decoration: InputDecoration(
         hintText: 'Artist, album or track…',
-        prefixIcon: const Icon(Icons.search_rounded, color: Tokens.dim, size: 20),
-        suffixIcon:
-            (searching || hasText)
-                ? Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    if (searching)
-                      Padding(
-                        padding: const EdgeInsets.only(right: 4),
-                        child: SizedBox(
-                          width: 16,
-                          height: 16,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            color: accent,
-                          ),
+        prefixIcon: const Icon(
+          Icons.search_rounded,
+          color: Tokens.dim,
+          size: 20,
+        ),
+        suffixIcon: (searching || hasText)
+            ? Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (searching)
+                    Padding(
+                      padding: const EdgeInsets.only(right: 4),
+                      child: SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: accent,
                         ),
                       ),
-                    if (hasText)
-                      IconButton(
-                        icon: const Icon(
-                          Icons.close_rounded,
-                          color: Tokens.dim,
-                          size: 18,
-                        ),
-                        tooltip: 'Clear search',
-                        onPressed: onClear,
+                    ),
+                  if (hasText)
+                    IconButton(
+                      icon: const Icon(
+                        Icons.close_rounded,
+                        color: Tokens.dim,
+                        size: 18,
                       ),
-                  ],
-                )
-                : null,
+                      tooltip: 'Clear search',
+                      onPressed: onClear,
+                    ),
+                ],
+              )
+            : null,
         isDense: true,
-        contentPadding: const EdgeInsets.symmetric(vertical: 10, horizontal: 14),
+        contentPadding: const EdgeInsets.symmetric(
+          vertical: 10,
+          horizontal: 14,
+        ),
       ),
       onChanged: onChanged,
       onSubmitted: onSubmitted,
@@ -1074,25 +1081,22 @@ class _SearchModeBar extends StatelessWidget {
                 height: 36,
                 alignment: Alignment.center,
                 decoration: BoxDecoration(
-                  color:
-                      mode == selected
-                          ? _accentFor(mode, primary).withValues(alpha: 0.16)
-                          : Tokens.surface2,
+                  color: mode == selected
+                      ? _accentFor(mode, primary).withValues(alpha: 0.16)
+                      : Tokens.surface2,
                   borderRadius: BorderRadius.circular(Tokens.radiusPill),
                   border: Border.all(
-                    color:
-                        mode == selected
-                            ? _accentFor(mode, primary).withValues(alpha: 0.45)
-                            : Tokens.borderSubtle,
+                    color: mode == selected
+                        ? _accentFor(mode, primary).withValues(alpha: 0.45)
+                        : Tokens.borderSubtle,
                   ),
                 ),
                 child: Text(
                   mode.label,
                   style: TextStyle(
-                    color:
-                        mode == selected
-                            ? _accentFor(mode, primary)
-                            : Tokens.dim,
+                    color: mode == selected
+                        ? _accentFor(mode, primary)
+                        : Tokens.dim,
                     fontSize: 12,
                     fontWeight: FontWeight.w600,
                   ),
@@ -1121,9 +1125,7 @@ class _ReleasesRefreshAction extends StatelessWidget {
   static String tooltipFor(ReleaseSyncEntry? sync, {DateTime? now}) {
     final finishedAt = sync?.finishedAt;
     if (finishedAt == null) return 'Check for new releases now';
-    final dt = DateTime.fromMillisecondsSinceEpoch(
-      (finishedAt * 1000).round(),
-    );
+    final dt = DateTime.fromMillisecondsSinceEpoch((finishedAt * 1000).round());
     final ref = now ?? DateTime.now();
     final today = DateTime(ref.year, ref.month, ref.day);
     final dtDay = DateTime(dt.year, dt.month, dt.day);

@@ -414,104 +414,109 @@ void main() {
       expect(config.config.startupPage, 'Search');
     });
 
-    testWidgets('Authentication saves Qobuz and Deezer credentials independently', (
-      tester,
-    ) async {
-      await pumpSettings(tester, initial: SettingsPage.account, height: 1400);
-      expect(find.text('Streaming Credentials'), findsOneWidget);
-      expect(find.text('SAVE CREDENTIALS'), findsNothing);
+    testWidgets(
+      'Authentication saves Qobuz and Deezer credentials independently',
+      (tester) async {
+        await pumpSettings(tester, initial: SettingsPage.account, height: 1400);
+        expect(find.text('Streaming Credentials'), findsOneWidget);
+        expect(find.text('SAVE CREDENTIALS'), findsNothing);
 
-      // Save Deezer ARL alone (without needing Qobuz credentials)
-      await tester.enterText(
-        find.widgetWithText(TextField, 'Deezer ARL Cookie'),
-        'arl_secret_cookie_123',
-      );
-      await tester.pump();
-      expect(find.text('SAVE CREDENTIALS'), findsOneWidget);
-      await tester.tap(find.text('SAVE CREDENTIALS'));
-      await settle(
-        tester,
-        () => config.config.sources.deezer.arl == 'arl_secret_cookie_123',
-      );
-      expect((fileToml()['deezer']! as Map)['arl'], 'arl_secret_cookie_123');
-      expect(find.text('Deezer credentials updated.'), findsOneWidget);
-      expect(find.text('SAVE CREDENTIALS'), findsNothing);
+        // Save Deezer ARL alone (without needing Qobuz credentials)
+        await tester.enterText(
+          find.widgetWithText(TextField, 'Deezer ARL Cookie'),
+          'arl_secret_cookie_123',
+        );
+        await tester.pump();
+        expect(find.text('SAVE CREDENTIALS'), findsOneWidget);
+        await tester.tap(find.text('SAVE CREDENTIALS'));
+        await settle(
+          tester,
+          () => config.config.sources.deezer.arl == 'arl_secret_cookie_123',
+        );
+        expect((fileToml()['deezer']! as Map)['arl'], 'arl_secret_cookie_123');
+        expect(find.text('Deezer credentials updated.'), findsOneWidget);
+        expect(find.text('SAVE CREDENTIALS'), findsNothing);
 
-      // Clear floating SnackBar so it doesn't obscure the floating save pill.
-      ScaffoldMessenger.of(
-        tester.element(find.byType(SettingsScreen)),
-      ).clearSnackBars();
-      await tester.pumpAndSettle();
+        // Clear floating SnackBar so it doesn't obscure the floating save pill.
+        ScaffoldMessenger.of(
+          tester.element(find.byType(SettingsScreen)),
+        ).clearSnackBars();
+        await tester.pumpAndSettle();
 
-      // Save Qobuz credentials alongside Deezer
-      await tester.enterText(
-        find.widgetWithText(TextField, 'Qobuz User ID'),
-        '987654',
-      );
-      await tester.enterText(
-        find.widgetWithText(TextField, 'Auth Token / Password Hash'),
-        'tok_abc',
-      );
-      await tester.pump();
-      await tester.tap(find.text('SAVE CREDENTIALS'));
-      await settle(
-        tester,
-        () =>
-            config.config.sources.qobuz.emailOrUserid == '987654' &&
-            find
-                .text('Qobuz & Deezer credentials updated.')
-                .evaluate()
-                .isNotEmpty,
-      );
-      final q = fileToml()['qobuz']! as Map;
-      expect(q['email_or_userid'], '987654');
-      expect(q['password_or_token'], 'tok_abc');
-      expect(q['use_auth_token'], false);
-      expect(q['app_id'], '312369995');
-      expect(q['secrets'], ['e79f8b9be485692b0e5f9dd895826368']);
-      expect(find.text('Qobuz & Deezer credentials updated.'), findsOneWidget);
-    });
+        // Save Qobuz credentials alongside Deezer
+        await tester.enterText(
+          find.widgetWithText(TextField, 'Qobuz User ID'),
+          '987654',
+        );
+        await tester.enterText(
+          find.widgetWithText(TextField, 'Auth Token / Password Hash'),
+          'tok_abc',
+        );
+        await tester.pump();
+        await tester.tap(find.text('SAVE CREDENTIALS'));
+        await settle(
+          tester,
+          () =>
+              config.config.sources.qobuz.emailOrUserid == '987654' &&
+              find
+                  .text('Qobuz & Deezer credentials updated.')
+                  .evaluate()
+                  .isNotEmpty,
+        );
+        final q = fileToml()['qobuz']! as Map;
+        expect(q['email_or_userid'], '987654');
+        expect(q['password_or_token'], 'tok_abc');
+        expect(q['use_auth_token'], false);
+        expect(q['app_id'], '312369995');
+        expect(q['secrets'], ['e79f8b9be485692b0e5f9dd895826368']);
+        expect(
+          find.text('Qobuz & Deezer credentials updated.'),
+          findsOneWidget,
+        );
+      },
+    );
 
-    testWidgets('Storage Default Download Quality writes general.default_quality', (
-      tester,
-    ) async {
-      final musicDir = Directory.systemTemp.createTempSync('mai_an_music');
-      addTearDown(() => musicDir.deleteSync(recursive: true));
-      const channel = MethodChannel('plugins.flutter.io/path_provider');
-      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-          .setMockMethodCallHandler(channel, (call) async {
-            if (call.method == 'getApplicationSupportDirectory') {
-              return '${dir.path}/support';
-            }
-            if (call.method == 'getApplicationDocumentsDirectory') {
-              return musicDir.path;
-            }
-            return musicDir.path;
-          });
-      addTearDown(() {
+    testWidgets(
+      'Storage Default Download Quality writes general.default_quality',
+      (tester) async {
+        final musicDir = Directory.systemTemp.createTempSync('mai_an_music');
+        addTearDown(() => musicDir.deleteSync(recursive: true));
+        const channel = MethodChannel('plugins.flutter.io/path_provider');
         TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-            .setMockMethodCallHandler(channel, null);
-      });
+            .setMockMethodCallHandler(channel, (call) async {
+              if (call.method == 'getApplicationSupportDirectory') {
+                return '${dir.path}/support';
+              }
+              if (call.method == 'getApplicationDocumentsDirectory') {
+                return musicDir.path;
+              }
+              return musicDir.path;
+            });
+        addTearDown(() {
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+              .setMockMethodCallHandler(channel, null);
+        });
 
-      await pumpSettings(tester, initial: SettingsPage.storage, height: 1200);
-      await settle(
-        tester,
-        () => find.textContaining(musicDir.path).evaluate().isNotEmpty,
-      );
-      expect(find.text('Default Download Quality'), findsOneWidget);
-      expect(find.text('Ask every time'), findsOneWidget);
+        await pumpSettings(tester, initial: SettingsPage.storage, height: 1200);
+        await settle(
+          tester,
+          () => find.textContaining(musicDir.path).evaluate().isNotEmpty,
+        );
+        expect(find.text('Default Download Quality'), findsOneWidget);
+        expect(find.text('Ask every time'), findsOneWidget);
 
-      await tester.tap(find.text('Ask every time'));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('CD Quality \u2014 16-bit FLAC').last);
-      await tester.pumpAndSettle();
-      expect(find.text('SAVE PATHS'), findsOneWidget);
-      await tester.tap(find.text('SAVE PATHS'));
-      await settle(
-        tester,
-        () => config.config.sources.defaultQuality == 'cd',
-      );
-      expect((fileToml()['general']! as Map)['default_quality'], 'cd');
-    });
+        await tester.tap(find.text('Ask every time'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('CD Quality \u2014 16-bit FLAC').last);
+        await tester.pumpAndSettle();
+        expect(find.text('SAVE PATHS'), findsOneWidget);
+        await tester.tap(find.text('SAVE PATHS'));
+        await settle(
+          tester,
+          () => config.config.sources.defaultQuality == 'cd',
+        );
+        expect((fileToml()['general']! as Map)['default_quality'], 'cd');
+      },
+    );
   });
 }

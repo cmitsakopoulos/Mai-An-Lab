@@ -130,10 +130,7 @@ class IoSourceHttpClient implements SourceHttpClient {
     bool verifySsl = true,
     Map<String, String>? defaultHeaders,
     HttpClient Function()? clientFactory,
-  }) : _defaultHeaders = {
-         'User-Agent': kDefaultUserAgent,
-         ...?defaultHeaders,
-       } {
+  }) : _defaultHeaders = {'User-Agent': kDefaultUserAgent, ...?defaultHeaders} {
     _client = clientFactory?.call() ?? HttpClient();
     if (!verifySsl) {
       _client.badCertificateCallback = (_, _, _) => true;

@@ -65,10 +65,9 @@ class DownloadHistoryStore {
       for (final h in existing)
         if ('${h['url'] ?? ''}' != entry['url']) h,
     ];
-    final trimmed =
-        updated.length > maxEntries
-            ? updated.sublist(0, maxEntries)
-            : updated;
+    final trimmed = updated.length > maxEntries
+        ? updated.sublist(0, maxEntries)
+        : updated;
     await save(trimmed);
     return trimmed;
   }

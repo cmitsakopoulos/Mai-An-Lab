@@ -237,4 +237,51 @@ void main() {
       () => Future<void>.delayed(const Duration(milliseconds: 50)),
     );
   });
+
+  testWidgets('workbench entry points: edit artist, curate genre', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(360 * 3, 760 * 3);
+    tester.view.devicePixelRatio = 3;
+    addTearDown(tester.view.reset);
+
+    final lib = LibraryController(() => LibraryRepository.open(path));
+    final browse = BrowseController(lib, views: LibraryView.values);
+    final player = ValueNotifier<PlayerController?>(null);
+    await tester.runAsync(lib.load);
+    final opened = <String>[];
+    Widget screen({bool workbench = true}) => MaterialApp(
+      theme: Tokens.theme(),
+      home: LibraryScreen(
+        controller: lib,
+        browse: browse,
+        player: player,
+        haptics: Haptics(const HapticsConfig(enabled: false)),
+        onEditArtist: workbench ? (n) => opened.add('artist:$n') : null,
+        onCurateGenre: workbench ? (n) => opened.add('genre:$n') : null,
+      ),
+    );
+    Future<void> settle() async {
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 50)),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    await tester.pumpWidget(screen(workbench: false));
+    await tester.tap(find.text('Artists'));
+    await settle();
+    expect(find.byTooltip('Fix artist info'), findsNothing);
+
+    await tester.pumpWidget(screen());
+    await settle();
+    await tester.tap(find.byTooltip('Fix artist info'));
+    await tester.tap(find.text('Genres'));
+    await settle();
+    await tester.tap(find.byTooltip('Curate Electronic in Workbench'));
+    expect(opened, [
+      'artist:An Artist Whose Name Is Long Enough To Wrap Onto Another Line',
+      'genre:Electronic',
+    ]);
+  });
 }

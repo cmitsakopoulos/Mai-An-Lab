@@ -41,30 +41,33 @@ void main() {
     });
     tearDown(() => dir.deleteSync(recursive: true));
 
-    test('deduplicates, moves to front, caps at 10, and handles corrupt JSON', () async {
-      expect(await store.load(), isEmpty);
-      for (var i = 1; i <= 12; i++) {
-        await store.add('query $i');
-      }
-      final list = await store.load();
-      expect(list.length, 10);
-      expect(list.first, 'query 12');
-      expect(list.last, 'query 3');
+    test(
+      'deduplicates, moves to front, caps at 10, and handles corrupt JSON',
+      () async {
+        expect(await store.load(), isEmpty);
+        for (var i = 1; i <= 12; i++) {
+          await store.add('query $i');
+        }
+        final list = await store.load();
+        expect(list.length, 10);
+        expect(list.first, 'query 12');
+        expect(list.last, 'query 3');
 
-      await store.add('query 5');
-      final moved = await store.load();
-      expect(moved.length, 10);
-      expect(moved.first, 'query 5');
-      expect(moved.where((q) => q == 'query 5').length, 1);
+        await store.add('query 5');
+        final moved = await store.load();
+        expect(moved.length, 10);
+        expect(moved.first, 'query 5');
+        expect(moved.where((q) => q == 'query 5').length, 1);
 
-      // 4-space indented JSON matching Python json.dump(..., indent=4).
-      final raw = await store.file.readAsString();
-      expect(raw, contains('    "query 5"'));
+        // 4-space indented JSON matching Python json.dump(..., indent=4).
+        final raw = await store.file.readAsString();
+        expect(raw, contains('    "query 5"'));
 
-      // Corrupt JSON returns empty rather than throwing.
-      await store.file.writeAsString('{broken');
-      expect(await store.load(), isEmpty);
-    });
+        // Corrupt JSON returns empty rather than throwing.
+        await store.file.writeAsString('{broken');
+        expect(await store.load(), isEmpty);
+      },
+    );
   });
 
   group('CachePruner', () {
@@ -75,52 +78,57 @@ void main() {
     });
     tearDown(() => dir.deleteSync(recursive: true));
 
-    test('prunes artwork > 100 keeping newest + .nomedia, prunes previews > 24h, respects 6h cooldown', () async {
-      final now = DateTime.now().add(const Duration(hours: 30));
-      final temp = Directory('${dir.path}/temp')..createSync();
-      final nomedia = File('${temp.path}/.nomedia')..writeAsStringSync('');
-      nomedia.setLastModifiedSync(now.subtract(const Duration(days: 30)));
+    test(
+      'prunes artwork > 100 keeping newest + .nomedia, prunes previews > 24h, respects 6h cooldown',
+      () async {
+        final now = DateTime.now().add(const Duration(hours: 30));
+        final temp = Directory('${dir.path}/temp')..createSync();
+        final nomedia = File('${temp.path}/.nomedia')..writeAsStringSync('');
+        nomedia.setLastModifiedSync(now.subtract(const Duration(days: 30)));
 
-      for (var i = 0; i < 105; i++) {
-        final f = File('${temp.path}/art_$i.jpg')..writeAsStringSync('x');
-        f.setLastModifiedSync(now.subtract(Duration(minutes: 200 - i)));
-      }
+        for (var i = 0; i < 105; i++) {
+          final f = File('${temp.path}/art_$i.jpg')..writeAsStringSync('x');
+          f.setLastModifiedSync(now.subtract(Duration(minutes: 200 - i)));
+        }
 
-      final previews = Directory('${dir.path}/previews')..createSync();
-      final oldPreview = File('${previews.path}/old.mp3')..writeAsStringSync('a');
-      oldPreview.setLastModifiedSync(now.subtract(const Duration(hours: 25)));
-      final newPreview = File('${previews.path}/new.mp3')..writeAsStringSync('b');
-      newPreview.setLastModifiedSync(now.subtract(const Duration(hours: 2)));
-      // Created at wall-clock `DateTime.now()`, which is 30h before `now`.
-      final oldDir = Directory('${previews.path}/old_dir')..createSync();
-      File('${oldDir.path}/x.mp3').writeAsStringSync('c');
+        final previews = Directory('${dir.path}/previews')..createSync();
+        final oldPreview = File('${previews.path}/old.mp3')
+          ..writeAsStringSync('a');
+        oldPreview.setLastModifiedSync(now.subtract(const Duration(hours: 25)));
+        final newPreview = File('${previews.path}/new.mp3')
+          ..writeAsStringSync('b');
+        newPreview.setLastModifiedSync(now.subtract(const Duration(hours: 2)));
+        // Created at wall-clock `DateTime.now()`, which is 30h before `now`.
+        final oldDir = Directory('${previews.path}/old_dir')..createSync();
+        File('${oldDir.path}/x.mp3').writeAsStringSync('c');
 
-      var clock = now;
-      final pruner = CachePruner(dir.path, clock: () => clock);
+        var clock = now;
+        final pruner = CachePruner(dir.path, clock: () => clock);
 
-      expect(await pruner.pruneIfDue(), isTrue);
-      // Cooldown prevents immediate rerun.
-      clock = now.add(const Duration(hours: 5));
-      expect(await pruner.pruneIfDue(), isFalse);
-      // After 6h cooldown it runs again.
-      clock = now.add(const Duration(hours: 6));
-      expect(await pruner.pruneIfDue(), isTrue);
+        expect(await pruner.pruneIfDue(), isTrue);
+        // Cooldown prevents immediate rerun.
+        clock = now.add(const Duration(hours: 5));
+        expect(await pruner.pruneIfDue(), isFalse);
+        // After 6h cooldown it runs again.
+        clock = now.add(const Duration(hours: 6));
+        expect(await pruner.pruneIfDue(), isTrue);
 
-      final remainingArt = temp
-          .listSync()
-          .map((e) => e.uri.pathSegments.last)
-          .toSet();
-      expect(remainingArt.contains('.nomedia'), isTrue);
-      expect(remainingArt.length, 101); // 100 art + .nomedia
-      expect(remainingArt.contains('art_0.jpg'), isFalse);
-      expect(remainingArt.contains('art_4.jpg'), isFalse);
-      expect(remainingArt.contains('art_5.jpg'), isTrue);
-      expect(remainingArt.contains('art_104.jpg'), isTrue);
+        final remainingArt = temp
+            .listSync()
+            .map((e) => e.uri.pathSegments.last)
+            .toSet();
+        expect(remainingArt.contains('.nomedia'), isTrue);
+        expect(remainingArt.length, 101); // 100 art + .nomedia
+        expect(remainingArt.contains('art_0.jpg'), isFalse);
+        expect(remainingArt.contains('art_4.jpg'), isFalse);
+        expect(remainingArt.contains('art_5.jpg'), isTrue);
+        expect(remainingArt.contains('art_104.jpg'), isTrue);
 
-      expect(oldPreview.existsSync(), isFalse);
-      expect(oldDir.existsSync(), isFalse);
-      expect(newPreview.existsSync(), isTrue);
-    });
+        expect(oldPreview.existsSync(), isFalse);
+        expect(oldDir.existsSync(), isFalse);
+        expect(newPreview.existsSync(), isTrue);
+      },
+    );
   });
 
   group('Ownership annotation & local matches', () {
@@ -194,16 +202,19 @@ void main() {
       expect(track.badgeLabel, 'IN LIBRARY');
     });
 
-    test('loadLocalMatches skips closest-match fallback and ranks exact/prefix first', () async {
-      final hit = await loadLocalMatches(repo, 'burial');
-      expect(hit.tracks.length, 3);
-      expect(hit.albums.map((a) => a.title), ['Untrue']);
-      expect(hit.artists.map((a) => a.name), ['Burial']);
+    test(
+      'loadLocalMatches skips closest-match fallback and ranks exact/prefix first',
+      () async {
+        final hit = await loadLocalMatches(repo, 'burial');
+        expect(hit.tracks.length, 3);
+        expect(hit.albums.map((a) => a.title), ['Untrue']);
+        expect(hit.artists.map((a) => a.name), ['Burial']);
 
-      // Unrelated query returns nothing (no fuzzy fallback).
-      final miss = await loadLocalMatches(repo, 'zzzz unrelated');
-      expect(miss.isEmpty, isTrue);
-    });
+        // Unrelated query returns nothing (no fuzzy fallback).
+        final miss = await loadLocalMatches(repo, 'zzzz unrelated');
+        expect(miss.isEmpty, isTrue);
+      },
+    );
   });
 
   group('Artwork URL detection', () {
@@ -255,105 +266,108 @@ void main() {
 
     tearDown(() => dir.deleteSync(recursive: true));
 
-    testWidgets('shows New From Your Artists shelves, manual refresh, recent searches, and local hits', (tester) async {
-      tester.view.physicalSize = const Size(420 * 2, 900 * 2);
-      tester.view.devicePixelRatio = 2;
-      addTearDown(tester.view.reset);
+    testWidgets(
+      'shows New From Your Artists shelves, manual refresh, recent searches, and local hits',
+      (tester) async {
+        tester.view.physicalSize = const Size(420 * 2, 900 * 2);
+        tester.view.devicePixelRatio = 2;
+        addTearDown(tester.view.reset);
 
-      final lib = LibraryController(
-        () => LibraryRepository.open(dbPath, writable: true),
-      );
-      await tester.runAsync(lib.load);
+        final lib = LibraryController(
+          () => LibraryRepository.open(dbPath, writable: true),
+        );
+        await tester.runAsync(lib.load);
 
-      final refreshGate = Completer<int>();
-      var manualTriggered = 0;
-      final scheduler = NewReleasesScheduler(
-        repository: () => lib.repository,
-        isEnabled: () => true,
-        runner: (_, {required refreshAfterS, required triggerType}) {
-          manualTriggered++;
-          return refreshGate.future;
-        },
-      );
-      final landing = LandingController(lib, releasesScheduler: scheduler);
-      final history = SearchHistoryStore(dir.path);
-      await tester.runAsync(() => history.add('burial'));
+        final refreshGate = Completer<int>();
+        var manualTriggered = 0;
+        final scheduler = NewReleasesScheduler(
+          repository: () => lib.repository,
+          isEnabled: () => true,
+          runner: (_, {required refreshAfterS, required triggerType}) {
+            manualTriggered++;
+            return refreshGate.future;
+          },
+        );
+        final landing = LandingController(lib, releasesScheduler: scheduler);
+        final history = SearchHistoryStore(dir.path);
+        await tester.runAsync(() => history.add('burial'));
 
-      final played = <String>[];
-      final opened = <(LibraryView, String)>[];
+        final played = <String>[];
+        final opened = <(LibraryView, String)>[];
 
-      await tester.pumpWidget(
-        MaterialApp(
-          theme: Tokens.theme(),
-          home: Scaffold(
-            body: SearchScreen(
-              landing: landing,
-              searchHistory: history,
-              onPlayTrack: played.add,
-              onOpenInLibrary: (v, q) => opened.add((v, q)),
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: Tokens.theme(),
+            home: Scaffold(
+              body: SearchScreen(
+                landing: landing,
+                searchHistory: history,
+                onPlayTrack: played.add,
+                onOpenInLibrary: (v, q) => opened.add((v, q)),
+              ),
             ),
           ),
-        ),
-      );
+        );
 
-      landing.onShow();
-      await tester.runAsync(
-        () => Future<void>.delayed(const Duration(milliseconds: 50)),
-      );
-      await tester.pumpAndSettle();
+        landing.onShow();
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 50)),
+        );
+        await tester.pumpAndSettle();
 
-      // New From Your Artists shelf rendered with both Albums & EPs and Singles.
-      expect(find.text('New From Your Artists'), findsOneWidget);
-      expect(find.text('Albums & EPs'), findsOneWidget);
-      expect(find.text('Singles'), findsOneWidget);
-      expect(find.text('New EP 1'), findsOneWidget);
-      expect(find.text('Fresh Single'), findsOneWidget);
+        // New From Your Artists shelf rendered with both Albums & EPs and Singles.
+        expect(find.text('New From Your Artists'), findsOneWidget);
+        expect(find.text('Albums & EPs'), findsOneWidget);
+        expect(find.text('Singles'), findsOneWidget);
+        expect(find.text('New EP 1'), findsOneWidget);
+        expect(find.text('Fresh Single'), findsOneWidget);
 
-      // Manual refresh button triggers scheduler and swaps to spinner while running.
-      await tester.tap(find.byIcon(Icons.refresh_rounded));
-      await tester.pump();
-      expect(manualTriggered, 1);
-      expect(find.byType(CircularProgressIndicator), findsOneWidget);
-      refreshGate.complete(1);
-      await tester.runAsync(
-        () => Future<void>.delayed(const Duration(milliseconds: 50)),
-      );
-      await tester.pumpAndSettle();
-      expect(find.byIcon(Icons.refresh_rounded), findsOneWidget);
+        // Manual refresh button triggers scheduler and swaps to spinner while running.
+        await tester.tap(find.byIcon(Icons.refresh_rounded));
+        await tester.pump();
+        expect(manualTriggered, 1);
+        expect(find.byType(CircularProgressIndicator), findsOneWidget);
+        refreshGate.complete(1);
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 50)),
+        );
+        await tester.pumpAndSettle();
+        expect(find.byIcon(Icons.refresh_rounded), findsOneWidget);
 
-      // Recent Searches sheet opens and runs local search on selection.
-      await tester.tap(find.byIcon(Icons.history_rounded));
-      await tester.runAsync(
-        () => Future<void>.delayed(const Duration(milliseconds: 50)),
-      );
-      await tester.pumpAndSettle();
-      expect(find.text('Recent Searches'), findsOneWidget);
-      await tester.tap(find.text('burial'));
-      await tester.runAsync(
-        () => Future<void>.delayed(const Duration(milliseconds: 50)),
-      );
-      await tester.pumpAndSettle();
+        // Recent Searches sheet opens and runs local search on selection.
+        await tester.tap(find.byIcon(Icons.history_rounded));
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 50)),
+        );
+        await tester.pumpAndSettle();
+        expect(find.text('Recent Searches'), findsOneWidget);
+        await tester.tap(find.text('burial'));
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 50)),
+        );
+        await tester.pumpAndSettle();
 
-      // Local matches card ("In your library") shown with results.
-      expect(find.text('In your library'), findsOneWidget);
-      expect(find.text('Archangel'), findsOneWidget);
-      expect(find.text('See all 5 in Library'), findsOneWidget);
+        // Local matches card ("In your library") shown with results.
+        expect(find.text('In your library'), findsOneWidget);
+        expect(find.text('Archangel'), findsOneWidget);
+        expect(find.text('See all 5 in Library'), findsOneWidget);
 
-      // Play button invokes callback.
-      await tester.tap(find.byIcon(Icons.play_circle_outline_rounded).first);
-      expect(played, ['/music/1.flac']);
+        // Play button invokes callback.
+        await tester.tap(find.byIcon(Icons.play_circle_outline_rounded).first);
+        expect(played, ['/music/1.flac']);
 
-      // Clear search returns to landing.
-      await tester.tap(find.byIcon(Icons.close_rounded));
-      await tester.pumpAndSettle();
-      expect(find.text('New From Your Artists'), findsOneWidget);
+        // Clear search returns to landing.
+        await tester.tap(find.byIcon(Icons.close_rounded));
+        await tester.pumpAndSettle();
+        expect(find.text('New From Your Artists'), findsOneWidget);
 
-      landing.dispose();
-      scheduler.dispose();
-      lib.dispose();
-      await tester.runAsync(
-        () => Future<void>.delayed(const Duration(milliseconds: 50)),
-      );
-    });
+        landing.dispose();
+        scheduler.dispose();
+        lib.dispose();
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 50)),
+        );
+      },
+    );
   });
 }
