@@ -79,7 +79,7 @@ Page shell: `GroupBody(children: [sections…])` (spacing 26 by default).
 | 5 | Audio & DSP | done | 7054d02 |
 | 6 | Account, AI Assistant | done | 635f9e6 |
 | 7 | Companion & Sync | done | 22f6752 |
-| 8 | Cleanup and row-level search | done | (see git log) |
+| 8 | Cleanup and row-level search | done | 536b3d4 |
 
 ## Remaining steps in detail
 
