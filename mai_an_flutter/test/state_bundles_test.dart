@@ -297,14 +297,7 @@ void main() {
       tester,
     ) async {
       await pump(tester);
-      expect(
-        find.text('State Backup & Migration (Import / Export)'),
-        findsOneWidget,
-      );
-      expect(
-        find.text('Android Release Build Sandbox Security'),
-        findsOneWidget,
-      );
+      expect(find.text('BACKUP & MIGRATION'), findsOneWidget);
       expect(find.textContaining(kSnapshotName), findsOneWidget);
 
       await tester.tap(find.text('Export State'));

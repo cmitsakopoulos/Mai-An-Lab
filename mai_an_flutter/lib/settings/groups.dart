@@ -79,41 +79,6 @@ class SettingsDropdown extends StatelessWidget {
   }
 }
 
-/// A switch with its label to the right (settings.py's `ft.Row([switch,
-/// text])`).
-class SwitchRow extends StatelessWidget {
-  const SwitchRow({
-    super.key,
-    required this.value,
-    required this.label,
-    required this.onChanged,
-    this.trailing,
-  });
-
-  final bool value;
-  final String label;
-  final ValueChanged<bool>? onChanged;
-  final Widget? trailing;
-
-  @override
-  Widget build(BuildContext context) => Row(
-    children: [
-      AppSwitch(value: value, onChanged: onChanged),
-      const SizedBox(width: 10),
-      Flexible(
-        child: GestureDetector(
-          onTap: onChanged == null ? null : () => onChanged!(!value),
-          child: Text(
-            label,
-            style: const TextStyle(color: Tokens.text, fontSize: 12),
-          ),
-        ),
-      ),
-      if (trailing != null) ...[const SizedBox(width: 10), trailing!],
-    ],
-  );
-}
-
 /// Modern Apple-style grouped inset section with an uppercase accent header
 /// above a clean [GlassCard]. Shared by Appearance, AI Assistant, Audio & DSP.
 class LegacySettingsSection extends StatelessWidget {
@@ -1202,54 +1167,34 @@ class _HapticsGroupState extends State<HapticsGroup> {
   @override
   Widget build(BuildContext context) {
     return GroupBody(
-      spacing: 20,
+      spacing: 26,
       children: [
-        const Dim(
-          'Customize tactile vibration effects for user gestures and '
-          'actions (Android only).',
+        SettingsSection(
+          footer: 'Vibration for gestures and actions. Android only.',
+          children: [
+            SettingsTile.toggle(
+              title: 'Enable Haptic Feedback',
+              leading: const SettingsIcon(
+                Icons.vibration_rounded,
+                color: Tokens.libGenre,
+              ),
+              value: _enabled,
+              onChanged: _toggle,
+            ),
+          ],
         ),
-        SettingsCard(
-          radius: 10,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const CardTitle(Icons.vibration_rounded, 'Global Control'),
-              const SizedBox(height: 10),
-              const Dim(
-                'Enable or completely disable tactile haptic feedback '
-                'vibrations throughout the application.',
+        SettingsSection(
+          header: 'Intensity',
+          footer: 'Each choice plays a sample. None turns that one off.',
+          children: [
+            for (final (k, label, options, _) in HapticsGroup.rows)
+              SettingsPickerTile<String>(
+                title: label,
+                value: _levelsNow[k] ?? '',
+                options: [for (final (v, t) in options) SettingsOption(v, t)],
+                onChanged: (v) => _level(k, v),
               ),
-              const SizedBox(height: 10),
-              SwitchRow(
-                value: _enabled,
-                label: 'Enable Haptic Feedback',
-                onChanged: _toggle,
-              ),
-            ],
-          ),
-        ),
-        SettingsCard(
-          radius: 10,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              const CardTitle(Icons.touch_app_rounded, 'Effect Intensities'),
-              const SizedBox(height: 10),
-              const Dim(
-                'Configure the vibration intensity for each tactile action. '
-                "Select 'None' to disable haptics for that action.",
-              ),
-              for (final (k, label, options, _) in HapticsGroup.rows) ...[
-                const SizedBox(height: 15),
-                SettingsDropdown(
-                  label: label,
-                  value: _levelsNow[k],
-                  options: options,
-                  onChanged: (v) => _level(k, v),
-                ),
-              ],
-            ],
-          ),
+          ],
         ),
       ],
     );
@@ -1322,97 +1267,102 @@ class _PermissionsGroupState extends State<PermissionsGroup> {
     }
   }
 
+  static String _statusLabel(PermissionStatus s) => switch (s) {
+    PermissionStatus.granted => 'Allowed',
+    PermissionStatus.limited => 'Limited',
+    PermissionStatus.provisional => 'Provisional',
+    PermissionStatus.restricted => 'Restricted',
+    PermissionStatus.permanentlyDenied => 'Blocked',
+    PermissionStatus.denied => 'Not Allowed',
+  };
+
   @override
   Widget build(BuildContext context) {
     if (!Platform.isAndroid) {
       return const GroupBody(
-        spacing: 12,
         children: [
-          Dim(
-            'Permissions are managed by the OS on this platform; this panel '
-            'only applies on Android.',
+          SettingsSection(
+            children: [
+              SettingsTile(
+                title: 'Managed by the system',
+                subtitle:
+                    'Permissions are granted in the OS on this platform; '
+                    'this page only applies on Android.',
+              ),
+            ],
           ),
         ],
       );
     }
-    final accent = Theme.of(context).colorScheme.primary;
     return GroupBody(
-      spacing: 12,
+      spacing: 26,
       children: [
-        SettingsCard(
-          padding: 12,
-          radius: 8,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const CardTitle(
-                Icons.info_outline_rounded,
-                'How to Grant Permissions on Android',
-                size: 13,
-              ),
-              const SizedBox(height: 6),
-              const Dim(
-                'Android restricts sensitive permissions for security. To '
-                'grant or manage access:\n'
-                "1. Tap 'OPEN SYSTEM SETTINGS' below to open the Android App "
-                'Info page for Mai An Lab.\n'
-                "2. Tap 'Permissions'.\n"
-                '3. Select the required permission (e.g. Files and Media, '
-                "Microphone) and set it to 'Allow'.",
-                size: 11,
-              ),
-              const SizedBox(height: 8),
-              Align(
-                alignment: Alignment.centerLeft,
-                child: TextButton.icon(
-                  icon: const Icon(Icons.open_in_new_rounded, size: 16),
-                  label: const Text('OPEN SYSTEM SETTINGS'),
-                  onPressed: openAppSettings,
+        SettingsSection(
+          header: 'Access',
+          footer:
+              'Tap a permission to open Android’s App Info, then '
+              'Permissions, and set it to Allow.',
+          children: [
+            for (final (p, label, desc) in PermissionsGroup.specs)
+              SettingsTile(
+                title: label,
+                subtitle: desc,
+                onTap: openAppSettings,
+                trailing: _StatusPill(
+                  label: switch (_status?[p]) {
+                    null => 'Checking…',
+                    final s => _statusLabel(s),
+                  },
+                  ok: _status?[p]?.isGranted ?? false,
+                  pending: _status?[p] == null,
                 ),
               ),
-            ],
-          ),
+          ],
         ),
-        for (final (p, label, desc) in PermissionsGroup.specs)
-          Container(
-            padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(10),
-              border: Border.all(color: Tokens.border),
+        SettingsSection(
+          children: [
+            SettingsTile.action(
+              title: 'Open System Settings',
+              leading: const SettingsIcon(
+                Icons.open_in_new_rounded,
+                color: Tokens.accentGreen,
+              ),
+              onTap: openAppSettings,
             ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        label,
-                        style: const TextStyle(
-                          color: Tokens.text,
-                          fontSize: 14,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ),
-                    switch (_status?[p]) {
-                      null => const Dim('checking…', size: 11),
-                      final s => Text(
-                        s.name.toUpperCase(),
-                        style: TextStyle(
-                          color: s.isGranted ? accent : const Color(0xFFFF8866),
-                          fontSize: 11,
-                        ),
-                      ),
-                    },
-                  ],
-                ),
-                const SizedBox(height: 4),
-                Dim(desc, size: 11),
-              ],
-            ),
-          ),
+          ],
+        ),
       ],
+    );
+  }
+}
+
+class _StatusPill extends StatelessWidget {
+  const _StatusPill({
+    required this.label,
+    required this.ok,
+    required this.pending,
+  });
+
+  final String label;
+  final bool ok, pending;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = pending
+        ? Tokens.dim
+        : ok
+        ? Tokens.accentGreen
+        : Tokens.amber;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: c.withValues(alpha: 0.16),
+        borderRadius: BorderRadius.circular(Tokens.radiusPill),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(color: c, fontSize: 12, fontWeight: FontWeight.w600),
+      ),
     );
   }
 }
@@ -1878,122 +1828,89 @@ class _AdvancedGroupState extends State<AdvancedGroup> {
 
   @override
   Widget build(BuildContext context) {
-    const heading = TextStyle(color: Tokens.dim, fontWeight: FontWeight.bold);
-    final accent = Theme.of(context).colorScheme.primary;
     return GroupBody(
-      spacing: 15,
+      spacing: 26,
       children: [
-        if (d.bundles != null) ...[
-          Text(
-            'State Backup & Migration (Import / Export)',
-            style: heading.copyWith(color: accent),
-          ),
-          SettingsCard(
-            padding: 12,
-            radius: 8,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Icon(Icons.lock_person_rounded, color: accent, size: 20),
-                    const SizedBox(width: 6),
-                    const Expanded(
-                      child: Text(
-                        'Android Release Build Sandbox Security',
-                        style: TextStyle(
-                          color: Tokens.text,
-                          fontSize: 13,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 6),
-                const Dim(
-                  'Because this application runs as a secure production '
-                  'release build, Android isolates all internal databases, '
-                  'config profiles, and search histories inside a restricted '
-                  'sandbox (/data/data/...).\n\n'
-                  'On every startup the app automatically writes a snapshot '
-                  '($kSnapshotName) to your library folder, keeping it in '
-                  'sync with your current state. The desktop offload script '
-                  'picks this up automatically — no manual export required.'
-                  '\n\n'
-                  'You can still manually Export/Import below for ad-hoc use '
-                  'or to restore from a specific point-in-time backup.',
-                ),
-              ],
-            ),
-          ),
-          Wrap(
+        if (d.bundles != null)
+          SettingsSection(
+            header: 'Backup & Migration',
+            footer:
+                'On every startup the app writes a snapshot ($kSnapshotName) '
+                'to your library folder, so the Mac companion picks up your '
+                'state on its own. Export or import here for a point-in-time '
+                'backup.',
             children: [
-              TextButton.icon(
-                icon: const Icon(Icons.ios_share_rounded),
-                label: const Text('Export State'),
-                onPressed: _exportClick,
+              SettingsTile.nav(
+                title: 'Export State',
+                leading: const SettingsIcon(Icons.ios_share_rounded),
+                onTap: _exportClick,
               ),
-              TextButton.icon(
-                icon: const Icon(Icons.file_download_rounded),
-                label: const Text('Import State'),
-                onPressed: _importClick,
+              SettingsTile.nav(
+                title: 'Import State',
+                leading: const SettingsIcon(Icons.file_download_rounded),
+                onTap: _importClick,
               ),
             ],
           ),
-          const Divider(color: Tokens.border, height: 40),
-        ],
-        const Text('Cache Maintenance', style: heading),
-        Wrap(
-          spacing: 10,
+        SettingsSection(
+          header: 'Cache',
           children: [
-            TextButton.icon(
-              icon: const Icon(Icons.image_rounded),
-              label: const Text('Album Cache'),
-              onPressed: () => _snackOf(_clearAlbumCache),
+            SettingsTile.action(
+              title: 'Clear Album Artwork Cache',
+              leading: const SettingsIcon(
+                Icons.image_rounded,
+                color: Tokens.libAlbum,
+              ),
+              onTap: () => _snackOf(_clearAlbumCache),
             ),
-            TextButton.icon(
-              icon: const Icon(Icons.music_note_rounded),
-              label: const Text('Preview Cache'),
-              onPressed: () => _snackOf(_clearPreviewCache),
+            SettingsTile.action(
+              title: 'Clear Preview Cache',
+              leading: const SettingsIcon(
+                Icons.music_note_rounded,
+                color: Tokens.libTrack,
+              ),
+              onTap: () => _snackOf(_clearPreviewCache),
             ),
           ],
         ),
-        const Divider(color: Tokens.border, height: 40),
-        const Text('Raw Configuration (TOML)', style: heading),
-        const Dim(
-          'Directly edit the Streamrip TOML configuration file for advanced '
-          'control.',
-        ),
-        TextField(
-          controller: _editor,
-          minLines: 15,
-          maxLines: 25,
-          style: const TextStyle(
-            color: Tokens.text,
-            fontFamily: 'monospace',
-            fontSize: 11,
-          ),
-          decoration: InputDecoration(
-            filled: true,
-            fillColor: Tokens.surface,
-            contentPadding: const EdgeInsets.all(12),
-            border: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(8),
-              borderSide: const BorderSide(color: Tokens.border),
+        SettingsSection(
+          header: 'Raw Configuration',
+          footer: 'Edits config.toml directly; saved exactly as typed.',
+          children: [
+            SettingsCustomTile(
+              child: TextField(
+                controller: _editor,
+                minLines: 15,
+                maxLines: 25,
+                style: const TextStyle(
+                  color: Tokens.text,
+                  fontFamily: 'monospace',
+                  fontSize: 11,
+                  height: 1.4,
+                ),
+                decoration: InputDecoration(
+                  filled: true,
+                  fillColor: Tokens.surface2,
+                  contentPadding: const EdgeInsets.all(12),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(10),
+                    borderSide: BorderSide.none,
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(10),
+                    borderSide: BorderSide(
+                      color: Theme.of(context).colorScheme.primary,
+                    ),
+                  ),
+                ),
+              ),
             ),
-            enabledBorder: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(8),
-              borderSide: const BorderSide(color: Tokens.border),
+            SettingsTile.action(
+              title: 'Save Configuration',
+              leading: const SettingsIcon(Icons.save_rounded),
+              onTap: _saveConfig,
             ),
-          ),
-        ),
-        Center(
-          child: OnyxButton(
-            label: 'SAVE CONFIG FILE',
-            icon: Icons.terminal,
-            onTap: _saveConfig,
-          ),
+          ],
         ),
       ],
     );
@@ -2054,123 +1971,98 @@ class AboutGroup extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final accent = Theme.of(context).colorScheme.primary;
-    const bold = TextStyle(color: Tokens.text, fontWeight: FontWeight.bold);
-    const divider = Divider(color: Tokens.border, height: 30);
     return GroupBody(
-      spacing: 12,
+      spacing: 26,
       children: [
-        Center(
-          child: Padding(
-            padding: const EdgeInsets.only(bottom: 10),
-            child: Column(
-              children: [
-                Text(
-                  'Mai An Lab',
-                  style: TextStyle(
-                    color: accent,
-                    fontSize: 28,
-                    fontWeight: FontWeight.w900,
-                  ),
+        Padding(
+          padding: const EdgeInsets.only(top: 8),
+          child: Column(
+            children: [
+              Text(
+                'Mai An Lab',
+                style: TextStyle(
+                  color: accent,
+                  fontSize: 28,
+                  fontWeight: FontWeight.w900,
                 ),
-                const SizedBox(height: 4),
-                const Dim('Version $kAppVersion', size: 14),
-              ],
-            ),
+              ),
+              const SizedBox(height: 4),
+              const Text('Version $kAppVersion', style: SettingsStyle.value),
+              const SizedBox(height: 14),
+              const Text(
+                'A high-fidelity audio player and streaming app. Built with '
+                'Flutter, it pairs audiophile-grade playback with DSP '
+                'similarity search, an AI assistant and full library tools.',
+                textAlign: TextAlign.center,
+                style: SettingsStyle.footer,
+              ),
+            ],
           ),
         ),
-        const Text('Summary', style: bold),
-        const Dim(
-          'Mai An Lab is a modern high-fidelity audio player and streaming '
-          'application. Built with Flutter, it pairs audiophile-grade '
-          'playback with intelligent DSP similarity search, AI assistant '
-          'controls, and comprehensive library tools.',
-        ),
-        const SizedBox(height: 5),
-        const Text('Core Features', style: bold),
-        for (final (title, desc, icon) in _features)
-          Container(
-            padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(
-              color: Tokens.surface2,
-              borderRadius: BorderRadius.circular(10),
-              border: Border.all(color: Tokens.border),
-            ),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Icon(icon, color: accent, size: 20),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        title,
-                        style: const TextStyle(
-                          color: Tokens.text,
-                          fontSize: 13,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                      const SizedBox(height: 2),
-                      Dim(desc),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-          ),
-        divider,
-        const Text('Developer', style: bold),
-        const Dim('Christophoros Mitsakopoulos', size: 13),
-        divider,
-        const Text('Credits', style: bold),
-        const Dim('• Streamrip by nathom and community'),
-        const Dim('• Flutter and its community'),
-        const Divider(color: Tokens.border, height: 40),
-        Wrap(
-          alignment: WrapAlignment.center,
+        SettingsSection(
+          header: 'Core Features',
           children: [
-            // No browser hand-off yet: the link is copied instead.
-            TextButton.icon(
-              icon: const Icon(Icons.code_rounded),
-              label: const Text('Project GitHub'),
-              onPressed: () async {
+            for (final (title, desc, icon) in _features)
+              SettingsTile(
+                title: title,
+                subtitle: desc,
+                leading: SettingsIcon(icon),
+              ),
+          ],
+        ),
+        SettingsSection(
+          header: 'Project',
+          children: [
+            SettingsTile.nav(
+              title: 'Project GitHub',
+              value: 'Copy link',
+              leading: const SettingsIcon(
+                Icons.code_rounded,
+                color: Tokens.libArtist,
+              ),
+              onTap: () async {
                 await Clipboard.setData(const ClipboardData(text: github));
                 if (context.mounted) {
                   showSettingsSnack(context, 'Link copied: $github');
                 }
               },
             ),
-            TextButton.icon(
-              icon: const Icon(Icons.gavel_rounded),
-              label: const Text('Licenses'),
-              onPressed: () => showLicensePage(
+            SettingsTile.nav(
+              title: 'Licenses',
+              leading: const SettingsIcon(
+                Icons.gavel_rounded,
+                color: Tokens.dim,
+              ),
+              onTap: () => showLicensePage(
                 context: context,
                 applicationName: 'Mai An Lab',
                 applicationVersion: kAppVersion,
               ),
             ),
-            TextButton.icon(
-              icon: const Icon(Icons.person_rounded),
-              label: const Text('Developer'),
-              onPressed: () => showSettingsSnack(
+            SettingsTile.nav(
+              title: 'Developer',
+              value: 'Christophoros Mitsakopoulos',
+              leading: const SettingsIcon(
+                Icons.person_rounded,
+                color: Tokens.libAlbum,
+              ),
+              onTap: () => showSettingsSnack(
                 context,
                 'Contact: mitsacopoulos@gmail.com',
               ),
             ),
           ],
         ),
-        const SizedBox(height: 20),
-        const Center(
-          child: Text(
-            '2026 Mai An Lab',
-            style: TextStyle(
-              color: Tokens.dim,
-              fontSize: 11,
-              fontStyle: FontStyle.italic,
+        const SettingsSection(
+          header: 'Credits',
+          footer: '2026 Mai An Lab',
+          children: [
+            SettingsTile(title: 'Streamrip', subtitle: 'nathom and community'),
+            SettingsTile(
+              title: 'Flutter',
+              subtitle: 'Flutter and its community',
             ),
-          ),
+          ],
         ),
       ],
     );

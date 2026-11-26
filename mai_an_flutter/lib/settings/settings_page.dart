@@ -332,33 +332,6 @@ class SettingsCard extends StatelessWidget {
   );
 }
 
-/// An icon and a bold title, the head of most cards.
-class CardTitle extends StatelessWidget {
-  const CardTitle(this.icon, this.title, {super.key, this.size = 14});
-
-  final IconData icon;
-  final String title;
-  final double size;
-
-  @override
-  Widget build(BuildContext context) => Row(
-    children: [
-      Icon(icon, color: Tokens.dim, size: 20),
-      const SizedBox(width: 12),
-      Expanded(
-        child: Text(
-          title,
-          style: TextStyle(
-            color: Tokens.text,
-            fontSize: size,
-            fontWeight: FontWeight.bold,
-          ),
-        ),
-      ),
-    ],
-  );
-}
-
 class Dim extends StatelessWidget {
   const Dim(this.text, {super.key, this.size = 12, this.color = Tokens.dim});
 

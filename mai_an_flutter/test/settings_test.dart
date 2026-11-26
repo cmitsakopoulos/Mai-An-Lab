@@ -418,13 +418,13 @@ void main() {
         '[general]\nstartup_page = "Search"\n',
       );
       await tester.dragUntilVisible(
-        find.text('SAVE CONFIG FILE'),
+        find.text('Save Configuration'),
         find.byType(ListView).first,
         const Offset(0, -200),
       );
-      await tester.ensureVisible(find.text('SAVE CONFIG FILE'));
+      await tester.ensureVisible(find.text('Save Configuration'));
       await tester.pump();
-      await tester.tap(find.text('SAVE CONFIG FILE'));
+      await tester.tap(find.text('Save Configuration'));
       await settle(tester, () => config.config.startupPage == 'Search');
       expect(
         File(config.store.path).readAsStringSync(),
