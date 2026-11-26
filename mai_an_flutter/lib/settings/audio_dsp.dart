@@ -10,7 +10,7 @@ import '../library/library_dialogs.dart' show confirmDelete;
 import '../player/dsp.dart';
 import '../ui/sliding_segmented.dart';
 import '../ui/tokens.dart';
-import 'groups.dart' show InsetSwitchRow, SettingsSection;
+import 'groups.dart' show InsetSwitchRow, LegacySettingsSection;
 import 'settings_page.dart';
 
 const kSystemPresets = [
@@ -404,7 +404,7 @@ class _AudioDspGroupState extends State<AudioDspGroup> {
                 ? Tokens.accentGreen
                 : Tokens.amber;
 
-            return SettingsSection(
+            return LegacySettingsSection(
               label: 'ACOUSTIC INDEX',
               trailing: Container(
                 padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
@@ -581,7 +581,7 @@ class _AudioDspGroupState extends State<AudioDspGroup> {
         ),
 
         // 2. Dynamic Punchiness
-        SettingsSection(
+        LegacySettingsSection(
           label: 'DYNAMIC PUNCHINESS',
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -619,7 +619,7 @@ class _AudioDspGroupState extends State<AudioDspGroup> {
         ),
 
         // 2. 5-Band Equalizer
-        SettingsSection(
+        LegacySettingsSection(
           label: 'EQUALIZER',
           trailing: _eq && hasNonZero
               ? GestureDetector(

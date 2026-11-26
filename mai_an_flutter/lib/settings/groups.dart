@@ -18,11 +18,10 @@ import '../player/queue_store.dart';
 import '../scan/library_folder.dart';
 import '../data/state_export.dart' show defaultBundleDir;
 import '../sync/state_bundles.dart' show kSnapshotName;
-import '../ui/app_switch.dart';
 import '../ui/frost.dart';
-import '../ui/sliding_segmented.dart';
 import '../ui/tokens.dart';
 import 'folder_browser.dart';
+import 'settings_kit.dart';
 import 'settings_page.dart';
 
 InputDecoration _fieldDecoration(BuildContext context, String label) {
@@ -117,8 +116,8 @@ class SwitchRow extends StatelessWidget {
 
 /// Modern Apple-style grouped inset section with an uppercase accent header
 /// above a clean [GlassCard]. Shared by Appearance, AI Assistant, Audio & DSP.
-class SettingsSection extends StatelessWidget {
-  const SettingsSection({
+class LegacySettingsSection extends StatelessWidget {
+  const LegacySettingsSection({
     super.key,
     required this.label,
     required this.child,
@@ -804,55 +803,6 @@ class _AppearanceGroupState extends State<AppearanceGroup> {
     );
   }
 
-  Future<void> _pickSort() async {
-    final current = LibrarySort.fromConfig('${_state['default_sort']}');
-    final accent = Theme.of(context).colorScheme.primary;
-    final picked = await showFrostedSheet<LibrarySort>(
-      context: context,
-      showDragHandle: true,
-      builder: (ctx) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Padding(
-              padding: EdgeInsets.fromLTRB(20, 4, 20, 12),
-              child: Text(
-                'Default Library Sort',
-                style: TextStyle(
-                  color: Tokens.text,
-                  fontSize: 16,
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-            ),
-            const Divider(height: 1, color: Tokens.borderSubtle),
-            for (final s in LibrarySort.values)
-              ListTile(
-                title: Text(
-                  s.label,
-                  style: TextStyle(
-                    color: s == current ? accent : Tokens.text,
-                    fontWeight: s == current
-                        ? FontWeight.w600
-                        : FontWeight.w400,
-                  ),
-                ),
-                trailing: s == current
-                    ? Icon(Icons.check_rounded, color: accent, size: 20)
-                    : null,
-                onTap: () => Navigator.pop(ctx, s),
-              ),
-            const SizedBox(height: 8),
-          ],
-        ),
-      ),
-    );
-    if (picked != null && mounted) {
-      _set('default_sort', picked.name);
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
     final accent =
@@ -860,97 +810,43 @@ class _AppearanceGroupState extends State<AppearanceGroup> {
         Theme.of(context).colorScheme.primary;
     final opacity =
         (_state['glass_opacity'] as double?) ?? Tokens.defaultGlassOpacity;
-    final isSolid = opacity >= 0.99;
     final pct = (opacity * 100).round();
-    final sort = LibrarySort.fromConfig('${_state['default_sort']}');
     final unified = _state['pill_style'] == 'unified';
 
+    SettingsTile toggle(String key, String title, {Widget? leading}) =>
+        SettingsTile.toggle(
+          title: title,
+          leading: leading,
+          value: _state[key] == true,
+          onChanged: (v) => _set(key, v),
+        );
+
     return GroupBody(
-      spacing: 20,
+      spacing: 26,
       children: [
-        // 1. Glass & Color
-        _AppearanceSection(
-          label: 'GLASS & COLOR',
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              _GlassPreview(opacity: opacity, accent: accent),
-              const SizedBox(height: 16),
-              Row(
-                children: [
-                  const Text(
-                    'Glass Opacity',
-                    style: TextStyle(
-                      color: Tokens.text,
-                      fontSize: 14,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                  const Spacer(),
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 8,
-                      vertical: 3,
-                    ),
-                    decoration: BoxDecoration(
-                      color: accent.withValues(alpha: 0.16),
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: Text(
-                      isSolid
-                          ? 'Solid (Off)'
-                          : pct == 0
-                          ? '0% (Clear)'
-                          : '$pct%',
-                      style: TextStyle(
-                        color: accent,
-                        fontSize: 12,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-              SliderTheme(
-                data: SliderTheme.of(context).copyWith(
-                  activeTrackColor: accent,
-                  inactiveTrackColor: Tokens.surface2,
-                  thumbColor: Tokens.text,
-                  trackHeight: 4,
-                ),
-                child: Slider(
-                  value: opacity.clamp(
-                    Tokens.minGlassOpacity,
-                    Tokens.maxGlassOpacity,
-                  ),
-                  min: Tokens.minGlassOpacity,
-                  max: Tokens.maxGlassOpacity,
-                  onChanged: (v) => _set('glass_opacity', v, persist: false),
-                  onChangeEnd: (v) => _set('glass_opacity', v, persist: true),
-                ),
-              ),
-              const Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Dim('Crystal Clear', size: 11),
-                  Dim('Balanced', size: 11),
-                  Dim('Solid', size: 11),
-                ],
-              ),
-              const Padding(
-                padding: EdgeInsets.symmetric(vertical: 14),
-                child: Divider(height: 1, color: Tokens.borderSubtle),
-              ),
-              const Text(
-                'Accent Color',
-                style: TextStyle(
-                  color: Tokens.text,
-                  fontSize: 14,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-              const SizedBox(height: 12),
-              Wrap(
+        SettingsSection(
+          header: 'Glass & Color',
+          children: [
+            SettingsCustomTile(
+              child: _GlassPreview(opacity: opacity, accent: accent),
+            ),
+            SettingsSliderTile(
+              title: 'Glass Opacity',
+              value: opacity,
+              min: Tokens.minGlassOpacity,
+              max: Tokens.maxGlassOpacity,
+              valueLabel: opacity >= 0.99
+                  ? 'Solid'
+                  : pct == 0
+                  ? 'Clear'
+                  : '$pct%',
+              marks: const ['Clear', 'Balanced', 'Solid'],
+              onChanged: (v) => _set('glass_opacity', v, persist: false),
+              onChangeEnd: (v) => _set('glass_opacity', v),
+            ),
+            SettingsCustomTile(
+              title: 'Accent Color',
+              child: Wrap(
                 spacing: 12,
                 runSpacing: 12,
                 children: [
@@ -965,220 +861,83 @@ class _AppearanceGroupState extends State<AppearanceGroup> {
                     ),
                 ],
               ),
-            ],
-          ),
+            ),
+            SettingsSegmentedTile<String>(
+              title: 'Category Colors',
+              subtitle: unified
+                  ? 'Artists, albums, tracks and more all use the accent.'
+                  : 'Each library category keeps its own colour.',
+              inline: false,
+              value: unified ? 'unified' : 'category',
+              options: const [
+                SettingsOption('category', 'Multi-Color'),
+                SettingsOption('unified', 'Unified Accent'),
+              ],
+              onChanged: (v) => _set('pill_style', v),
+            ),
+          ],
         ),
-
-        // 2. Navigation & Sort
-        _AppearanceSection(
-          label: 'NAVIGATION & SORT',
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text(
-                'Startup Page',
-                style: TextStyle(
-                  color: Tokens.text,
-                  fontSize: 13,
-                  fontWeight: FontWeight.w600,
+        SettingsSection(
+          header: 'Navigation',
+          children: [
+            SettingsSegmentedTile<String>(
+              title: 'Startup Page',
+              value: '${_state['startup_page']}',
+              options: const [
+                SettingsOption('Library', 'Library'),
+                SettingsOption('Search', 'Search'),
+              ],
+              onChanged: (v) => _set('startup_page', v),
+            ),
+            SettingsPickerTile<LibrarySort>(
+              title: 'Default Library Sort',
+              value: LibrarySort.fromConfig('${_state['default_sort']}'),
+              options: [
+                for (final s in LibrarySort.values) SettingsOption(s, s.label),
+              ],
+              onChanged: (s) => _set('default_sort', s.name),
+            ),
+          ],
+        ),
+        SettingsSection(
+          header: 'Library Views',
+          footer: 'Hidden views leave the Library view bar.',
+          children: [
+            for (final (key, view, label) in const [
+              ('tracks', LibraryView.tracks, 'Tracks'),
+              ('albums', LibraryView.albums, 'Albums'),
+              ('artists', LibraryView.artists, 'Artists'),
+              ('genres', LibraryView.genres, 'Genres'),
+              ('playlists', LibraryView.playlists, 'Playlists'),
+            ])
+              toggle(
+                key,
+                label,
+                leading: SettingsIcon(
+                  ViewBar.icon(view),
+                  color: unified ? accent : (ViewBar.color(view) ?? accent),
                 ),
               ),
-              const SizedBox(height: 8),
-              SlidingSegmented<String>(
-                segments: const [
-                  Segment(
-                    value: 'Library',
-                    label: 'Library',
-                    icon: Icons.library_music_rounded,
-                  ),
-                  Segment(
-                    value: 'Search',
-                    label: 'Search',
-                    icon: Icons.search_rounded,
-                  ),
-                ],
-                selected: '${_state['startup_page']}',
-                onSelect: (v) => _set('startup_page', v),
-                accent: accent,
-                frosted: false,
-                height: 38,
-                fontSize: 12,
-                iconSize: 16,
-              ),
-              const SizedBox(height: 16),
-              const Text(
-                'Category Colors',
-                style: TextStyle(
-                  color: Tokens.text,
-                  fontSize: 13,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-              const SizedBox(height: 8),
-              SlidingSegmented<String>(
-                segments: const [
-                  Segment(value: 'category', label: 'Multi-Color'),
-                  Segment(value: 'unified', label: 'Unified Accent'),
-                ],
-                selected: '${_state['pill_style']}',
-                onSelect: (v) => _set('pill_style', v),
-                accent: accent,
-                frosted: false,
-                height: 38,
-                fontSize: 12,
-              ),
-              const Padding(
-                padding: EdgeInsets.symmetric(vertical: 14),
-                child: Divider(height: 1, color: Tokens.borderSubtle),
-              ),
-              InkWell(
-                borderRadius: BorderRadius.circular(10),
-                onTap: _pickSort,
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 4),
-                  child: Row(
-                    children: [
-                      const Expanded(
-                        child: Text(
-                          'Default Library Sort',
-                          style: TextStyle(
-                            color: Tokens.text,
-                            fontSize: 14,
-                            fontWeight: FontWeight.w500,
-                          ),
-                        ),
-                      ),
-                      Text(
-                        sort.label,
-                        style: TextStyle(
-                          color: accent,
-                          fontSize: 13,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                      const SizedBox(width: 4),
-                      const Icon(
-                        Icons.chevron_right_rounded,
-                        color: Tokens.dim,
-                        size: 18,
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ],
-          ),
+          ],
         ),
-
-        // 3. Library Views (tappable icon chips)
-        _AppearanceSection(
-          label: 'LIBRARY VIEWS',
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Dim(
-                'Tap to show or hide icons in the Library view bar.',
-                size: 12,
-              ),
-              const SizedBox(height: 12),
-              Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                children: [
-                  for (final (key, view, label, experimental) in const [
-                    ('tracks', LibraryView.tracks, 'Tracks', false),
-                    ('albums', LibraryView.albums, 'Albums', false),
-                    ('artists', LibraryView.artists, 'Artists', false),
-                    ('genres', LibraryView.genres, 'Genres', false),
-                    ('playlists', LibraryView.playlists, 'Playlists', false),
-                  ])
-                    _ViewToggleChip(
-                      icon: ViewBar.icon(view),
-                      label: label,
-                      color: unified ? accent : (ViewBar.color(view) ?? accent),
-                      selected: _state[key] == true,
-                      experimental: experimental,
-                      onTap: () => _set(key, !(_state[key] == true)),
-                    ),
-                ],
-              ),
-            ],
-          ),
+        SettingsSection(
+          header: 'Search Landing',
+          footer: 'What the Search tab shows before you type.',
+          children: [
+            toggle('new_releases', 'New From Your Artists'),
+            toggle('most_listened', 'Most Listened Tracks'),
+            toggle('top_artists', 'Most Listened Artists'),
+            toggle('top_genres', 'Most Listened Genres'),
+            toggle('library_stats', 'Library Stats'),
+          ],
         ),
-
-        // 4. Search Landing & AI
-        _AppearanceSection(
-          label: 'SEARCH LANDING & AI',
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-          child: Column(
-            children: [
-              _InsetSwitch(
-                label: 'New From Your Artists',
-                value: _state['new_releases'] == true,
-                onChanged: (v) => _set('new_releases', v),
-              ),
-              const Divider(height: 1, color: Tokens.borderSubtle),
-              _InsetSwitch(
-                label: 'Most Listened Tracks',
-                value: _state['most_listened'] == true,
-                onChanged: (v) => _set('most_listened', v),
-              ),
-              const Divider(height: 1, color: Tokens.borderSubtle),
-              _InsetSwitch(
-                label: 'Most Listened Artists',
-                value: _state['top_artists'] == true,
-                onChanged: (v) => _set('top_artists', v),
-              ),
-              const Divider(height: 1, color: Tokens.borderSubtle),
-              _InsetSwitch(
-                label: 'Most Listened Genres',
-                value: _state['top_genres'] == true,
-                onChanged: (v) => _set('top_genres', v),
-              ),
-              const Divider(height: 1, color: Tokens.borderSubtle),
-              _InsetSwitch(
-                label: 'Library Stats',
-                value: _state['library_stats'] == true,
-                onChanged: (v) => _set('library_stats', v),
-              ),
-              const Divider(height: 1, color: Tokens.borderSubtle),
-              _InsetSwitch(
-                label: 'Enable Jarvis Tab',
-                value: _state['jarvis'] == true,
-                onChanged: (v) => _set('jarvis', v),
-              ),
-            ],
-          ),
+        SettingsSection(
+          header: 'Assistant',
+          children: [toggle('jarvis', 'Enable Jarvis Tab')],
         ),
-
-        const SizedBox(height: 24),
       ],
     );
   }
-}
-
-class _AppearanceSection extends StatelessWidget {
-  const _AppearanceSection({
-    required this.label,
-    required this.child,
-    this.padding = const EdgeInsets.all(16),
-  });
-
-  final String label;
-  final Widget child;
-  final EdgeInsetsGeometry padding;
-
-  @override
-  Widget build(BuildContext context) => Column(
-    crossAxisAlignment: CrossAxisAlignment.start,
-    children: [
-      Padding(
-        padding: const EdgeInsets.only(left: 4, bottom: 8),
-        child: AccentLabel(label, size: 11),
-      ),
-      GlassCard(padding: padding, child: child),
-    ],
-  );
 }
 
 class _GlassPreview extends StatelessWidget {
@@ -1324,96 +1083,6 @@ class _GlassPreview extends StatelessWidget {
       ),
     );
   }
-}
-
-class _ViewToggleChip extends StatelessWidget {
-  const _ViewToggleChip({
-    required this.icon,
-    required this.label,
-    required this.color,
-    required this.selected,
-    required this.experimental,
-    required this.onTap,
-  });
-
-  final IconData icon;
-  final String label;
-  final Color color;
-  final bool selected;
-  final bool experimental;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: AnimatedContainer(
-        duration: Tokens.motionFast,
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-        decoration: BoxDecoration(
-          color: selected ? color.withValues(alpha: 0.18) : Tokens.surface2,
-          borderRadius: BorderRadius.circular(Tokens.radiusPill),
-          border: Border.all(
-            color: selected
-                ? color.withValues(alpha: 0.55)
-                : Tokens.borderSubtle,
-            width: 1,
-          ),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(icon, size: 16, color: selected ? color : Tokens.dim),
-            const SizedBox(width: 6),
-            Text(
-              label,
-              style: TextStyle(
-                color: selected ? Tokens.text : Tokens.dim,
-                fontSize: 12,
-                fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
-              ),
-            ),
-            if (experimental) ...[
-              const SizedBox(width: 6),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
-                decoration: BoxDecoration(
-                  color: Tokens.amber,
-                  borderRadius: BorderRadius.circular(4),
-                ),
-                child: const Text(
-                  'BETA',
-                  style: TextStyle(
-                    color: Tokens.bg,
-                    fontSize: 8,
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
-              ),
-            ],
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _InsetSwitch extends StatelessWidget {
-  const _InsetSwitch({
-    required this.label,
-    required this.value,
-    required this.onChanged,
-  });
-
-  final String label;
-  final bool value;
-  final ValueChanged<bool> onChanged;
-
-  @override
-  Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.symmetric(vertical: 6),
-    child: InsetSwitchRow(label: label, value: value, onChanged: onChanged),
-  );
 }
 
 class _AccentDot extends StatelessWidget {

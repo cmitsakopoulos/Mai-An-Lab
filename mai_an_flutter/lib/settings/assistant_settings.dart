@@ -410,7 +410,7 @@ class _AssistantSettingsGroupState extends State<AssistantSettingsGroup> {
       saveIcon: Icons.smart_toy_rounded,
       children: [
         // 1. Intelligence & Provider
-        SettingsSection(
+        LegacySettingsSection(
           label: 'JARVIS INTELLIGENCE',
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -457,7 +457,7 @@ class _AssistantSettingsGroupState extends State<AssistantSettingsGroup> {
         ),
 
         // 2. Connection
-        SettingsSection(
+        LegacySettingsSection(
           label: isGemini
               ? 'GEMINI CONNECTION'
               : 'LOCAL SERVER (OLLAMA / LM STUDIO)',
@@ -588,7 +588,7 @@ class _AssistantSettingsGroupState extends State<AssistantSettingsGroup> {
         ),
 
         // 3. Personality & System Directive
-        SettingsSection(
+        LegacySettingsSection(
           label: 'PERSONALITY & DIRECTIVE',
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
