@@ -18,6 +18,7 @@ import '../player/queue_store.dart';
 import '../scan/library_folder.dart';
 import '../data/state_export.dart' show defaultBundleDir;
 import '../sync/state_bundles.dart' show kSnapshotName;
+import '../ui/app_switch.dart';
 import '../ui/frost.dart';
 import '../ui/sliding_segmented.dart';
 import '../ui/tokens.dart';
@@ -98,11 +99,7 @@ class SwitchRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Row(
     children: [
-      Switch(
-        value: value,
-        activeThumbColor: Theme.of(context).colorScheme.primary,
-        onChanged: onChanged,
-      ),
+      AppSwitch(value: value, onChanged: onChanged),
       const SizedBox(width: 10),
       Flexible(
         child: GestureDetector(
@@ -196,11 +193,7 @@ class InsetSwitchRow extends StatelessWidget {
             ),
           ),
           const SizedBox(width: 12),
-          Switch(
-            value: value,
-            activeThumbColor: Theme.of(context).colorScheme.primary,
-            onChanged: onChanged,
-          ),
+          AppSwitch(value: value, onChanged: onChanged),
         ],
       ),
     ),
@@ -1417,15 +1410,9 @@ class _InsetSwitch extends StatelessWidget {
   final ValueChanged<bool> onChanged;
 
   @override
-  Widget build(BuildContext context) => SwitchListTile(
-    value: value,
-    onChanged: onChanged,
-    dense: true,
-    contentPadding: EdgeInsets.zero,
-    title: Text(
-      label,
-      style: const TextStyle(color: Tokens.text, fontSize: 14),
-    ),
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.symmetric(vertical: 6),
+    child: InsetSwitchRow(label: label, value: value, onChanged: onChanged),
   );
 }
 

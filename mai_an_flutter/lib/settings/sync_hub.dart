@@ -15,6 +15,7 @@ import '../sync/offload_library.dart';
 import '../sync/problem_reports.dart';
 import '../sync/state_bundles.dart';
 import '../sync/sync_manager.dart';
+import '../ui/app_switch.dart';
 import '../ui/tokens.dart';
 import '../ui/page_header.dart';
 import 'settings_page.dart';
@@ -515,10 +516,9 @@ class SyncHubGroupState extends State<SyncHubGroup> {
         Icons.phonelink_setup_rounded,
         accent,
         'Companion Sync',
-        Switch(
+        AppSwitch(
           key: const ValueKey('sync-switch'),
           value: enabled,
-          activeTrackColor: accent,
           onChanged: _toggle,
         ),
       ),
@@ -662,10 +662,9 @@ class SyncHubGroupState extends State<SyncHubGroup> {
               ],
             ),
           ),
-          Switch(
+          AppSwitch(
             key: const ValueKey('ask-switch'),
             value: m.askBeforeDownload,
-            activeTrackColor: accent,
             onChanged: (v) => unawaited(m.setAskBeforeDownload(v)),
           ),
         ],

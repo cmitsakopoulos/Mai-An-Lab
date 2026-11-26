@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
 import '../../library/library_controller.dart';
+import '../../ui/app_switch.dart';
 import '../../ui/frost.dart';
 import '../../ui/tokens.dart';
 import '../autoplay.dart';
@@ -674,9 +675,8 @@ void _showAutoPlaySheet(
                       ),
                     ),
                     if (available)
-                      Switch(
+                      AppSwitch(
                         value: ap.enabled,
-                        activeThumbColor: accent,
                         onChanged: (v) => ap.setMode(v),
                       ),
                   ],

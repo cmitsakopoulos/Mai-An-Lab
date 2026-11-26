@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../sources/source_config.dart';
+import '../ui/app_switch.dart';
 import '../ui/tokens.dart';
 import 'settings_page.dart';
 
@@ -267,9 +268,8 @@ class _AuthGroupState extends State<AuthGroup> {
               const SizedBox(height: 12),
               Row(
                 children: [
-                  Switch(
+                  AppSwitch(
                     value: _useToken,
-                    activeThumbColor: accent,
                     onChanged: (v) => setState(() => _useToken = v),
                   ),
                   const SizedBox(width: 10),

@@ -214,12 +214,14 @@ class GlassCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final r = BorderRadius.circular(radius);
     Widget body = Padding(padding: padding, child: child);
-    if (onTap != null) {
-      body = Material(
-        type: MaterialType.transparency,
-        child: InkWell(borderRadius: r, onTap: onTap, child: body),
-      );
-    }
+    // Always a Material: ink from rows inside the card otherwise paints on
+    // the page beneath the card's opaque fill and never shows.
+    body = Material(
+      type: MaterialType.transparency,
+      child: onTap != null
+          ? InkWell(borderRadius: r, onTap: onTap, child: body)
+          : body,
+    );
     return Container(
       margin: margin,
       decoration: cardDecoration(

@@ -139,6 +139,17 @@ abstract final class Tokens {
         ),
       ),
       dividerColor: border,
+      // A fallback for any Material [Switch]; settings use AppSwitch. Without
+      // it, M3 draws the off thumb in `outline` (near-black here) and the on
+      // thumb in the seeded `onPrimary`.
+      switchTheme: SwitchThemeData(
+        thumbColor: const WidgetStatePropertyAll(text),
+        trackColor: WidgetStateProperty.resolveWith(
+          (s) =>
+              s.contains(WidgetState.selected) ? accentColor : surfaceElevated,
+        ),
+        trackOutlineColor: const WidgetStatePropertyAll(Colors.transparent),
+      ),
       sliderTheme: SliderThemeData(
         activeTrackColor: accentColor,
         inactiveTrackColor: surface2,
