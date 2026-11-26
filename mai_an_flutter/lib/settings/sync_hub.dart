@@ -15,9 +15,9 @@ import '../sync/offload_library.dart';
 import '../sync/problem_reports.dart';
 import '../sync/state_bundles.dart';
 import '../sync/sync_manager.dart';
-import '../ui/app_switch.dart';
+import '../library/library_dialogs.dart' show confirmDelete;
 import '../ui/tokens.dart';
-import '../ui/page_header.dart';
+import 'settings_kit.dart';
 import 'settings_page.dart';
 
 /// ui/views/sync_hub.py, the Android view: Settings → Companion & Sync.
@@ -472,272 +472,186 @@ class SyncHubGroupState extends State<SyncHubGroup> {
     final findLabel = _finding
         ? 'Searching…'
         : (connected ? 'Test Connection' : 'Find Mac');
-
-    Widget card(List<Widget> children) => SettingsCard(
-      radius: Tokens.radiusCard,
-      borderColor: Tokens.borderSubtle,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          for (final (i, c) in children.indexed) ...[
-            if (i > 0) const SizedBox(height: 10),
-            c,
-          ],
-        ],
-      ),
+    final spinner = SizedBox(
+      width: 18,
+      height: 18,
+      child: CircularProgressIndicator(strokeWidth: 2, color: accent),
     );
 
-    Widget head(IconData icon, Color color, String title, [Widget? trailing]) =>
-        Row(
-          children: [
-            Icon(icon, color: color, size: 22),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(
-                title,
-                style: const TextStyle(
-                  color: Tokens.text,
-                  fontSize: 15,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-            ),
-            ?trailing,
-          ],
-        );
-
-    final pillButton = FilledButton.styleFrom(
-      backgroundColor: accent,
-      foregroundColor: Tokens.bg,
-    );
-
-    final connection = card([
-      head(
-        Icons.phonelink_setup_rounded,
-        accent,
-        'Companion Sync',
-        AppSwitch(
-          key: const ValueKey('sync-switch'),
+    final connection = SettingsSection(
+      header: 'Connection',
+      footer:
+          'Automatically discovers your Mac Companion over Wi-Fi, hotspot, '
+          'or USB to sync tracks and offload acoustic analysis. Pauses after '
+          '15 minutes without use to save battery.',
+      children: [
+        SettingsTile.toggle(
+          switchKey: const ValueKey('sync-switch'),
+          leading: const SettingsIcon(Icons.phonelink_setup_rounded),
+          title: 'Companion Sync',
           value: enabled,
           onChanged: _toggle,
         ),
-      ),
-      Row(
-        children: [
-          Container(
-            width: 10,
-            height: 10,
-            decoration: BoxDecoration(color: dot, shape: BoxShape.circle),
-          ),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(
-              status,
-              style: const TextStyle(color: Tokens.dim, fontSize: 13),
-            ),
-          ),
-        ],
-      ),
-      const Dim(
-        'Automatically discovers your Mac Companion over Wi-Fi, hotspot, or '
-        'USB to sync tracks and offload acoustic analysis. Pauses after 15 '
-        'minutes without use to save battery.',
-      ),
-      Wrap(
-        spacing: 8,
-        runSpacing: 4,
-        children: [
-          FilledButton.icon(
-            style: pillButton,
-            icon: const Icon(Icons.radar_rounded, size: 18),
-            label: Text(findLabel),
-            onPressed: _finding ? null : _find,
-          ),
-          if (linked)
-            TextButton.icon(
-              icon: const Icon(Icons.link_off_rounded, size: 18),
-              label: const Text('Unpair Device'),
-              onPressed: () => unawaited(m.unpair()),
-            ),
-          TextButton.icon(
-            icon: const Icon(Icons.router_rounded, size: 18),
-            label: Text(_manual ? 'Hide Manual IP' : 'Manual IP Connection…'),
-            onPressed: () => setState(() => _manual = !_manual),
-          ),
-        ],
-      ),
-      if (_diag.isNotEmpty)
-        SelectableText(
-          _diag,
-          style: TextStyle(
-            color: _diagOk ? Tokens.accentGreen : Tokens.dim,
-            fontSize: 12,
+        SettingsCustomTile(
+          child: Row(
+            children: [
+              Container(
+                width: 10,
+                height: 10,
+                decoration: BoxDecoration(color: dot, shape: BoxShape.circle),
+              ),
+              const SizedBox(width: 10),
+              Expanded(child: Text(status, style: SettingsStyle.value)),
+            ],
           ),
         ),
-      if (_manual)
-        Row(
-          children: [
-            Expanded(
-              child: TextField(
-                key: const ValueKey('manual-ip'),
-                controller: _ip,
-                keyboardType: TextInputType.url,
-                onSubmitted: (_) => _connectManual(),
-                decoration: InputDecoration(
-                  labelText: 'Manual Mac IP',
-                  hintText: 'e.g. 192.168.1.50 or 192.168.1.50:8946',
-                  isDense: true,
-                  filled: false,
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(8),
-                    borderSide: const BorderSide(color: Tokens.border),
-                  ),
-                ),
+        SettingsTile(
+          leading: const SettingsIcon(Icons.radar_rounded),
+          title: findLabel,
+          titleColor: accent,
+          trailing: _finding ? spinner : null,
+          onTap: _finding ? null : _find,
+        ),
+        if (linked)
+          SettingsTile.action(
+            leading: const SettingsIcon(
+              Icons.link_off_rounded,
+              color: Tokens.accentRed,
+            ),
+            title: 'Unpair Device',
+            destructive: true,
+            onTap: _confirmUnpair,
+          ),
+        SettingsTile(
+          leading: const SettingsIcon(Icons.router_rounded),
+          title: _manual ? 'Hide Manual IP' : 'Manual IP Connection…',
+          titleColor: accent,
+          trailing: AnimatedRotation(
+            turns: _manual ? 0.25 : 0,
+            duration: Tokens.motionFast,
+            child: Icon(
+              Icons.chevron_right_rounded,
+              color: Tokens.dim.withValues(alpha: 0.6),
+              size: 20,
+            ),
+          ),
+          onTap: () => setState(() => _manual = !_manual),
+        ),
+        if (_manual) ...[
+          SettingsCustomTile(
+            child: ModernTextField(
+              fieldKey: const ValueKey('manual-ip'),
+              label: 'Manual Mac IP',
+              controller: _ip,
+              hint: 'e.g. 192.168.1.50 or 192.168.1.50:8946',
+            ),
+          ),
+          SettingsTile.action(
+            leading: const SettingsIcon(Icons.link_rounded),
+            title: 'Connect',
+            onTap: _connectManual,
+          ),
+        ],
+        if (_diag.isNotEmpty)
+          SettingsCustomTile(
+            child: SelectableText(
+              _diag,
+              style: SettingsStyle.subtitle.copyWith(
+                color: _diagOk ? Tokens.accentGreen : Tokens.dim,
               ),
             ),
-            const SizedBox(width: 8),
-            FilledButton.icon(
-              style: pillButton,
-              icon: const Icon(Icons.link_rounded, size: 18),
-              label: const Text('Connect'),
-              onPressed: _connectManual,
-            ),
-          ],
-        ),
-    ]);
+          ),
+      ],
+    );
 
-    final transfers = card([
-      head(
-        Icons.phonelink_ring_rounded,
-        Tokens.accentGreen,
-        'Transfers from Mac',
-      ),
-      Text(
-        _transfersText,
-        style: const TextStyle(color: Tokens.dim, fontSize: 13),
-      ),
-      Wrap(
-        spacing: 8,
-        runSpacing: 4,
-        children: [
-          FilledButton.icon(
-            style: FilledButton.styleFrom(
-              backgroundColor: Tokens.accentGreen,
-              foregroundColor: Tokens.bg,
-            ),
-            icon: const Icon(Icons.download_for_offline_rounded, size: 18),
-            label: Text(
-              _pending > 0
-                  ? 'Download ($_pending) from Mac'
-                  : 'Download from Mac',
-            ),
-            onPressed: linked && _pending > 0 ? _downloadTransfers : null,
+    final transfers = SettingsSection(
+      header: 'Transfers from Mac',
+      footer:
+          'To send the other way, long-press a track or album and choose '
+          'Send to your Mac.',
+      children: [
+        SettingsTile.action(
+          leading: const SettingsIcon(
+            Icons.download_for_offline_rounded,
+            color: Tokens.accentGreen,
           ),
-          TextButton.icon(
-            icon: const Icon(Icons.refresh_rounded, size: 18),
-            label: const Text('Check Pending'),
-            onPressed: linked ? refreshPending : null,
-          ),
-        ],
-      ),
-      Row(
-        children: [
-          const Expanded(
+          title: _pending > 0
+              ? 'Download ($_pending) from Mac'
+              : 'Download from Mac',
+          subtitle: _transfersText,
+          onTap: linked && _pending > 0 ? _downloadTransfers : null,
+        ),
+        SettingsTile.action(
+          leading: const SettingsIcon(Icons.refresh_rounded),
+          title: 'Check Pending',
+          onTap: linked ? refreshPending : null,
+        ),
+        SettingsTile.toggle(
+          switchKey: const ValueKey('ask-switch'),
+          title: 'Ask before downloading',
+          subtitle: 'Off: tracks sent from the Mac download on their own',
+          value: m.askBeforeDownload,
+          onChanged: (v) => unawaited(m.setAskBeforeDownload(v)),
+        ),
+      ],
+    );
+
+    final offload = SettingsSection(
+      header: 'DSP Acoustic Offload',
+      footer:
+          'Offload acoustic feature extraction (BPM, timbre, key) to your '
+          'Mac for high-speed batch processing.',
+      children: [
+        SettingsTile.action(
+          key: const ValueKey('offload'),
+          leading: const SettingsIcon(Icons.bolt_rounded, color: Tokens.amber),
+          title: 'Offload to Mac',
+          subtitle: _dspText,
+          // Never while one runs (a second would race it), nor once the
+          // count says every track is analysed.
+          onTap: linked && !_offloading && _missing != 0 ? startOffload : null,
+        ),
+        if (_offloading) ...[
+          SettingsCustomTile(
             child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                Text(
-                  'Ask before downloading',
-                  style: TextStyle(
-                    color: Tokens.text,
-                    fontSize: 13,
-                    fontWeight: FontWeight.w600,
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(2),
+                  child: LinearProgressIndicator(
+                    value: _offloadProgress,
+                    minHeight: 4,
+                    color: accent,
+                    backgroundColor: Tokens.surface2,
                   ),
                 ),
-                SizedBox(height: 1),
-                Dim(
-                  'Off: tracks sent from the Mac download on their own',
-                  size: 11,
-                ),
+                const SizedBox(height: 8),
+                Text(_offloadDetail, style: SettingsStyle.subtitle),
               ],
             ),
           ),
-          AppSwitch(
-            key: const ValueKey('ask-switch'),
-            value: m.askBeforeDownload,
-            onChanged: (v) => unawaited(m.setAskBeforeDownload(v)),
+          SettingsTile.action(
+            title: 'Cancel',
+            destructive: true,
+            onTap: _cancelOffloadTap,
           ),
         ],
-      ),
-      const Dim(
-        'To send the other way, long-press a track or album and choose Send '
-        'to your Mac.',
-      ),
-    ]);
+      ],
+    );
 
-    final offload = card([
-      head(Icons.graphic_eq_rounded, Tokens.amber, 'DSP Acoustic Offload'),
-      Text(_dspText, style: const TextStyle(color: Tokens.text, fontSize: 13)),
-      if (_offloading) ...[
-        ClipRRect(
-          borderRadius: BorderRadius.circular(2),
-          child: LinearProgressIndicator(
-            value: _offloadProgress,
-            minHeight: 4,
-            color: accent,
-            backgroundColor: Tokens.surface,
-          ),
-        ),
-        Text(
-          _offloadDetail,
-          style: const TextStyle(color: Tokens.dim, fontSize: 12),
+    final backup = SettingsSection(
+      header: 'Library State Backup',
+      footer:
+          'Back up your library database, playback history, and similarity '
+          'graph to your Mac.',
+      children: [
+        SettingsTile.action(
+          leading: const SettingsIcon(Icons.cloud_upload_rounded),
+          title: 'Send Backup to Mac',
+          onTap: linked ? uploadBundle : null,
         ),
       ],
-      Wrap(
-        spacing: 8,
-        runSpacing: 4,
-        children: [
-          FilledButton.icon(
-            key: const ValueKey('offload'),
-            style: pillButton,
-            icon: const Icon(Icons.bolt_rounded, size: 18),
-            label: const Text('Offload to Mac'),
-            // Never while one runs (a second would race it), nor once the
-            // count says every track is analysed.
-            onPressed: linked && !_offloading && _missing != 0
-                ? startOffload
-                : null,
-          ),
-          if (_offloading)
-            TextButton.icon(
-              icon: const Icon(Icons.cancel_rounded, size: 18),
-              label: const Text('Cancel'),
-              onPressed: _cancelOffloadTap,
-            ),
-        ],
-      ),
-      const Dim(
-        'Offload acoustic feature extraction (BPM, timbre, key) to your Mac '
-        'for high-speed batch processing.',
-      ),
-    ]);
-
-    final backup = card([
-      head(Icons.archive_rounded, accent, 'Library State Backup'),
-      const Dim(
-        'Back up your library database, playback history, and similarity '
-        'graph to your Mac.',
-      ),
-      Wrap(
-        children: [
-          TextButton.icon(
-            icon: const Icon(Icons.cloud_upload_rounded, size: 18),
-            label: const Text('Send Backup to Mac'),
-            onPressed: linked ? uploadBundle : null,
-          ),
-        ],
-      ),
-    ]);
+    );
 
     final updater = m.updater;
     final appUpdate = updater == null
@@ -749,41 +663,47 @@ class SyncHubGroupState extends State<SyncHubGroup> {
               final hot =
                   u.state != AppUpdateState.none &&
                   u.state != AppUpdateState.upToDate;
-              return card([
-                head(
-                  Icons.system_update_rounded,
-                  hot ? Tokens.accent : Tokens.dim,
-                  'App Updates',
-                  hot
-                      ? Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 8,
-                            vertical: 2,
+              return SettingsSection(
+                header: 'App Updates',
+                headerTrailing: hot
+                    ? Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 2,
+                        ),
+                        decoration: BoxDecoration(
+                          color: Tokens.accent,
+                          borderRadius: BorderRadius.circular(99),
+                        ),
+                        child: Text(
+                          u.offerLabel,
+                          style: const TextStyle(
+                            color: Tokens.bg,
+                            fontSize: 11,
+                            fontWeight: FontWeight.w700,
                           ),
-                          decoration: BoxDecoration(
-                            color: Tokens.accent,
-                            borderRadius: BorderRadius.circular(99),
-                          ),
-                          child: Text(
-                            u.offerLabel,
-                            style: const TextStyle(
-                              color: Tokens.bg,
-                              fontSize: 11,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
-                        )
-                      : null,
-                ),
-                if (!linked && !hot)
-                  Dim(
-                    'Builds you make on your Mac (flutter build apk, or an APK '
-                    'dropped on the Companion page) install from here. '
-                    'This phone runs ${u.build?.label ?? 'an unknown build'}.',
-                  )
-                else
-                  AppUpdatePanel(updater: u),
-              ]);
+                        ),
+                      )
+                    : null,
+                children: [
+                  if (!linked && !hot)
+                    SettingsTile(
+                      leading: const SettingsIcon(
+                        Icons.system_update_rounded,
+                        color: Tokens.dim,
+                      ),
+                      title:
+                          'This phone runs '
+                          '${u.build?.label ?? 'an unknown build'}',
+                      subtitle:
+                          'Builds you make on your Mac (flutter build apk, or '
+                          'an APK dropped on the Companion page) install from '
+                          'here.',
+                    )
+                  else
+                    SettingsCustomTile(child: AppUpdatePanel(updater: u)),
+                ],
+              );
             },
           );
 
@@ -794,39 +714,50 @@ class SyncHubGroupState extends State<SyncHubGroup> {
             listenable: reporter,
             builder: (context, _) {
               final waiting = reporter.pending.length;
-              return card([
-                head(Icons.bug_report_rounded, Tokens.dim, 'Report a Problem'),
-                Dim(
-                  'Describe what went wrong; the app\'s recent log goes with '
-                  'it to the Companion page on your Mac. Errors the app '
-                  'catches are sent there on their own.'
-                  '${waiting == 0 ? '' : ' $waiting waiting for the Mac.'}',
-                ),
-                Wrap(
-                  children: [
-                    TextButton.icon(
-                      icon: const Icon(Icons.edit_note_rounded, size: 18),
-                      label: const Text('Report a Problem'),
-                      onPressed: () => _reportProblem(reporter),
+              return SettingsSection(
+                header: 'Support',
+                footer:
+                    'Describe what went wrong; the app\'s recent log goes '
+                    'with it to the Companion page on your Mac. Errors the '
+                    'app catches are sent there on their own.',
+                children: [
+                  SettingsTile.nav(
+                    leading: const SettingsIcon(
+                      Icons.bug_report_rounded,
+                      color: Tokens.dim,
                     ),
-                  ],
-                ),
-              ]);
+                    title: 'Report a Problem',
+                    value: waiting == 0 ? null : '$waiting waiting',
+                    onTap: () => _reportProblem(reporter),
+                  ),
+                ],
+              );
             },
           );
 
-    return ListView(
-      padding: EdgeInsets.fromLTRB(28, HeaderInsets.topOf(context), 28, 100),
+    return GroupBody(
+      spacing: 26,
       children: [
         connection,
-        if (appUpdate != null) ...[const SizedBox(height: 16), appUpdate],
-        if (problems != null) ...[const SizedBox(height: 16), problems],
-        const SizedBox(height: 16),
+        ?appUpdate,
         transfers,
-        if (widget.library != null) ...[const SizedBox(height: 16), offload],
-        if (widget.bundles != null) ...[const SizedBox(height: 16), backup],
+        if (widget.library != null) offload,
+        if (widget.bundles != null) backup,
+        ?problems,
       ],
     );
+  }
+
+  Future<void> _confirmUnpair() async {
+    final ok = await confirmDelete(
+      context,
+      title: 'Unpair this phone?',
+      message:
+          'The Mac forgets this phone. Pairing again needs the PIN shown on '
+          'the Mac.',
+      confirmLabel: 'Unpair',
+    );
+    if (ok && mounted) unawaited(m.unpair());
   }
 }
 

@@ -21,6 +21,7 @@ import 'package:mai_an_lab/player/queue_store.dart' show Prefs;
 import 'package:mai_an_lab/search/landing_controller.dart';
 import 'package:mai_an_lab/settings/config_controller.dart';
 import 'package:mai_an_lab/settings/settings_page.dart';
+import 'package:mai_an_lab/settings/settings_kit.dart';
 import 'package:mai_an_lab/settings/sync_hub.dart';
 import 'package:mai_an_lab/sync/app_sync_host.dart';
 import 'package:mai_an_lab/sync/companion_client.dart'
@@ -367,11 +368,11 @@ void main() {
     expect(find.byKey(const ValueKey('manual-ip')), findsOneWidget);
     expect(find.text('Hide Manual IP'), findsOneWidget);
 
-    await tester.tap(find.widgetWithText(FilledButton, 'Connect'));
+    await tester.tap(find.widgetWithText(SettingsTile, 'Connect'));
     await tester.pump();
     expect(snacks.last, 'RED Please enter an IP address');
     await tester.enterText(find.byKey(const ValueKey('manual-ip')), '1.2:x');
-    await tester.tap(find.widgetWithText(FilledButton, 'Connect'));
+    await tester.tap(find.widgetWithText(SettingsTile, 'Connect'));
     await tester.pump();
     expect(snacks.last, 'RED Invalid port in 1.2:x');
 
@@ -380,7 +381,7 @@ void main() {
       find.byKey(const ValueKey('manual-ip')),
       '192.168.1.7',
     );
-    await tester.tap(find.widgetWithText(FilledButton, 'Connect'));
+    await tester.tap(find.widgetWithText(SettingsTile, 'Connect'));
     await tester.pumpAndSettle();
     expect(
       find.text(
@@ -543,20 +544,17 @@ void main() {
     testWidgets('off: the card is there, its button disabled', (tester) async {
       make(tester);
       await pumpHub(tester, bundles: _Bundles(dir.path));
-      expect(find.text('Library State Backup'), findsOneWidget);
-      final button = tester.widget<TextButton>(
-        find.ancestor(
-          of: find.text('Send Backup to Mac'),
-          matching: find.byWidgetPredicate((w) => w is TextButton),
-        ),
+      expect(find.text('LIBRARY STATE BACKUP'), findsOneWidget);
+      final row = tester.widget<SettingsTile>(
+        find.widgetWithText(SettingsTile, 'Send Backup to Mac'),
       );
-      expect(button.onPressed, isNull);
+      expect(row.onTap, isNull);
     });
 
     testWidgets('no bundles: no card', (tester) async {
       make(tester);
       await pumpHub(tester);
-      expect(find.text('Library State Backup'), findsNothing);
+      expect(find.text('LIBRARY STATE BACKUP'), findsNothing);
     });
 
     testWidgets('connected: the bundle goes to the Mac and is deleted here, '
@@ -627,13 +625,8 @@ void main() {
   });
 
   group('DSP Acoustic Offload', () {
-    FilledButton offloadButton(WidgetTester tester) =>
-        tester.widget<FilledButton>(
-          find.ancestor(
-            of: find.text('Offload to Mac'),
-            matching: find.byWidgetPredicate((w) => w is FilledButton),
-          ),
-        );
+    SettingsTile offloadButton(WidgetTester tester) =>
+        tester.widget<SettingsTile>(find.byKey(const ValueKey('offload')));
 
     Future<void> showCard(WidgetTester tester) async {
       await tester.scrollUntilVisible(
@@ -654,18 +647,18 @@ void main() {
     testWidgets('off: no count yet, the button disabled', (tester) async {
       make(tester);
       await pumpHub(tester, library: _OffloadLib(['/m/a.flac']));
-      expect(find.text('DSP Acoustic Offload'), findsOneWidget);
+      expect(find.text('DSP ACOUSTIC OFFLOAD'), findsOneWidget);
       expect(
         find.text('Checking library acoustic features...'),
         findsOneWidget,
       );
-      expect(offloadButton(tester).onPressed, isNull);
+      expect(offloadButton(tester).onTap, isNull);
     });
 
     testWidgets('no library: no card', (tester) async {
       make(tester);
       await pumpHub(tester);
-      expect(find.text('DSP Acoustic Offload'), findsNothing);
+      expect(find.text('DSP ACOUSTIC OFFLOAD'), findsNothing);
     });
 
     testWidgets('connected: the count, the offload, the rebuild, the '
@@ -677,13 +670,13 @@ void main() {
       await connect(tester);
       await showCard(tester);
       expect(find.text('3 tracks require acoustic analysis.'), findsOneWidget);
-      expect(offloadButton(tester).onPressed, isNotNull);
+      expect(offloadButton(tester).onTap, isNotNull);
 
       await tester.tap(find.text('Offload to Mac'));
       await tester.pump();
       expect(find.text('Initiating offload...'), findsOneWidget);
       expect(find.text('Cancel'), findsOneWidget);
-      expect(offloadButton(tester).onPressed, isNull);
+      expect(offloadButton(tester).onTap, isNull);
       await tester.pump(const Duration(seconds: 1));
       expect(
         find.text('Processed 1/3 (1.2 tracks/s) • 1.flac'),
@@ -705,7 +698,7 @@ void main() {
         findsOneWidget,
       );
       expect(find.text('Cancel'), findsNothing);
-      expect(offloadButton(tester).onPressed, isNull);
+      expect(offloadButton(tester).onTap, isNull);
       // About one update a second (the notifier's own clock): the first
       // track lands right after the stage line, the last always shows.
       expect(syncNotes(), [
@@ -746,7 +739,7 @@ void main() {
       expect(lib.rebuilds, 1);
       expect(find.text('DSP offload cancelled (2 of 3 done).'), findsOneWidget);
       expect(find.text('1 track require acoustic analysis.'), findsOneWidget);
-      expect(offloadButton(tester).onPressed, isNotNull);
+      expect(offloadButton(tester).onTap, isNotNull);
       await drain(tester);
     });
 
@@ -808,7 +801,7 @@ void main() {
         ),
         findsOneWidget,
       );
-      expect(offloadButton(tester).onPressed, isNull);
+      expect(offloadButton(tester).onTap, isNull);
       await drain(tester);
     });
   });

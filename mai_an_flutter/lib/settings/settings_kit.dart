@@ -161,7 +161,8 @@ class SettingsTile extends StatelessWidget {
     this.titleColor,
   });
 
-  /// A switch; the whole row toggles it.
+  /// A switch; the whole row toggles it. [switchKey] keys the switch
+  /// itself (for finders), [key] the row.
   factory SettingsTile.toggle({
     Key? key,
     required String title,
@@ -169,6 +170,7 @@ class SettingsTile extends StatelessWidget {
     Widget? leading,
     required bool value,
     required ValueChanged<bool>? onChanged,
+    Key? switchKey,
   }) => SettingsTile(
     key: key,
     title: title,
@@ -176,7 +178,7 @@ class SettingsTile extends StatelessWidget {
     leading: leading,
     enabled: onChanged != null,
     onTap: onChanged == null ? null : () => onChanged(!value),
-    trailing: AppSwitch(value: value, onChanged: onChanged),
+    trailing: AppSwitch(key: switchKey, value: value, onChanged: onChanged),
   );
 
   /// Opens something: a sub-page, a sheet. Shows [value] before the

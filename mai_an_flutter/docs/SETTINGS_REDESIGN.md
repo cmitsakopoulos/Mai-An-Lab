@@ -71,8 +71,8 @@ Page shell: `GroupBody(spacing: 26, children: [sections…])`.
 | 3 | Haptics, Permissions, Advanced, About | done | 004071b |
 | 4 | Storage & Paths, Database | done | 03f180a |
 | 5 | Audio & DSP | done | 7054d02 |
-| 6 | Account, AI Assistant | done | (see git log) |
-| 7 | Companion & Sync | todo | |
+| 6 | Account, AI Assistant | done | 635f9e6 |
+| 7 | Companion & Sync | done | (see git log) |
 | 8 | Cleanup and row-level search | todo | |
 
 ## Remaining steps in detail
@@ -158,6 +158,13 @@ Load Available Models and Test Connection are rows.
   lands on the row, so check the finders still hit the switch, or put the
   key on the `AppSwitch` through a custom `trailing`.
 - App Updates and the Report dialog: action and nav rows.
+
+**As built:** `SettingsTile.toggle(switchKey:)` keys the switch itself, so
+`sync-switch` / `ask-switch` stay on the `AppSwitch`. Sections: Connection
+(switch, status dot, Find Mac / Test Connection, Unpair (now confirms),
+Manual IP expander + Connect row, diagnosis), App Updates (`AppUpdatePanel`
+as a custom tile), Transfers from Mac, DSP Acoustic Offload (row key
+`offload`), Library State Backup, Support (Report a Problem, moved last).
 
 ### 8. Cleanup
 - Delete what nothing uses any more: `SettingsCard`, `LegacySettingsSection`,
