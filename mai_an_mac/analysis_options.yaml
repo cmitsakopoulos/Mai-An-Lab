@@ -1,0 +1,5 @@
+analyzer:
+  errors:
+    # shared.dart deliberately reaches into the phone app's pure-Dart DSP and
+    # file-name code so the Mac computes exactly what the phone does.
+    avoid_relative_lib_imports: ignore
