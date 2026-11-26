@@ -14,9 +14,9 @@ import 'audio_dsp.dart';
 import 'auth_settings.dart';
 import 'config_controller.dart';
 import 'groups.dart';
+import 'settings_kit.dart';
 import 'settings_search.dart';
 import 'sync_hub.dart';
-import '../ui/frost.dart';
 import '../ui/page_header.dart';
 import '../ui/glass_search_bar.dart';
 import '../ui/toast.dart';
@@ -98,10 +98,26 @@ class SettingsScreenState extends State<SettingsScreen> {
     super.dispose();
   }
 
-  void open(SettingsPage p) => setState(() => page = p);
+  /// The anchor the open page brings into view and pulses (a row-level
+  /// search result); null otherwise.
+  String? _target;
+
+  void open(SettingsPage p) => setState(() {
+    page = p;
+    _target = null;
+  });
+
+  /// A row-level search result: its page, scrolled to the row.
+  void openRow(SettingRow r) => setState(() {
+    page = r.page;
+    _target = r.id;
+  });
 
   /// `_show_hub`, keeping the search.
-  void showHub() => setState(() => page = null);
+  void showHub() => setState(() {
+    page = null;
+    _target = null;
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -124,6 +140,7 @@ class SettingsScreenState extends State<SettingsScreen> {
                     key: const ValueKey('hub'),
                     search: _search,
                     onOpen: open,
+                    onOpenRow: openRow,
                     hasSync: widget.deps.sync != null,
                     hasWorkbench: widget.deps.workbench != null,
                     highlight: widget.highlight,
@@ -161,7 +178,10 @@ class SettingsScreenState extends State<SettingsScreen> {
       SettingsPage.advanced => AdvancedGroup(deps: d),
       SettingsPage.about => const AboutGroup(),
     };
-    return SubpageFrame(title: p.title, onBack: showHub, child: body);
+    return SettingsTarget(
+      id: _target,
+      child: SubpageFrame(title: p.title, onBack: showHub, child: body),
+    );
   }
 }
 
@@ -199,57 +219,28 @@ class _BelowHeader extends StatelessWidget {
   );
 }
 
-/// A sub-page's scrolling column, with settings.py's floating save button
-/// (`_mark_dirty`) when [onSave] is set.
+/// A sub-page's scrolling column of [SettingsSection]s.
 class GroupBody extends StatelessWidget {
-  const GroupBody({
-    super.key,
-    required this.children,
-    this.spacing = 16,
-    this.onSave,
-    this.saveLabel = 'SAVE CHANGES',
-    this.saveIcon = Icons.save_rounded,
-  });
+  const GroupBody({super.key, required this.children, this.spacing = 26});
 
   final List<Widget> children;
   final double spacing;
-  final VoidCallback? onSave;
-  final String saveLabel;
-  final IconData saveIcon;
 
   @override
   Widget build(BuildContext context) {
     final hPad = Tokens.pagePad(context);
-    return Stack(
+    return ListView(
+      padding: EdgeInsets.fromLTRB(
+        hPad,
+        HeaderInsets.topOf(context) + 4,
+        hPad,
+        100,
+      ),
       children: [
-        ListView(
-          padding: EdgeInsets.fromLTRB(
-            hPad,
-            HeaderInsets.topOf(context) + 4,
-            hPad,
-            100,
-          ),
-          children: [
-            for (final (i, c) in children.indexed) ...[
-              if (i > 0) SizedBox(height: spacing),
-              c,
-            ],
-          ],
-        ),
-        if (onSave != null)
-          Positioned(
-            left: 0,
-            right: 0,
-            bottom: 15,
-            child: Center(
-              child: OnyxButton(
-                label: saveLabel,
-                icon: saveIcon,
-                height: 46,
-                onTap: onSave!,
-              ),
-            ),
-          ),
+        for (final (i, c) in children.indexed) ...[
+          if (i > 0) SizedBox(height: spacing),
+          c,
+        ],
       ],
     );
   }
@@ -309,29 +300,6 @@ class OnyxButton extends StatelessWidget {
   }
 }
 
-/// The bordered card settings.py builds its groups from.
-class SettingsCard extends StatelessWidget {
-  const SettingsCard({
-    super.key,
-    required this.child,
-    this.padding = 16,
-    this.radius = 12,
-    this.borderColor = Tokens.border,
-  });
-
-  final Widget child;
-  final double padding, radius;
-  final Color borderColor;
-
-  @override
-  Widget build(BuildContext context) => GlassCard(
-    padding: EdgeInsets.all(padding),
-    radius: radius,
-    flatBorder: borderColor,
-    child: child,
-  );
-}
-
 class Dim extends StatelessWidget {
   const Dim(this.text, {super.key, this.size = 12, this.color = Tokens.dim});
 
@@ -343,24 +311,6 @@ class Dim extends StatelessWidget {
   Widget build(BuildContext context) => Text(
     text,
     style: TextStyle(color: color, fontSize: size),
-  );
-}
-
-/// A section label in the accent (settings.py's "Landing Page Sections").
-class AccentLabel extends StatelessWidget {
-  const AccentLabel(this.text, {super.key, this.size = 12});
-
-  final String text;
-  final double size;
-
-  @override
-  Widget build(BuildContext context) => Text(
-    text,
-    style: TextStyle(
-      color: Theme.of(context).colorScheme.primary,
-      fontSize: size,
-      fontWeight: FontWeight.bold,
-    ),
   );
 }
 
@@ -390,12 +340,14 @@ void showSnackOn(
 
 // ---------------------------------------------------------------------------
 
-/// `_render_hub_or_search`.
-class _Hub extends StatefulWidget {
+/// `_render_hub_or_search`: the pages in four groups, or, while searching,
+/// the matching pages and then the matching rows inside them.
+class _Hub extends StatelessWidget {
   const _Hub({
     super.key,
     required this.search,
     required this.onOpen,
+    required this.onOpenRow,
     required this.hasSync,
     this.hasWorkbench = false,
     this.highlight,
@@ -403,58 +355,16 @@ class _Hub extends StatefulWidget {
 
   final TextEditingController search;
   final ValueChanged<SettingsPage> onOpen;
+  final ValueChanged<SettingRow> onOpenRow;
   final bool hasSync;
   final bool hasWorkbench;
+
+  /// Scrolled to and pulsed once (the header gear's entry).
   final SettingsPage? highlight;
 
-  @override
-  State<_Hub> createState() => _HubState();
-}
+  static String _anchorOf(SettingsPage p) => 'page:${p.name}';
 
-class _HubState extends State<_Hub> with SingleTickerProviderStateMixin {
-  final _itemKeys = <SettingsPage, GlobalKey>{};
-  AnimationController? _pulse;
-  SettingsPage? _highlighted;
-
-  GlobalKey _keyFor(SettingsPage p) =>
-      _itemKeys.putIfAbsent(p, () => GlobalKey());
-
-  @override
-  void initState() {
-    super.initState();
-    widget.search.addListener(_changed);
-    if (widget.highlight != null) {
-      _highlighted = widget.highlight;
-      _pulse = AnimationController(
-        vsync: this,
-        duration: const Duration(milliseconds: 1400),
-      );
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted) return;
-        final ctx = _itemKeys[widget.highlight]?.currentContext;
-        if (ctx != null) {
-          Scrollable.ensureVisible(
-            ctx,
-            alignment: 0.45,
-            duration: const Duration(milliseconds: 360),
-            curve: Curves.easeOutCubic,
-          );
-        }
-        _pulse?.forward(from: 0);
-      });
-    }
-  }
-
-  @override
-  void dispose() {
-    _pulse?.dispose();
-    widget.search.removeListener(_changed);
-    super.dispose();
-  }
-
-  void _changed() => setState(() {});
-
-  SettingEntry _entry(SettingsPage p) =>
+  static SettingEntry _entry(SettingsPage p) =>
       kSettingEntries.firstWhere((e) => e.page == p);
 
   static Color _badgeColor(SettingsPage p, Color accent) => switch (p) {
@@ -472,79 +382,64 @@ class _HubState extends State<_Hub> with SingleTickerProviderStateMixin {
     SettingsPage.about => const Color(0xFF636366),
   };
 
+  bool _has(SettingsPage p) =>
+      (hasSync || p != SettingsPage.companion) &&
+      (hasWorkbench || p != SettingsPage.metadata);
+
   Widget _group(
     BuildContext context,
     String label,
     List<SettingEntry> entries, {
-    bool showCategoryInSub = false,
+    bool searching = false,
   }) {
     final accent = Theme.of(context).colorScheme.primary;
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 22),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Padding(
-            padding: const EdgeInsets.only(left: 4, bottom: 8),
-            child: AccentLabel(label, size: 11),
-          ),
-          GlassCard(
-            padding: EdgeInsets.zero,
-            radius: Tokens.radiusCard + 2,
-            child: Column(
-              children: [
-                for (final (i, e) in entries.indexed) ...[
-                  if (i > 0)
-                    const Divider(
-                      height: 1,
-                      indent: 58,
-                      color: Tokens.borderSubtle,
-                    ),
-                  _HubItem(
-                    key: showCategoryInSub ? null : _keyFor(e.page),
-                    icon: e.icon,
-                    badgeColor: _badgeColor(e.page, accent),
-                    title: e.title,
-                    subtitle: showCategoryInSub
-                        ? '[${e.category}] ${e.subtitle}'
-                        : e.subtitle,
-                    highlightAnimation:
-                        !showCategoryInSub && _highlighted == e.page
-                        ? _pulse
-                        : null,
-                    onTap: () => widget.onOpen(e.page),
-                  ),
-                ],
-              ],
+    return SettingsSection(
+      header: label,
+      children: [
+        for (final e in entries)
+          SettingsAnchor(
+            id: searching ? 'search:${e.page.name}' : _anchorOf(e.page),
+            child: SettingsTile.nav(
+              leading: SettingsIcon(e.icon, color: _badgeColor(e.page, accent)),
+              title: e.title,
+              subtitle: searching
+                  ? '[${e.category}] ${e.subtitle}'
+                  : e.subtitle,
+              onTap: () => onOpen(e.page),
             ),
           ),
-        ],
-      ),
+      ],
     );
   }
 
   @override
-  Widget build(BuildContext context) {
-    final query = widget.search.text.trim().toLowerCase();
+  Widget build(BuildContext context) => ListenableBuilder(
+    listenable: search,
+    builder: (context, _) => _build(context),
+  );
+
+  Widget _build(BuildContext context) {
+    final accent = Theme.of(context).colorScheme.primary;
+    final query = search.text.trim().toLowerCase();
     final hPad = Tokens.pagePad(context);
     final children = <Widget>[];
     if (query.isEmpty) {
       children.addAll([
-        _group(context, 'LOOK & FEEL', [
+        _group(context, 'Look & Feel', [
           _entry(SettingsPage.appearance),
           _entry(SettingsPage.audio),
           _entry(SettingsPage.haptics),
         ]),
-        _group(context, 'LIBRARY & SYNC', [
+        _group(context, 'Library & Sync', [
           _entry(SettingsPage.storage),
-          if (widget.hasWorkbench) _entry(SettingsPage.metadata),
-          if (widget.hasSync) _entry(SettingsPage.companion),
+          if (hasWorkbench) _entry(SettingsPage.metadata),
+          if (hasSync) _entry(SettingsPage.companion),
         ]),
-        _group(context, 'SERVICES & AI', [
+        _group(context, 'Services & AI', [
           _entry(SettingsPage.account),
           _entry(SettingsPage.assistant),
         ]),
-        _group(context, 'SYSTEM', [
+        _group(context, 'System', [
           _entry(SettingsPage.permissions),
           _entry(SettingsPage.database),
           _entry(SettingsPage.advanced),
@@ -554,20 +449,42 @@ class _HubState extends State<_Hub> with SingleTickerProviderStateMixin {
     } else {
       final matches = [
         for (final e in searchSettings(query))
-          if ((widget.hasSync || e.page != SettingsPage.companion) &&
-              (widget.hasWorkbench || e.page != SettingsPage.metadata))
-            e,
+          if (_has(e.page)) e,
+      ];
+      final rows = [
+        for (final r in searchSettingRows(query))
+          if (_has(r.page)) r,
       ];
       if (matches.isNotEmpty) {
         children.add(
           _group(
             context,
-            'SEARCH RESULTS (${matches.length})',
+            'Search Results (${matches.length})',
             matches,
-            showCategoryInSub: true,
+            searching: true,
           ),
         );
-      } else {
+      }
+      if (rows.isNotEmpty) {
+        children.add(
+          SettingsSection(
+            header: 'Settings (${rows.length})',
+            children: [
+              for (final r in rows)
+                SettingsTile.nav(
+                  leading: SettingsIcon(
+                    _entry(r.page).icon,
+                    color: _badgeColor(r.page, accent),
+                  ),
+                  title: r.title,
+                  subtitle: r.page.title,
+                  onTap: () => onOpenRow(r),
+                ),
+            ],
+          ),
+        );
+      }
+      if (matches.isEmpty && rows.isEmpty) {
         children.add(
           Padding(
             padding: const EdgeInsets.symmetric(vertical: 30, horizontal: 16),
@@ -586,7 +503,7 @@ class _HubState extends State<_Hub> with SingleTickerProviderStateMixin {
                   icon: Icons.clear_rounded,
                   textSize: 12,
                   height: 38,
-                  onTap: widget.search.clear,
+                  onTap: search.clear,
                 ),
               ],
             ),
@@ -605,130 +522,31 @@ class _HubState extends State<_Hub> with SingleTickerProviderStateMixin {
         Padding(
           padding: EdgeInsets.fromLTRB(hPad, 0, hPad, 8),
           child: GlassSearchBar(
-            controller: widget.search,
+            controller: search,
             hintText: 'Search settings…',
             clearTooltip: 'Clear',
           ),
         ),
       ],
-      child: Builder(
-        builder: (context) => ListView(
-          padding: EdgeInsets.fromLTRB(
-            hPad,
-            HeaderInsets.topOf(context) + 8,
-            hPad,
-            32,
-          ),
-          children: children,
-        ),
-      ),
-    );
-  }
-}
-
-/// Apple-style grouped hub row with a rounded-square tinted icon badge.
-class _HubItem extends StatelessWidget {
-  const _HubItem({
-    super.key,
-    required this.icon,
-    required this.badgeColor,
-    required this.title,
-    required this.subtitle,
-    required this.onTap,
-    this.highlightAnimation,
-  });
-
-  final IconData icon;
-  final Color badgeColor;
-  final String title, subtitle;
-  final VoidCallback onTap;
-  final Animation<double>? highlightAnimation;
-
-  @override
-  Widget build(BuildContext context) {
-    final row = Material(
-      type: MaterialType.transparency,
-      child: InkWell(
-        onTap: onTap,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-          child: Row(
+      child: SettingsTarget(
+        id: highlight == null ? null : _anchorOf(highlight!),
+        child: Builder(
+          builder: (context) => ListView(
+            padding: EdgeInsets.fromLTRB(
+              hPad,
+              HeaderInsets.topOf(context) + 8,
+              hPad,
+              32,
+            ),
             children: [
-              Container(
-                width: 32,
-                height: 32,
-                decoration: BoxDecoration(
-                  color: badgeColor.withValues(alpha: 0.18),
-                  borderRadius: BorderRadius.circular(9),
-                ),
-                child: Icon(icon, color: badgeColor, size: 18),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      title,
-                      style: const TextStyle(
-                        color: Tokens.text,
-                        fontSize: 15,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    const SizedBox(height: 2),
-                    Dim(subtitle, size: 12),
-                  ],
-                ),
-              ),
-              const SizedBox(width: 8),
-              Icon(
-                Icons.chevron_right_rounded,
-                color: Tokens.dim.withValues(alpha: 0.45),
-                size: 18,
-              ),
+              for (final (i, c) in children.indexed) ...[
+                if (i > 0) const SizedBox(height: 22),
+                c,
+              ],
             ],
           ),
         ),
       ),
-    );
-
-    final anim = highlightAnimation;
-    if (anim == null) return row;
-
-    final accent = Theme.of(context).colorScheme.primary;
-    return AnimatedBuilder(
-      animation: anim,
-      builder: (_, child) {
-        final t = anim.value;
-        // Quick ease-in pop (0..0.22), hold glow (0.22..0.55), smooth fade out (0.55..1.0).
-        final glow = t < 0.22
-            ? Curves.easeOut.transform(t / 0.22)
-            : t < 0.55
-            ? 1.0
-            : 1.0 - Curves.easeIn.transform((t - 0.55) / 0.45);
-        final pop = t < 0.20
-            ? 1.0 + 0.025 * Curves.easeOutCubic.transform(t / 0.20)
-            : t < 0.45
-            ? 1.0 +
-                  0.025 * (1.0 - Curves.easeInOut.transform((t - 0.20) / 0.25))
-            : 1.0;
-        return Transform.scale(
-          scale: pop,
-          child: DecoratedBox(
-            decoration: BoxDecoration(
-              color: accent.withValues(alpha: 0.18 * glow),
-              border: Border.all(
-                color: accent.withValues(alpha: 0.65 * glow),
-                width: 1.25,
-              ),
-              borderRadius: BorderRadius.circular(Tokens.radiusCard),
-            ),
-            child: child,
-          ),
-        );
-      },
-      child: row,
     );
   }
 }

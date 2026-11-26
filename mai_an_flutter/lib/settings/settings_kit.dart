@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../ui/app_switch.dart';
@@ -58,7 +60,11 @@ class SettingsSection extends StatelessWidget {
   final List<Widget> children;
 
   static double _indentOf(Widget w) => switch (w) {
+    SettingsAnchor(:final child) => _indentOf(child),
     SettingsTile(leading: _?) => SettingsStyle.iconIndent,
+    SettingsPickerTile(leading: _?) => SettingsStyle.iconIndent,
+    SettingsSegmentedTile(leading: _?, inline: true) =>
+      SettingsStyle.iconIndent,
     _ => SettingsStyle.hPad,
   };
 
@@ -849,6 +855,109 @@ class _ModernTextFieldState extends State<ModernTextField> {
             child: Text(widget.help!, style: SettingsStyle.subtitle),
           ),
       ],
+    );
+  }
+}
+
+/// The anchor a Settings page should bring into view and pulse: a search
+/// result (row-level search) or the hub's highlighted entry. Pages wrap
+/// findable rows and sections in [SettingsAnchor]s; the one whose id
+/// matches scrolls to the middle and pulses once.
+class SettingsTarget extends InheritedWidget {
+  const SettingsTarget({super.key, required this.id, required super.child});
+
+  /// Null: nothing to find.
+  final String? id;
+
+  static String? of(BuildContext context) =>
+      context.dependOnInheritedWidgetOfExactType<SettingsTarget>()?.id;
+
+  @override
+  bool updateShouldNotify(SettingsTarget old) => old.id != id;
+}
+
+/// A findable row or section; see [SettingsTarget]. Ids are stable
+/// (`page.thing`) and listed in `kSettingRows`.
+class SettingsAnchor extends StatefulWidget {
+  const SettingsAnchor({super.key, required this.id, required this.child});
+
+  final String id;
+  final Widget child;
+
+  @override
+  State<SettingsAnchor> createState() => _SettingsAnchorState();
+}
+
+class _SettingsAnchorState extends State<SettingsAnchor>
+    with SingleTickerProviderStateMixin {
+  late final _pulse = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1400),
+  );
+
+  /// The target this anchor already answered (once per arrival).
+  String? _answered;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final target = SettingsTarget.of(context);
+    if (target != widget.id || _answered == target) return;
+    _answered = target;
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (!mounted) return;
+      await Scrollable.ensureVisible(
+        context,
+        alignment: 0.45,
+        duration: const Duration(milliseconds: 360),
+        curve: Curves.easeOutCubic,
+      );
+      if (mounted) unawaited(_pulse.forward(from: 0));
+    });
+  }
+
+  @override
+  void dispose() {
+    _pulse.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final accent = Theme.of(context).colorScheme.primary;
+    return AnimatedBuilder(
+      animation: _pulse,
+      child: widget.child,
+      builder: (_, child) {
+        final t = _pulse.value;
+        if (t == 0 || t == 1) return child!;
+        // Quick ease-in pop, hold the glow, then a smooth fade.
+        final glow = t < 0.22
+            ? Curves.easeOut.transform(t / 0.22)
+            : t < 0.55
+            ? 1.0
+            : 1.0 - Curves.easeIn.transform((t - 0.55) / 0.45);
+        final pop = t < 0.20
+            ? 1.0 + 0.02 * Curves.easeOutCubic.transform(t / 0.20)
+            : t < 0.45
+            ? 1.0 + 0.02 * (1.0 - Curves.easeInOut.transform((t - 0.20) / 0.25))
+            : 1.0;
+        return Transform.scale(
+          scale: pop,
+          child: DecoratedBox(
+            position: DecorationPosition.foreground,
+            decoration: BoxDecoration(
+              color: accent.withValues(alpha: 0.12 * glow),
+              border: Border.all(
+                color: accent.withValues(alpha: 0.65 * glow),
+                width: 1.25,
+              ),
+              borderRadius: BorderRadius.circular(Tokens.radiusCard),
+            ),
+            child: child,
+          ),
+        );
+      },
     );
   }
 }

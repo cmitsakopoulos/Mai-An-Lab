@@ -31,8 +31,9 @@ On top of that:
 3. **Saving.** Toggles, pickers, segmented controls and sliders apply
    immediately. An explicit Save is kept only where text is typed as a whole:
    credentials (Account, the Assistant API key) and the raw TOML editor. Put
-   Save as a `SettingsTile.action` row inside the form's own section. Don't
-   use the floating `GroupBody.onSave` button; remove it once nothing uses it.
+   Save as a `SettingsTile.action` row inside the form's own section, with
+   `onTap: null` until something changed. (The floating save button is
+   gone.)
 4. **Destructive actions** use `SettingsTile.action(destructive: true)` and
    confirm first (`confirmDelete`).
 5. **Migrate one page at a time.** After each step:
@@ -57,8 +58,13 @@ On top of that:
 | `SettingsCustomTile(title:, subtitle:, child:)` | Any panel, with the rows' padding. |
 | `SettingsOption<T>(value, label, subtitle:, icon:)` | One option for pickers and segmented controls. |
 | `SettingsStyle` | Type and spacing constants (title, subtitle, value, footer). |
+| `ModernTextField(label:, controller:, hint:, help:, obscureToggle:, fieldKey:)` | Typed values (credentials, prompts), inside a `SettingsCustomTile`. |
+| `SettingsAnchor(id:, child:)` | Makes a row or section findable by row-level search. The id must be in `kSettingRows` (`settings_search.dart`). |
+| `SettingsTarget(id:)` | Set by the screen; the matching anchor scrolls into view and pulses once. |
 
-Page shell: `GroupBody(spacing: 26, children: [sections…])`.
+`SettingsTile.toggle(switchKey:)` keys the `AppSwitch` itself (for finders).
+
+Page shell: `GroupBody(children: [sections…])` (spacing 26 by default).
 `AppSwitch` (`lib/ui/app_switch.dart`) is the only switch in the app.
 `Tokens.theme()` also styles any plain Material `Switch` as a fallback.
 
@@ -72,8 +78,8 @@ Page shell: `GroupBody(spacing: 26, children: [sections…])`.
 | 4 | Storage & Paths, Database | done | 03f180a |
 | 5 | Audio & DSP | done | 7054d02 |
 | 6 | Account, AI Assistant | done | 635f9e6 |
-| 7 | Companion & Sync | done | (see git log) |
-| 8 | Cleanup and row-level search | todo | |
+| 7 | Companion & Sync | done | 22f6752 |
+| 8 | Cleanup and row-level search | done | (see git log) |
 
 ## Remaining steps in detail
 
@@ -179,6 +185,18 @@ as a custom tile), Transfers from Mac, DSP Acoustic Offload (row key
   and pulses the row. The hub already does this for pages with
   `Scrollable.ensureVisible` and `_pulse`.
 - Search: `test/goldens/settings_search.json` must stay in sync.
+
+**As built:** `LegacySettingsSection`, `InsetSwitchRow`, `SettingsPickerRow`,
+`SettingsCard`, `AccentLabel` and `GroupBody.onSave` are deleted
+(`OnyxButton` stays for the hub's Clear Search). The hub is `SettingsSection`
++ `SettingsTile.nav` + `SettingsIcon`; its gear highlight is an anchor
+(`page:<name>`). Row search is separate from the Flet-parity page search, so
+the golden is untouched: `kSettingRows` (`SettingRow(page, id, title,
+keywords)`) + `searchSettingRows`, shown in the hub as a "Settings (n)"
+section under the page results; tapping one opens the page with
+`SettingsTarget(id)`. `test/settings_rows_test.dart` checks each id has
+exactly one anchor. To make a new row findable: wrap it in
+`SettingsAnchor(id: 'page.thing', …)` and add a `SettingRow`.
 
 ## Shipping each step to the phone (maian)
 

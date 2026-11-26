@@ -146,115 +146,127 @@ class _AuthGroupState extends State<AuthGroup> {
     return GroupBody(
       spacing: 26,
       children: [
-        SettingsSection(
-          header: 'Qobuz Account',
-          footer:
-              'Authentication details used to generate valid Qobuz user '
-              'sessions.',
-          children: [
-            SettingsCustomTile(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  ModernTextField(
-                    fieldKey: const ValueKey('qobuz_uid'),
-                    label: 'Qobuz User ID',
-                    controller: _uid,
-                    hint: 'e.g. 1234567',
-                    help:
-                        'Your registered Qobuz email address or numeric '
-                        'User ID.',
-                  ),
-                  const SizedBox(height: 14),
-                  ModernTextField(
-                    fieldKey: const ValueKey('qobuz_token'),
-                    label: 'Auth Token / Password Hash',
-                    controller: _token,
-                    hint: 'Enter token or MD5 of password',
-                    help: 'Pre-hashed MD5 password string or session token.',
-                    obscureToggle: true,
-                  ),
-                ],
+        SettingsAnchor(
+          id: 'account.qobuz',
+          child: SettingsSection(
+            header: 'Qobuz Account',
+            footer:
+                'Authentication details used to generate valid Qobuz user '
+                'sessions.',
+            children: [
+              SettingsCustomTile(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    ModernTextField(
+                      fieldKey: const ValueKey('qobuz_uid'),
+                      label: 'Qobuz User ID',
+                      controller: _uid,
+                      hint: 'e.g. 1234567',
+                      help:
+                          'Your registered Qobuz email address or numeric '
+                          'User ID.',
+                    ),
+                    const SizedBox(height: 14),
+                    ModernTextField(
+                      fieldKey: const ValueKey('qobuz_token'),
+                      label: 'Auth Token / Password Hash',
+                      controller: _token,
+                      hint: 'Enter token or MD5 of password',
+                      help: 'Pre-hashed MD5 password string or session token.',
+                      obscureToggle: true,
+                    ),
+                  ],
+                ),
               ),
-            ),
-            SettingsTile.toggle(
-              title: 'Use Session Token Authentication',
-              subtitle:
-                  'Bypasses password authentication when a valid token is '
-                  'present.',
-              value: _useToken,
-              onChanged: _onUseToken,
-            ),
-            SettingsTile.action(
-              leading: const SettingsIcon(
-                Icons.key_rounded,
-                color: Tokens.qobuz,
+              SettingsAnchor(
+                id: 'account.token',
+                child: SettingsTile.toggle(
+                  title: 'Use Session Token Authentication',
+                  subtitle:
+                      'Bypasses password authentication when a valid token is '
+                      'present.',
+                  value: _useToken,
+                  onChanged: _onUseToken,
+                ),
               ),
-              title: 'Save Qobuz',
-              onTap: _qobuzDirty ? _saveQobuz : null,
-            ),
-          ],
+              SettingsTile.action(
+                leading: const SettingsIcon(
+                  Icons.key_rounded,
+                  color: Tokens.qobuz,
+                ),
+                title: 'Save Qobuz',
+                onTap: _qobuzDirty ? _saveQobuz : null,
+              ),
+            ],
+          ),
         ),
-        SettingsSection(
-          header: 'Qobuz Developer API Keys',
-          footer:
-              'Qobuz Application ID and Secret required to negotiate API '
-              'sessions. Saved with Save Qobuz.',
-          children: [
-            SettingsCustomTile(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  ModernTextField(
-                    fieldKey: const ValueKey('qobuz_app_id'),
-                    label: 'Qobuz App ID',
-                    controller: _appId,
-                    hint: 'Default: $kQobuzDefaultAppId',
-                    help:
-                        'Application Identifier registered with the Qobuz '
-                        'developer portal.',
-                  ),
-                  const SizedBox(height: 14),
-                  ModernTextField(
-                    fieldKey: const ValueKey('qobuz_app_secret'),
-                    label: 'Qobuz App Secret',
-                    controller: _appSecret,
-                    hint: 'Default: $kQobuzDefaultSecret',
-                    help: 'Application Secret key paired with your App ID.',
-                  ),
-                ],
+        SettingsAnchor(
+          id: 'account.qobuz_keys',
+          child: SettingsSection(
+            header: 'Qobuz Developer API Keys',
+            footer:
+                'Qobuz Application ID and Secret required to negotiate API '
+                'sessions. Saved with Save Qobuz.',
+            children: [
+              SettingsCustomTile(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    ModernTextField(
+                      fieldKey: const ValueKey('qobuz_app_id'),
+                      label: 'Qobuz App ID',
+                      controller: _appId,
+                      hint: 'Default: $kQobuzDefaultAppId',
+                      help:
+                          'Application Identifier registered with the Qobuz '
+                          'developer portal.',
+                    ),
+                    const SizedBox(height: 14),
+                    ModernTextField(
+                      fieldKey: const ValueKey('qobuz_app_secret'),
+                      label: 'Qobuz App Secret',
+                      controller: _appSecret,
+                      hint: 'Default: $kQobuzDefaultSecret',
+                      help: 'Application Secret key paired with your App ID.',
+                    ),
+                  ],
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
-        SettingsSection(
-          header: 'Deezer Account',
-          footer:
-              "FLAC needs a Deezer plan with lossless and 320 kbps MP3 a "
-              "paid plan. If your plan can't serve the quality you pick, "
-              'downloads drop to the best it can.',
-          children: [
-            SettingsCustomTile(
-              child: ModernTextField(
-                fieldKey: const ValueKey('deezer_arl'),
-                label: 'Deezer ARL Cookie',
-                controller: _arl,
-                hint: 'Long alphanumeric string from your browser cookies',
-                help:
-                    'Browser → DevTools → Application → '
-                    'Cookies → deezer.com → copy the \'arl\' value.',
-                obscureToggle: true,
+        SettingsAnchor(
+          id: 'account.deezer',
+          child: SettingsSection(
+            header: 'Deezer Account',
+            footer:
+                "FLAC needs a Deezer plan with lossless and 320 kbps MP3 a "
+                "paid plan. If your plan can't serve the quality you pick, "
+                'downloads drop to the best it can.',
+            children: [
+              SettingsCustomTile(
+                child: ModernTextField(
+                  fieldKey: const ValueKey('deezer_arl'),
+                  label: 'Deezer ARL Cookie',
+                  controller: _arl,
+                  hint: 'Long alphanumeric string from your browser cookies',
+                  help:
+                      'Browser → DevTools → Application → '
+                      'Cookies → deezer.com → copy the \'arl\' value.',
+                  obscureToggle: true,
+                ),
               ),
-            ),
-            SettingsTile.action(
-              leading: const SettingsIcon(
-                Icons.key_rounded,
-                color: Tokens.deezer,
+              SettingsTile.action(
+                leading: const SettingsIcon(
+                  Icons.key_rounded,
+                  color: Tokens.deezer,
+                ),
+                title: 'Save Deezer',
+                onTap: _deezerDirty ? _saveDeezer : null,
               ),
-              title: 'Save Deezer',
-              onTap: _deezerDirty ? _saveDeezer : null,
-            ),
-          ],
+            ],
+          ),
         ),
       ],
     );

@@ -324,83 +324,98 @@ class _AssistantSettingsGroupState extends State<AssistantSettingsGroup> {
         SettingsSection(
           header: 'Jarvis Intelligence',
           children: [
-            SettingsTile.toggle(
-              title: 'Enable LLM Agent Intelligence',
-              subtitle:
-                  'Conversational AI, smart playlist curation & library '
-                  'analysis',
-              value: _llmEnabled,
-              onChanged: _onEnabled,
+            SettingsAnchor(
+              id: 'assistant.enable',
+              child: SettingsTile.toggle(
+                title: 'Enable LLM Agent Intelligence',
+                subtitle:
+                    'Conversational AI, smart playlist curation & library '
+                    'analysis',
+                value: _llmEnabled,
+                onChanged: _onEnabled,
+              ),
             ),
-            SettingsSegmentedTile<String>(
-              title: 'AI Provider',
-              inline: false,
-              value: isGemini ? 'gemini' : 'ollama',
-              onChanged: _onProvider,
-              options: const [
-                SettingsOption(
-                  'gemini',
-                  'Google Gemini',
-                  icon: Icons.auto_awesome_rounded,
-                ),
-                SettingsOption(
-                  'ollama',
-                  'Local Server',
-                  icon: Icons.dns_rounded,
-                ),
-              ],
+            SettingsAnchor(
+              id: 'assistant.provider',
+              child: SettingsSegmentedTile<String>(
+                title: 'AI Provider',
+                inline: false,
+                value: isGemini ? 'gemini' : 'ollama',
+                onChanged: _onProvider,
+                options: const [
+                  SettingsOption(
+                    'gemini',
+                    'Google Gemini',
+                    icon: Icons.auto_awesome_rounded,
+                  ),
+                  SettingsOption(
+                    'ollama',
+                    'Local Server',
+                    icon: Icons.dns_rounded,
+                  ),
+                ],
+              ),
             ),
           ],
         ),
         if (isGemini)
-          SettingsSection(
-            header: 'Gemini Connection',
-            footer:
-                'Free-tier API keys can be generated at aistudio.google.com '
-                'with no credit card.',
-            children: [
-              SettingsCustomTile(
-                child: ModernTextField(
-                  fieldKey: const ValueKey('gemini_api_key'),
-                  label: 'Google Gemini API Key',
-                  controller: _apiKey,
-                  hint: 'Paste your key from aistudio.google.com',
-                  obscureToggle: true,
+          SettingsAnchor(
+            id: 'assistant.api_key',
+            child: SettingsSection(
+              header: 'Gemini Connection',
+              footer:
+                  'Free-tier API keys can be generated at aistudio.google.com '
+                  'with no credit card.',
+              children: [
+                SettingsCustomTile(
+                  child: ModernTextField(
+                    fieldKey: const ValueKey('gemini_api_key'),
+                    label: 'Google Gemini API Key',
+                    controller: _apiKey,
+                    hint: 'Paste your key from aistudio.google.com',
+                    obscureToggle: true,
+                  ),
                 ),
-              ),
-              SettingsTile.action(
-                leading: const SettingsIcon(Icons.key_rounded),
-                title: 'Save API Key',
-                onTap: _keyDirty ? _saveKey : null,
-              ),
-              SettingsPickerTile<String>(
-                title: 'Gemini Model',
-                value: _model,
-                options: [
-                  for (final (id, label) in _modelOptions)
-                    SettingsOption(id, label),
-                ],
-                onChanged: _onModel,
-              ),
-              SettingsTile(
-                leading: const SettingsIcon(Icons.refresh_rounded),
-                title: 'Load Available Models',
-                subtitle: 'The models your key can use',
-                trailing: _loadingModels ? spinner : null,
-                onTap: _loadingModels
-                    ? null
-                    : () => unawaited(_refreshModels()),
-              ),
-              SettingsPickerTile<String>(
-                title: 'Research Paradigm',
-                subtitle: 'How Jarvis researches artists & genres',
-                sheetTitle: 'Artist Research Paradigm',
-                value: _researchMode,
-                options: _researchOptions,
-                onChanged: _onResearchMode,
-              ),
-              _testRow(spinner),
-            ],
+                SettingsTile.action(
+                  leading: const SettingsIcon(Icons.key_rounded),
+                  title: 'Save API Key',
+                  onTap: _keyDirty ? _saveKey : null,
+                ),
+                SettingsAnchor(
+                  id: 'assistant.model',
+                  child: SettingsPickerTile<String>(
+                    title: 'Gemini Model',
+                    value: _model,
+                    options: [
+                      for (final (id, label) in _modelOptions)
+                        SettingsOption(id, label),
+                    ],
+                    onChanged: _onModel,
+                  ),
+                ),
+                SettingsTile(
+                  leading: const SettingsIcon(Icons.refresh_rounded),
+                  title: 'Load Available Models',
+                  subtitle: 'The models your key can use',
+                  trailing: _loadingModels ? spinner : null,
+                  onTap: _loadingModels
+                      ? null
+                      : () => unawaited(_refreshModels()),
+                ),
+                SettingsAnchor(
+                  id: 'assistant.research',
+                  child: SettingsPickerTile<String>(
+                    title: 'Research Paradigm',
+                    subtitle: 'How Jarvis researches artists & genres',
+                    sheetTitle: 'Artist Research Paradigm',
+                    value: _researchMode,
+                    options: _researchOptions,
+                    onChanged: _onResearchMode,
+                  ),
+                ),
+                _testRow(spinner),
+              ],
+            ),
           )
         else
           SettingsSection(
@@ -432,50 +447,54 @@ class _AssistantSettingsGroupState extends State<AssistantSettingsGroup> {
               _testRow(spinner),
             ],
           ),
-        SettingsSection(
-          header: 'Personality & Directive',
-          footer:
-              'Customize how Jarvis addresses you, speaks, or behaves. '
-              'Standard tool-calling directives remain active.',
-          children: [
-            SettingsCustomTile(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  ModernTextField(
-                    label: 'System Directive Prompt',
-                    controller: _personality,
-                    minLines: 3,
-                    maxLines: 6,
-                    hint:
-                        "You are Jarvis, a concise, sophisticated AI "
-                        "assistant embedded in the Mai An Lab high-fidelity "
-                        "music app. Address the user as 'sir'.",
-                  ),
-                  const SizedBox(height: 12),
-                  Wrap(
-                    spacing: 8,
-                    runSpacing: 8,
-                    children: [
-                      for (final (label, text, muted) in _personalityPresets)
-                        _PresetChip(
-                          label: label,
-                          selected: !muted && _personality.text.trim() == text,
-                          muted: muted,
-                          accent: accent,
-                          onTap: () => _personality.text = text,
-                        ),
-                    ],
-                  ),
-                ],
+        SettingsAnchor(
+          id: 'assistant.directive',
+          child: SettingsSection(
+            header: 'Personality & Directive',
+            footer:
+                'Customize how Jarvis addresses you, speaks, or behaves. '
+                'Standard tool-calling directives remain active.',
+            children: [
+              SettingsCustomTile(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    ModernTextField(
+                      label: 'System Directive Prompt',
+                      controller: _personality,
+                      minLines: 3,
+                      maxLines: 6,
+                      hint:
+                          "You are Jarvis, a concise, sophisticated AI "
+                          "assistant embedded in the Mai An Lab high-fidelity "
+                          "music app. Address the user as 'sir'.",
+                    ),
+                    const SizedBox(height: 12),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        for (final (label, text, muted) in _personalityPresets)
+                          _PresetChip(
+                            label: label,
+                            selected:
+                                !muted && _personality.text.trim() == text,
+                            muted: muted,
+                            accent: accent,
+                            onTap: () => _personality.text = text,
+                          ),
+                      ],
+                    ),
+                  ],
+                ),
               ),
-            ),
-            SettingsTile.action(
-              leading: const SettingsIcon(Icons.save_rounded),
-              title: 'Save Directive',
-              onTap: _personalityDirty ? _savePersonality : null,
-            ),
-          ],
+              SettingsTile.action(
+                leading: const SettingsIcon(Icons.save_rounded),
+                title: 'Save Directive',
+                onTap: _personalityDirty ? _savePersonality : null,
+              ),
+            ],
+          ),
         ),
       ],
     );

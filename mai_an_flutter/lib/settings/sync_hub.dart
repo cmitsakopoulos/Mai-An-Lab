@@ -485,12 +485,15 @@ class SyncHubGroupState extends State<SyncHubGroup> {
           'or USB to sync tracks and offload acoustic analysis. Pauses after '
           '15 minutes without use to save battery.',
       children: [
-        SettingsTile.toggle(
-          switchKey: const ValueKey('sync-switch'),
-          leading: const SettingsIcon(Icons.phonelink_setup_rounded),
-          title: 'Companion Sync',
-          value: enabled,
-          onChanged: _toggle,
+        SettingsAnchor(
+          id: 'companion.sync',
+          child: SettingsTile.toggle(
+            switchKey: const ValueKey('sync-switch'),
+            leading: const SettingsIcon(Icons.phonelink_setup_rounded),
+            title: 'Companion Sync',
+            value: enabled,
+            onChanged: _toggle,
+          ),
         ),
         SettingsCustomTile(
           child: Row(
@@ -522,20 +525,23 @@ class SyncHubGroupState extends State<SyncHubGroup> {
             destructive: true,
             onTap: _confirmUnpair,
           ),
-        SettingsTile(
-          leading: const SettingsIcon(Icons.router_rounded),
-          title: _manual ? 'Hide Manual IP' : 'Manual IP Connection…',
-          titleColor: accent,
-          trailing: AnimatedRotation(
-            turns: _manual ? 0.25 : 0,
-            duration: Tokens.motionFast,
-            child: Icon(
-              Icons.chevron_right_rounded,
-              color: Tokens.dim.withValues(alpha: 0.6),
-              size: 20,
+        SettingsAnchor(
+          id: 'companion.manual_ip',
+          child: SettingsTile(
+            leading: const SettingsIcon(Icons.router_rounded),
+            title: _manual ? 'Hide Manual IP' : 'Manual IP Connection…',
+            titleColor: accent,
+            trailing: AnimatedRotation(
+              turns: _manual ? 0.25 : 0,
+              duration: Tokens.motionFast,
+              child: Icon(
+                Icons.chevron_right_rounded,
+                color: Tokens.dim.withValues(alpha: 0.6),
+                size: 20,
+              ),
             ),
+            onTap: () => setState(() => _manual = !_manual),
           ),
-          onTap: () => setState(() => _manual = !_manual),
         ),
         if (_manual) ...[
           SettingsCustomTile(
@@ -586,71 +592,85 @@ class SyncHubGroupState extends State<SyncHubGroup> {
           title: 'Check Pending',
           onTap: linked ? refreshPending : null,
         ),
-        SettingsTile.toggle(
-          switchKey: const ValueKey('ask-switch'),
-          title: 'Ask before downloading',
-          subtitle: 'Off: tracks sent from the Mac download on their own',
-          value: m.askBeforeDownload,
-          onChanged: (v) => unawaited(m.setAskBeforeDownload(v)),
+        SettingsAnchor(
+          id: 'companion.ask',
+          child: SettingsTile.toggle(
+            switchKey: const ValueKey('ask-switch'),
+            title: 'Ask before downloading',
+            subtitle: 'Off: tracks sent from the Mac download on their own',
+            value: m.askBeforeDownload,
+            onChanged: (v) => unawaited(m.setAskBeforeDownload(v)),
+          ),
         ),
       ],
     );
 
-    final offload = SettingsSection(
-      header: 'DSP Acoustic Offload',
-      footer:
-          'Offload acoustic feature extraction (BPM, timbre, key) to your '
-          'Mac for high-speed batch processing.',
-      children: [
-        SettingsTile.action(
-          key: const ValueKey('offload'),
-          leading: const SettingsIcon(Icons.bolt_rounded, color: Tokens.amber),
-          title: 'Offload to Mac',
-          subtitle: _dspText,
-          // Never while one runs (a second would race it), nor once the
-          // count says every track is analysed.
-          onTap: linked && !_offloading && _missing != 0 ? startOffload : null,
-        ),
-        if (_offloading) ...[
-          SettingsCustomTile(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(2),
-                  child: LinearProgressIndicator(
-                    value: _offloadProgress,
-                    minHeight: 4,
-                    color: accent,
-                    backgroundColor: Tokens.surface2,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                Text(_offloadDetail, style: SettingsStyle.subtitle),
-              ],
-            ),
-          ),
+    final offload = SettingsAnchor(
+      id: 'companion.offload',
+      child: SettingsSection(
+        header: 'DSP Acoustic Offload',
+        footer:
+            'Offload acoustic feature extraction (BPM, timbre, key) to your '
+            'Mac for high-speed batch processing.',
+        children: [
           SettingsTile.action(
-            title: 'Cancel',
-            destructive: true,
-            onTap: _cancelOffloadTap,
+            key: const ValueKey('offload'),
+            leading: const SettingsIcon(
+              Icons.bolt_rounded,
+              color: Tokens.amber,
+            ),
+            title: 'Offload to Mac',
+            subtitle: _dspText,
+            // Never while one runs (a second would race it), nor once the
+            // count says every track is analysed.
+            onTap: linked && !_offloading && _missing != 0
+                ? startOffload
+                : null,
+          ),
+          if (_offloading) ...[
+            SettingsCustomTile(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(2),
+                    child: LinearProgressIndicator(
+                      value: _offloadProgress,
+                      minHeight: 4,
+                      color: accent,
+                      backgroundColor: Tokens.surface2,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(_offloadDetail, style: SettingsStyle.subtitle),
+                ],
+              ),
+            ),
+            SettingsTile.action(
+              title: 'Cancel',
+              destructive: true,
+              onTap: _cancelOffloadTap,
+            ),
+          ],
+        ],
+      ),
+    );
+
+    final backup = SettingsAnchor(
+      id: 'companion.backup',
+      child: SettingsSection(
+        header: 'Library State Backup',
+        footer:
+            'Back up your library database, playback history, and similarity '
+            'graph to your Mac.',
+        children: [
+          SettingsTile.action(
+            leading: const SettingsIcon(Icons.cloud_upload_rounded),
+            title: 'Send Backup to Mac',
+            onTap: linked ? uploadBundle : null,
           ),
         ],
-      ],
-    );
-
-    final backup = SettingsSection(
-      header: 'Library State Backup',
-      footer:
-          'Back up your library database, playback history, and similarity '
-          'graph to your Mac.',
-      children: [
-        SettingsTile.action(
-          leading: const SettingsIcon(Icons.cloud_upload_rounded),
-          title: 'Send Backup to Mac',
-          onTap: linked ? uploadBundle : null,
-        ),
-      ],
+      ),
     );
 
     final updater = m.updater;
@@ -663,46 +683,49 @@ class SyncHubGroupState extends State<SyncHubGroup> {
               final hot =
                   u.state != AppUpdateState.none &&
                   u.state != AppUpdateState.upToDate;
-              return SettingsSection(
-                header: 'App Updates',
-                headerTrailing: hot
-                    ? Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 8,
-                          vertical: 2,
-                        ),
-                        decoration: BoxDecoration(
-                          color: Tokens.accent,
-                          borderRadius: BorderRadius.circular(99),
-                        ),
-                        child: Text(
-                          u.offerLabel,
-                          style: const TextStyle(
-                            color: Tokens.bg,
-                            fontSize: 11,
-                            fontWeight: FontWeight.w700,
+              return SettingsAnchor(
+                id: 'companion.updates',
+                child: SettingsSection(
+                  header: 'App Updates',
+                  headerTrailing: hot
+                      ? Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 2,
                           ),
+                          decoration: BoxDecoration(
+                            color: Tokens.accent,
+                            borderRadius: BorderRadius.circular(99),
+                          ),
+                          child: Text(
+                            u.offerLabel,
+                            style: const TextStyle(
+                              color: Tokens.bg,
+                              fontSize: 11,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        )
+                      : null,
+                  children: [
+                    if (!linked && !hot)
+                      SettingsTile(
+                        leading: const SettingsIcon(
+                          Icons.system_update_rounded,
+                          color: Tokens.dim,
                         ),
+                        title:
+                            'This phone runs '
+                            '${u.build?.label ?? 'an unknown build'}',
+                        subtitle:
+                            'Builds you make on your Mac (flutter build apk, or '
+                            'an APK dropped on the Companion page) install from '
+                            'here.',
                       )
-                    : null,
-                children: [
-                  if (!linked && !hot)
-                    SettingsTile(
-                      leading: const SettingsIcon(
-                        Icons.system_update_rounded,
-                        color: Tokens.dim,
-                      ),
-                      title:
-                          'This phone runs '
-                          '${u.build?.label ?? 'an unknown build'}',
-                      subtitle:
-                          'Builds you make on your Mac (flutter build apk, or '
-                          'an APK dropped on the Companion page) install from '
-                          'here.',
-                    )
-                  else
-                    SettingsCustomTile(child: AppUpdatePanel(updater: u)),
-                ],
+                    else
+                      SettingsCustomTile(child: AppUpdatePanel(updater: u)),
+                  ],
+                ),
               );
             },
           );
@@ -721,14 +744,17 @@ class SyncHubGroupState extends State<SyncHubGroup> {
                     'with it to the Companion page on your Mac. Errors the '
                     'app catches are sent there on their own.',
                 children: [
-                  SettingsTile.nav(
-                    leading: const SettingsIcon(
-                      Icons.bug_report_rounded,
-                      color: Tokens.dim,
+                  SettingsAnchor(
+                    id: 'companion.report',
+                    child: SettingsTile.nav(
+                      leading: const SettingsIcon(
+                        Icons.bug_report_rounded,
+                        color: Tokens.dim,
+                      ),
+                      title: 'Report a Problem',
+                      value: waiting == 0 ? null : '$waiting waiting',
+                      onTap: () => _reportProblem(reporter),
                     ),
-                    title: 'Report a Problem',
-                    value: waiting == 0 ? null : '$waiting waiting',
-                    onTap: () => _reportProblem(reporter),
                   ),
                 ],
               );

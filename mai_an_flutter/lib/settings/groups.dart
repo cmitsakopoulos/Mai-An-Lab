@@ -24,165 +24,6 @@ import 'folder_browser.dart';
 import 'settings_kit.dart';
 import 'settings_page.dart';
 
-/// Modern Apple-style grouped inset section with an uppercase accent header
-/// above a clean [GlassCard]. Shared by Appearance, AI Assistant, Audio & DSP.
-class LegacySettingsSection extends StatelessWidget {
-  const LegacySettingsSection({
-    super.key,
-    required this.label,
-    required this.child,
-    this.padding = const EdgeInsets.all(16),
-    this.trailing,
-  });
-
-  final String label;
-  final Widget child;
-  final EdgeInsetsGeometry padding;
-  final Widget? trailing;
-
-  @override
-  Widget build(BuildContext context) => Column(
-    crossAxisAlignment: CrossAxisAlignment.start,
-    children: [
-      Padding(
-        padding: const EdgeInsets.only(left: 4, right: 4, bottom: 8),
-        child: Row(
-          children: [
-            AccentLabel(label, size: 11),
-            if (trailing != null) ...[const Spacer(), trailing!],
-          ],
-        ),
-      ),
-      GlassCard(padding: padding, child: child),
-    ],
-  );
-}
-
-/// Modern right-aligned switch row for grouped inset settings cards.
-class InsetSwitchRow extends StatelessWidget {
-  const InsetSwitchRow({
-    super.key,
-    required this.label,
-    required this.value,
-    required this.onChanged,
-    this.subtitle,
-  });
-
-  final String label;
-  final String? subtitle;
-  final bool value;
-  final ValueChanged<bool>? onChanged;
-
-  @override
-  Widget build(BuildContext context) => InkWell(
-    onTap: onChanged == null ? null : () => onChanged!(!value),
-    borderRadius: BorderRadius.circular(10),
-    child: Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
-      child: Row(
-        children: [
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  label,
-                  style: const TextStyle(
-                    color: Tokens.text,
-                    fontSize: 14,
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
-                if (subtitle != null) ...[
-                  const SizedBox(height: 2),
-                  Dim(subtitle!, size: 11),
-                ],
-              ],
-            ),
-          ),
-          const SizedBox(width: 12),
-          AppSwitch(value: value, onChanged: onChanged),
-        ],
-      ),
-    ),
-  );
-}
-
-/// Tappable picker row showing a label on the left and the current value +
-/// chevron on the right (opens a frosted bottom sheet).
-class SettingsPickerRow extends StatelessWidget {
-  const SettingsPickerRow({
-    super.key,
-    required this.label,
-    required this.valueText,
-    required this.onTap,
-    this.subtitle,
-  });
-
-  final String label;
-  final String valueText;
-  final String? subtitle;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final accent = Theme.of(context).colorScheme.primary;
-    return InkWell(
-      borderRadius: BorderRadius.circular(10),
-      onTap: onTap,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 8),
-        child: Row(
-          children: [
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    label,
-                    style: const TextStyle(
-                      color: Tokens.text,
-                      fontSize: 14,
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                  if (subtitle != null) ...[
-                    const SizedBox(height: 2),
-                    Dim(subtitle!, size: 11),
-                  ],
-                ],
-              ),
-            ),
-            const SizedBox(width: 12),
-            ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 165),
-              child: Text(
-                valueText,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                textAlign: TextAlign.right,
-                style: TextStyle(
-                  color: accent,
-                  fontSize: 13,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ),
-            const SizedBox(width: 4),
-            const Icon(
-              Icons.chevron_right_rounded,
-              color: Tokens.dim,
-              size: 18,
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
 // ---------------------------------------------------------------------------
 // Storage & Paths
 
@@ -338,17 +179,23 @@ class _StorageGroupState extends State<StorageGroup> {
               'Downloads land in the download folder. The library folder is '
               'scanned to index your local audio files, tags and artwork.',
           children: [
-            SettingsTile.nav(
-              leading: const SettingsIcon(Icons.download_rounded),
-              title: 'Downloads Directory',
-              subtitle: _dl.isEmpty ? null : _dl,
-              onTap: () => _browse(download: true),
+            SettingsAnchor(
+              id: 'storage.download_folder',
+              child: SettingsTile.nav(
+                leading: const SettingsIcon(Icons.download_rounded),
+                title: 'Downloads Directory',
+                subtitle: _dl.isEmpty ? null : _dl,
+                onTap: () => _browse(download: true),
+              ),
             ),
-            SettingsTile.nav(
-              leading: const SettingsIcon(Icons.library_music_rounded),
-              title: 'Local Music Library',
-              subtitle: _lib.isEmpty ? null : _lib,
-              onTap: () => _browse(download: false),
+            SettingsAnchor(
+              id: 'storage.library_folder',
+              child: SettingsTile.nav(
+                leading: const SettingsIcon(Icons.library_music_rounded),
+                title: 'Local Music Library',
+                subtitle: _lib.isEmpty ? null : _lib,
+                onTap: () => _browse(download: false),
+              ),
             ),
           ],
         ),
@@ -358,13 +205,16 @@ class _StorageGroupState extends State<StorageGroup> {
               'Pick a tier to skip the quality sheet on every download. '
               '"Ask every time" restores the prompt.',
           children: [
-            SettingsPickerTile<String>(
-              leading: const SettingsIcon(Icons.high_quality_rounded),
-              title: 'Default Download Quality',
-              sheetTitle: 'Default Quality',
-              value: _quality,
-              options: kDefaultQualityOptions,
-              onChanged: _setQuality,
+            SettingsAnchor(
+              id: 'storage.quality',
+              child: SettingsPickerTile<String>(
+                leading: const SettingsIcon(Icons.high_quality_rounded),
+                title: 'Default Download Quality',
+                sheetTitle: 'Default Quality',
+                value: _quality,
+                options: kDefaultQualityOptions,
+                onChanged: _setQuality,
+              ),
             ),
           ],
         ),
@@ -529,110 +379,135 @@ class _AppearanceGroupState extends State<AppearanceGroup> {
             SettingsCustomTile(
               child: _GlassPreview(opacity: opacity, accent: accent),
             ),
-            SettingsSliderTile(
-              title: 'Glass Opacity',
-              value: opacity,
-              min: Tokens.minGlassOpacity,
-              max: Tokens.maxGlassOpacity,
-              valueLabel: opacity >= 0.99
-                  ? 'Solid'
-                  : pct == 0
-                  ? 'Clear'
-                  : '$pct%',
-              marks: const ['Clear', 'Balanced', 'Solid'],
-              onChanged: (v) => _set('glass_opacity', v, persist: false),
-              onChangeEnd: (v) => _set('glass_opacity', v),
-            ),
-            SettingsCustomTile(
-              title: 'Accent Color',
-              child: Wrap(
-                spacing: 12,
-                runSpacing: 12,
-                children: [
-                  for (final (name, hex) in kAccentChoices)
-                    _AccentDot(
-                      name: name,
-                      hex: hex,
-                      selected:
-                          hex.toLowerCase() ==
-                          '${_state['accent_color']}'.toLowerCase(),
-                      onTap: () => _set('accent_color', hex),
-                    ),
-                ],
+            SettingsAnchor(
+              id: 'appearance.opacity',
+              child: SettingsSliderTile(
+                title: 'Glass Opacity',
+                value: opacity,
+                min: Tokens.minGlassOpacity,
+                max: Tokens.maxGlassOpacity,
+                valueLabel: opacity >= 0.99
+                    ? 'Solid'
+                    : pct == 0
+                    ? 'Clear'
+                    : '$pct%',
+                marks: const ['Clear', 'Balanced', 'Solid'],
+                onChanged: (v) => _set('glass_opacity', v, persist: false),
+                onChangeEnd: (v) => _set('glass_opacity', v),
               ),
             ),
-            SettingsSegmentedTile<String>(
-              title: 'Category Colors',
-              subtitle: unified
-                  ? 'Artists, albums, tracks and more all use the accent.'
-                  : 'Each library category keeps its own colour.',
-              inline: false,
-              value: unified ? 'unified' : 'category',
-              options: const [
-                SettingsOption('category', 'Multi-Color'),
-                SettingsOption('unified', 'Unified Accent'),
-              ],
-              onChanged: (v) => _set('pill_style', v),
+            SettingsAnchor(
+              id: 'appearance.accent',
+              child: SettingsCustomTile(
+                title: 'Accent Color',
+                child: Wrap(
+                  spacing: 12,
+                  runSpacing: 12,
+                  children: [
+                    for (final (name, hex) in kAccentChoices)
+                      _AccentDot(
+                        name: name,
+                        hex: hex,
+                        selected:
+                            hex.toLowerCase() ==
+                            '${_state['accent_color']}'.toLowerCase(),
+                        onTap: () => _set('accent_color', hex),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+            SettingsAnchor(
+              id: 'appearance.category_colors',
+              child: SettingsSegmentedTile<String>(
+                title: 'Category Colors',
+                subtitle: unified
+                    ? 'Artists, albums, tracks and more all use the accent.'
+                    : 'Each library category keeps its own colour.',
+                inline: false,
+                value: unified ? 'unified' : 'category',
+                options: const [
+                  SettingsOption('category', 'Multi-Color'),
+                  SettingsOption('unified', 'Unified Accent'),
+                ],
+                onChanged: (v) => _set('pill_style', v),
+              ),
             ),
           ],
         ),
         SettingsSection(
           header: 'Navigation',
           children: [
-            SettingsSegmentedTile<String>(
-              title: 'Startup Page',
-              value: '${_state['startup_page']}',
-              options: const [
-                SettingsOption('Library', 'Library'),
-                SettingsOption('Search', 'Search'),
-              ],
-              onChanged: (v) => _set('startup_page', v),
-            ),
-            SettingsPickerTile<LibrarySort>(
-              title: 'Default Library Sort',
-              value: LibrarySort.fromConfig('${_state['default_sort']}'),
-              options: [
-                for (final s in LibrarySort.values) SettingsOption(s, s.label),
-              ],
-              onChanged: (s) => _set('default_sort', s.name),
-            ),
-          ],
-        ),
-        SettingsSection(
-          header: 'Library Views',
-          footer: 'Hidden views leave the Library view bar.',
-          children: [
-            for (final (key, view, label) in const [
-              ('tracks', LibraryView.tracks, 'Tracks'),
-              ('albums', LibraryView.albums, 'Albums'),
-              ('artists', LibraryView.artists, 'Artists'),
-              ('genres', LibraryView.genres, 'Genres'),
-              ('playlists', LibraryView.playlists, 'Playlists'),
-            ])
-              toggle(
-                key,
-                label,
-                leading: SettingsIcon(
-                  ViewBar.icon(view),
-                  color: unified ? accent : (ViewBar.color(view) ?? accent),
-                ),
+            SettingsAnchor(
+              id: 'appearance.startup',
+              child: SettingsSegmentedTile<String>(
+                title: 'Startup Page',
+                value: '${_state['startup_page']}',
+                options: const [
+                  SettingsOption('Library', 'Library'),
+                  SettingsOption('Search', 'Search'),
+                ],
+                onChanged: (v) => _set('startup_page', v),
               ),
+            ),
+            SettingsAnchor(
+              id: 'appearance.sort',
+              child: SettingsPickerTile<LibrarySort>(
+                title: 'Default Library Sort',
+                value: LibrarySort.fromConfig('${_state['default_sort']}'),
+                options: [
+                  for (final s in LibrarySort.values)
+                    SettingsOption(s, s.label),
+                ],
+                onChanged: (s) => _set('default_sort', s.name),
+              ),
+            ),
           ],
         ),
-        SettingsSection(
-          header: 'Search Landing',
-          footer: 'What the Search tab shows before you type.',
-          children: [
-            toggle('new_releases', 'New From Your Artists'),
-            toggle('most_listened', 'Most Listened Tracks'),
-            toggle('top_artists', 'Most Listened Artists'),
-            toggle('top_genres', 'Most Listened Genres'),
-            toggle('library_stats', 'Library Stats'),
-          ],
+        SettingsAnchor(
+          id: 'appearance.library_views',
+          child: SettingsSection(
+            header: 'Library Views',
+            footer: 'Hidden views leave the Library view bar.',
+            children: [
+              for (final (key, view, label) in const [
+                ('tracks', LibraryView.tracks, 'Tracks'),
+                ('albums', LibraryView.albums, 'Albums'),
+                ('artists', LibraryView.artists, 'Artists'),
+                ('genres', LibraryView.genres, 'Genres'),
+                ('playlists', LibraryView.playlists, 'Playlists'),
+              ])
+                toggle(
+                  key,
+                  label,
+                  leading: SettingsIcon(
+                    ViewBar.icon(view),
+                    color: unified ? accent : (ViewBar.color(view) ?? accent),
+                  ),
+                ),
+            ],
+          ),
         ),
-        SettingsSection(
-          header: 'Assistant',
-          children: [toggle('jarvis', 'Enable Jarvis Tab')],
+        SettingsAnchor(
+          id: 'appearance.search_landing',
+          child: SettingsSection(
+            header: 'Search Landing',
+            footer: 'What the Search tab shows before you type.',
+            children: [
+              toggle('new_releases', 'New From Your Artists'),
+              toggle('most_listened', 'Most Listened Tracks'),
+              toggle('top_artists', 'Most Listened Artists'),
+              toggle('top_genres', 'Most Listened Genres'),
+              toggle('library_stats', 'Library Stats'),
+            ],
+          ),
+        ),
+        SettingsAnchor(
+          id: 'appearance.jarvis_tab',
+          child: SettingsSection(
+            header: 'Assistant',
+            children: [toggle('jarvis', 'Enable Jarvis Tab')],
+          ),
         ),
       ],
     );
@@ -906,29 +781,35 @@ class _HapticsGroupState extends State<HapticsGroup> {
         SettingsSection(
           footer: 'Vibration for gestures and actions. Android only.',
           children: [
-            SettingsTile.toggle(
-              title: 'Enable Haptic Feedback',
-              leading: const SettingsIcon(
-                Icons.vibration_rounded,
-                color: Tokens.libGenre,
+            SettingsAnchor(
+              id: 'haptics.enable',
+              child: SettingsTile.toggle(
+                title: 'Enable Haptic Feedback',
+                leading: const SettingsIcon(
+                  Icons.vibration_rounded,
+                  color: Tokens.libGenre,
+                ),
+                value: _enabled,
+                onChanged: _toggle,
               ),
-              value: _enabled,
-              onChanged: _toggle,
             ),
           ],
         ),
-        SettingsSection(
-          header: 'Intensity',
-          footer: 'Each choice plays a sample. None turns that one off.',
-          children: [
-            for (final (k, label, options, _) in HapticsGroup.rows)
-              SettingsPickerTile<String>(
-                title: label,
-                value: _levelsNow[k] ?? '',
-                options: [for (final (v, t) in options) SettingsOption(v, t)],
-                onChanged: (v) => _level(k, v),
-              ),
-          ],
+        SettingsAnchor(
+          id: 'haptics.intensity',
+          child: SettingsSection(
+            header: 'Intensity',
+            footer: 'Each choice plays a sample. None turns that one off.',
+            children: [
+              for (final (k, label, options, _) in HapticsGroup.rows)
+                SettingsPickerTile<String>(
+                  title: label,
+                  value: _levelsNow[k] ?? '',
+                  options: [for (final (v, t) in options) SettingsOption(v, t)],
+                  onChanged: (v) => _level(k, v),
+                ),
+            ],
+          ),
         ),
       ],
     );
@@ -1031,27 +912,30 @@ class _PermissionsGroupState extends State<PermissionsGroup> {
     return GroupBody(
       spacing: 26,
       children: [
-        SettingsSection(
-          header: 'Access',
-          footer:
-              'Tap a permission to open Android’s App Info, then '
-              'Permissions, and set it to Allow.',
-          children: [
-            for (final (p, label, desc) in PermissionsGroup.specs)
-              SettingsTile(
-                title: label,
-                subtitle: desc,
-                onTap: openAppSettings,
-                trailing: _StatusPill(
-                  label: switch (_status?[p]) {
-                    null => 'Checking…',
-                    final s => _statusLabel(s),
-                  },
-                  ok: _status?[p]?.isGranted ?? false,
-                  pending: _status?[p] == null,
+        SettingsAnchor(
+          id: 'permissions.access',
+          child: SettingsSection(
+            header: 'Access',
+            footer:
+                'Tap a permission to open Android’s App Info, then '
+                'Permissions, and set it to Allow.',
+            children: [
+              for (final (p, label, desc) in PermissionsGroup.specs)
+                SettingsTile(
+                  title: label,
+                  subtitle: desc,
+                  onTap: openAppSettings,
+                  trailing: _StatusPill(
+                    label: switch (_status?[p]) {
+                      null => 'Checking…',
+                      final s => _statusLabel(s),
+                    },
+                    ok: _status?[p]?.isGranted ?? false,
+                    pending: _status?[p] == null,
+                  ),
                 ),
-              ),
-          ],
+            ],
+          ),
         ),
         SettingsSection(
           children: [
@@ -1283,69 +1167,78 @@ class _DatabaseGroupState extends State<DatabaseGroup> {
               'application database. Your actual music files will NOT be '
               'touched.',
           children: [
-            SettingsTile.action(
-              leading: const SettingsIcon(Icons.format_list_bulleted_rounded),
-              title: 'Library Index',
-              subtitle: 'Clear indexed music, playlists and metadata',
-              destructive: true,
-              onTap: when(
-                () => _confirmThen(
-                  'Clear Library Index?',
-                  'This will clear all indexed music, playlists, and '
-                      'metadata from the local database, leaving '
-                      'configuration, history, and play counts intact.'
-                      '\n\nYour actual music files will NOT be touched.',
-                  'Clear Index',
-                  () => _run(
-                    repo!.clearLibraryIndex,
-                    ok: 'Library index cleared successfully.',
-                    failed: 'Failed to clear library index',
-                    clearsQueue: true,
+            SettingsAnchor(
+              id: 'database.library_index',
+              child: SettingsTile.action(
+                leading: const SettingsIcon(Icons.format_list_bulleted_rounded),
+                title: 'Library Index',
+                subtitle: 'Clear indexed music, playlists and metadata',
+                destructive: true,
+                onTap: when(
+                  () => _confirmThen(
+                    'Clear Library Index?',
+                    'This will clear all indexed music, playlists, and '
+                        'metadata from the local database, leaving '
+                        'configuration, history, and play counts intact.'
+                        '\n\nYour actual music files will NOT be touched.',
+                    'Clear Index',
+                    () => _run(
+                      repo!.clearLibraryIndex,
+                      ok: 'Library index cleared successfully.',
+                      failed: 'Failed to clear library index',
+                      clearsQueue: true,
+                    ),
                   ),
                 ),
               ),
             ),
-            SettingsTile.action(
-              leading: const SettingsIcon(Icons.graphic_eq_rounded),
-              title: 'DSP Features',
-              subtitle: 'Purge acoustic features and the PCA space',
-              destructive: true,
-              onTap: when(
-                () => _confirmThen(
-                  'Clear DSP Features?',
-                  'This will purge all extracted acoustic DSP features '
-                      'and PCA space definitions, forcing a full '
-                      'recalculation/re-scan on your next sweep.\n\n'
-                      'Your library index will remain intact.',
-                  'Clear DSP',
-                  () => _run(
-                    repo!.clearDspFeatures,
-                    ok: 'Acoustic DSP features cleared successfully.',
-                    failed: 'Failed to clear DSP features',
+            SettingsAnchor(
+              id: 'database.dsp_features',
+              child: SettingsTile.action(
+                leading: const SettingsIcon(Icons.graphic_eq_rounded),
+                title: 'DSP Features',
+                subtitle: 'Purge acoustic features and the PCA space',
+                destructive: true,
+                onTap: when(
+                  () => _confirmThen(
+                    'Clear DSP Features?',
+                    'This will purge all extracted acoustic DSP features '
+                        'and PCA space definitions, forcing a full '
+                        'recalculation/re-scan on your next sweep.\n\n'
+                        'Your library index will remain intact.',
+                    'Clear DSP',
+                    () => _run(
+                      repo!.clearDspFeatures,
+                      ok: 'Acoustic DSP features cleared successfully.',
+                      failed: 'Failed to clear DSP features',
+                    ),
                   ),
                 ),
               ),
             ),
-            SettingsTile.action(
-              leading: const SettingsIcon(
-                Icons.delete_forever_rounded,
-                color: Tokens.accentRed,
-              ),
-              title: 'Wipe DB',
-              subtitle: 'Clear the search index and all metadata',
-              destructive: true,
-              onTap: when(
-                () => _confirmThen(
-                  'Wipe Library Database?',
-                  'This will clear the search index and all metadata '
-                      'from the database. \n\nIMPORTANT: Your local music '
-                      'files will NOT be touched or deleted.',
-                  'Wipe Database',
-                  () => _run(
-                    repo!.wipeDatabase,
-                    ok: 'Library database wiped successfully.',
-                    failed: 'Wipe failed',
-                    clearsQueue: true,
+            SettingsAnchor(
+              id: 'database.wipe',
+              child: SettingsTile.action(
+                leading: const SettingsIcon(
+                  Icons.delete_forever_rounded,
+                  color: Tokens.accentRed,
+                ),
+                title: 'Wipe DB',
+                subtitle: 'Clear the search index and all metadata',
+                destructive: true,
+                onTap: when(
+                  () => _confirmThen(
+                    'Wipe Library Database?',
+                    'This will clear the search index and all metadata '
+                        'from the database. \n\nIMPORTANT: Your local music '
+                        'files will NOT be touched or deleted.',
+                    'Wipe Database',
+                    () => _run(
+                      repo!.wipeDatabase,
+                      ok: 'Library database wiped successfully.',
+                      failed: 'Wipe failed',
+                      clearsQueue: true,
+                    ),
                   ),
                 ),
               ),
@@ -1354,44 +1247,50 @@ class _DatabaseGroupState extends State<DatabaseGroup> {
               const SettingsCustomTile(child: LinearProgressIndicator()),
           ],
         ),
-        SettingsSection(
-          header: 'Compute Pipeline',
-          footer:
-              'Run the DSP / graph / PCA pipeline manually instead of going '
-              'through Jarvis.',
-          children: [
-            SettingsTile.action(
-              leading: const SettingsIcon(Icons.play_arrow_rounded),
-              title: 'Commence/Continue DSP Compute',
-              onTap: when(() => _computeDsp(DspEntry.settings)),
-            ),
-            SettingsTile.action(
-              leading: const SettingsIcon(Icons.replay_rounded),
-              title: 'Recompute All DSP Features',
-              onTap: when(_confirmRecomputeAllDsp),
-            ),
-            SettingsTile.action(
-              leading: const SettingsIcon(Icons.scatter_plot_rounded),
-              title: 'Recompute PCA',
-              onTap: when(_recomputePca),
-            ),
-            if (analysis.running) ...[
-              SettingsCustomTile(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    LinearProgressIndicator(value: analysis.progress),
-                    if (analysis.status.isNotEmpty) ...[
-                      const SizedBox(height: 8),
-                      Text(analysis.status, style: SettingsStyle.subtitle),
-                    ],
-                  ],
+        SettingsAnchor(
+          id: 'database.compute',
+          child: SettingsSection(
+            header: 'Compute Pipeline',
+            footer:
+                'Run the DSP / graph / PCA pipeline manually instead of going '
+                'through Jarvis.',
+            children: [
+              SettingsTile.action(
+                leading: const SettingsIcon(Icons.play_arrow_rounded),
+                title: 'Commence/Continue DSP Compute',
+                onTap: when(() => _computeDsp(DspEntry.settings)),
+              ),
+              SettingsTile.action(
+                leading: const SettingsIcon(Icons.replay_rounded),
+                title: 'Recompute All DSP Features',
+                onTap: when(_confirmRecomputeAllDsp),
+              ),
+              SettingsAnchor(
+                id: 'database.pca',
+                child: SettingsTile.action(
+                  leading: const SettingsIcon(Icons.scatter_plot_rounded),
+                  title: 'Recompute PCA',
+                  onTap: when(_recomputePca),
                 ),
               ),
-              SettingsTile.action(title: 'Cancel', onTap: analysis.cancel),
-            ] else if (_pcaBusy)
-              const SettingsCustomTile(child: LinearProgressIndicator()),
-          ],
+              if (analysis.running) ...[
+                SettingsCustomTile(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      LinearProgressIndicator(value: analysis.progress),
+                      if (analysis.status.isNotEmpty) ...[
+                        const SizedBox(height: 8),
+                        Text(analysis.status, style: SettingsStyle.subtitle),
+                      ],
+                    ],
+                  ),
+                ),
+                SettingsTile.action(title: 'Cancel', onTap: analysis.cancel),
+              ] else if (_pcaBusy)
+                const SettingsCustomTile(child: LinearProgressIndicator()),
+            ],
+          ),
         ),
       ],
     );
@@ -1582,77 +1481,89 @@ class _AdvancedGroupState extends State<AdvancedGroup> {
                 'state on its own. Export or import here for a point-in-time '
                 'backup.',
             children: [
-              SettingsTile.nav(
-                title: 'Export State',
-                leading: const SettingsIcon(Icons.ios_share_rounded),
-                onTap: _exportClick,
+              SettingsAnchor(
+                id: 'advanced.export',
+                child: SettingsTile.nav(
+                  title: 'Export State',
+                  leading: const SettingsIcon(Icons.ios_share_rounded),
+                  onTap: _exportClick,
+                ),
               ),
-              SettingsTile.nav(
-                title: 'Import State',
-                leading: const SettingsIcon(Icons.file_download_rounded),
-                onTap: _importClick,
+              SettingsAnchor(
+                id: 'advanced.import',
+                child: SettingsTile.nav(
+                  title: 'Import State',
+                  leading: const SettingsIcon(Icons.file_download_rounded),
+                  onTap: _importClick,
+                ),
               ),
             ],
           ),
-        SettingsSection(
-          header: 'Cache',
-          children: [
-            SettingsTile.action(
-              title: 'Clear Album Artwork Cache',
-              leading: const SettingsIcon(
-                Icons.image_rounded,
-                color: Tokens.libAlbum,
-              ),
-              onTap: () => _snackOf(_clearAlbumCache),
-            ),
-            SettingsTile.action(
-              title: 'Clear Preview Cache',
-              leading: const SettingsIcon(
-                Icons.music_note_rounded,
-                color: Tokens.libTrack,
-              ),
-              onTap: () => _snackOf(_clearPreviewCache),
-            ),
-          ],
-        ),
-        SettingsSection(
-          header: 'Raw Configuration',
-          footer: 'Edits config.toml directly; saved exactly as typed.',
-          children: [
-            SettingsCustomTile(
-              child: TextField(
-                controller: _editor,
-                minLines: 15,
-                maxLines: 25,
-                style: const TextStyle(
-                  color: Tokens.text,
-                  fontFamily: 'monospace',
-                  fontSize: 11,
-                  height: 1.4,
+        SettingsAnchor(
+          id: 'advanced.cache',
+          child: SettingsSection(
+            header: 'Cache',
+            children: [
+              SettingsTile.action(
+                title: 'Clear Album Artwork Cache',
+                leading: const SettingsIcon(
+                  Icons.image_rounded,
+                  color: Tokens.libAlbum,
                 ),
-                decoration: InputDecoration(
-                  filled: true,
-                  fillColor: Tokens.surface2,
-                  contentPadding: const EdgeInsets.all(12),
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(10),
-                    borderSide: BorderSide.none,
+                onTap: () => _snackOf(_clearAlbumCache),
+              ),
+              SettingsTile.action(
+                title: 'Clear Preview Cache',
+                leading: const SettingsIcon(
+                  Icons.music_note_rounded,
+                  color: Tokens.libTrack,
+                ),
+                onTap: () => _snackOf(_clearPreviewCache),
+              ),
+            ],
+          ),
+        ),
+        SettingsAnchor(
+          id: 'advanced.toml',
+          child: SettingsSection(
+            header: 'Raw Configuration',
+            footer: 'Edits config.toml directly; saved exactly as typed.',
+            children: [
+              SettingsCustomTile(
+                child: TextField(
+                  controller: _editor,
+                  minLines: 15,
+                  maxLines: 25,
+                  style: const TextStyle(
+                    color: Tokens.text,
+                    fontFamily: 'monospace',
+                    fontSize: 11,
+                    height: 1.4,
                   ),
-                  focusedBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(10),
-                    borderSide: BorderSide(
-                      color: Theme.of(context).colorScheme.primary,
+                  decoration: InputDecoration(
+                    filled: true,
+                    fillColor: Tokens.surface2,
+                    contentPadding: const EdgeInsets.all(12),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(10),
+                      borderSide: BorderSide.none,
+                    ),
+                    focusedBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(10),
+                      borderSide: BorderSide(
+                        color: Theme.of(context).colorScheme.primary,
+                      ),
                     ),
                   ),
                 ),
               ),
-            ),
-            SettingsTile.action(
-              title: 'Save Configuration',
-              leading: const SettingsIcon(Icons.save_rounded),
-              onTap: _saveConfig,
-            ),
-          ],
+              SettingsTile.action(
+                title: 'Save Configuration',
+                leading: const SettingsIcon(Icons.save_rounded),
+                onTap: _saveConfig,
+              ),
+            ],
+          ),
         ),
       ],
     );
@@ -1769,16 +1680,19 @@ class AboutGroup extends StatelessWidget {
                 }
               },
             ),
-            SettingsTile.nav(
-              title: 'Licenses',
-              leading: const SettingsIcon(
-                Icons.gavel_rounded,
-                color: Tokens.dim,
-              ),
-              onTap: () => showLicensePage(
-                context: context,
-                applicationName: 'Mai An Lab',
-                applicationVersion: kAppVersion,
+            SettingsAnchor(
+              id: 'about.licenses',
+              child: SettingsTile.nav(
+                title: 'Licenses',
+                leading: const SettingsIcon(
+                  Icons.gavel_rounded,
+                  color: Tokens.dim,
+                ),
+                onTap: () => showLicensePage(
+                  context: context,
+                  applicationName: 'Mai An Lab',
+                  applicationVersion: kAppVersion,
+                ),
               ),
             ),
             SettingsTile.nav(

@@ -398,13 +398,16 @@ class _AudioDspGroupState extends State<AudioDspGroup> {
             header: 'Dynamic Punchiness',
             footer: _dynamismNote,
             children: [
-              SettingsTile.toggle(
-                title: 'Enable Dynamism Enhancement',
-                subtitle:
-                    'Automatically boost output gain from track energy & '
-                    'beat strength',
-                value: _dynamism,
-                onChanged: _dynamismAvailable ? _onDynamism : null,
+              SettingsAnchor(
+                id: 'audio.dynamism',
+                child: SettingsTile.toggle(
+                  title: 'Enable Dynamism Enhancement',
+                  subtitle:
+                      'Automatically boost output gain from track energy & '
+                      'beat strength',
+                  value: _dynamism,
+                  onChanged: _dynamismAvailable ? _onDynamism : null,
+                ),
               ),
               if (boost > 0)
                 SettingsTile(
@@ -443,12 +446,15 @@ class _AudioDspGroupState extends State<AudioDspGroup> {
                 )
               : null,
           children: [
-            SettingsTile.toggle(
-              title: 'Enable 5-Band Equalizer',
-              subtitle:
-                  'Shape frequency bands to match your headphones or genre',
-              value: _eq,
-              onChanged: _onEqualizer,
+            SettingsAnchor(
+              id: 'audio.eq',
+              child: SettingsTile.toggle(
+                title: 'Enable 5-Band Equalizer',
+                subtitle:
+                    'Shape frequency bands to match your headphones or genre',
+                value: _eq,
+                onChanged: _onEqualizer,
+              ),
             ),
             SettingsCustomTile(
               child: SettingsSegmented<String>(
@@ -460,12 +466,15 @@ class _AudioDspGroupState extends State<AudioDspGroup> {
                 ],
               ),
             ),
-            SettingsPickerTile<String>(
-              title: 'Preset',
-              sheetTitle: custom ? 'Custom Presets' : 'System Presets',
-              value: _preset,
-              options: [for (final n in _options) SettingsOption(n, n)],
-              onChanged: _onPreset,
+            SettingsAnchor(
+              id: 'audio.preset',
+              child: SettingsPickerTile<String>(
+                title: 'Preset',
+                sheetTitle: custom ? 'Custom Presets' : 'System Presets',
+                value: _preset,
+                options: [for (final n in _options) SettingsOption(n, n)],
+                onChanged: _onPreset,
+              ),
             ),
             SettingsCustomTile(child: _bands(accent)),
             if (custom) ...[
@@ -624,109 +633,115 @@ class _AudioDspGroupState extends State<AudioDspGroup> {
         ? Tokens.accentGreen
         : Tokens.amber;
 
-    return SettingsSection(
-      header: 'Acoustic Index',
-      headerTrailing: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-        decoration: BoxDecoration(
-          color: badgeColor.withValues(alpha: 0.16),
-          borderRadius: BorderRadius.circular(8),
-        ),
-        child: Text(
-          badgeText,
-          style: TextStyle(
-            color: badgeColor,
-            fontSize: 11,
-            fontWeight: FontWeight.w700,
+    return SettingsAnchor(
+      id: 'audio.acoustic_index',
+      child: SettingsSection(
+        header: 'Acoustic Index',
+        headerTrailing: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+          decoration: BoxDecoration(
+            color: badgeColor.withValues(alpha: 0.16),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Text(
+            badgeText,
+            style: TextStyle(
+              color: badgeColor,
+              fontSize: 11,
+              fontWeight: FontWeight.w700,
+            ),
           ),
         ),
-      ),
-      footer:
-          'Powers Auto-Play similarity walks, Dynamic Punchiness, and '
-          'Acoustic Network.',
-      children: [
-        SettingsCustomTile(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      total == 0
-                          ? 'Add tracks to build acoustic features'
-                          : '$analysed / $total tracks indexed',
-                      style: SettingsStyle.title.copyWith(
-                        fontFeatures: const [FontFeature.tabularFigures()],
+        footer:
+            'Powers Auto-Play similarity walks, Dynamic Punchiness, and '
+            'Acoustic Network.',
+        children: [
+          SettingsCustomTile(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        total == 0
+                            ? 'Add tracks to build acoustic features'
+                            : '$analysed / $total tracks indexed',
+                        style: SettingsStyle.title.copyWith(
+                          fontFeatures: const [FontFeature.tabularFigures()],
+                        ),
                       ),
                     ),
+                    if (total > 0)
+                      Text(
+                        '${(ratio * 100).round()}%',
+                        style: TextStyle(
+                          color: badgeColor,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w700,
+                          fontFeatures: const [FontFeature.tabularFigures()],
+                        ),
+                      ),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(3),
+                  child: LinearProgressIndicator(
+                    value: analysis.running ? analysis.progress : ratio,
+                    minHeight: 5,
+                    color: badgeColor,
+                    backgroundColor: Tokens.surface2,
                   ),
-                  if (total > 0)
-                    Text(
-                      '${(ratio * 100).round()}%',
-                      style: TextStyle(
-                        color: badgeColor,
-                        fontSize: 13,
-                        fontWeight: FontWeight.w700,
-                        fontFeatures: const [FontFeature.tabularFigures()],
-                      ),
-                    ),
+                ),
+                if (analysis.running) ...[
+                  const SizedBox(height: 8),
+                  Text(
+                    analysis.status.isEmpty
+                        ? 'Analysing acoustic features…'
+                        : analysis.status,
+                    style: SettingsStyle.subtitle,
+                  ),
                 ],
-              ),
-              const SizedBox(height: 10),
-              ClipRRect(
-                borderRadius: BorderRadius.circular(3),
-                child: LinearProgressIndicator(
-                  value: analysis.running ? analysis.progress : ratio,
-                  minHeight: 5,
-                  color: badgeColor,
-                  backgroundColor: Tokens.surface2,
-                ),
-              ),
-              if (analysis.running) ...[
-                const SizedBox(height: 8),
-                Text(
-                  analysis.status.isEmpty
-                      ? 'Analysing acoustic features…'
-                      : analysis.status,
-                  style: SettingsStyle.subtitle,
-                ),
               ],
-            ],
+            ),
           ),
-        ),
-        if (analysis.running)
-          SettingsTile.action(
-            title: 'Cancel Analysis',
-            destructive: true,
-            onTap: analysis.cancel,
-          )
-        else if (missing > 0) ...[
-          SettingsTile.action(
-            leading: const SettingsIcon(Icons.play_arrow_rounded),
-            title: 'Analyse $missing Track${missing == 1 ? '' : 's'}',
-            onTap: when(() => unawaited(_runAnalysis(DspEntry.settings))),
-          ),
-          if (analysed > 0)
+          if (analysis.running)
+            SettingsTile.action(
+              title: 'Cancel Analysis',
+              destructive: true,
+              onTap: analysis.cancel,
+            )
+          else if (missing > 0) ...[
+            SettingsTile.action(
+              leading: const SettingsIcon(Icons.play_arrow_rounded),
+              title: 'Analyse $missing Track${missing == 1 ? '' : 's'}',
+              onTap: when(() => unawaited(_runAnalysis(DspEntry.settings))),
+            ),
+            if (analysed > 0)
+              SettingsTile.action(
+                leading: const SettingsIcon(Icons.refresh_rounded),
+                title: 'Rebuild All',
+                onTap: when(() => unawaited(_confirmRebuildAll())),
+              ),
+          ] else
             SettingsTile.action(
               leading: const SettingsIcon(Icons.refresh_rounded),
-              title: 'Rebuild All',
+              title: 'Rebuild Acoustic Index',
               onTap: when(() => unawaited(_confirmRebuildAll())),
             ),
-        ] else
-          SettingsTile.action(
-            leading: const SettingsIcon(Icons.refresh_rounded),
-            title: 'Rebuild Acoustic Index',
-            onTap: when(() => unawaited(_confirmRebuildAll())),
+          SettingsAnchor(
+            id: 'audio.auto_analyse',
+            child: SettingsTile.toggle(
+              title: 'Auto-analyse new tracks',
+              subtitle:
+                  'Automatically compute DSP features after scans & downloads',
+              value: _autoAnalyse,
+              onChanged: _onAutoAnalyse,
+            ),
           ),
-        SettingsTile.toggle(
-          title: 'Auto-analyse new tracks',
-          subtitle:
-              'Automatically compute DSP features after scans & downloads',
-          value: _autoAnalyse,
-          onChanged: _onAutoAnalyse,
-        ),
-      ],
+        ],
+      ),
     );
   }
 }

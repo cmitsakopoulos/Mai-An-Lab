@@ -193,6 +193,322 @@ const kSettingEntries = [
   ),
 ];
 
+/// One findable row or section inside a Settings page (row-level
+/// search). [id] matches the page's `SettingsAnchor`; separate from
+/// [kSettingEntries], whose search must list what Flet lists.
+class SettingRow {
+  const SettingRow(this.page, this.id, this.title, this.keywords);
+
+  final SettingsPage page;
+  final String id, title;
+  final List<String> keywords;
+}
+
+const kSettingRows = [
+  SettingRow(
+    SettingsPage.storage,
+    'storage.download_folder',
+    'Downloads Directory',
+    ['download folder', 'path', 'destination', 'directory'],
+  ),
+  SettingRow(
+    SettingsPage.storage,
+    'storage.library_folder',
+    'Local Music Library',
+    ['library folder', 'music folder', 'scan', 'path'],
+  ),
+  SettingRow(
+    SettingsPage.storage,
+    'storage.quality',
+    'Default Download Quality',
+    ['quality', 'flac', 'hi-res', 'hires', 'mp3', 'bitrate', 'lossless'],
+  ),
+  SettingRow(SettingsPage.appearance, 'appearance.opacity', 'Glass Opacity', [
+    'glass',
+    'opacity',
+    'transparency',
+    'blur',
+    'frosted',
+    'solid',
+  ]),
+  SettingRow(SettingsPage.appearance, 'appearance.accent', 'Accent Color', [
+    'accent',
+    'colour',
+    'color',
+    'theme',
+  ]),
+  SettingRow(
+    SettingsPage.appearance,
+    'appearance.category_colors',
+    'Category Colors',
+    ['category', 'colour', 'color', 'artist', 'album', 'genre'],
+  ),
+  SettingRow(SettingsPage.appearance, 'appearance.startup', 'Startup Page', [
+    'startup',
+    'landing',
+    'launch',
+    'tab',
+  ]),
+  SettingRow(
+    SettingsPage.appearance,
+    'appearance.sort',
+    'Default Library Sort',
+    ['sort', 'order', 'library'],
+  ),
+  SettingRow(
+    SettingsPage.appearance,
+    'appearance.library_views',
+    'Library Views',
+    ['library', 'views', 'tabs', 'pills'],
+  ),
+  SettingRow(
+    SettingsPage.appearance,
+    'appearance.search_landing',
+    'Search Landing',
+    ['search', 'landing', 'most played', 'top artists', 'stats', 'history'],
+  ),
+  SettingRow(
+    SettingsPage.appearance,
+    'appearance.jarvis_tab',
+    'Enable Jarvis Tab',
+    ['jarvis', 'assistant', 'tab'],
+  ),
+  SettingRow(SettingsPage.audio, 'audio.acoustic_index', 'Acoustic Index', [
+    'acoustic',
+    'analyse',
+    'analyze',
+    'features',
+    'dsp',
+    'rebuild',
+  ]),
+  SettingRow(
+    SettingsPage.audio,
+    'audio.auto_analyse',
+    'Auto-analyse new tracks',
+    ['auto', 'analyse', 'analyze', 'dsp', 'scan'],
+  ),
+  SettingRow(
+    SettingsPage.audio,
+    'audio.dynamism',
+    'Enable Dynamism Enhancement',
+    ['dynamism', 'punchiness', 'boost', 'loudness', 'energy'],
+  ),
+  SettingRow(SettingsPage.audio, 'audio.eq', 'Enable 5-Band Equalizer', [
+    'eq',
+    'equalizer',
+    'equaliser',
+    'bands',
+    'gain',
+    'bass',
+    'treble',
+  ]),
+  SettingRow(SettingsPage.audio, 'audio.preset', 'EQ Preset', [
+    'preset',
+    'eq',
+    'rock',
+    'pop',
+    'jazz',
+    'bass booster',
+    'vocal',
+  ]),
+  SettingRow(SettingsPage.haptics, 'haptics.enable', 'Enable Haptic Feedback', [
+    'haptic',
+    'vibration',
+    'vibrate',
+  ]),
+  SettingRow(SettingsPage.haptics, 'haptics.intensity', 'Haptic Intensity', [
+    'intensity',
+    'vibration',
+    'strength',
+  ]),
+  SettingRow(
+    SettingsPage.permissions,
+    'permissions.access',
+    'Permission Access',
+    ['permission', 'notification', 'microphone', 'storage', 'grant'],
+  ),
+  SettingRow(
+    SettingsPage.database,
+    'database.library_index',
+    'Clear Library Index',
+    ['library index', 'clear', 'reset'],
+  ),
+  SettingRow(
+    SettingsPage.database,
+    'database.dsp_features',
+    'Clear DSP Features',
+    ['dsp', 'features', 'purge', 'clear'],
+  ),
+  SettingRow(SettingsPage.database, 'database.wipe', 'Wipe Database', [
+    'wipe',
+    'database',
+    'db',
+    'reset',
+  ]),
+  SettingRow(SettingsPage.database, 'database.compute', 'Compute Pipeline', [
+    'compute',
+    'dsp',
+    'recompute',
+    'pipeline',
+  ]),
+  SettingRow(SettingsPage.database, 'database.pca', 'Recompute PCA', [
+    'pca',
+    'similarity',
+    'graph',
+  ]),
+  SettingRow(SettingsPage.advanced, 'advanced.export', 'Export State', [
+    'export',
+    'backup',
+    'bundle',
+  ]),
+  SettingRow(SettingsPage.advanced, 'advanced.import', 'Import State', [
+    'import',
+    'restore',
+    'bundle',
+  ]),
+  SettingRow(SettingsPage.advanced, 'advanced.cache', 'Clear Caches', [
+    'cache',
+    'artwork',
+    'preview',
+    'clear',
+  ]),
+  SettingRow(SettingsPage.advanced, 'advanced.toml', 'Raw Configuration', [
+    'toml',
+    'config',
+    'raw',
+    'editor',
+  ]),
+  SettingRow(SettingsPage.about, 'about.licenses', 'Licenses', [
+    'license',
+    'licenses',
+    'open source',
+  ]),
+  SettingRow(SettingsPage.account, 'account.qobuz', 'Qobuz Account', [
+    'qobuz',
+    'user id',
+    'token',
+    'password',
+    'login',
+  ]),
+  SettingRow(
+    SettingsPage.account,
+    'account.token',
+    'Use Session Token Authentication',
+    ['token', 'session', 'qobuz'],
+  ),
+  SettingRow(
+    SettingsPage.account,
+    'account.qobuz_keys',
+    'Qobuz Developer API Keys',
+    ['app id', 'app secret', 'qobuz', 'api'],
+  ),
+  SettingRow(SettingsPage.account, 'account.deezer', 'Deezer Account', [
+    'deezer',
+    'arl',
+    'cookie',
+    'login',
+  ]),
+  SettingRow(
+    SettingsPage.assistant,
+    'assistant.enable',
+    'Enable LLM Agent Intelligence',
+    ['llm', 'jarvis', 'ai', 'enable', 'disable'],
+  ),
+  SettingRow(SettingsPage.assistant, 'assistant.provider', 'AI Provider', [
+    'provider',
+    'gemini',
+    'ollama',
+    'local server',
+    'lm studio',
+  ]),
+  SettingRow(SettingsPage.assistant, 'assistant.api_key', 'Gemini API Key', [
+    'api key',
+    'apikey',
+    'gemini',
+    'key',
+  ]),
+  SettingRow(SettingsPage.assistant, 'assistant.model', 'Gemini Model', [
+    'model',
+    'gemini',
+  ]),
+  SettingRow(
+    SettingsPage.assistant,
+    'assistant.research',
+    'Research Paradigm',
+    ['research', 'web', 'grounding', 'snippets'],
+  ),
+  SettingRow(
+    SettingsPage.assistant,
+    'assistant.directive',
+    'System Directive',
+    ['personality', 'prompt', 'directive', 'zax'],
+  ),
+  SettingRow(SettingsPage.companion, 'companion.sync', 'Companion Sync', [
+    'companion',
+    'sync',
+    'mac',
+    'pair',
+    'find mac',
+  ]),
+  SettingRow(
+    SettingsPage.companion,
+    'companion.manual_ip',
+    'Manual IP Connection',
+    ['ip', 'manual', 'connect', 'address'],
+  ),
+  SettingRow(
+    SettingsPage.companion,
+    'companion.ask',
+    'Ask before downloading',
+    ['transfers', 'ask', 'download', 'mac'],
+  ),
+  SettingRow(
+    SettingsPage.companion,
+    'companion.offload',
+    'DSP Acoustic Offload',
+    ['offload', 'dsp', 'mac', 'analysis'],
+  ),
+  SettingRow(
+    SettingsPage.companion,
+    'companion.backup',
+    'Library State Backup',
+    ['backup', 'mac', 'bundle'],
+  ),
+  SettingRow(SettingsPage.companion, 'companion.updates', 'App Updates', [
+    'update',
+    'apk',
+    'install',
+    'version',
+  ]),
+  SettingRow(SettingsPage.companion, 'companion.report', 'Report a Problem', [
+    'report',
+    'problem',
+    'bug',
+    'feedback',
+    'log',
+  ]),
+];
+
+/// The rows whose title or keywords hold every word of [query] (two
+/// letters or more), in page order.
+List<SettingRow> searchSettingRows(
+  String query, [
+  List<SettingRow> rows = kSettingRows,
+]) {
+  final q = query.trim().toLowerCase();
+  if (q.length < 2) return const [];
+  final terms = q.split(_ws).where((t) => t.isNotEmpty).toList();
+  return [
+    for (final r in rows)
+      if (terms.every(
+        (t) =>
+            r.title.toLowerCase().contains(t) ||
+            r.keywords.any((k) => k.contains(t)),
+      ))
+        r,
+  ];
+}
+
 /// settings.py `_render_hub_or_search` for a non-empty [query]: the direct
 /// matches (substring either way, or every word somewhere), then the
 /// typo-tolerant ones, each entry once.

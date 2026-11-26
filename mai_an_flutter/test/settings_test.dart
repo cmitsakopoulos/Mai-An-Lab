@@ -388,6 +388,27 @@ void main() {
       expect(row['timbre'], isNotNull);
     });
 
+    testWidgets('a row result opens its page and scrolls to the row', (
+      tester,
+    ) async {
+      await pumpSettings(tester);
+      await tester.enterText(find.byType(TextField), 'flac');
+      await tester.pump();
+      expect(find.text('SETTINGS (1)'), findsOneWidget);
+      await tester.tap(find.text('Default Download Quality'));
+      await tester.pumpAndSettle();
+      expect(find.text('Storage'), findsOneWidget);
+      final anchor = find.byWidgetPredicate(
+        (w) => w is SettingsAnchor && w.id == 'storage.quality',
+      );
+      expect(anchor, findsOneWidget);
+      // On screen: the page scrolled to it.
+      final screen =
+          Offset.zero &
+          (tester.view.physicalSize / tester.view.devicePixelRatio);
+      expect(screen.overlaps(tester.getRect(anchor)), isTrue);
+    });
+
     testWidgets('Database Management clears the index after asking', (
       tester,
     ) async {
