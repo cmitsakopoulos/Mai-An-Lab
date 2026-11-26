@@ -9,6 +9,7 @@ import 'dart:io';
 ///   received.json     tracks the phone sent us (the UI's list)
 ///   state_backups/    state bundles the phone uploaded
 ///   outbox/           files dropped into the web UI, waiting to go out
+///   updates/          the phone app build on offer (current.apk + .json)
 ///   cache/            AAC transcodes, scratch audio
 class MaiAnHome {
   MaiAnHome(String root) : root = Directory(root) {
@@ -25,7 +26,9 @@ class MaiAnHome {
     final path =
         override ??
         env['MAIAN_HOME'] ??
-        (Platform.isMacOS ? '$home/Library/Application Support/MaiAn' : '$home/.maian');
+        (Platform.isMacOS
+            ? '$home/Library/Application Support/MaiAn'
+            : '$home/.maian');
     return MaiAnHome(path);
   }
 
@@ -74,6 +77,9 @@ class Settings {
   String? get receiveDir => _data['receive_dir'] as String?;
   String get lastClient => (_data['last_client'] as String?) ?? '';
   String get quality => (_data['quality'] as String?) ?? 'aac_vbr_max';
+  bool get notify => _data['notify'] != false;
+
+  Object? get(String key) => _data[key];
 
   void set(String key, Object? value) {
     if (value == null) {

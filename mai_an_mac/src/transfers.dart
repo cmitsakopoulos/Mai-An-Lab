@@ -7,8 +7,10 @@ import 'home.dart';
 
 /// `_transfer_id`: stable across runs, so re-sending a track replaces its
 /// pending entry instead of duplicating it.
-String transferId(String path, String quality) =>
-    sha1.convert(utf8.encode('$path\u0000$quality')).toString().substring(0, 16);
+String transferId(String path, String quality) => sha1
+    .convert(utf8.encode('$path\u0000$quality'))
+    .toString()
+    .substring(0, 16);
 
 /// The path's hash used to name its transcode (transcoder.py).
 String pathDigest(String path) =>

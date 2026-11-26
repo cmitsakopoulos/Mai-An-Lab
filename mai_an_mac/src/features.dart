@@ -96,13 +96,23 @@ class FeatureCache {
 
 /// At most [size] jobs at once.
 class Pool {
-  Pool(this.size);
-  final int size;
+  Pool(this._size);
+  int _size;
   int _active = 0;
   final _waiting = Queue<Completer<void>>();
 
+  /// How many jobs run at once. Lowering it lets running jobs finish.
+  int get size => _size;
+  set size(int n) {
+    _size = n < 1 ? 1 : n;
+    while (_active < _size && _waiting.isNotEmpty) {
+      _active++;
+      _waiting.removeFirst().complete();
+    }
+  }
+
   Future<T> run<T>(Future<T> Function() job) async {
-    if (_active >= size) {
+    if (_active >= _size) {
       final c = Completer<void>();
       _waiting.add(c);
       await c.future;
@@ -112,7 +122,7 @@ class Pool {
     try {
       return await job();
     } finally {
-      if (_waiting.isNotEmpty) {
+      if (_waiting.isNotEmpty && _active <= _size) {
         _waiting.removeFirst().complete();
       } else {
         _active--;

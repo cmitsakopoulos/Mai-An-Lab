@@ -191,9 +191,7 @@ class Ffmpeg {
       tmp,
     ]);
     bool ok(ProcessResult r) =>
-        r.exitCode == 0 &&
-        File(tmp).existsSync() &&
-        File(tmp).lengthSync() > 0;
+        r.exitCode == 0 && File(tmp).existsSync() && File(tmp).lengthSync() > 0;
     try {
       var r = await run([
         '-map',

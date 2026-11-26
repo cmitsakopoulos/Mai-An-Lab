@@ -37,10 +37,9 @@ Stream<FormPart> multipartParts(HttpRequest req) {
   for (final m in re.allMatches(header)) {
     var v = m.group(2)!.trim();
     if (v.startsWith('"') && v.endsWith('"') && v.length >= 2) {
-      v = v.substring(1, v.length - 1).replaceAllMapped(
-        RegExp(r'\\(.)'),
-        (x) => x.group(1)!,
-      );
+      v = v
+          .substring(1, v.length - 1)
+          .replaceAllMapped(RegExp(r'\\(.)'), (x) => x.group(1)!);
     }
     params[m.group(1)!.toLowerCase()] = v;
   }

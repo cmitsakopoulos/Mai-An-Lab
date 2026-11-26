@@ -127,7 +127,11 @@ Future<Resp> call(
 }
 
 Future<String> pair() async {
-  final r = await call('POST', '/api/v1/pair', json: {'pin': srv.pin, 'device_name': 'Pixel 8'});
+  final r = await call(
+    'POST',
+    '/api/v1/pair',
+    json: {'pin': srv.pin, 'device_name': 'Pixel 8'},
+  );
   expect(r.status, 200);
   return r.json['token']! as String;
 }
@@ -138,7 +142,8 @@ void main() {
   setUp(() async {
     tmp = Directory.systemTemp.createTempSync('maian_test_');
     final home = MaiAnHome('${tmp.path}/home');
-    final settings = Settings.load(home)..set('receive_dir', '${tmp.path}/recv');
+    final settings = Settings.load(home)
+      ..set('receive_dir', '${tmp.path}/recv');
     srv = CompanionServer(
       home: home,
       settings: settings,
@@ -150,6 +155,7 @@ void main() {
       beaconUdpPort: 0,
       beaconTargets: const [],
     );
+    srv.notifier = (_, _) {};
     await srv.start();
     ui = UiServer(srv, port: 0);
     await ui.start();
@@ -172,7 +178,12 @@ void main() {
       expect(r.json['features_version'], 5);
       expect(r.json['authorized'], false);
       final token = await pair();
-      r = await call('GET', '/api/v1/ping', token: token, headers: {'x-device-name': 'Pixel%208'});
+      r = await call(
+        'GET',
+        '/api/v1/ping',
+        token: token,
+        headers: {'x-device-name': 'Pixel%208'},
+      );
       expect(r.json['authorized'], true);
       expect((await srv.snapshot())['clients'], isNotEmpty);
     });
@@ -200,7 +211,10 @@ void main() {
       ]) {
         expect((await call(m, p, json: {})).status, 401, reason: '$m $p');
       }
-      expect((await call('GET', '/api/v1/ping', token: 'nope')).json['authorized'], false);
+      expect(
+        (await call('GET', '/api/v1/ping', token: 'nope')).json['authorized'],
+        false,
+      );
     });
 
     test('the token survives a restart, so phones stay paired', () async {
@@ -219,7 +233,11 @@ void main() {
         beaconTargets: const [],
       );
       await s.start();
-      final r = await call('GET', '/api/v1/ping', baseUrl: 'http://127.0.0.1:${s.port}');
+      final r = await call(
+        'GET',
+        '/api/v1/ping',
+        baseUrl: 'http://127.0.0.1:${s.port}',
+      );
       expect(r.json['authorized'], true);
       await s.stop();
     });
@@ -227,118 +245,236 @@ void main() {
     test('unpair revokes the old token', () async {
       final token = await pair();
       srv.resetPairing();
-      expect((await call('GET', '/api/v1/transfers/pending', token: token)).status, 401);
+      expect(
+        (await call('GET', '/api/v1/transfers/pending', token: token)).status,
+        401,
+      );
     });
   });
 
   group('offload', () {
-    test('extracts, then answers from the cache without the audio',
-        skip: Ffmpeg.which('ffmpeg') == null ? 'ffmpeg missing' : null, () async {
-      final token = await pair();
-      const phonePath = '/storage/emulated/0/Music/Ωmega/tone.wav';
-      var m = await call('POST', '/api/v1/dsp/match', token: token, json: {
-        'tracks': [{'path': phonePath}],
-      });
-      expect(m.json['cached'], isEmpty);
-      expect(m.json['missing'], [phonePath]);
+    test(
+      'extracts, then answers from the cache without the audio',
+      skip: Ffmpeg.which('ffmpeg') == null ? 'ffmpeg missing' : null,
+      () async {
+        final token = await pair();
+        const phonePath = '/storage/emulated/0/Music/Ωmega/tone.wav';
+        var m = await call(
+          'POST',
+          '/api/v1/dsp/match',
+          token: token,
+          json: {
+            'tracks': [
+              {'path': phonePath},
+            ],
+          },
+        );
+        expect(m.json['cached'], isEmpty);
+        expect(m.json['missing'], [phonePath]);
 
-      final mp = multipart([
-        (name: 'path', file: null, data: utf8.encode(phonePath), type: null),
-        (name: 'file', file: 'tone.wav', data: wav(25), type: 'application/octet-stream'),
-      ]);
-      final e = await call('POST', '/api/v1/dsp/extract', token: token, body: mp.body, contentType: mp.type);
-      expect(e.status, 200, reason: e.text);
-      final f = e.json;
-      expect(f['status'], 'ok');
-      expect(f['path'], phonePath);
-      expect(f['features_version'], 5);
-      for (final k in ['bpm', 'energy', 'brightness', 'rolloff', 'beat_strength', 'spectral_flatness', 'spectral_contrast']) {
-        expect(f[k], isA<num>(), reason: k);
-      }
-      expect(f['key_index'], inInclusiveRange(0, 23));
-      expect(base64.decode(f['timbre_b64']! as String).length, 272);
-      expect(srv.offload.extracted, 1);
-      expect(srv.offload.done, srv.offload.total, reason: 'the one-track run is finished');
+        final mp = multipart([
+          (name: 'path', file: null, data: utf8.encode(phonePath), type: null),
+          (
+            name: 'file',
+            file: 'tone.wav',
+            data: wav(25),
+            type: 'application/octet-stream',
+          ),
+        ]);
+        final e = await call(
+          'POST',
+          '/api/v1/dsp/extract',
+          token: token,
+          body: mp.body,
+          contentType: mp.type,
+        );
+        expect(e.status, 200, reason: e.text);
+        final f = e.json;
+        expect(f['status'], 'ok');
+        expect(f['path'], phonePath);
+        expect(f['features_version'], 5);
+        for (final k in [
+          'bpm',
+          'energy',
+          'brightness',
+          'rolloff',
+          'beat_strength',
+          'spectral_flatness',
+          'spectral_contrast',
+        ]) {
+          expect(f[k], isA<num>(), reason: k);
+        }
+        expect(f['key_index'], inInclusiveRange(0, 23));
+        expect(base64.decode(f['timbre_b64']! as String).length, 272);
+        expect(srv.offload.extracted, 1);
+        expect(
+          srv.offload.done,
+          srv.offload.total,
+          reason: 'the one-track run is finished',
+        );
 
-      m = await call('POST', '/api/v1/dsp/match', token: token, json: {
-        'tracks': [{'path': phonePath}],
-      });
-      expect(m.json['missing'], isEmpty);
-      final cached = (m.json['cached']! as List).single as Map;
-      expect(cached['path'], phonePath);
-      expect(cached['bpm'], f['bpm']);
-      expect(cached['timbre_b64'], f['timbre_b64']);
-      // A new run that the cache answered entirely.
-      expect(srv.offload.cached, 1);
-      expect(srv.offload.extracted, 0);
-    });
+        m = await call(
+          'POST',
+          '/api/v1/dsp/match',
+          token: token,
+          json: {
+            'tracks': [
+              {'path': phonePath},
+            ],
+          },
+        );
+        expect(m.json['missing'], isEmpty);
+        final cached = (m.json['cached']! as List).single as Map;
+        expect(cached['path'], phonePath);
+        expect(cached['bpm'], f['bpm']);
+        expect(cached['timbre_b64'], f['timbre_b64']);
+        // A new run that the cache answered entirely.
+        expect(srv.offload.cached, 1);
+        expect(srv.offload.extracted, 0);
+      },
+    );
 
-    test('the cache survives a restart', skip: Ffmpeg.which('ffmpeg') == null ? 'ffmpeg missing' : null, () async {
-      final token = await pair();
-      final mp = multipart([
-        (name: 'path', file: null, data: utf8.encode('/p/a.wav'), type: null),
-        (name: 'file', file: 'a.wav', data: wav(25), type: null),
-      ]);
-      await call('POST', '/api/v1/dsp/extract', token: token, body: mp.body, contentType: mp.type);
-      await srv.cache.close();
-      final c2 = srv.cache.file;
-      final reloaded = CompanionServer(
-        home: MaiAnHome('${tmp.path}/home'),
-        settings: Settings.load(MaiAnHome('${tmp.path}/home')),
-        port: 0,
-        beaconUdpPort: 0,
-      );
-      reloaded.cache.load();
-      expect(reloaded.cache.get('/p/a.wav'), isNotNull);
-      expect(c2.existsSync(), true);
-    });
+    test(
+      'the cache survives a restart',
+      skip: Ffmpeg.which('ffmpeg') == null ? 'ffmpeg missing' : null,
+      () async {
+        final token = await pair();
+        final mp = multipart([
+          (name: 'path', file: null, data: utf8.encode('/p/a.wav'), type: null),
+          (name: 'file', file: 'a.wav', data: wav(25), type: null),
+        ]);
+        await call(
+          'POST',
+          '/api/v1/dsp/extract',
+          token: token,
+          body: mp.body,
+          contentType: mp.type,
+        );
+        await srv.cache.close();
+        final c2 = srv.cache.file;
+        final reloaded = CompanionServer(
+          home: MaiAnHome('${tmp.path}/home'),
+          settings: Settings.load(MaiAnHome('${tmp.path}/home')),
+          port: 0,
+          beaconUdpPort: 0,
+        );
+        reloaded.cache.load();
+        expect(reloaded.cache.get('/p/a.wav'), isNotNull);
+        expect(c2.existsSync(), true);
+      },
+    );
 
-    test('garbage audio is a 500 and counted as failed', skip: Ffmpeg.which('ffmpeg') == null ? 'ffmpeg missing' : null, () async {
-      final token = await pair();
-      final mp = multipart([
-        (name: 'path', file: null, data: utf8.encode('/p/bad.flac'), type: null),
-        (name: 'file', file: 'bad.flac', data: utf8.encode('not audio at all'), type: null),
-      ]);
-      final e = await call('POST', '/api/v1/dsp/extract', token: token, body: mp.body, contentType: mp.type);
-      expect(e.status, 500);
-      expect(srv.offload.failed, 1);
-    });
+    test(
+      'garbage audio is a 500 and counted as failed',
+      skip: Ffmpeg.which('ffmpeg') == null ? 'ffmpeg missing' : null,
+      () async {
+        final token = await pair();
+        final mp = multipart([
+          (
+            name: 'path',
+            file: null,
+            data: utf8.encode('/p/bad.flac'),
+            type: null,
+          ),
+          (
+            name: 'file',
+            file: 'bad.flac',
+            data: utf8.encode('not audio at all'),
+            type: null,
+          ),
+        ]);
+        final e = await call(
+          'POST',
+          '/api/v1/dsp/extract',
+          token: token,
+          body: mp.body,
+          contentType: mp.type,
+        );
+        expect(e.status, 500);
+        expect(srv.offload.failed, 1);
+      },
+    );
   });
 
   group('files from the phone', () {
-    Future<Resp> push(String file, Map<String, Object?> meta, List<int> data, String token) {
+    Future<Resp> push(
+      String file,
+      Map<String, Object?> meta,
+      List<int> data,
+      String token,
+    ) {
       final mp = multipart([
-        (name: 'meta', file: null, data: utf8.encode(jsonEncode(meta)), type: 'application/json'),
+        (
+          name: 'meta',
+          file: null,
+          data: utf8.encode(jsonEncode(meta)),
+          type: 'application/json',
+        ),
         (name: 'file', file: file, data: data, type: null),
       ]);
-      return call('POST', '/api/v1/tracks/receive', token: token, body: mp.body, contentType: mp.type, headers: {'x-device-name': 'Pixel%208'});
+      return call(
+        'POST',
+        '/api/v1/tracks/receive',
+        token: token,
+        body: mp.body,
+        contentType: mp.type,
+        headers: {'x-device-name': 'Pixel%208'},
+      );
     }
 
-    test('lands under Artist/Album, Greek names intact, duplicates noticed', () async {
-      final token = await pair();
-      final data = List<int>.generate(5000, (i) => i % 251);
-      var r = await push('Ο Δρόμος.flac', {'artist': 'Σωκράτης', 'album': 'Άλμπουμ', 'remaining': 0}, data, token);
-      expect(r.status, 200, reason: r.text);
-      final dest = r.json['path']! as String;
-      expect(dest, '${tmp.path}/recv/Σωκράτης/Άλμπουμ/Ο Δρόμος.flac');
-      expect(File(dest).readAsBytesSync(), data);
-      expect(r.json['duplicate'], false);
+    test(
+      'lands under Artist/Album, Greek names intact, duplicates noticed',
+      () async {
+        final token = await pair();
+        final data = List<int>.generate(5000, (i) => i % 251);
+        var r = await push(
+          'Ο Δρόμος.flac',
+          {'artist': 'Σωκράτης', 'album': 'Άλμπουμ', 'remaining': 0},
+          data,
+          token,
+        );
+        expect(r.status, 200, reason: r.text);
+        final dest = r.json['path']! as String;
+        expect(dest, '${tmp.path}/recv/Σωκράτης/Άλμπουμ/Ο Δρόμος.flac');
+        expect(File(dest).readAsBytesSync(), data);
+        expect(r.json['duplicate'], false);
 
-      r = await push('Ο Δρόμος.flac', {'artist': 'Σωκράτης', 'album': 'Άλμπουμ'}, data, token);
-      expect(r.json['duplicate'], true);
+        r = await push(
+          'Ο Δρόμος.flac',
+          {'artist': 'Σωκράτης', 'album': 'Άλμπουμ'},
+          data,
+          token,
+        );
+        expect(r.json['duplicate'], true);
 
-      // Same name, different bytes: never overwritten.
-      r = await push('Ο Δρόμος.flac', {'artist': 'Σωκράτης', 'album': 'Άλμπουμ'}, [...data, 1], token);
-      expect(r.json['path'], endsWith('Ο Δρόμος (2).flac'));
-      expect(Directory('${tmp.path}/recv/Σωκράτης/Άλμπουμ').listSync().whereType<File>().length, 2);
-      expect((await srv.snapshot())['received'], hasLength(2));
-    });
+        // Same name, different bytes: never overwritten.
+        r = await push(
+          'Ο Δρόμος.flac',
+          {'artist': 'Σωκράτης', 'album': 'Άλμπουμ'},
+          [...data, 1],
+          token,
+        );
+        expect(r.json['path'], endsWith('Ο Δρόμος (2).flac'));
+        expect(
+          Directory(
+            '${tmp.path}/recv/Σωκράτης/Άλμπουμ',
+          ).listSync().whereType<File>().length,
+          2,
+        );
+        expect((await srv.snapshot())['received'], hasLength(2));
+      },
+    );
 
     test('refuses non-audio, and cannot climb out of the folder', () async {
       final token = await pair();
       var r = await push('evil.sh', {}, [1, 2, 3], token);
       expect(r.status, 415);
-      r = await push('x.flac', {'artist': '..', 'album': '..'}, [1, 2, 3], token);
+      r = await push(
+        'x.flac',
+        {'artist': '..', 'album': '..'},
+        [1, 2, 3],
+        token,
+      );
       expect(r.status, 200);
       expect(r.json['path'], '${tmp.path}/recv/x.flac');
       r = await push('../../etc/x.flac', {}, [1, 2, 3], token);
@@ -350,8 +486,21 @@ void main() {
 
     test('state bundles are saved to the backups folder', () async {
       final token = await pair();
-      final mp = multipart([(name: 'file', file: 'b.zip', data: [80, 75, 3, 4, 9, 9], type: 'application/zip')]);
-      final r = await call('POST', '/api/v1/bundle/upload', token: token, body: mp.body, contentType: mp.type);
+      final mp = multipart([
+        (
+          name: 'file',
+          file: 'b.zip',
+          data: [80, 75, 3, 4, 9, 9],
+          type: 'application/zip',
+        ),
+      ]);
+      final r = await call(
+        'POST',
+        '/api/v1/bundle/upload',
+        token: token,
+        body: mp.body,
+        contentType: mp.type,
+      );
       expect(r.status, 200);
       final saved = File(r.json['saved_path']! as String);
       expect(saved.path, contains('state_backups/mai_an_lab_state_'));
@@ -362,16 +511,24 @@ void main() {
   group('files to the phone', () {
     late File track;
     setUp(() {
-      track = File('${tmp.path}/Song Ω.flac')..writeAsBytesSync(List.generate(3000, (i) => i % 200));
+      track = File('${tmp.path}/Song Ω.flac')
+        ..writeAsBytesSync(List.generate(3000, (i) => i % 200));
     });
 
     test('queue, list, download, ack', () async {
       final token = await pair();
-      final q = await call('POST', '/api/v1/transfers/queue', token: token, json: {
-        'tracks': [{'path': track.path, 'title': 'Song', 'artist': 'A', 'album': 'B'}],
-        'quality': 'original',
-        'precompute_dsp': false,
-      });
+      final q = await call(
+        'POST',
+        '/api/v1/transfers/queue',
+        token: token,
+        json: {
+          'tracks': [
+            {'path': track.path, 'title': 'Song', 'artist': 'A', 'album': 'B'},
+          ],
+          'quality': 'original',
+          'precompute_dsp': false,
+        },
+      );
       expect(q.json['queued'], 1);
 
       final p = await call('GET', '/api/v1/transfers/pending', token: token);
@@ -385,65 +542,134 @@ void main() {
       final d = await call('GET', '${t['stream_path']}&token=$token');
       expect(d.status, 200);
       expect(d.bytes, track.readAsBytesSync());
-      expect(d.headers.value('content-disposition'), "attachment; filename*=UTF-8''Song%20%CE%A9.flac");
+      expect(
+        d.headers.value('content-disposition'),
+        "attachment; filename*=UTF-8''Song%20%CE%A9.flac",
+      );
 
       expect((await call('GET', '${t['stream_path']}')).status, 401);
       final other = File('${tmp.path}/secret.flac')..writeAsBytesSync([1]);
       expect(
-        (await call('GET', '/api/v1/tracks/stream?path=${Uri.encodeQueryComponent(other.path)}&quality=original&token=$token')).status,
+        (await call(
+          'GET',
+          '/api/v1/tracks/stream?path=${Uri.encodeQueryComponent(other.path)}&quality=original&token=$token',
+        )).status,
         404,
         reason: 'only queued files are served',
       );
 
-      final a = await call('POST', '/api/v1/transfers/ack', token: token, json: {'ids': [t['id']]});
+      final a = await call(
+        'POST',
+        '/api/v1/transfers/ack',
+        token: token,
+        json: {
+          'ids': [t['id']],
+        },
+      );
       expect(a.json['remaining'], 0);
-      expect((await call('GET', '${t['stream_path']}&token=$token')).status, 404);
+      expect(
+        (await call('GET', '${t['stream_path']}&token=$token')).status,
+        404,
+      );
     });
 
     test('re-queueing a track replaces its entry (stable id)', () async {
-      await srv.queueTracks([{'path': track.path}], quality: 'original', precomputeDsp: false);
-      await srv.queueTracks([{'path': track.path}], quality: 'original', precomputeDsp: false);
+      await srv.queueTracks(
+        [
+          {'path': track.path},
+        ],
+        quality: 'original',
+        precomputeDsp: false,
+      );
+      await srv.queueTracks(
+        [
+          {'path': track.path},
+        ],
+        quality: 'original',
+        precomputeDsp: false,
+      );
       expect(srv.queue.items, hasLength(1));
     });
 
     test('the queue survives a restart', () async {
-      await srv.queueTracks([{'path': track.path}], quality: 'original', precomputeDsp: false);
-      final again = CompanionServer(home: MaiAnHome('${tmp.path}/home'), settings: Settings.load(MaiAnHome('${tmp.path}/home')), port: 0, beaconUdpPort: 0);
+      await srv.queueTracks(
+        [
+          {'path': track.path},
+        ],
+        quality: 'original',
+        precomputeDsp: false,
+      );
+      final again = CompanionServer(
+        home: MaiAnHome('${tmp.path}/home'),
+        settings: Settings.load(MaiAnHome('${tmp.path}/home')),
+        port: 0,
+        beaconUdpPort: 0,
+      );
       again.queue.load();
       expect(again.queue.items, hasLength(1));
     });
 
-    test('AAC profile is converted and served as m4a', skip: Ffmpeg.which('ffmpeg') == null ? 'ffmpeg missing' : null, () async {
-      final w = File('${tmp.path}/tone.wav')..writeAsBytesSync(wav(8));
-      final token = await pair();
-      final q = await srv.queueTracks([{'path': w.path}], quality: 'aac_256k', precomputeDsp: false);
-      expect(q.single['extension'], 'm4a');
-      final path = q.single['stream_path']! as String;
-      final d = await call('GET', '$path&token=$token');
-      expect(d.status, 200);
-      // MP4 container: "ftyp" at byte 4.
-      expect(utf8.decode(d.bytes.sublist(4, 8)), 'ftyp');
-      expect(d.bytes.length, lessThan(w.lengthSync()));
-    });
+    test(
+      'AAC profile is converted and served as m4a',
+      skip: Ffmpeg.which('ffmpeg') == null ? 'ffmpeg missing' : null,
+      () async {
+        final w = File('${tmp.path}/tone.wav')..writeAsBytesSync(wav(8));
+        final token = await pair();
+        final q = await srv.queueTracks(
+          [
+            {'path': w.path},
+          ],
+          quality: 'aac_256k',
+          precomputeDsp: false,
+        );
+        expect(q.single['extension'], 'm4a');
+        final path = q.single['stream_path']! as String;
+        final d = await call('GET', '$path&token=$token');
+        expect(d.status, 200);
+        // MP4 container: "ftyp" at byte 4.
+        expect(utf8.decode(d.bytes.sublist(4, 8)), 'ftyp');
+        expect(d.bytes.length, lessThan(w.lengthSync()));
+      },
+    );
 
-    test('tracks sent with analysis carry their features', skip: Ffmpeg.which('ffmpeg') == null ? 'ffmpeg missing' : null, () async {
-      final w = File('${tmp.path}/tone2.wav')..writeAsBytesSync(wav(25));
-      final q = await srv.queueTracks([{'path': w.path}], quality: 'original', precomputeDsp: true);
-      final f = q.single['dsp_features']! as Map;
-      expect(f['features_version'], 5);
-      expect(base64.decode(f['timbre_b64']! as String).length, 272);
-    });
+    test(
+      'tracks sent with analysis carry their features',
+      skip: Ffmpeg.which('ffmpeg') == null ? 'ffmpeg missing' : null,
+      () async {
+        final w = File('${tmp.path}/tone2.wav')..writeAsBytesSync(wav(25));
+        final q = await srv.queueTracks(
+          [
+            {'path': w.path},
+          ],
+          quality: 'original',
+          precomputeDsp: true,
+        );
+        final f = q.single['dsp_features']! as Map;
+        expect(f['features_version'], 5);
+        expect(base64.decode(f['timbre_b64']! as String).length, 272);
+      },
+    );
   });
 
   group('beacon', () {
     test('answers a phone\'s query by unicast with where we are', () async {
-      final sock = await RawDatagramSocket.bind(InternetAddress.loopbackIPv4, 0);
+      final sock = await RawDatagramSocket.bind(
+        InternetAddress.loopbackIPv4,
+        0,
+      );
       sock.send(
-        utf8.encode(jsonEncode({'service': 'mai_an_sync', 'version': 1, 'type': 'query'})),
+        utf8.encode(
+          jsonEncode({'service': 'mai_an_sync', 'version': 1, 'type': 'query'}),
+        ),
         InternetAddress.loopbackIPv4,
         srv.beaconPort,
       );
-      final reply = await sock.where((e) => e == RawSocketEvent.read).map((_) => sock.receive()).where((d) => d != null).first.timeout(const Duration(seconds: 3));
+      final reply = await sock
+          .where((e) => e == RawSocketEvent.read)
+          .map((_) => sock.receive())
+          .where((d) => d != null)
+          .first
+          .timeout(const Duration(seconds: 3));
       final j = jsonDecode(utf8.decode(reply!.data)) as Map;
       expect(j['service'], 'mai_an_sync');
       expect(j['type'], 'beacon');
@@ -464,7 +690,12 @@ void main() {
       expect(r.json['pin'], '4821');
       expect(r.json['port'], srv.port);
       // DNS rebinding: a foreign Host header is refused.
-      r = await call('GET', '/api/state', baseUrl: ubase(), headers: {'host': 'evil.example:${ui.port}'});
+      r = await call(
+        'GET',
+        '/api/state',
+        baseUrl: ubase(),
+        headers: {'host': 'evil.example:${ui.port}'},
+      );
       expect(r.status, 403);
     });
 
@@ -472,35 +703,80 @@ void main() {
       var r = await call('POST', '/api/rotate-pin', baseUrl: ubase());
       expect(r.status, 403);
       expect(srv.pin, '4821');
-      r = await call('POST', '/api/rotate-pin', baseUrl: ubase(), headers: {'x-maian': '1'});
+      r = await call(
+        'POST',
+        '/api/rotate-pin',
+        baseUrl: ubase(),
+        headers: {'x-maian': '1'},
+      );
       expect(r.status, 200);
       expect(srv.pin, isNot('4821'));
-      r = await call('POST', '/api/rotate-pin', baseUrl: ubase(), headers: {'x-maian': '1', 'origin': 'https://evil.example'});
+      r = await call(
+        'POST',
+        '/api/rotate-pin',
+        baseUrl: ubase(),
+        headers: {'x-maian': '1', 'origin': 'https://evil.example'},
+      );
       expect(r.status, 403);
     });
 
-    test('a dropped file is kept in the outbox, queued, and removed once fetched', () async {
-      final h = {'x-maian': '1'};
-      final up = await call('POST', '/api/upload?name=${Uri.encodeQueryComponent('Δοκιμή.flac')}', baseUrl: ubase(), headers: h, body: List.generate(2000, (i) => i % 100));
-      expect(up.status, 200);
-      final path = up.json['path']! as String;
-      expect(path, startsWith(srv.home.outbox.path));
-      expect(path, endsWith('Δοκιμή.flac'));
-      final s = await call('POST', '/api/send', baseUrl: ubase(), headers: h, json: {'paths': [path], 'quality': 'original', 'dsp': false, 'wait': true});
-      expect(s.json['queued'], 1);
-      expect(srv.queue.items, hasLength(1));
-      final id = '${srv.queue.items.single['id']}';
-      srv.removeTransfers([id]);
-      expect(File(path).existsSync(), false, reason: 'outbox copy removed');
-    });
+    test(
+      'a dropped file is kept in the outbox, queued, and removed once fetched',
+      () async {
+        final h = {'x-maian': '1'};
+        final up = await call(
+          'POST',
+          '/api/upload?name=${Uri.encodeQueryComponent('Δοκιμή.flac')}',
+          baseUrl: ubase(),
+          headers: h,
+          body: List.generate(2000, (i) => i % 100),
+        );
+        expect(up.status, 200);
+        final path = up.json['path']! as String;
+        expect(path, startsWith(srv.home.outbox.path));
+        expect(path, endsWith('Δοκιμή.flac'));
+        final s = await call(
+          'POST',
+          '/api/send',
+          baseUrl: ubase(),
+          headers: h,
+          json: {
+            'paths': [path],
+            'quality': 'original',
+            'dsp': false,
+            'wait': true,
+          },
+        );
+        expect(s.json['queued'], 1);
+        expect(srv.queue.items, hasLength(1));
+        final id = '${srv.queue.items.single['id']}';
+        srv.removeTransfers([id]);
+        expect(File(path).existsSync(), false, reason: 'outbox copy removed');
+      },
+    );
 
     test('uploads cannot escape the outbox', () async {
-      final up = await call('POST', '/api/upload?name=${Uri.encodeQueryComponent('../../evil.flac')}', baseUrl: ubase(), headers: {'x-maian': '1'}, body: [1, 2, 3]);
-      expect((up.json['path']! as String).startsWith(srv.home.outbox.path), true);
+      final up = await call(
+        'POST',
+        '/api/upload?name=${Uri.encodeQueryComponent('../../evil.flac')}',
+        baseUrl: ubase(),
+        headers: {'x-maian': '1'},
+        body: [1, 2, 3],
+      );
+      expect(
+        (up.json['path']! as String).startsWith(srv.home.outbox.path),
+        true,
+      );
     });
 
     test('"show in Finder" only opens files Mac handed out', () async {
-      final r = await call('POST', '/api/reveal', baseUrl: ubase(), headers: {'x-maian': '1'}, json: {'path': '/etc/hosts'});
+      final r = await call(
+        'POST',
+        '/api/reveal',
+        baseUrl: ubase(),
+        headers: {'x-maian': '1'},
+        json: {'path': '/etc/hosts'},
+      );
       expect(r.status, 404);
     });
 
@@ -508,7 +784,9 @@ void main() {
       final c = HttpClient();
       final req = await c.getUrl(Uri.parse('${ubase()}/api/events'));
       final resp = await req.close();
-      final lines = resp.transform(utf8.decoder).transform(const LineSplitter());
+      final lines = resp
+          .transform(utf8.decoder)
+          .transform(const LineSplitter());
       final it = StreamIterator(lines.where((l) => l.startsWith('data: ')));
       expect(await it.moveNext().timeout(const Duration(seconds: 3)), true);
       expect((jsonDecode(it.current.substring(6)) as Map)['pin'], '4821');

@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'mac.dart';
 import 'multipart.dart';
 import 'server.dart';
 import 'shared.dart';
@@ -17,11 +18,14 @@ const defaultUiPort = 8946;
 /// the custom `x-maian` header (a cross-site page can't add it without a
 /// CORS preflight, which we never answer).
 class UiServer {
-  UiServer(this.server, {this.port = defaultUiPort, this.log});
+  UiServer(this.server, {this.port = defaultUiPort, this.log, this.onQuit});
 
   final CompanionServer server;
   int port;
   final void Function(String)? log;
+
+  /// "Quit" on the page: stop the whole program.
+  final void Function()? onQuit;
   HttpServer? _http;
 
   String get url => 'http://localhost:$port';
@@ -104,7 +108,10 @@ class UiServer {
     final bytes = utf8.encode(body);
     final r = req.response
       ..statusCode = status
-      ..headers.set('content-type', type.contains('json') ? '$type; charset=utf-8' : type)
+      ..headers.set(
+        'content-type',
+        type.contains('json') ? '$type; charset=utf-8' : type,
+      )
       ..headers.set('cache-control', 'no-store')
       ..contentLength = bytes.length;
     r.add(bytes);
@@ -119,6 +126,9 @@ class UiServer {
       return {};
     }
   }
+
+  Future<void> _bad(HttpRequest req, String message, [int status = 400]) =>
+      _send(req, status, 'application/json', jsonEncode({'error': message}));
 
   Future<void> _ok(HttpRequest req, [Map<String, Object?> extra = const {}]) =>
       _send(req, 200, 'application/json', jsonEncode({'ok': true, ...extra}));
@@ -157,12 +167,234 @@ class UiServer {
             server.received.any((r) => r['path'] == p) ||
             p.startsWith('${server.home.backups.path}/');
         if (!known || !File(p).existsSync()) {
-          return _send(req, 404, 'application/json', '{"error":"Unknown file"}');
+          return _send(
+            req,
+            404,
+            'application/json',
+            '{"error":"Unknown file"}',
+          );
         }
         await _open(['-R', p]);
         return _ok(req);
       case '/api/upload':
         return await _upload(req);
+      case '/api/quit':
+        await _ok(req);
+        onQuit?.call();
+        return;
+      case '/api/notify':
+        final b = await _body(req);
+        server.settings.set('notify', b['on'] == true);
+        server.note('Notifications ${b['on'] == true ? 'on' : 'off'}');
+        return _ok(req);
+      case '/api/login-item':
+        final b = await _body(req);
+        await setLoginItem(b['on'] == true);
+        server.note(
+          b['on'] == true ? 'Will start at login' : 'Won\'t start at login',
+        );
+        return _ok(req);
+      case '/api/choose-receive-dir':
+        final d = await chooseFolder(prompt: 'Save tracks from the phone in');
+        if (d != null) {
+          server.settings.set('receive_dir', d);
+          server.note('Tracks from the phone now go to $d');
+        }
+        return _ok(req, {'path': d});
+      case '/api/choose-send':
+        final picked = await chooseFiles(
+          prompt: 'Send to the phone',
+          extensions: const [
+            'flac',
+            'mp3',
+            'm4a',
+            'aac',
+            'wav',
+            'aif',
+            'aiff',
+            'ogg',
+            'opus',
+          ],
+        );
+        if (picked.isNotEmpty) {
+          final b = await _body(req);
+          unawaited(
+            server.queueTracks(
+              [
+                for (final p in picked) {'path': p},
+              ],
+              quality: '${b['quality'] ?? server.settings.quality}',
+              precomputeDsp: b['dsp'] != false,
+            ),
+          );
+        }
+        return _ok(req, {'queued': picked.length, 'native': Platform.isMacOS});
+      // ── phone app updates ──
+      case '/api/update/choose':
+        final picked = await chooseFiles(
+          prompt: 'Choose the Mai An APK to offer to the phone',
+          extensions: const ['apk'],
+          multiple: false,
+        );
+        if (picked.isEmpty) return _ok(req, {'picked': false});
+        return await _publish(req, picked.first);
+      case '/api/update/upload':
+        final tmp = File('${server.home.tmp.path}/upload_${pid}.apk');
+        try {
+          await saveStream(req, tmp);
+          return await _publish(
+            req,
+            tmp.path,
+            name: req.uri.queryParameters['name'],
+            source: 'dropped on the page',
+          );
+        } finally {
+          try {
+            tmp.deleteSync();
+          } catch (_) {}
+        }
+      case '/api/update/publish':
+        // `maian publish`: a path on this Mac.
+        final b = await _body(req);
+        final path = '${b['path'] ?? ''}';
+        if (!path.startsWith('/') || !File(path).existsSync()) {
+          return _send(
+            req,
+            400,
+            'application/json',
+            '{"error":"No such file"}',
+          );
+        }
+        return await _publish(req, path, source: 'maian publish');
+      case '/api/update/withdraw':
+        server.updates.withdraw();
+        return _ok(req);
+      case '/api/update/auto':
+        final b = await _body(req);
+        server.updates.setAuto(b['on'] == true);
+        return _ok(req);
+      case '/api/update/watch-dir':
+        final b = await _body(req);
+        if (b['clear'] == true) {
+          server.updates.setWatchDir(null);
+          return _ok(req);
+        }
+        final d = await chooseFolder(
+          prompt: 'Folder with app-release.apk (flutter build apk)',
+        );
+        if (d != null) server.updates.setWatchDir(d);
+        return _ok(req, {'path': d});
+      // ── release notes ──
+      case '/api/update/draft-notes':
+        final b = await _body(req);
+        server.updates.setDraftNotes('${b['text'] ?? ''}');
+        return _ok(req);
+      case '/api/update/notes':
+        final b = await _body(req);
+        try {
+          server.updates.setNotes('${b['text'] ?? ''}');
+        } on FormatException catch (e) {
+          return _bad(req, e.message);
+        }
+        return _ok(req);
+      case '/api/update/git-notes':
+        try {
+          return _ok(req, {'text': await server.builder.gitNotes()});
+        } on FormatException catch (e) {
+          return _bad(req, e.message);
+        }
+      // ── problem reports ──
+      case '/api/report/text':
+        final b = await _body(req);
+        final t = server.reports.textOf('${b['id']}');
+        if (t == null) return _bad(req, 'Unknown report', 404);
+        return _ok(req, {'text': t});
+      case '/api/report/reveal':
+        final b = await _body(req);
+        final p = server.reports.pathOf('${b['id']}');
+        if (p == null) return _bad(req, 'Unknown report', 404);
+        await _open(['-R', p]);
+        return _ok(req);
+      case '/api/report/delete':
+        final b = await _body(req);
+        server.reports.delete('${b['id']}');
+        server.changed();
+        return _ok(req);
+      case '/api/report/clear':
+        server.reports.clear();
+        server.changed();
+        return _ok(req);
+      case '/api/report/seen':
+        server.reports.markSeen();
+        server.changed();
+        return _ok(req);
+      // ── background services ──
+      case '/api/service':
+        final b = await _body(req);
+        try {
+          await server.setService('${b['name']}', b['on'] == true);
+        } on FormatException catch (e) {
+          return _send(
+            req,
+            400,
+            'application/json',
+            jsonEncode({'error': e.message}),
+          );
+        }
+        return _ok(req);
+      // ── building the phone app ──
+      case '/api/build/start':
+        if (server.builder.running) return _ok(req, {'started': false});
+        unawaited(
+          server.builder.build().then((_) {
+            final b = server.builder;
+            if (b.phase == 'done') {
+              server.notify(
+                'Phone app built',
+                '${b.built} is offered to the phone',
+              );
+            } else if (b.phase == 'failed') {
+              server.notify('Build failed', b.error);
+            }
+          }),
+        );
+        return _ok(req, {'started': true});
+      case '/api/build/cancel':
+        server.builder.cancel();
+        return _ok(req);
+      case '/api/build/option':
+        final b = await _body(req);
+        try {
+          server.builder.setOption('${b['name']}', b['on'] == true);
+        } on FormatException catch (e) {
+          return _send(
+            req,
+            400,
+            'application/json',
+            jsonEncode({'error': e.message}),
+          );
+        }
+        return _ok(req);
+      case '/api/build/project':
+        final d = await chooseFolder(
+          prompt: 'The Mai An Flutter project (the folder with pubspec.yaml)',
+        );
+        if (d == null) return _ok(req, {'path': null});
+        if (!File('$d/pubspec.yaml').existsSync()) {
+          return _send(
+            req,
+            400,
+            'application/json',
+            jsonEncode({'error': 'No pubspec.yaml in $d'}),
+          );
+        }
+        server.builder.setProject(d);
+        server.note('Builds come from $d');
+        return _ok(req, {'path': d});
+      case '/api/update/reveal':
+        if (server.updates.current == null) return _ok(req);
+        await _open(['-R', server.updates.apk.path]);
+        return _ok(req);
       case '/api/send':
         final b = await _body(req);
         final paths = [
@@ -210,6 +442,28 @@ class UiServer {
         return _ok(req, {'queued': paths.length});
     }
     return _send(req, 404, 'application/json', '{"error":"Not found"}');
+  }
+
+  Future<void> _publish(
+    HttpRequest req,
+    String path, {
+    String? name,
+    String source = 'chosen',
+  }) async {
+    try {
+      final meta = await server.updates.publish(path, source: source);
+      if (name != null && name.isNotEmpty) {
+        server.updates.current?['file_name'] = _cleanName(name);
+      }
+      return _ok(req, {'update': meta});
+    } on FormatException catch (e) {
+      return _send(
+        req,
+        400,
+        'application/json',
+        jsonEncode({'error': 'Not an Android app: ${e.message}'}),
+      );
+    }
   }
 
   /// A file dropped on the page: the browser can't give us its path, so it
@@ -288,10 +542,9 @@ class UiServer {
 /// client sees an error instead of waiting forever.
 void abortResponse(HttpRequest req) {
   try {
-    req.response.detachSocket(writeHeaders: false).then(
-      (s) => s.destroy(),
-      onError: (_) {},
-    );
+    req.response
+        .detachSocket(writeHeaders: false)
+        .then((s) => s.destroy(), onError: (_) {});
   } catch (_) {}
 }
 

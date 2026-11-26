@@ -7,12 +7,16 @@ import 'beacon.dart';
 import 'features.dart';
 import 'ffmpeg.dart';
 import 'home.dart';
+import 'mac.dart';
 import 'multipart.dart';
 import 'net.dart';
+import 'reports.dart';
 import 'shared.dart';
 import 'transfers.dart';
+import 'builder.dart';
+import 'updates.dart';
 
-const appVersion = '0.1.0';
+const appVersion = '0.3.2';
 const defaultPort = 8945;
 
 /// Wrong PINs tolerated before the PIN rotates: a 4-digit PIN falls to a
@@ -22,8 +26,18 @@ const _maxPinFailures = 5;
 /// Tracks the phone may push to us; anything else is refused, so a token
 /// never becomes write access for arbitrary files.
 const _receivable = {
-  '.flac', '.mp3', '.m4a', '.aac', '.alac', '.ogg', '.opus',
-  '.wav', '.aif', '.aiff', '.wv', '.ape',
+  '.flac',
+  '.mp3',
+  '.m4a',
+  '.aac',
+  '.alac',
+  '.ogg',
+  '.opus',
+  '.wav',
+  '.aif',
+  '.aiff',
+  '.wv',
+  '.ape',
 };
 
 /// A phone that has talked to us.
@@ -32,6 +46,11 @@ class ClientInfo {
   String name;
   String ip;
   DateTime lastSeen;
+
+  /// The phone app's own build, from its X-App-Version / X-App-Package
+  /// headers ("0.3.0+4"); empty for phones too old to send them.
+  String appVersion = '';
+  String appPackage = '';
 }
 
 /// What the current (or last) offload from a phone looks like from here.
@@ -89,8 +108,14 @@ class CompanionServer {
        cache = FeatureCache(home.featuresFile),
        queue = TransferQueue(home.transfersFile) {
     if (settings.token == null) settings.set('token', token);
-    pool = Pool(dspJobs ?? max(1, Platform.numberOfProcessors - 1));
+    pool = Pool(_workers);
+    updates = AppUpdates(home, settings, log: _note, onChange: _changed);
+    builder = AppBuilder(settings, updates, log: _note, onChange: _changed);
+    reports = ProblemReports(home, settings);
   }
+
+  /// Problem reports the phone sent (a described bug, or a caught error).
+  late final ProblemReports reports;
 
   final MaiAnHome home;
   final Settings settings;
@@ -110,7 +135,31 @@ class CompanionServer {
   final FeatureCache cache;
   final TransferQueue queue;
   late final Pool pool;
+  late final AppUpdates updates;
+  late final AppBuilder builder;
   final _prepPool = Pool(3);
+
+  /// The last lines logged, for the control page's Activity list.
+  final logLines = <Map<String, Object?>>[];
+
+  /// Log [m]: to [log] (the terminal / log file) and to the page.
+  void note(String m) => _note(m);
+  void _note(String m) {
+    logLines.add({'at': DateTime.now().millisecondsSinceEpoch, 'text': m});
+    if (logLines.length > 300) logLines.removeRange(0, logLines.length - 300);
+    log?.call(m);
+    _changed();
+  }
+
+  /// A macOS notification ([notifier] in tests); off with the "notify"
+  /// setting.
+  void Function(String title, String body)? notifier;
+  void notify(String title, String body) => _notify(title, body);
+
+  void _notify(String title, String body) {
+    if (!settings.notify) return;
+    (notifier ?? macNotify)(title, body);
+  }
 
   final clients = <String, ClientInfo>{};
   final offload = OffloadStats();
@@ -122,6 +171,7 @@ class CompanionServer {
   HttpServer? _http;
   Beacon? _beacon;
   int _pinFailures = 0;
+  int _batchReceived = 0;
   int _seq = 0;
   int _sleepHolders = 0;
   Process? _caffeinate;
@@ -129,6 +179,8 @@ class CompanionServer {
 
   /// Fires when anything the UI shows has changed.
   final changes = StreamController<void>.broadcast();
+  void changed() => _changed();
+
   void _changed() {
     if (!changes.isClosed) changes.add(null);
   }
@@ -151,13 +203,26 @@ class CompanionServer {
     cache.load();
     queue.load();
     _loadReceived();
+    if (phoneOn) await _listen();
+    updates.start();
+    // Keeps the UI's "seen 12 s ago" honest and ends a finished offload;
+    // only while a control page is open.
+    _tick = Timer.periodic(const Duration(seconds: 5), (_) {
+      if (changes.hasListener) _changed();
+    });
+    return port;
+  }
+
+  /// Open the phone-facing port (and the beacon, if on).
+  Future<void> _listen() async {
+    if (_http != null) return;
     HttpServer? s;
     var p = port;
     for (var i = 0; i < 5 && s == null; i++, p++) {
       try {
         s = await HttpServer.bind(InternetAddress.anyIPv4, p);
       } on SocketException {
-        log?.call('Port $p is busy, trying ${p + 1}');
+        _note('Port $p is busy, trying ${p + 1}');
       }
     }
     if (s == null) throw StateError('No free port from $port to ${p - 1}');
@@ -165,7 +230,20 @@ class CompanionServer {
     _http = s;
     port = s.port;
     s.listen(_dispatch);
-    _beacon = Beacon(
+    if (beaconOn) await _startBeacon();
+  }
+
+  Future<void> _unlisten() async {
+    _beacon?.stop();
+    _beacon = null;
+    await _http?.close(force: true);
+    _http = null;
+    clients.clear();
+  }
+
+  Future<void> _startBeacon() async {
+    if (_beacon != null) return;
+    final b = Beacon(
       name: deviceName,
       port: port,
       udp: beaconUdpPort,
@@ -174,22 +252,103 @@ class CompanionServer {
       targets: beaconTargets,
       log: log,
     );
-    await _beacon!.start();
-    // Keeps the UI's "seen 12 s ago" honest and ends a finished offload.
-    _tick = Timer.periodic(const Duration(seconds: 5), (_) => _changed());
-    return port;
+    _beacon = b;
+    await b.start();
   }
 
   Future<void> stop() async {
     _tick?.cancel();
-    _beacon?.stop();
-    await _http?.close(force: true);
-    _http = null;
+    updates.stop();
+    builder.dispose();
+    await _unlisten();
     _sleepHolders = 0;
     _caffeinate?.kill();
     _caffeinate = null;
     await cache.close();
     await changes.close();
+  }
+
+  // ── background services, each switchable from the page ───────────────────
+
+  /// The phone-facing server: off, the phone can't connect at all.
+  bool get phoneOn => settings.get('svc_phone') != false;
+
+  /// The UDP beacon (every few seconds) that lets the phone find the Mac.
+  bool get beaconOn => settings.get('svc_beacon') != false;
+
+  /// Analysing tracks for the phone (ffmpeg, several cores).
+  bool get offloadOn => settings.get('svc_offload') != false;
+
+  /// Keeping the Mac awake while a job runs.
+  bool get awakeOn => settings.get('svc_awake') != false;
+
+  /// One analysis at a time instead of one per core: slower, cooler.
+  bool get gentle => settings.get('dsp_gentle') == true;
+
+  int get _workers =>
+      gentle ? 1 : (dspJobs ?? max(1, Platform.numberOfProcessors - 1));
+
+  static const services = [
+    'phone',
+    'beacon',
+    'offload',
+    'gentle',
+    'awake',
+    'watch',
+    'stop_gradle',
+  ];
+
+  /// Turn a service on or off; throws [FormatException] for an unknown one.
+  Future<void> setService(String name, bool on) async {
+    String what;
+    switch (name) {
+      case 'phone':
+        settings.set('svc_phone', on);
+        on ? await _listen() : await _unlisten();
+        what = on
+            ? 'Phone connection on (port $port)'
+            : 'Phone connection off: the phone can\'t reach this Mac';
+      case 'beacon':
+        settings.set('svc_beacon', on);
+        if (!on) {
+          _beacon?.stop();
+          _beacon = null;
+        } else if (_http != null) {
+          await _startBeacon();
+        }
+        what = on
+            ? 'Discovery on'
+            : 'Discovery off: a phone that knows this Mac still connects';
+      case 'offload':
+        settings.set('svc_offload', on);
+        what = on ? 'Analysis for the phone on' : 'Analysis for the phone off';
+      case 'gentle':
+        settings.set('dsp_gentle', on);
+        pool.size = _workers;
+        what = on
+            ? 'Low-power analysis: one track at a time'
+            : 'Analysis uses ${pool.size} cores';
+      case 'awake':
+        settings.set('svc_awake', on);
+        if (!on) {
+          _caffeinate?.kill();
+          _caffeinate = null;
+        }
+        what = on
+            ? 'The Mac stays awake during jobs'
+            : 'The Mac may sleep during jobs';
+      case 'watch':
+        updates.setAuto(on);
+        what = on ? 'Watching for new builds' : 'Not watching for new builds';
+      case 'stop_gradle':
+        builder.setOption('stop_gradle', on);
+        what = on
+            ? 'Gradle stops after each build'
+            : 'Gradle stays running between builds (faster rebuilds)';
+      default:
+        throw FormatException('Unknown service $name');
+    }
+    _note(what);
   }
 
   /// Revoke every paired phone: new token, new PIN.
@@ -213,7 +372,7 @@ class CompanionServer {
   /// to finish must not let the Mac sleep under the others.
   Future<T> awake<T>(Future<T> Function() job) async {
     _sleepHolders++;
-    if (Platform.isMacOS && _caffeinate == null) {
+    if (awakeOn && Platform.isMacOS && _caffeinate == null) {
       try {
         _caffeinate = await Process.start('caffeinate', ['-i', '-w', '$pid']);
       } catch (_) {}
@@ -255,12 +414,18 @@ class CompanionServer {
           return await _queueRequest(req);
         case 'POST /api/v1/transfers/ack':
           return await _ack(req);
+        case 'GET /api/v1/app/apk':
+          return await _appApk(req);
+        case 'POST /api/v1/app/status':
+          return await _appStatus(req);
+        case 'POST /api/v1/report':
+          return await _report(req);
       }
       await _json(req, {'error': 'Not found'}, 404);
     } on FormatException catch (e) {
       await _fail(req, 400, e.message);
     } catch (e) {
-      log?.call('Request ${req.method} ${req.uri.path} failed: $e');
+      _note('Request ${req.method} ${req.uri.path} failed: $e');
       await _fail(req, 500, '$e');
     }
   }
@@ -321,14 +486,31 @@ class CompanionServer {
   String _deviceOf(HttpRequest req) =>
       _unquote(req.headers.value('x-device-name') ?? 'Phone');
 
-  void _seen(String name, String? ip) {
+  void _seen(String name, String? ip, [HttpRequest? req]) {
     final key = '${ip ?? ''}|$name';
-    final c = clients[key];
+    var c = clients[key];
     if (c == null) {
-      clients[key] = ClientInfo(name, ip ?? '');
-      log?.call('Phone connected: $name (${ip ?? '?'})');
+      c = clients[key] = ClientInfo(name, ip ?? '');
+      _note('Phone connected: $name (${ip ?? '?'})');
     } else {
       c.lastSeen = DateTime.now();
+    }
+    final v = req?.headers.value('x-app-version');
+    if (v != null && v.isNotEmpty && v != c.appVersion) {
+      final was = c.appVersion;
+      c.appVersion = v;
+      c.appPackage = req?.headers.value('x-app-package') ?? '';
+      if (was.isNotEmpty) _note('$name now runs Mai An $v (was $was)');
+      // Installed: the phone came back on the offered version after it had
+      // started on it (a fresh Mac run only knows the phone's word).
+      final offered = updates.current;
+      final st = updates.phoneStatus?['state'];
+      if (offered != null &&
+          v == '${offered['version_name']}+${offered['version_code']}' &&
+          (was.isNotEmpty || st == 'installing' || st == 'downloading')) {
+        updates.setPhoneStatus({'state': 'installed', 'device': name});
+        _notify('Phone app updated', '$name now runs Mai An $v');
+      }
     }
     if (settings.lastClient != name) settings.set('last_client', name);
     _changed();
@@ -338,7 +520,10 @@ class CompanionServer {
 
   Future<void> _ping(HttpRequest req) async {
     final ok = _authorized(req);
-    if (ok) _seen(_deviceOf(req), req.connectionInfo?.remoteAddress.address);
+    if (ok) {
+      _seen(_deviceOf(req), req.connectionInfo?.remoteAddress.address, req);
+    }
+    final offer = ok ? updates.offer : null;
     await _json(req, {
       'status': 'ok',
       'name': deviceName,
@@ -349,6 +534,9 @@ class CompanionServer {
       // Ping itself is open (discovery needs it), so the client learns here
       // whether its token still works instead of on the next 401.
       'authorized': ok,
+      'companion_version': appVersion,
+      // The phone app build on offer (only to a paired phone).
+      'app_update': ?offer,
     });
   }
 
@@ -359,24 +547,35 @@ class CompanionServer {
     final name = '${body['device_name'] ?? 'Android Client'}';
     if (_constEq(attempt, pin)) {
       _pinFailures = 0;
-      log?.call('Paired with $name');
-      _seen(name, req.connectionInfo?.remoteAddress.address);
+      _note('Paired with $name');
+      _seen(name, req.connectionInfo?.remoteAddress.address, req);
+      _notify('Phone paired', name);
       return _json(req, {
         'status': 'paired',
         'token': token,
         'server_name': deviceName,
       });
     }
-    log?.call('Wrong PIN from ${req.connectionInfo?.remoteAddress.address}');
+    _note('Wrong PIN from ${req.connectionInfo?.remoteAddress.address}');
     if (++_pinFailures >= _maxPinFailures) {
-      log?.call('Too many wrong PINs: new PIN');
+      _note('Too many wrong PINs: new PIN');
       rotatePin();
     }
     await _json(req, {'error': 'Invalid PIN'}, 403);
   }
 
+  Future<void> _offloadOff(HttpRequest req) async {
+    // Unread upload bodies would keep the phone sending: drop them.
+    await req.drain<void>().catchError((_) {});
+    return _json(req, {
+      'error': 'Analysis is turned off in Mai An Companion on the Mac',
+      'reason': 'offload_off',
+    }, 503);
+  }
+
   Future<void> _dspMatch(HttpRequest req) async {
     if (!await _requireAuth(req)) return;
+    if (!offloadOn) return _offloadOff(req);
     final body = await _readJson(req);
     if (body == null) return _json(req, {'error': 'Invalid JSON'}, 400);
     final cached = <Map<String, Object?>>[];
@@ -400,7 +599,7 @@ class CompanionServer {
       ..started = DateTime.now()
       ..last = DateTime.now();
     if (offload.total > 0) {
-      log?.call(
+      _note(
         'Offload: ${offload.total} tracks, ${cached.length} already cached, '
         '${missing.length} to analyse',
       );
@@ -411,6 +610,7 @@ class CompanionServer {
 
   Future<void> _dspExtract(HttpRequest req) async {
     if (!await _requireAuth(req)) return;
+    if (!offloadOn) return _offloadOff(req);
     final ff = ffmpeg;
     if (ff == null) {
       return _json(req, {
@@ -445,18 +645,22 @@ class CompanionServer {
           return _json(req, {'error': 'No file uploaded'}, 400);
         }
         if (trackPath.isEmpty) {
-          trackPath = (uploadName?.isEmpty ?? true) ? 'unknown.audio' : uploadName!;
+          trackPath = (uploadName?.isEmpty ?? true)
+              ? 'unknown.audio'
+              : uploadName!;
         }
         offload.current = _baseName(trackPath);
         offload.started ??= DateTime.now();
         _changed();
-        final feats = await pool.run(() => analyseFile(ff, tmp!.path, home.tmp));
+        final feats = await pool.run(
+          () => analyseFile(ff, tmp!.path, home.tmp),
+        );
         cache.put(trackPath, feats);
         _offloadStep(extracted: true);
         await _json(req, {'status': 'ok', 'path': trackPath, ...feats});
       } catch (e) {
         _offloadStep(extracted: false);
-        log?.call('DSP failed for ${_baseName(trackPath)}: $e');
+        _note('DSP failed for ${_baseName(trackPath)}: $e');
         await _json(req, {'error': '$e'}, 500);
       } finally {
         try {
@@ -475,7 +679,7 @@ class CompanionServer {
     }
     offload.last = DateTime.now();
     if (offload.done >= offload.total) {
-      log?.call(
+      _note(
         'Offload done: ${offload.cached + offload.extracted} ok, '
         '${offload.failed} failed',
       );
@@ -502,7 +706,7 @@ class CompanionServer {
       try {
         send = await awake(() => _transcode(path, q));
       } catch (e) {
-        log?.call('Transcode failed for ${_baseName(path)} ($e): sending original');
+        _note('Transcode failed for ${_baseName(path)} ($e): sending original');
       }
     }
     final f = File(send);
@@ -516,7 +720,9 @@ class CompanionServer {
       ..contentLength = f.lengthSync();
     await r.addStream(f.openRead());
     await r.close();
-    log?.call('Sent ${_baseName(path)} to ${req.connectionInfo?.remoteAddress.address}');
+    _note(
+      'Sent ${_baseName(path)} to ${req.connectionInfo?.remoteAddress.address}',
+    );
   }
 
   Future<String> _transcode(String path, Quality q) =>
@@ -540,7 +746,7 @@ class CompanionServer {
     if (n == null) {
       return _json(req, {'error': 'No bundle file provided'}, 400);
     }
-    log?.call('Saved state bundle (${_size(n)}) to ${dest.path}');
+    _note('Saved state bundle (${_size(n)}) to ${dest.path}');
     _changed();
     await _json(req, {'status': 'ok', 'saved_path': dest.path});
   }
@@ -624,7 +830,7 @@ class CompanionServer {
       final dsp = meta['dsp_features'];
       if (dsp is Map<String, Object?> && !duplicate) cache.put(dest, dsp);
       final sender = _deviceOf(req);
-      _seen(sender, remote);
+      _seen(sender, remote, req);
       if (!duplicate) {
         received.insert(0, {
           'name': _baseName(dest),
@@ -637,10 +843,20 @@ class CompanionServer {
         atomicWrite(home.receivedFile, jsonEncode(received));
       }
       final remaining = int.tryParse('${meta['remaining'] ?? 0}') ?? 0;
-      log?.call(
+      _note(
         'Received ${_baseName(dest)} from $sender${duplicate ? ' (duplicate)' : ''}'
         '${remaining > 0 ? ' ($remaining to go)' : ''}',
       );
+      if (!duplicate) _batchReceived++;
+      if (remaining <= 0 && _batchReceived > 0) {
+        _notify(
+          'From $sender',
+          _batchReceived == 1
+              ? 'Received ${_baseName(dest)}'
+              : 'Received $_batchReceived tracks',
+        );
+        _batchReceived = 0;
+      }
       _changed();
       await _json(req, {'status': 'ok', 'path': dest, 'duplicate': duplicate});
     } finally {
@@ -662,6 +878,98 @@ class CompanionServer {
         ];
       }
     } catch (_) {}
+  }
+
+  /// The offered phone app build. Served from the copy in updates/, so a
+  /// rebuild mid-download can't change the bytes under the phone.
+  Future<void> _appApk(HttpRequest req) async {
+    if (!_authorized(req)) {
+      return _json(req, {'error': 'Unauthorized'}, 401);
+    }
+    final c = updates.current;
+    final f = updates.apk;
+    if (c == null || !f.existsSync()) {
+      return _json(req, {'error': 'No app update on offer'}, 404);
+    }
+    final who = _deviceOf(req);
+    _seen(who, req.connectionInfo?.remoteAddress.address, req);
+    _note(
+      '$who is downloading Mai An ${c['version_name']} (${c['version_code']})',
+    );
+    updates.downloads++;
+    updates.setPhoneStatus({'state': 'downloading', 'device': who});
+    final r = req.response
+      ..statusCode = 200
+      ..headers.contentType = ContentType(
+        'application',
+        'vnd.android.package-archive',
+      )
+      ..headers.set('etag', '"${c['sha256']}"')
+      ..headers.set('x-sha256', '${c['sha256']}')
+      ..contentLength = f.lengthSync();
+    await r.addStream(f.openRead());
+    await r.close();
+  }
+
+  /// The phone's progress with the offered build, for the control page.
+  Future<void> _appStatus(HttpRequest req) async {
+    if (!await _requireAuth(req)) return;
+    final body = await _readJson(req) ?? {};
+    final state = '${body['state'] ?? ''}';
+    const states = {
+      'downloading',
+      'downloaded',
+      'installing',
+      'installed',
+      'failed',
+      'declined',
+    };
+    if (!states.contains(state)) {
+      return _json(req, {'error': 'Unknown state'}, 400);
+    }
+    final who = _deviceOf(req);
+    _seen(who, req.connectionInfo?.remoteAddress.address, req);
+    final before = updates.phoneStatus?['state'];
+    updates.setPhoneStatus({
+      'state': state,
+      'device': who,
+      if (body['error'] != null) 'error': '${body['error']}',
+    });
+    if (state == 'failed') {
+      _note('App update on $who failed: ${body['error'] ?? 'unknown error'}');
+    } else if (state == 'installing') {
+      _note('$who is installing the update');
+    } else if (state == 'installed' && before != 'installed') {
+      final c = updates.current;
+      _note('$who runs the offered build');
+      _notify(
+        'Phone app updated',
+        c == null
+            ? who
+            : '$who now runs Mai An ${c['version_name']} (${c['version_code']})',
+      );
+    }
+    await _json(req, {'status': 'ok'});
+  }
+
+  /// A problem report from the phone: kept for the page, and a notification.
+  Future<void> _report(HttpRequest req) async {
+    if (!await _requireAuth(req)) return;
+    final body = await _readJson(req);
+    if (body == null) return _json(req, {'error': 'Invalid JSON'}, 400);
+    final who = _deviceOf(req);
+    _seen(who, req.connectionInfo?.remoteAddress.address, req);
+    final r = reports.add(body, device: who);
+    final bug = r['kind'] == 'bug';
+    _note(
+      '${bug ? 'Problem report' : 'Error report'} from $who: ${r['title']}',
+    );
+    _notify(
+      bug ? 'Problem report from $who' : 'Error on $who',
+      '${r['title']}',
+    );
+    _changed();
+    await _json(req, {'status': 'ok', 'id': r['id']});
   }
 
   Future<void> _pending(HttpRequest req) async {
@@ -695,7 +1003,9 @@ class CompanionServer {
     if (body['clear_all'] == true) {
       clearQueue();
     } else {
-      removeTransfers([for (final i in (body['ids'] as List? ?? const [])) '$i']);
+      removeTransfers([
+        for (final i in (body['ids'] as List? ?? const [])) '$i',
+      ]);
     }
     await _json(req, {'status': 'ok', 'remaining': queue.items.length});
   }
@@ -746,7 +1056,7 @@ class CompanionServer {
       cache.put(path, f);
       return f;
     } catch (e) {
-      log?.call('Feature extraction failed for ${_baseName(path)}: $e');
+      _note('Feature extraction failed for ${_baseName(path)}: $e');
       return null;
     }
   }
@@ -773,10 +1083,11 @@ class CompanionServer {
     _changed();
     try {
       final results = await Future.wait([
-        for (final t in todo) _prepOne(t, q, quality, ip, precomputeDsp, cancel),
+        for (final t in todo)
+          _prepOne(t, q, quality, ip, precomputeDsp, cancel),
       ]);
       if (cancel.set) {
-        log?.call('Send cancelled');
+        _note('Send cancelled');
         return const [];
       }
       final queued = [
@@ -784,7 +1095,7 @@ class CompanionServer {
           if (r != null) r,
       ];
       queue.addAll(queued);
-      log?.call(
+      _note(
         'Queued ${queued.length} track${queued.length == 1 ? '' : 's'} for the phone '
         '(${queue.items.length} waiting)',
       );
@@ -819,7 +1130,7 @@ class CompanionServer {
         await awake(() => _transcode(path, q));
       } catch (e) {
         // The stream handler retries (and falls back to the original).
-        log?.call('Pre-encode failed for ${_baseName(path)}: $e');
+        _note('Pre-encode failed for ${_baseName(path)}: $e');
       }
     }
     _prepDone++;
@@ -859,11 +1170,9 @@ class CompanionServer {
     final ifaces = await localInterfaces();
     final now = DateTime.now();
     final backups = home.backups.existsSync()
-        ? (home.backups.listSync().whereType<File>().toList()
-            ..sort(
-              (a, b) =>
-                  b.lastModifiedSync().compareTo(a.lastModifiedSync()),
-            ))
+        ? (home.backups.listSync().whereType<File>().toList()..sort(
+            (a, b) => b.lastModifiedSync().compareTo(a.lastModifiedSync()),
+          ))
         : <File>[];
     final cl = clients.values.toList()
       ..sort((a, b) => b.lastSeen.compareTo(a.lastSeen));
@@ -887,8 +1196,45 @@ class CompanionServer {
             'name': c.name,
             'ip': c.ip,
             'ago': now.difference(c.lastSeen).inSeconds,
+            'app_version': c.appVersion,
+            'app_package': c.appPackage,
           },
       ],
+      'update': {
+        'current': updates.current,
+        'phone': updates.phoneStatus,
+        'downloads': updates.downloads,
+        'watch_dir': updates.watchDir,
+        'watch_error': updates.watchError,
+        'auto': updates.auto,
+        'draft_notes': updates.draftNotes,
+      },
+      'notify': settings.notify,
+      'services': {
+        'phone': phoneOn,
+        'listening': _http != null,
+        'beacon': beaconOn,
+        'beacon_live': _beacon != null,
+        'offload': offloadOn,
+        'gentle': gentle,
+        'workers': pool.size,
+        'awake': awakeOn,
+        'awake_now': _caffeinate != null,
+        'watch': updates.auto,
+        'stop_gradle': builder.stopGradle,
+      },
+      'build': builder.toJson(),
+      'reports': {
+        'items': reports.items.take(40).toList(),
+        'total': reports.items.length,
+        'unseen': reports.unseen,
+        'seen_at': reports.seenAt,
+      },
+      'login_item': loginItemEnabled(),
+      'in_app': appBundlePath() != null,
+      'log': logLines.length > 120
+          ? logLines.sublist(logLines.length - 120)
+          : logLines,
       'offload': offload.toJson(),
       'prep': _prepTotal == 0
           ? null
@@ -915,6 +1261,18 @@ class CompanionServer {
       ],
     };
   }
+}
+
+/// A Notification Center banner, through AppleScript (no entitlement, no
+/// helper app). Fire and forget.
+void macNotify(String title, String body) {
+  if (!Platform.isMacOS) return;
+  String q(String s) =>
+      '"${s.replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"';
+  Process.start('/usr/bin/osascript', [
+    '-e',
+    'display notification ${q(body)} with title ${q('Mai An Companion')} subtitle ${q(title)}',
+  ]).then((p) => p.exitCode, onError: (_) => 0);
 }
 
 class _Cancel {

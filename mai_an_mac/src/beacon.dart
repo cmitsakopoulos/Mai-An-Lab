@@ -29,6 +29,7 @@ class Beacon {
 
   final String name;
   final int port;
+
   /// The port we listen on for queries.
   final int udp;
 
@@ -64,7 +65,9 @@ class Beacon {
     } catch (e) {
       // Another program holds the port: we can still announce, but can't
       // hear queries.
-      log?.call('UDP $udp is busy ($e): announcing only, not answering queries');
+      log?.call(
+        'UDP $udp is busy ($e): announcing only, not answering queries',
+      );
       s = await bind(0, reusePort: false);
     }
     s.broadcastEnabled = true;
@@ -131,7 +134,8 @@ class Beacon {
     _warned = true;
     log?.call(
       'Could not send discovery beacon${to == null ? '' : ' to $to'}: $e. If this '
-      'persists, allow your terminal under System Settings > Privacy & '
+      'persists, allow Mai An Companion (or your terminal, if you run maian '
+      'there) under System Settings > Privacy & '
       'Security > Local Network.',
     );
   }

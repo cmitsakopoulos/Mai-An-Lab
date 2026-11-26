@@ -68,27 +68,36 @@ Future<List<Iface>> localInterfaces({bool fresh = false}) async {
         String? bcast;
         final ni = parts.indexOf('netmask');
         if (ni >= 0 && ni + 1 < parts.length) {
-          final m = int.tryParse(parts[ni + 1].replaceFirst('0x', ''), radix: 16);
+          final m = int.tryParse(
+            parts[ni + 1].replaceFirst('0x', ''),
+            radix: 16,
+          );
           if (m != null) prefix = m.toRadixString(2).replaceAll('0', '').length;
         }
         final bi = parts.indexOf('broadcast');
         if (bi >= 0 && bi + 1 < parts.length) bcast = parts[bi + 1];
-        out.add(Iface(name, ip, prefix, bcast, _vpnPrefixes.any(name.startsWith)));
+        out.add(
+          Iface(name, ip, prefix, bcast, _vpnPrefixes.any(name.startsWith)),
+        );
       }
     } catch (_) {}
   }
   if (out.isEmpty) {
     try {
-      for (final i in await NetworkInterface.list(type: InternetAddressType.IPv4)) {
+      for (final i in await NetworkInterface.list(
+        type: InternetAddressType.IPv4,
+      )) {
         for (final a in i.addresses) {
           if (a.isLoopback || a.address.startsWith('169.254.')) continue;
-          out.add(Iface(
-            i.name,
-            a.address,
-            24,
-            slash24Broadcast(a.address),
-            _vpnPrefixes.any(i.name.startsWith),
-          ));
+          out.add(
+            Iface(
+              i.name,
+              a.address,
+              24,
+              slash24Broadcast(a.address),
+              _vpnPrefixes.any(i.name.startsWith),
+            ),
+          );
         }
       }
     } catch (_) {}
