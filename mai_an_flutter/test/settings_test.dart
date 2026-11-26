@@ -319,7 +319,7 @@ void main() {
         find.widgetWithText(TextField, 'Save Custom Preset'),
         'Rock',
       );
-      await tester.tap(find.text('SAVE'));
+      await tester.tap(find.text('Save Preset'));
       await settle(tester);
       expect(find.text('Cannot overwrite default presets.'), findsOneWidget);
 
@@ -327,7 +327,7 @@ void main() {
         find.widgetWithText(TextField, 'Save Custom Preset'),
         'Night',
       );
-      await tester.tap(find.text('SAVE'));
+      await tester.tap(find.text('Save Preset'));
       // The file, then the screen re-read from it (the Delete button shows
       // for a custom preset): under a loaded test run the second can lag.
       await settle(
@@ -353,6 +353,9 @@ void main() {
         ),
       );
       await tester.tap(find.byTooltip('Delete Preset'));
+      await tester.pumpAndSettle();
+      expect(find.text("Delete 'Night'?"), findsOneWidget);
+      await tester.tap(find.text('Delete'));
       await settle(
         tester,
         () => (fileToml()['dsp']! as Map)['active_preset'] == 'Flat',

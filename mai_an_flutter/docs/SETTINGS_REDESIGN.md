@@ -69,8 +69,8 @@ Page shell: `GroupBody(spacing: 26, children: [sections…])`.
 | 1 | `AppSwitch` everywhere, switch theme, `GlassCard` always provides a `Material` (ripples show) | done | a0c5f57 |
 | 2 | Kit, plus Appearance rebuilt | done | 431c484 |
 | 3 | Haptics, Permissions, Advanced, About | done | 004071b |
-| 4 | Storage & Paths, Database | built, awaiting phone check | |
-| 5 | Audio & DSP | todo | |
+| 4 | Storage & Paths, Database | done | 03f180a |
+| 5 | Audio & DSP | built, awaiting phone check | |
 | 6 | Account, AI Assistant | todo | |
 | 7 | Companion & Sync | todo | |
 | 8 | Cleanup and row-level search | todo | |
@@ -117,6 +117,15 @@ No `enabled:` was needed: `SettingsTile.action(onTap: null)` already dims.
 - `settings_test.dart` "Audio & DSP" taps the texts
   'Enable 5-Band Equalizer' and 'Custom Presets'. Keep those strings or
   update the test.
+
+**As built:** Acoustic Index is a custom tile (count, %, bar) plus action
+rows (Analyse N / Rebuild All / Cancel) and the auto-analyse toggle; the
+badge is the header trailing. The Dynamism warning is the section footer;
+Active Track Boost is a row shown while boosting. Presets: a System/Custom
+`SettingsSegmented` over a `SettingsPickerTile` (the chip strip is gone).
+The curve and band sliders are one custom tile. Saving a custom preset is a
+name field plus a 'Save Preset' action row; saved presets are their own
+section (tap applies, trash deletes after `confirmDelete`).
 
 ### 6. Account (`auth_settings.dart`), AI Assistant (`assistant_settings.dart`)
 - Credentials stay explicit-save (rule 3): `ModernTextField`s in a

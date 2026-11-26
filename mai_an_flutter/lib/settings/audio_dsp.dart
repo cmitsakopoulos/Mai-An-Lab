@@ -8,9 +8,8 @@ import '../analysis/library_analysis.dart';
 import '../core/py_num.dart';
 import '../library/library_dialogs.dart' show confirmDelete;
 import '../player/dsp.dart';
-import '../ui/sliding_segmented.dart';
 import '../ui/tokens.dart';
-import 'groups.dart' show InsetSwitchRow, LegacySettingsSection;
+import 'settings_kit.dart';
 import 'settings_page.dart';
 
 const kSystemPresets = [
@@ -334,8 +333,19 @@ class _AudioDspGroupState extends State<AudioDspGroup> {
     showSettingsSnack(context, "Applied custom preset '$name'.");
   }
 
-  /// `_delete_custom_preset`.
+  /// `_delete_custom_preset`, after asking.
   Future<void> _deletePreset(String name) async {
+    final ok = await confirmDelete(
+      context,
+      title: "Delete '$name'?",
+      message: 'This custom EQ preset will be removed.',
+      confirmLabel: 'Delete',
+    );
+    if (!ok || !mounted) return;
+    await _removePreset(name);
+  }
+
+  Future<void> _removePreset(String name) async {
     _custom.remove(name);
     final active = d.config.string('dsp', 'active_preset', 'Flat');
     final next = active == name ? 'Flat' : active;
@@ -376,252 +386,50 @@ class _AudioDspGroupState extends State<AudioDspGroup> {
     final hasNonZero = _gains.any((g) => g.abs() >= 0.05);
 
     return GroupBody(
-      spacing: 20,
+      spacing: 26,
       children: [
-        // 1. Acoustic Index (DSP feature coverage & auto-analysis)
         ListenableBuilder(
           listenable: Listenable.merge([d.library, d.library.analysis]),
-          builder: (context, _) {
-            final lib = d.library;
-            final analysis = lib.analysis;
-            final total = lib.dspTotal;
-            final missing = lib.dspMissing;
-            final analysed = lib.dspAnalysed;
-            final ratio = total > 0 ? (analysed / total).clamp(0.0, 1.0) : 0.0;
-            final allReady = total > 0 && missing == 0;
-            final canRun = lib.canWrite && total > 0;
-
-            final badgeText = analysis.running
-                ? 'Analysing…'
-                : total == 0
-                ? 'No Tracks'
-                : allReady
-                ? 'All Ready'
-                : '$missing pending';
-            final badgeColor = analysis.running
-                ? accent
-                : allReady
-                ? Tokens.accentGreen
-                : Tokens.amber;
-
-            return LegacySettingsSection(
-              label: 'ACOUSTIC INDEX',
-              trailing: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                decoration: BoxDecoration(
-                  color: badgeColor.withValues(alpha: 0.16),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Text(
-                  badgeText,
-                  style: TextStyle(
-                    color: badgeColor,
-                    fontSize: 11,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          total == 0
-                              ? 'Add tracks to build acoustic features'
-                              : '$analysed / $total tracks indexed',
-                          style: const TextStyle(
-                            color: Tokens.text,
-                            fontSize: 14,
-                            fontWeight: FontWeight.w600,
-                            fontFeatures: [FontFeature.tabularFigures()],
-                          ),
-                        ),
-                      ),
-                      if (total > 0)
-                        Text(
-                          '${(ratio * 100).round()}%',
-                          style: TextStyle(
-                            color: badgeColor,
-                            fontSize: 12,
-                            fontWeight: FontWeight.w700,
-                            fontFeatures: const [FontFeature.tabularFigures()],
-                          ),
-                        ),
-                    ],
-                  ),
-                  const SizedBox(height: 8),
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(3),
-                    child: LinearProgressIndicator(
-                      value: analysis.running ? analysis.progress : ratio,
-                      minHeight: 5,
-                      color: badgeColor,
-                      backgroundColor: Tokens.surface2,
-                    ),
-                  ),
-                  const SizedBox(height: 6),
-                  Dim(
-                    analysis.running
-                        ? (analysis.status.isEmpty
-                              ? 'Analysing acoustic features…'
-                              : analysis.status)
-                        : 'Powers Auto-Play similarity walks, Dynamic Punchiness, and Acoustic Network.',
-                    size: 11,
-                  ),
-                  const SizedBox(height: 12),
-                  Wrap(
-                    spacing: 8,
-                    runSpacing: 8,
-                    crossAxisAlignment: WrapCrossAlignment.center,
-                    children: [
-                      if (analysis.running)
-                        Material(
-                          color: Tokens.accentRed.withValues(alpha: 0.16),
-                          borderRadius: BorderRadius.circular(10),
-                          child: InkWell(
-                            borderRadius: BorderRadius.circular(10),
-                            onTap: analysis.cancel,
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 14,
-                                vertical: 9,
-                              ),
-                              decoration: BoxDecoration(
-                                borderRadius: BorderRadius.circular(10),
-                                border: Border.all(
-                                  color: Tokens.accentRed.withValues(
-                                    alpha: 0.45,
-                                  ),
-                                ),
-                              ),
-                              child: const Text(
-                                'Cancel Analysis',
-                                style: TextStyle(
-                                  color: Tokens.accentRed,
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w700,
-                                ),
-                              ),
-                            ),
-                          ),
-                        )
-                      else if (missing > 0) ...[
-                        Material(
-                          color: canRun ? accent : Tokens.surface2,
-                          borderRadius: BorderRadius.circular(10),
-                          child: InkWell(
-                            borderRadius: BorderRadius.circular(10),
-                            onTap: canRun
-                                ? () =>
-                                      unawaited(_runAnalysis(DspEntry.settings))
-                                : null,
-                            child: Padding(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 14,
-                                vertical: 9,
-                              ),
-                              child: Text(
-                                'Analyse $missing Track${missing == 1 ? '' : 's'}',
-                                style: TextStyle(
-                                  color: canRun ? Colors.black : Tokens.dim,
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w800,
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                        if (analysed > 0)
-                          TextButton(
-                            onPressed: canRun
-                                ? () => unawaited(_confirmRebuildAll())
-                                : null,
-                            child: const Text(
-                              'Rebuild All',
-                              style: TextStyle(color: Tokens.dim, fontSize: 12),
-                            ),
-                          ),
-                      ] else
-                        OutlinedButton.icon(
-                          icon: const Icon(Icons.refresh_rounded, size: 16),
-                          label: const Text(
-                            'Rebuild Acoustic Index',
-                            style: TextStyle(fontSize: 12),
-                          ),
-                          style: OutlinedButton.styleFrom(
-                            foregroundColor: Tokens.dim,
-                            side: const BorderSide(color: Tokens.borderSubtle),
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(10),
-                            ),
-                          ),
-                          onPressed: canRun
-                              ? () => unawaited(_confirmRebuildAll())
-                              : null,
-                        ),
-                    ],
-                  ),
-                  const Padding(
-                    padding: EdgeInsets.symmetric(vertical: 10),
-                    child: Divider(height: 1, color: Tokens.borderSubtle),
-                  ),
-                  InsetSwitchRow(
-                    label: 'Auto-analyse new tracks',
-                    subtitle:
-                        'Automatically compute DSP features after scans & downloads',
-                    value: _autoAnalyse,
-                    onChanged: _onAutoAnalyse,
-                  ),
-                ],
-              ),
-            );
-          },
+          builder: (context, _) => _acousticIndex(accent),
         ),
-
-        // 2. Dynamic Punchiness
-        LegacySettingsSection(
-          label: 'DYNAMIC PUNCHINESS',
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
+        _BoostListener(
+          deps: d,
+          builder: (boost) => SettingsSection(
+            header: 'Dynamic Punchiness',
+            footer: _dynamismNote,
             children: [
-              Opacity(
-                opacity: _dynamismAvailable ? 1 : 0.45,
-                child: InsetSwitchRow(
-                  label: 'Enable Dynamism Enhancement',
-                  subtitle:
-                      'Automatically boost output gain from track energy & beat strength',
-                  value: _dynamism,
-                  onChanged: _dynamismAvailable ? _onDynamism : null,
-                ),
+              SettingsTile.toggle(
+                title: 'Enable Dynamism Enhancement',
+                subtitle:
+                    'Automatically boost output gain from track energy & '
+                    'beat strength',
+                value: _dynamism,
+                onChanged: _dynamismAvailable ? _onDynamism : null,
               ),
-              if (_dynamismNote != null) ...[
-                const SizedBox(height: 10),
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 10,
-                    vertical: 8,
+              if (boost > 0)
+                SettingsTile(
+                  leading: const SettingsIcon(
+                    Icons.flash_on_rounded,
+                    color: Tokens.amber,
                   ),
-                  decoration: BoxDecoration(
-                    color: Tokens.amber.withValues(alpha: 0.12),
-                    borderRadius: BorderRadius.circular(10),
-                    border: Border.all(
-                      color: Tokens.amber.withValues(alpha: 0.35),
+                  title: 'Active Track Boost',
+                  subtitle: 'Acoustic energy enhancement active',
+                  trailing: Text(
+                    '+${boost.toStringAsFixed(1)} dB',
+                    style: const TextStyle(
+                      color: Tokens.amber,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w700,
+                      fontFeatures: [FontFeature.tabularFigures()],
                     ),
                   ),
-                  child: Dim(_dynamismNote!, size: 11, color: Tokens.amber),
                 ),
-              ],
-              _BoostCard(deps: d),
             ],
           ),
         ),
-
-        // 2. 5-Band Equalizer
-        LegacySettingsSection(
-          label: 'EQUALIZER',
-          trailing: _eq && hasNonZero
+        SettingsSection(
+          header: 'Equalizer',
+          headerTrailing: _eq && hasNonZero
               ? GestureDetector(
                   onTap: () => _onPreset('Flat'),
                   child: Text(
@@ -634,296 +442,311 @@ class _AudioDspGroupState extends State<AudioDspGroup> {
                   ),
                 )
               : null,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              InsetSwitchRow(
-                label: 'Enable 5-Band Equalizer',
-                subtitle:
-                    'Shape frequency bands to match your headphones or genre',
-                value: _eq,
-                onChanged: _onEqualizer,
-              ),
-              const Padding(
-                padding: EdgeInsets.symmetric(vertical: 12),
-                child: Divider(height: 1, color: Tokens.borderSubtle),
-              ),
-              SlidingSegmented<String>(
-                selected: _type,
-                accent: accent,
-                onSelect: _onType,
-                segments: const [
-                  Segment(value: 'system', label: 'System Presets'),
-                  Segment(value: 'custom', label: 'Custom Presets'),
+          children: [
+            SettingsTile.toggle(
+              title: 'Enable 5-Band Equalizer',
+              subtitle:
+                  'Shape frequency bands to match your headphones or genre',
+              value: _eq,
+              onChanged: _onEqualizer,
+            ),
+            SettingsCustomTile(
+              child: SettingsSegmented<String>(
+                value: _type,
+                onChanged: _onType,
+                options: const [
+                  SettingsOption('system', 'System Presets'),
+                  SettingsOption('custom', 'Custom Presets'),
                 ],
               ),
-              const SizedBox(height: 12),
-              SizedBox(
-                height: 36,
-                child: ListView.separated(
-                  scrollDirection: Axis.horizontal,
-                  itemCount: _options.length,
-                  separatorBuilder: (_, _) => const SizedBox(width: 8),
-                  itemBuilder: (context, idx) {
-                    final name = _options[idx];
-                    final selected = name == _preset;
-                    return Material(
-                      color: selected
-                          ? accent.withValues(alpha: 0.20)
-                          : Tokens.surface2,
-                      borderRadius: BorderRadius.circular(10),
-                      child: InkWell(
-                        borderRadius: BorderRadius.circular(10),
-                        onTap: () => _onPreset(name),
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 13),
-                          alignment: Alignment.center,
-                          decoration: BoxDecoration(
-                            borderRadius: BorderRadius.circular(10),
-                            border: Border.all(
-                              color: selected
-                                  ? accent.withValues(alpha: 0.7)
-                                  : Tokens.borderSubtle,
-                            ),
-                          ),
-                          child: Text(
-                            name,
-                            style: TextStyle(
-                              color: selected ? accent : Tokens.text,
-                              fontSize: 12,
-                              fontWeight: selected
-                                  ? FontWeight.w700
-                                  : FontWeight.w500,
-                            ),
-                          ),
-                        ),
-                      ),
-                    );
-                  },
+            ),
+            SettingsPickerTile<String>(
+              title: 'Preset',
+              sheetTitle: custom ? 'Custom Presets' : 'System Presets',
+              value: _preset,
+              options: [for (final n in _options) SettingsOption(n, n)],
+              onChanged: _onPreset,
+            ),
+            SettingsCustomTile(child: _bands(accent)),
+            if (custom) ...[
+              SettingsCustomTile(
+                child: TextField(
+                  controller: _presetName,
+                  style: const TextStyle(color: Tokens.text, fontSize: 14),
+                  decoration: InputDecoration(
+                    hintText: 'Save Custom Preset',
+                    hintStyle: const TextStyle(
+                      color: Tokens.textTertiary,
+                      fontSize: 14,
+                    ),
+                    filled: true,
+                    fillColor: Tokens.surface2,
+                    contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 14,
+                      vertical: 11,
+                    ),
+                    enabledBorder: _border(Tokens.borderSubtle),
+                    focusedBorder: _border(accent, 1.3),
+                    border: _border(Tokens.borderSubtle),
+                  ),
+                  onSubmitted: (_) => _savePreset(),
                 ),
               ),
-              const SizedBox(height: 14),
-              EqCurve(
-                freqs: _freqs,
-                gains: _gains,
-                minDb: _minDb,
-                maxDb: _maxDb,
-                enabled: _eq,
-                onChanged: _onCurve,
-                onEnd: () => _saveGainsAs('Custom'),
-              ),
-              const SizedBox(height: 16),
-              for (var i = 0; i < _gains.length; i++)
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 12),
-                  child: Row(
+              SettingsTile.action(title: 'Save Preset', onTap: _savePreset),
+            ],
+          ],
+        ),
+        if (custom && customNames.isNotEmpty)
+          SettingsSection(
+            header: 'Saved Custom Presets',
+            footer: 'Tap a preset to apply it.',
+            children: [
+              for (final name in customNames)
+                SettingsTile(
+                  leading: const SettingsIcon(Icons.equalizer_rounded),
+                  title: name,
+                  titleColor: name == _preset ? accent : null,
+                  subtitle: '[${_custom[name]!.map(_signed).join(', ')}] dB',
+                  onTap: () => _applyPreset(name),
+                  trailing: Row(
+                    mainAxisSize: MainAxisSize.min,
                     children: [
-                      SizedBox(
-                        width: 56,
-                        child: Text(
-                          _freqLabel(_freqs[i]),
-                          style: const TextStyle(
-                            color: Tokens.dim,
-                            fontSize: 12,
-                            fontWeight: FontWeight.w600,
-                            fontFeatures: [FontFeature.tabularFigures()],
-                          ),
+                      if (name == _preset)
+                        Icon(Icons.check_rounded, color: accent, size: 20),
+                      IconButton(
+                        icon: const Icon(
+                          Icons.delete_outline_rounded,
+                          size: 20,
                         ),
-                      ),
-                      Expanded(
-                        child: SliderTheme(
-                          data: SliderTheme.of(context).copyWith(
-                            activeTrackColor: _eq ? accent : Tokens.dim,
-                            inactiveTrackColor: Tokens.surface2,
-                            thumbColor: _eq ? Tokens.text : Tokens.dim,
-                            trackHeight: 4,
-                          ),
-                          child: Slider(
-                            min: _minDb,
-                            max: _maxDb,
-                            divisions: ((_maxDb - _minDb) * 2).toInt(),
-                            value: _gains[i].clamp(_minDb, _maxDb).toDouble(),
-                            onChanged: _eq ? (v) => _onSlider(i, v) : null,
-                            onChangeEnd: _eq
-                                ? (_) => _saveGainsAs('Custom')
-                                : null,
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 10),
-                      _GainField(
-                        key: ValueKey('gain$i'),
-                        text: '${_signed(_gains[i])} dB',
-                        enabled: _eq,
-                        onSubmit: (t) => _onGainField(i, t),
+                        color: Tokens.accentRed,
+                        tooltip: 'Delete Preset',
+                        onPressed: () => _deletePreset(name),
                       ),
                     ],
                   ),
                 ),
-              if (custom) ...[
-                const Padding(
-                  padding: EdgeInsets.only(top: 4, bottom: 12),
-                  child: Divider(height: 1, color: Tokens.borderSubtle),
+            ],
+          ),
+      ],
+    );
+  }
+
+  static OutlineInputBorder _border(Color c, [double width = 1.0]) =>
+      OutlineInputBorder(
+        borderRadius: BorderRadius.circular(12),
+        borderSide: BorderSide(color: c, width: width),
+      );
+
+  /// The curve over a slider and gain field per band.
+  Widget _bands(Color accent) => Column(
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    children: [
+      EqCurve(
+        freqs: _freqs,
+        gains: _gains,
+        minDb: _minDb,
+        maxDb: _maxDb,
+        enabled: _eq,
+        onChanged: _onCurve,
+        onEnd: () => _saveGainsAs('Custom'),
+      ),
+      const SizedBox(height: 16),
+      for (var i = 0; i < _gains.length; i++)
+        Padding(
+          padding: EdgeInsets.only(bottom: i == _gains.length - 1 ? 0 : 10),
+          child: Row(
+            children: [
+              SizedBox(
+                width: 56,
+                child: Text(
+                  _freqLabel(_freqs[i]),
+                  style: const TextStyle(
+                    color: Tokens.dim,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                    fontFeatures: [FontFeature.tabularFigures()],
+                  ),
                 ),
-                Row(
-                  children: [
-                    Expanded(
-                      child: TextField(
-                        controller: _presetName,
-                        style: const TextStyle(
-                          color: Tokens.text,
-                          fontSize: 13,
-                        ),
-                        decoration: InputDecoration(
-                          hintText: 'Save Custom Preset',
-                          hintStyle: const TextStyle(
-                            color: Tokens.textTertiary,
-                            fontSize: 13,
-                          ),
-                          filled: true,
-                          fillColor: Tokens.surface2,
-                          contentPadding: const EdgeInsets.symmetric(
-                            horizontal: 14,
-                            vertical: 11,
-                          ),
-                          enabledBorder: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(12),
-                            borderSide: const BorderSide(
-                              color: Tokens.borderSubtle,
-                            ),
-                          ),
-                          focusedBorder: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(12),
-                            borderSide: BorderSide(color: accent, width: 1.3),
-                          ),
-                          border: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(12),
-                            borderSide: const BorderSide(
-                              color: Tokens.borderSubtle,
-                            ),
-                          ),
-                        ),
+              ),
+              Expanded(
+                child: SliderTheme(
+                  data: SliderTheme.of(context).copyWith(
+                    activeTrackColor: _eq ? accent : Tokens.dim,
+                    inactiveTrackColor: Tokens.surfaceElevated,
+                    thumbColor: _eq ? Tokens.text : Tokens.dim,
+                    trackHeight: 4,
+                  ),
+                  child: Slider(
+                    min: _minDb,
+                    max: _maxDb,
+                    divisions: ((_maxDb - _minDb) * 2).toInt(),
+                    value: _gains[i].clamp(_minDb, _maxDb).toDouble(),
+                    onChanged: _eq ? (v) => _onSlider(i, v) : null,
+                    onChangeEnd: _eq ? (_) => _saveGainsAs('Custom') : null,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 10),
+              _GainField(
+                key: ValueKey('gain$i'),
+                text: '${_signed(_gains[i])} dB',
+                enabled: _eq,
+                onSubmit: (t) => _onGainField(i, t),
+              ),
+            ],
+          ),
+        ),
+    ],
+  );
+
+  /// Acoustic Index: DSP feature coverage, the analyser and auto-analysis.
+  Widget _acousticIndex(Color accent) {
+    final lib = d.library;
+    final analysis = lib.analysis;
+    final total = lib.dspTotal;
+    final missing = lib.dspMissing;
+    final analysed = lib.dspAnalysed;
+    final ratio = total > 0 ? (analysed / total).clamp(0.0, 1.0) : 0.0;
+    final allReady = total > 0 && missing == 0;
+    final canRun = lib.canWrite && total > 0;
+    VoidCallback? when(VoidCallback f) => canRun ? f : null;
+
+    final badgeText = analysis.running
+        ? 'Analysing…'
+        : total == 0
+        ? 'No Tracks'
+        : allReady
+        ? 'All Ready'
+        : '$missing pending';
+    final badgeColor = analysis.running
+        ? accent
+        : allReady
+        ? Tokens.accentGreen
+        : Tokens.amber;
+
+    return SettingsSection(
+      header: 'Acoustic Index',
+      headerTrailing: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+        decoration: BoxDecoration(
+          color: badgeColor.withValues(alpha: 0.16),
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Text(
+          badgeText,
+          style: TextStyle(
+            color: badgeColor,
+            fontSize: 11,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+      ),
+      footer:
+          'Powers Auto-Play similarity walks, Dynamic Punchiness, and '
+          'Acoustic Network.',
+      children: [
+        SettingsCustomTile(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      total == 0
+                          ? 'Add tracks to build acoustic features'
+                          : '$analysed / $total tracks indexed',
+                      style: SettingsStyle.title.copyWith(
+                        fontFeatures: const [FontFeature.tabularFigures()],
                       ),
                     ),
-                    const SizedBox(width: 10),
-                    Material(
-                      color: accent,
-                      borderRadius: BorderRadius.circular(12),
-                      child: InkWell(
-                        borderRadius: BorderRadius.circular(12),
-                        onTap: _savePreset,
-                        child: const Padding(
-                          padding: EdgeInsets.symmetric(
-                            horizontal: 18,
-                            vertical: 12,
-                          ),
-                          child: Text(
-                            'SAVE',
-                            style: TextStyle(
-                              color: Colors.black,
-                              fontSize: 12,
-                              fontWeight: FontWeight.w800,
-                              letterSpacing: 0.5,
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-                if (customNames.isNotEmpty) ...[
-                  const SizedBox(height: 16),
-                  const AccentLabel('SAVED CUSTOM PRESETS', size: 11),
-                  const SizedBox(height: 6),
-                  for (final name in customNames)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 8),
-                      child: _PresetCard(
-                        name: name,
-                        gains: _custom[name]!,
-                        active: name == _preset,
-                        onApply: () => _applyPreset(name),
-                        onDelete: () => _deletePreset(name),
+                  ),
+                  if (total > 0)
+                    Text(
+                      '${(ratio * 100).round()}%',
+                      style: TextStyle(
+                        color: badgeColor,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w700,
+                        fontFeatures: const [FontFeature.tabularFigures()],
                       ),
                     ),
                 ],
+              ),
+              const SizedBox(height: 10),
+              ClipRRect(
+                borderRadius: BorderRadius.circular(3),
+                child: LinearProgressIndicator(
+                  value: analysis.running ? analysis.progress : ratio,
+                  minHeight: 5,
+                  color: badgeColor,
+                  backgroundColor: Tokens.surface2,
+                ),
+              ),
+              if (analysis.running) ...[
+                const SizedBox(height: 8),
+                Text(
+                  analysis.status.isEmpty
+                      ? 'Analysing acoustic features…'
+                      : analysis.status,
+                  style: SettingsStyle.subtitle,
+                ),
               ],
             ],
           ),
         ),
-        const SizedBox(height: 24),
+        if (analysis.running)
+          SettingsTile.action(
+            title: 'Cancel Analysis',
+            destructive: true,
+            onTap: analysis.cancel,
+          )
+        else if (missing > 0) ...[
+          SettingsTile.action(
+            leading: const SettingsIcon(Icons.play_arrow_rounded),
+            title: 'Analyse $missing Track${missing == 1 ? '' : 's'}',
+            onTap: when(() => unawaited(_runAnalysis(DspEntry.settings))),
+          ),
+          if (analysed > 0)
+            SettingsTile.action(
+              leading: const SettingsIcon(Icons.refresh_rounded),
+              title: 'Rebuild All',
+              onTap: when(() => unawaited(_confirmRebuildAll())),
+            ),
+        ] else
+          SettingsTile.action(
+            leading: const SettingsIcon(Icons.refresh_rounded),
+            title: 'Rebuild Acoustic Index',
+            onTap: when(() => unawaited(_confirmRebuildAll())),
+          ),
+        SettingsTile.toggle(
+          title: 'Auto-analyse new tracks',
+          subtitle:
+              'Automatically compute DSP features after scans & downloads',
+          value: _autoAnalyse,
+          onChanged: _onAutoAnalyse,
+        ),
       ],
     );
   }
 }
 
-/// The "Active Track Boost" card: Dynamism's boost for the playing track,
-/// shown while it is above zero (`update_loudness_boost`).
-class _BoostCard extends StatelessWidget {
-  const _BoostCard({required this.deps});
+/// Rebuilds with Dynamism's boost for the playing track (0 with no
+/// player), `update_loudness_boost`.
+class _BoostListener extends StatelessWidget {
+  const _BoostListener({required this.deps, required this.builder});
 
   final SettingsDeps deps;
+  final Widget Function(double boost) builder;
 
   @override
   Widget build(BuildContext context) => ValueListenableBuilder(
     valueListenable: deps.player,
     builder: (context, player, _) => player == null
-        ? const SizedBox.shrink()
+        ? builder(0)
         : ValueListenableBuilder(
             valueListenable: player.loudnessBoost,
-            builder: (context, boost, _) => boost <= 0
-                ? const SizedBox.shrink()
-                : Container(
-                    margin: const EdgeInsets.only(top: 10),
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 12,
-                      vertical: 8,
-                    ),
-                    decoration: BoxDecoration(
-                      color: Tokens.text.withValues(alpha: 0.04),
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border.all(color: Tokens.border),
-                    ),
-                    child: Row(
-                      children: [
-                        const Icon(
-                          Icons.flash_on_rounded,
-                          color: Tokens.amber,
-                          size: 16,
-                        ),
-                        const SizedBox(width: 10),
-                        const Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                'Active Track Boost',
-                                style: TextStyle(
-                                  color: Tokens.text,
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.bold,
-                                ),
-                              ),
-                              SizedBox(height: 2),
-                              Dim(
-                                'Acoustic energy enhancement active',
-                                size: 10,
-                              ),
-                            ],
-                          ),
-                        ),
-                        Text(
-                          '+${boost.toStringAsFixed(1)} dB',
-                          style: const TextStyle(
-                            color: Tokens.amber,
-                            fontSize: 13,
-                            fontWeight: FontWeight.w700,
-                            fontFeatures: [FontFeature.tabularFigures()],
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
+            builder: (context, boost, _) => builder(boost),
           ),
   );
 }
@@ -1002,72 +825,6 @@ class _GainFieldState extends State<_GainField> {
       onSubmitted: widget.onSubmit,
     ),
   );
-}
-
-class _PresetCard extends StatelessWidget {
-  const _PresetCard({
-    required this.name,
-    required this.gains,
-    required this.active,
-    required this.onApply,
-    required this.onDelete,
-  });
-
-  final String name;
-  final List<double> gains;
-  final bool active;
-  final VoidCallback onApply, onDelete;
-
-  @override
-  Widget build(BuildContext context) {
-    final accent = Theme.of(context).colorScheme.primary;
-    final text = gains.map(_AudioDspGroupState._signed).join(', ');
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      decoration: BoxDecoration(
-        color: active ? accent.withValues(alpha: 0.12) : Tokens.surface2,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(
-          color: active ? accent.withValues(alpha: 0.5) : Tokens.borderSubtle,
-        ),
-      ),
-      child: Row(
-        children: [
-          Icon(Icons.equalizer_rounded, color: accent, size: 17),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  name,
-                  style: TextStyle(
-                    color: active ? accent : Tokens.text,
-                    fontSize: 13,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                const SizedBox(height: 2),
-                Dim('[$text] dB', size: 10),
-              ],
-            ),
-          ),
-          IconButton(
-            icon: const Icon(Icons.play_arrow_rounded, size: 19),
-            color: accent,
-            tooltip: 'Apply Preset',
-            onPressed: onApply,
-          ),
-          IconButton(
-            icon: const Icon(Icons.delete_outline_rounded, size: 19),
-            color: Tokens.accentRed,
-            tooltip: 'Delete Preset',
-            onPressed: onDelete,
-          ),
-        ],
-      ),
-    );
-  }
 }
 
 /// settings.py `EqualizerCurve`: the bands as a smooth curve over a dB
