@@ -44,16 +44,8 @@ class _AssistantSettingsGroupState extends State<AssistantSettingsGroup> {
       'Smart Hybrid',
       'Web snippets + training weights (Recommended, free)',
     ),
-    (
-      'weights',
-      'Training Weights Only',
-      'Model memory only — fast, 100% free',
-    ),
-    (
-      'web_snippets',
-      'Web Search Snippets',
-      'Live DuckDuckGo Lite lookups',
-    ),
+    ('weights', 'Training Weights Only', 'Model memory only — fast, 100% free'),
+    ('web_snippets', 'Web Search Snippets', 'Live DuckDuckGo Lite lookups'),
     (
       'google_grounding',
       'Google Search Grounding',
@@ -466,7 +458,9 @@ class _AssistantSettingsGroupState extends State<AssistantSettingsGroup> {
 
         // 2. Connection
         SettingsSection(
-          label: isGemini ? 'GEMINI CONNECTION' : 'LOCAL SERVER (OLLAMA / LM STUDIO)',
+          label: isGemini
+              ? 'GEMINI CONNECTION'
+              : 'LOCAL SERVER (OLLAMA / LM STUDIO)',
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
@@ -659,9 +653,7 @@ class _PresetChip extends StatelessWidget {
         : muted
         ? Tokens.dim
         : Tokens.text;
-    final bg = selected
-        ? accent.withValues(alpha: 0.18)
-        : Tokens.surface2;
+    final bg = selected ? accent.withValues(alpha: 0.18) : Tokens.surface2;
     final border = selected
         ? accent.withValues(alpha: 0.65)
         : muted

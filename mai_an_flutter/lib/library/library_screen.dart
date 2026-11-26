@@ -22,6 +22,8 @@ import 'track_menu.dart';
 import 'track_query.dart';
 import 'track_row.dart';
 import '../ui/frost.dart';
+import '../ui/page_header.dart';
+import '../ui/glass_search_bar.dart';
 import '../ui/toast.dart';
 
 const _appChannel = MethodChannel('mai_an/app');
@@ -184,191 +186,166 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
   Widget _screen() {
     return Scaffold(
-      appBar: AppBar(
-        titleSpacing: Tokens.pagePad(context),
-        title: ListenableBuilder(
-          listenable: Listenable.merge([controller, browse]),
-          builder: (context, _) =>
-              _Header(controller: controller, browse: browse),
-        ),
-        actions: [
-          ListenableBuilder(
-            listenable: Listenable.merge([controller, browse]),
-            builder: (context, _) => _sortMenu(),
-          ),
-          ListenableBuilder(
-            listenable: controller,
-            builder: (context, _) => controller.canScan
-                ? IconButton(
-                    icon: const Icon(Icons.refresh_rounded, size: 22),
-                    color: Theme.of(context).colorScheme.primary,
-                    tooltip: 'Scan library',
-                    visualDensity: VisualDensity.compact,
-                    onPressed: controller.scanning ? null : controller.scan,
-                  )
-                : const SizedBox.shrink(),
-          ),
-          if (widget.onOpenSettings case final open?)
-            IconButton(
-              icon: const Icon(Icons.settings_outlined, size: 21),
-              color: Tokens.dim,
-              tooltip: 'Settings',
-              visualDensity: VisualDensity.compact,
-              onPressed: () => open(),
-            ),
-          const SizedBox(width: 6),
-        ],
-      ),
       body: ListenableBuilder(
         listenable: Listenable.merge([controller, browse, selection]),
         builder: (context, _) {
-          final shellBottom = ShellInsets.bottomOf(context);
           final hPad = Tokens.pagePad(context);
           final showViewBar = browse.views.length >= 2;
-          final topChromeHeight =
-              56.0 +
-              (showViewBar ? 50.0 : 0.0) +
-              (controller.scanning ? 40.0 : 0.0) +
-              4.0;
-          final listBottomPad =
-              shellBottom + (selection.active ? 72.0 : 0.0) + 16.0;
-
-          final content = switch (controller.state) {
-            LoadState.loading => const Center(
-              child: CircularProgressIndicator(),
-            ),
-            LoadState.error => _ErrorView(message: controller.error ?? ''),
-            LoadState.ready => Stack(
-              fit: StackFit.expand,
-              children: [
-                if (controller.total == 0 && !controller.scanning)
-                  Padding(
-                    padding: EdgeInsets.only(
-                      top: topChromeHeight,
-                      bottom: shellBottom,
-                    ),
-                    child: _EmptyLibrary(
-                      onEnterPaths: widget.onOpenSettings == null
-                          ? null
-                          : () =>
-                                widget.onOpenSettings!(SettingsPage.storage),
-                    ),
-                  )
-                else if (browse.view == LibraryView.tracks)
-                  _tracksList(
-                    topPadding: topChromeHeight,
-                    bottomPadding: listBottomPad,
-                  )
-                else
-                  BrowseList(
-                    controller: browse,
-                    player: widget.player,
-                    onPlayTrack: _playInContext,
-                    onTrackMenu: _trackMenu,
-                    onAlbumMenu: _albumMenu,
-                    onPlayGenre: _playGenre,
-                    selection: selection,
-                    onCreatePlaylist: _createPlaylist,
-                    onEditPlaylist: _editPlaylist,
-                    onDeletePlaylist: _deletePlaylist,
-                    onRemoveFromPlaylist: _removeFromPlaylist,
-                    onEditArtist: widget.onEditArtist,
-                    onCurateGenre: widget.onCurateGenre,
-                    topPadding: topChromeHeight,
-                    bottomPadding: listBottomPad,
-                  ),
-                Positioned(
-                  top: 0,
-                  left: 0,
-                  right: 0,
-                  child: BackdropGroup(
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        GlassSurface(
-                          radius: Tokens.radiusPill,
-                          grouped: true,
-                          margin: EdgeInsets.fromLTRB(hPad, 4, hPad, 8),
-                          child: TextField(
-                            controller: _search,
-                            onChanged: controller.setQuery,
-                            decoration: const InputDecoration(
-                              hintText: 'Search artists, albums, tracks…',
-                              prefixIcon: Icon(
-                                Icons.search,
-                                color: Tokens.dim,
-                              ),
-                              filled: false,
-                              border: InputBorder.none,
-                              enabledBorder: InputBorder.none,
-                              focusedBorder: InputBorder.none,
-                              isDense: true,
-                              contentPadding: EdgeInsets.symmetric(
-                                vertical: 11,
-                                horizontal: 4,
-                              ),
-                            ),
-                          ),
-                        ),
-                        if (showViewBar)
-                          Padding(
-                            padding: EdgeInsets.fromLTRB(hPad, 0, hPad, 8),
-                            child: ViewBar(
-                              views: browse.views,
-                              selected: browse.view,
-                              unified: widget.unifiedPills,
-                              onSelect: browse.setView,
-                              grouped: true,
-                            ),
-                          ),
-                        if (controller.scanning)
-                          _ScanBanner(controller: controller),
-                      ],
-                    ),
-                  ),
+          return PageHeader(
+            title: 'Library',
+            caption: _caption(),
+            actions: [
+              _sortMenu(),
+              if (controller.canScan)
+                HeaderAction(
+                  icon: Icons.refresh_rounded,
+                  tooltip: 'Scan library',
+                  accent: true,
+                  onPressed: controller.scanning ? null : controller.scan,
                 ),
-              ],
-            ),
-          };
-
-          return Stack(
-            fit: StackFit.expand,
-            children: [
-              content,
-              if (selection.active)
-                Positioned(
-                  left: 0,
-                  right: 0,
-                  bottom: shellBottom + 8,
-                  child: _SelectionBar(
-                    selection: selection,
-                    onPlay: () => _selectionPlay(replace: true),
-                    onQueue: () => _selectionPlay(replace: false),
-                    onAddToPlaylist: () =>
-                        _addToPlaylist(selection.tracks, fromSelection: true),
-                    canWritePlaylists: controller.canWrite,
-                    sendTarget: widget.sync == null
-                        ? null
-                        : companionTarget(widget.sync!),
-                    onSend: () => _send(selection.tracks),
-                  ),
-                ),
-              if (_standalone)
-                Positioned(
-                  left: 0,
-                  right: 0,
-                  bottom: 0,
-                  child: ValueListenableBuilder(
-                    valueListenable: widget.player,
-                    builder: (context, player, _) => player == null
-                        ? const SizedBox.shrink()
-                        : SafeArea(top: false, child: MiniPlayer(player: player)),
-                  ),
+              if (widget.onOpenSettings case final open?)
+                HeaderAction(
+                  icon: Icons.settings_outlined,
+                  tooltip: 'Settings',
+                  onPressed: () => open(),
                 ),
             ],
+            bottom: [
+              GlassSearchBar(
+                controller: _search,
+                hintText: 'Search artists, albums, tracks…',
+                grouped: true,
+                margin: EdgeInsets.fromLTRB(hPad, 0, hPad, 8),
+                onChanged: controller.setQuery,
+                onClear: () {
+                  _search.clear();
+                  controller.setQuery('');
+                },
+              ),
+              if (showViewBar)
+                Padding(
+                  padding: EdgeInsets.fromLTRB(hPad, 0, hPad, 8),
+                  child: ViewBar(
+                    views: browse.views,
+                    selected: browse.view,
+                    unified: widget.unifiedPills,
+                    onSelect: browse.setView,
+                    grouped: true,
+                  ),
+                ),
+              if (controller.scanning) _ScanBanner(controller: controller),
+            ],
+            child: Builder(builder: _body),
           );
         },
       ),
+    );
+  }
+
+  /// The header caption: how many items the current view shows.
+  String? _caption() {
+    final c = controller;
+    final b = browse;
+    if (c.state != LoadState.ready) return null;
+    if (b.view == LibraryView.tracks) {
+      final filtered = c.visible.length != c.total;
+      return filtered
+          ? '${c.visible.length} of ${c.total} tracks${c.closestMatch ? ' · closest' : ''}'
+          : '${c.total} track${c.total == 1 ? '' : 's'}';
+    }
+    if (b.loading && b.rows.isEmpty) return null;
+    final unit = b.view.label.toLowerCase();
+    final filtered = b.shown != b.total;
+    return filtered
+        ? '${b.shown} of ${b.total} $unit${b.closestMatch ? ' · closest' : ''}'
+        : '${b.total} $unit';
+  }
+
+  Widget _body(BuildContext context) {
+    final shellBottom = ShellInsets.bottomOf(context);
+    final topChromeHeight = HeaderInsets.topOf(context);
+    final listBottomPad = shellBottom + (selection.active ? 72.0 : 0.0) + 16.0;
+
+    final content = switch (controller.state) {
+      LoadState.loading => const Center(child: CircularProgressIndicator()),
+      LoadState.error => _ErrorView(message: controller.error ?? ''),
+      LoadState.ready => Stack(
+        fit: StackFit.expand,
+        children: [
+          if (controller.total == 0 && !controller.scanning)
+            Padding(
+              padding: EdgeInsets.only(
+                top: topChromeHeight,
+                bottom: shellBottom,
+              ),
+              child: _EmptyLibrary(
+                onEnterPaths: widget.onOpenSettings == null
+                    ? null
+                    : () => widget.onOpenSettings!(SettingsPage.storage),
+              ),
+            )
+          else if (browse.view == LibraryView.tracks)
+            _tracksList(
+              topPadding: topChromeHeight,
+              bottomPadding: listBottomPad,
+            )
+          else
+            BrowseList(
+              controller: browse,
+              player: widget.player,
+              onPlayTrack: _playInContext,
+              onTrackMenu: _trackMenu,
+              onAlbumMenu: _albumMenu,
+              onPlayGenre: _playGenre,
+              selection: selection,
+              onCreatePlaylist: _createPlaylist,
+              onEditPlaylist: _editPlaylist,
+              onDeletePlaylist: _deletePlaylist,
+              onRemoveFromPlaylist: _removeFromPlaylist,
+              onEditArtist: widget.onEditArtist,
+              onCurateGenre: widget.onCurateGenre,
+              topPadding: topChromeHeight,
+              bottomPadding: listBottomPad,
+            ),
+        ],
+      ),
+    };
+
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        content,
+        if (selection.active)
+          Positioned(
+            left: 0,
+            right: 0,
+            bottom: shellBottom + 8,
+            child: _SelectionBar(
+              selection: selection,
+              onPlay: () => _selectionPlay(replace: true),
+              onQueue: () => _selectionPlay(replace: false),
+              onAddToPlaylist: () =>
+                  _addToPlaylist(selection.tracks, fromSelection: true),
+              canWritePlaylists: controller.canWrite,
+              sendTarget: widget.sync == null
+                  ? null
+                  : companionTarget(widget.sync!),
+              onSend: () => _send(selection.tracks),
+            ),
+          ),
+        if (_standalone)
+          Positioned(
+            left: 0,
+            right: 0,
+            bottom: 0,
+            child: ValueListenableBuilder(
+              valueListenable: widget.player,
+              builder: (context, player, _) => player == null
+                  ? const SizedBox.shrink()
+                  : SafeArea(top: false, child: MiniPlayer(player: player)),
+            ),
+          ),
+      ],
     );
   }
 
@@ -416,7 +393,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
       String Function(T) label,
       ValueChanged<T> onSelected,
     ) => PopupMenuButton<T>(
-      icon: const Icon(Icons.sort),
+      icon: const Icon(Icons.sort_rounded, size: HeaderAction.iconSize),
+      iconColor: Tokens.dim,
+      style: HeaderAction.style,
       tooltip: 'Sort',
       initialValue: current,
       onSelected: onSelected,
@@ -765,63 +744,6 @@ class _SelectionBar extends StatelessWidget {
             ),
         ],
       ),
-    );
-  }
-}
-
-class _Header extends StatelessWidget {
-  const _Header({required this.controller, required this.browse});
-  final LibraryController controller;
-  final BrowseController browse;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = controller;
-    final b = browse;
-    String? subtitle;
-    if (c.state == LoadState.ready) {
-      if (b.view == LibraryView.tracks) {
-        final filtered = c.visible.length != c.total;
-        subtitle = filtered
-            ? '${c.visible.length} of ${c.total} tracks${c.closestMatch ? ' · closest' : ''}'
-            : '${c.total} track${c.total == 1 ? '' : 's'}';
-      } else if (!b.loading || b.rows.isNotEmpty) {
-        final unit = b.view.label.toLowerCase();
-        final filtered = b.shown != b.total;
-        subtitle = filtered
-            ? '${b.shown} of ${b.total} $unit${b.closestMatch ? ' · closest' : ''}'
-            : '${b.total} $unit';
-      }
-    }
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.baseline,
-      textBaseline: TextBaseline.alphabetic,
-      children: [
-        const Text(
-          'Library',
-          style: TextStyle(
-            color: Tokens.text,
-            fontSize: 22,
-            fontWeight: FontWeight.w700,
-            letterSpacing: -0.3,
-          ),
-        ),
-        if (subtitle != null) ...[
-          const SizedBox(width: 8),
-          Flexible(
-            child: Text(
-              subtitle,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(
-                color: Tokens.dim,
-                fontSize: 12,
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-          ),
-        ],
-      ],
     );
   }
 }

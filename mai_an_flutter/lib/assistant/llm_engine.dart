@@ -145,6 +145,151 @@ class LlmEngine {
     );
   }
 
+  /// [chatCompletion] with `stream: true`: reply text reaches [onDelta] as
+  /// it is generated, and the assembled reply is returned as usual (tool
+  /// calls and the provider's raw message included, so a Gemini
+  /// thought_signature survives). A server that answers with plain JSON is
+  /// read as such; one that refuses streaming before sending anything gets
+  /// one non-streaming retry. Between chunks the limit is [streamIdle]
+  /// rather than a total, so a long answer isn't cut off.
+  Future<LlmResponse> chatCompletionStream(
+    List<Map<String, Object?>> messages, {
+    List<Map<String, Object?>>? tools,
+    required void Function(String delta) onDelta,
+  }) async {
+    if (!isConfigured) return chatCompletion(messages, tools: tools);
+    final gemini = provider == 'gemini';
+    try {
+      return await _streamOpenAiCompatible(
+        gemini ? geminiUrl : '$ollamaEndpoint/chat/completions',
+        {
+          if (gemini) 'Authorization': 'Bearer ${pyStrip(apiKey)}',
+          'Content-Type': 'application/json',
+        },
+        gemini ? model : ollamaModel,
+        messages,
+        tools,
+        firstByte: timeoutOverride ?? Duration(seconds: gemini ? 30 : 45),
+        idle: timeoutOverride ?? streamIdle,
+        onDelta: onDelta,
+      );
+    } on _StreamUnsupported {
+      return chatCompletion(messages, tools: tools);
+    }
+  }
+
+  /// The longest gap between streamed chunks before the turn gives up.
+  static const streamIdle = Duration(seconds: 20);
+
+  static List<Map<String, Object?>>? _wrapTools(
+    List<Map<String, Object?>>? tools,
+  ) => tools == null || tools.isEmpty
+      ? null
+      : [
+          for (final t in tools)
+            {
+              'type': 'function',
+              'function': {
+                'name': t['name'],
+                'description': t['description'] ?? '',
+                'parameters': t['parameters'] ?? <String, Object?>{},
+              },
+            },
+        ];
+
+  Future<LlmResponse> _streamOpenAiCompatible(
+    String url,
+    Map<String, String> headers,
+    String model,
+    List<Map<String, Object?>> messages,
+    List<Map<String, Object?>>? tools, {
+    required Duration firstByte,
+    required Duration idle,
+    required void Function(String delta) onDelta,
+  }) async {
+    final payload = <String, Object?>{
+      'model': model,
+      'messages': messages,
+      'stream': true,
+    };
+    final wrapped = _wrapTools(tools);
+    if (wrapped != null) payload['tools'] = wrapped;
+    final body = utf8.encode(pyJsonDumps(payload));
+
+    final acc = StreamAccumulator();
+    for (var attempt = 1; ; attempt++) {
+      final http = HttpClient()
+        ..connectionTimeout = const Duration(seconds: 10);
+      try {
+        final HttpClientResponse resp;
+        try {
+          final req = await http.postUrl(Uri.parse(url)).timeout(firstByte);
+          headers.forEach(req.headers.set);
+          req.contentLength = body.length;
+          req.add(body);
+          resp = await req.close().timeout(firstByte);
+        } on SocketException catch (e) {
+          if (attempt == 1 && !e.message.contains('timed out')) {
+            await Future<void>.delayed(retryDelay);
+            continue;
+          }
+          return LlmResponse.failure('Network error: $e');
+        }
+
+        if (resp.statusCode != 200) {
+          final text = await utf8.decodeStream(resp).timeout(idle);
+          if (_noStreamStatuses.contains(resp.statusCode)) {
+            throw const _StreamUnsupported();
+          }
+          return LlmResponse.failure(
+            'Provider returned HTTP ${resp.statusCode}: ${_head(text, 200)}',
+          );
+        }
+        final mime = resp.headers.contentType?.mimeType ?? '';
+        if (mime == 'application/json') {
+          // The server ignored `stream`; read the whole reply.
+          final text = await utf8.decodeStream(resp).timeout(firstByte);
+          final r = _parseCompletion(_decodeJson(resp, text));
+          if (r.success && r.content.isNotEmpty) onDelta(r.content);
+          return r;
+        }
+
+        final lines = resp
+            .cast<List<int>>()
+            .transform(utf8.decoder)
+            .transform(const LineSplitter())
+            .timeout(idle);
+        await for (final line in lines) {
+          if (!line.startsWith('data:')) continue;
+          final data = line.substring(5).trim();
+          if (data.isEmpty) continue;
+          if (data == '[DONE]') break;
+          final Object? chunk;
+          try {
+            chunk = jsonDecode(data);
+          } on FormatException {
+            if (!acc.started) throw const _StreamUnsupported();
+            rethrow;
+          }
+          final err = acc.add(chunk);
+          if (err != null) return LlmResponse.failure(err);
+          final d = acc.takeDelta();
+          if (d.isNotEmpty) onDelta(d);
+        }
+        if (!acc.started) throw const _StreamUnsupported();
+        return acc.result();
+      } on TimeoutException {
+        return LlmResponse.failure('Network error: ');
+      } on _StreamUnsupported {
+        rethrow;
+      } catch (e) {
+        return LlmResponse.failure('Network error: $e');
+      } finally {
+        http.close(force: true);
+      }
+    }
+  }
+
   Future<LlmResponse> _callOpenAiCompatible(
     String url,
     Map<String, String> headers,
@@ -212,7 +357,10 @@ class LlmEngine {
         'Provider returned HTTP ${resp.statusCode}: ${_head(text, 200)}',
       );
     }
-    final data = _decodeJson(resp, text);
+    return _parseCompletion(_decodeJson(resp, text));
+  }
+
+  LlmResponse _parseCompletion(Object? data) {
     if (data is! Map<String, Object?>) {
       throw const FormatException('the reply is not a JSON object');
     }
@@ -371,4 +519,144 @@ Future<List<GeminiModel>> listGeminiModels(
       return c != 0 ? c : a - b;
     });
   return [for (final i in idx) out[i]];
+}
+
+/// Statuses that mean "this server won't stream", answered by one
+/// non-streaming retry.
+const _noStreamStatuses = {400, 404, 405, 415, 422, 501};
+
+class _StreamUnsupported implements Exception {
+  const _StreamUnsupported();
+}
+
+/// Assembles OpenAI-style `chat.completion.chunk` deltas into the message a
+/// non-streaming call would have returned. Text fields are concatenated;
+/// tool calls are grouped by `index` (or by a new `id` when a provider
+/// omits the index) with their `arguments` joined; every other field,
+/// Gemini's `extra_content.google.thought_signature` included, is merged
+/// through unchanged so the message can be echoed back on the next turn.
+class StreamAccumulator {
+  final Map<String, Object?> _msg = {};
+  final StringBuffer _content = StringBuffer();
+  final List<Map<String, Object?>> _calls = [];
+  final StringBuffer _pending = StringBuffer();
+  bool _started = false;
+
+  /// True once any chunk with choices arrived.
+  bool get started => _started;
+
+  static const _concatKeys = {'content', 'reasoning_content', 'reasoning'};
+
+  /// Folds in one decoded chunk; returns an error message for an error
+  /// chunk, else null.
+  String? add(Object? chunk) {
+    if (chunk is! Map<String, Object?>) return null;
+    final error = chunk['error'];
+    if (error != null) {
+      final m = error is Map<String, Object?> ? error['message'] : error;
+      return 'Provider error: ${m ?? error}';
+    }
+    final choices = chunk['choices'];
+    if (choices is! List || choices.isEmpty) return null;
+    _started = true;
+    final first = choices.first;
+    if (first is! Map<String, Object?>) return null;
+    final delta = first['delta'] ?? first['message'];
+    if (delta is! Map<String, Object?>) return null;
+    for (final MapEntry(:key, :value) in delta.entries) {
+      if (key == 'tool_calls') {
+        if (value is List) {
+          for (final tc in value) {
+            if (tc is Map<String, Object?>) _addCall(tc);
+          }
+        }
+      } else if (key == 'content') {
+        if (value is String && value.isNotEmpty) {
+          _content.write(value);
+          _pending.write(value);
+        }
+      } else if (_concatKeys.contains(key) && value is String) {
+        final prev = _msg[key];
+        _msg[key] = prev is String ? '$prev$value' : value;
+      } else if (value != null) {
+        _msg[key] = _merge(_msg[key], value);
+      }
+    }
+    return null;
+  }
+
+  void _addCall(Map<String, Object?> tc) {
+    final index = tc['index'];
+    final id = tc['id'];
+    Map<String, Object?>? slot;
+    if (index is int) {
+      while (_calls.length <= index) {
+        _calls.add({});
+      }
+      slot = _calls[index];
+    } else if (id is String &&
+        id.isNotEmpty &&
+        !_calls.any((c) => c['id'] == id)) {
+      slot = {};
+      _calls.add(slot);
+    } else if (_calls.isNotEmpty) {
+      slot = _calls.last;
+    } else {
+      slot = {};
+      _calls.add(slot);
+    }
+    for (final MapEntry(:key, :value) in tc.entries) {
+      if (key == 'index' || value == null) continue;
+      if (key == 'function' && value is Map<String, Object?>) {
+        final fn = (slot['function'] as Map<String, Object?>?) ?? {};
+        for (final MapEntry(key: k, value: v) in value.entries) {
+          if (k == 'arguments' && v is String) {
+            final prev = fn['arguments'];
+            fn['arguments'] = prev is String ? '$prev$v' : v;
+          } else if (v != null) {
+            fn[k] = _merge(fn[k], v);
+          }
+        }
+        slot['function'] = fn;
+      } else {
+        slot[key] = _merge(slot[key], value);
+      }
+    }
+  }
+
+  static Object? _merge(Object? prev, Object? next) {
+    if (prev is Map<String, Object?> && next is Map<String, Object?>) {
+      final out = Map<String, Object?>.of(prev);
+      next.forEach((k, v) => out[k] = _merge(out[k], v));
+      return out;
+    }
+    return next;
+  }
+
+  /// Text that arrived since the last call.
+  String takeDelta() {
+    final d = _pending.toString();
+    _pending.clear();
+    return d;
+  }
+
+  /// The assembled reply.
+  LlmResponse result() {
+    final content = _content.toString();
+    final calls = [
+      for (final c in _calls)
+        if (c.isNotEmpty) c,
+    ];
+    final raw = <String, Object?>{
+      'role': 'assistant',
+      ..._msg,
+      'content': content.isEmpty && calls.isNotEmpty ? null : content,
+      if (calls.isNotEmpty) 'tool_calls': calls,
+    };
+    return LlmResponse(
+      content: content,
+      toolCalls: LlmEngine.parseToolCalls(calls),
+      rawMessage: raw,
+    );
+  }
 }

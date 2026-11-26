@@ -5,6 +5,8 @@ import 'package:flutter/material.dart';
 import '../library/library_controller.dart';
 import '../player/queue_store.dart' show Prefs;
 import '../ui/tokens.dart';
+import 'app_update.dart';
+import 'app_update_view.dart';
 import 'sync_dialogs.dart';
 import 'sync_manager.dart';
 
@@ -119,6 +121,13 @@ class AppSyncHost implements SyncHost {
   @override
   void dismissTransferPrompt(TransferPrompt prompt) =>
       _dismiss(prompt, () => manager.transferPromptClosed(prompt));
+
+  /// A new build of this app on the Mac: offer it, unless the app is in
+  /// the background (the Companion & Sync card still shows it).
+  void showAppUpdatePrompt(AppUpdater updater) {
+    if (inBackground || _routes.containsKey(updater)) return;
+    _show(updater, AppUpdateDialog(updater: updater), () {});
+  }
 
   @override
   Future<Map<String, Object?>?> storedFeatures(String path) async =>

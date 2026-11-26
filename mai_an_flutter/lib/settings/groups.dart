@@ -346,7 +346,10 @@ class _ModernTextFieldState extends State<ModernTextField> {
           ),
           decoration: InputDecoration(
             hintText: widget.hint,
-            hintStyle: const TextStyle(color: Tokens.textTertiary, fontSize: 13),
+            hintStyle: const TextStyle(
+              color: Tokens.textTertiary,
+              fontSize: 13,
+            ),
             filled: true,
             fillColor: Tokens.surface2,
             contentPadding: const EdgeInsets.symmetric(
@@ -1099,9 +1102,7 @@ class _AppearanceGroupState extends State<AppearanceGroup> {
                     _ViewToggleChip(
                       icon: ViewBar.icon(view),
                       label: label,
-                      color: unified
-                          ? accent
-                          : (ViewBar.color(view) ?? accent),
+                      color: unified ? accent : (ViewBar.color(view) ?? accent),
                       selected: _state[key] == true,
                       experimental: experimental,
                       onTap: () => _set(key, !(_state[key] == true)),

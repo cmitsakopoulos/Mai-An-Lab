@@ -9,6 +9,7 @@ import '../core/py_values.dart';
 import '../ui/tokens.dart';
 import 'workbench_controller.dart';
 import '../ui/frost.dart';
+import '../ui/glass_search_bar.dart';
 import '../ui/toast.dart';
 
 /// `metadata_workbench.py`'s pane: the hero (status, Sync, Research), the
@@ -466,11 +467,12 @@ class _WorkbenchPageState extends State<WorkbenchPage> {
   // ── search + sort ─────────────────────────────────────────────────────────
 
   Widget _filter(BuildContext context) {
-    final field = TextField(
+    final field = GlassSearchBar(
       controller: _search,
+      hintText: 'Find an artist…',
+      elevated: false,
+      height: 42,
       onChanged: c.setSearch,
-      style: const TextStyle(color: Tokens.text, fontSize: 13),
-      decoration: _inputDecoration(context, 'Find an artist…'),
     );
     final seg = SegmentedButton<String>(
       showSelectedIcon: false,

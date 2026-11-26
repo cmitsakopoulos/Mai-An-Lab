@@ -219,12 +219,13 @@ void main() {
           ),
         );
 
-        // Empty state with 4 prompt chips.
-        expect(find.text('JARVIS'), findsNWidgets(2));
-        expect(find.text('[?] What can you do?'), findsOneWidget);
+        // Empty state with 4 prompt cards.
+        // Header title + empty-state hero.
+        expect(find.text('Jarvis'), findsNWidgets(2));
+        expect(find.text('What can you do?'), findsOneWidget);
 
-        // Tap a prompt chip -> dispatches "help" and renders Markdown reply.
-        await tester.tap(find.text('[?] What can you do?'));
+        // Tap a prompt card -> dispatches "help" and renders Markdown reply.
+        await tester.tap(find.text('What can you do?'));
         await tester.runAsync(
           () => Future<void>.delayed(const Duration(milliseconds: 50)),
         );
@@ -267,7 +268,7 @@ void main() {
         // Clear chat returns to empty state.
         await tester.tap(find.byTooltip('Clear conversation history'));
         await tester.pumpAndSettle();
-        expect(find.text('[?] What can you do?'), findsOneWidget);
+        expect(find.text('What can you do?'), findsOneWidget);
       },
     );
 
@@ -315,8 +316,8 @@ void main() {
 
         await tester.pumpWidget(buildShell(true));
         await tester.pumpAndSettle();
-        expect(find.text('Jarvis'), findsOneWidget);
-        expect(find.text('JARVIS'), findsNWidgets(2));
+        // Tab label + header title + empty-state hero.
+        expect(find.text('Jarvis'), findsNWidgets(3));
 
         // Disable Jarvis -> tab vanishes and shell falls back to Library.
         await tester.pumpWidget(buildShell(false));

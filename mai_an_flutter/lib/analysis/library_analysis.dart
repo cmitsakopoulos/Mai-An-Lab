@@ -263,11 +263,7 @@ class DspAnalysis extends ChangeNotifier {
           debugPrint('DSP compute: bulk_analyze_library failed: $e');
           say('DSP analysis failed: ${err(e)}', DspNoticeKind.error);
           notifier?.finish('Analysis failed: ${err(e)}');
-          _setOutcome(
-            title: 'Analysis failed',
-            detail: err(e),
-            isError: true,
-          );
+          _setOutcome(title: 'Analysis failed', detail: err(e), isError: true);
           return null;
         }
         if (_cancelled) {
@@ -295,7 +291,10 @@ class DspAnalysis extends ChangeNotifier {
         totalCount: result.total,
         failedCount: result.failed,
       );
-      notifier?.stage('Linking similar tracks…', title: 'Building acoustic map');
+      notifier?.stage(
+        'Linking similar tracks…',
+        title: 'Building acoustic map',
+      );
       var graphOk = true;
       try {
         await _host.rebuildSimilarityGraph();

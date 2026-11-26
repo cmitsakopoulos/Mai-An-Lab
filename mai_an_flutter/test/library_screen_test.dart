@@ -89,7 +89,7 @@ void main() {
     expect(find.textContaining('A Very Long Album'), findsOneWidget);
     expect(find.text('First'), findsNothing); // expansions don't carry over
 
-    await tester.tap(find.byIcon(Icons.sort));
+    await tester.tap(find.byIcon(Icons.sort_rounded));
     await settle();
     expect(find.text('Date Added'), findsOneWidget);
     await tester.tap(find.text('Album (A–Z)'), warnIfMissed: false);
@@ -98,7 +98,7 @@ void main() {
 
     await tester.tap(find.byTooltip('Artists'));
     await settle();
-    await tester.tap(find.byIcon(Icons.sort));
+    await tester.tap(find.byIcon(Icons.sort_rounded));
     await settle();
     expect(find.text('Most Albums'), findsOneWidget);
     await tester.tapAt(const Offset(10, 700));

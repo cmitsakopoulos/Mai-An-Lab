@@ -123,6 +123,7 @@ class DownloadPill extends StatelessWidget {
                             style: const TextStyle(
                               color: Tokens.dim,
                               fontSize: 11,
+                              fontFeatures: [FontFeature.tabularFigures()],
                             ),
                           ),
                         ],
@@ -384,7 +385,11 @@ class _JobRow extends StatelessWidget {
                       statusLine,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: TextStyle(color: tint, fontSize: 10),
+                      style: TextStyle(
+                        color: tint,
+                        fontSize: 10,
+                        fontFeatures: const [FontFeature.tabularFigures()],
+                      ),
                     ),
                   ],
                 ),

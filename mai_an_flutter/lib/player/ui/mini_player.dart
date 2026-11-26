@@ -20,13 +20,14 @@ class MiniPlayer extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return ListenableBuilder(
-      listenable: player,
+      listenable: Listenable.merge([player, ?player.autoplay]),
       builder: (context, _) {
         final row = player.nowPlaying;
         if (!player.hasEverPlayed || row == null) {
           return const SizedBox.shrink();
         }
         final base = Theme.of(context).colorScheme.primary;
+        final similar = player.autoplay?.enabled ?? false;
         final hPad = Tokens.dockPad(context);
         return ArtTint(
           path: player.art,
@@ -49,17 +50,39 @@ class MiniPlayer extends StatelessWidget {
                         NowPlaying.open(context, player);
                       }
                     },
+                    onHorizontalDragEnd: (d) {
+                      final v = d.primaryVelocity ?? 0;
+                      if (v < -250) {
+                        player.next();
+                      } else if (v > 250) {
+                        player.previous();
+                      }
+                    },
                     child: Padding(
                       padding: const EdgeInsets.fromLTRB(10, 10, 6, 8),
                       child: Row(
                         children: [
-                          Artwork(
-                            path: player.art,
-                            size: 42,
-                            radius: Tokens.radiusThumb,
-                            placeholder: Icons.music_note_rounded,
-                            placeholderSize: 22,
-                            cacheWidth: 128,
+                          Hero(
+                            tag: 'now_playing_artwork',
+                            child: DecoratedBox(
+                              position: DecorationPosition.foreground,
+                              decoration: BoxDecoration(
+                                borderRadius: BorderRadius.circular(
+                                  Tokens.radiusThumb,
+                                ),
+                                border: similar
+                                    ? Border.all(color: base, width: 1.5)
+                                    : null,
+                              ),
+                              child: Artwork(
+                                path: player.art,
+                                size: 42,
+                                radius: Tokens.radiusThumb,
+                                placeholder: Icons.music_note_rounded,
+                                placeholderSize: 22,
+                                cacheWidth: 128,
+                              ),
+                            ),
                           ),
                           const SizedBox(width: 10),
                           Expanded(
@@ -133,7 +156,7 @@ class MiniPlayer extends StatelessWidget {
                                 ? (pos.inMilliseconds / d).clamp(0.0, 1.0)
                                 : 0,
                             minHeight: 2.5,
-                            color: base,
+                            color: accent,
                             backgroundColor: Colors.white.withValues(
                               alpha: 0.08,
                             ),

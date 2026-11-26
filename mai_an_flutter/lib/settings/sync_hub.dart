@@ -7,12 +7,16 @@ import 'package:flutter/material.dart';
 import '../core/progress_notify.dart';
 import '../core/py_num.dart';
 import '../data/library_repository.dart' show kFeaturesVersion;
+import '../sync/app_update.dart';
+import '../sync/app_update_view.dart';
 import '../sync/companion_client.dart'
     show CompanionAuthError, defaultCompanionPort, isNetworkError;
 import '../sync/offload_library.dart';
+import '../sync/problem_reports.dart';
 import '../sync/state_bundles.dart';
 import '../sync/sync_manager.dart';
 import '../ui/tokens.dart';
+import '../ui/page_header.dart';
 import 'settings_page.dart';
 
 /// ui/views/sync_hub.py, the Android view: Settings → Companion & Sync.
@@ -97,6 +101,20 @@ class SyncHubGroupState extends State<SyncHubGroup> {
 
   void _snack(String text, {SyncIcon? icon, bool red = false}) =>
       m.host.snack(text, icon: icon, red: red);
+
+  Future<void> _reportProblem(ProblemReporter reporter) async {
+    final text = await showDialog<String>(
+      context: context,
+      builder: (context) => const _ReportDialog(),
+    );
+    if (text == null || text.trim().isEmpty || !mounted) return;
+    final sent = await reporter.report(text);
+    if (!mounted) return;
+    _snack(
+      sent ? 'Sent to your Mac' : 'Saved: it goes to your Mac when it connects',
+      icon: sent ? SyncIcon.check : SyncIcon.upload,
+    );
+  }
 
   /// `_refresh_pending_transfers`.
   Future<void> refreshPending() async {
@@ -722,14 +740,151 @@ class SyncHubGroupState extends State<SyncHubGroup> {
       ),
     ]);
 
+    final updater = m.updater;
+    final appUpdate = updater == null
+        ? null
+        : ListenableBuilder(
+            listenable: updater,
+            builder: (context, _) {
+              final u = updater;
+              final hot =
+                  u.state != AppUpdateState.none &&
+                  u.state != AppUpdateState.upToDate;
+              return card([
+                head(
+                  Icons.system_update_rounded,
+                  hot ? Tokens.accent : Tokens.dim,
+                  'App Updates',
+                  hot
+                      ? Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 2,
+                          ),
+                          decoration: BoxDecoration(
+                            color: Tokens.accent,
+                            borderRadius: BorderRadius.circular(99),
+                          ),
+                          child: Text(
+                            u.offerLabel,
+                            style: const TextStyle(
+                              color: Tokens.bg,
+                              fontSize: 11,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        )
+                      : null,
+                ),
+                if (!linked && !hot)
+                  Dim(
+                    'Builds you make on your Mac (flutter build apk, or an APK '
+                    'dropped on the Companion page) install from here. '
+                    'This phone runs ${u.build?.label ?? 'an unknown build'}.',
+                  )
+                else
+                  AppUpdatePanel(updater: u),
+              ]);
+            },
+          );
+
+    final reporter = m.reporter;
+    final problems = reporter == null
+        ? null
+        : ListenableBuilder(
+            listenable: reporter,
+            builder: (context, _) {
+              final waiting = reporter.pending.length;
+              return card([
+                head(Icons.bug_report_rounded, Tokens.dim, 'Report a Problem'),
+                Dim(
+                  'Describe what went wrong; the app\'s recent log goes with '
+                  'it to the Companion page on your Mac. Errors the app '
+                  'catches are sent there on their own.'
+                  '${waiting == 0 ? '' : ' $waiting waiting for the Mac.'}',
+                ),
+                Wrap(
+                  children: [
+                    TextButton.icon(
+                      icon: const Icon(Icons.edit_note_rounded, size: 18),
+                      label: const Text('Report a Problem'),
+                      onPressed: () => _reportProblem(reporter),
+                    ),
+                  ],
+                ),
+              ]);
+            },
+          );
+
     return ListView(
-      padding: const EdgeInsets.fromLTRB(28, 0, 28, 100),
+      padding: EdgeInsets.fromLTRB(28, HeaderInsets.topOf(context), 28, 100),
       children: [
         connection,
+        if (appUpdate != null) ...[const SizedBox(height: 16), appUpdate],
+        if (problems != null) ...[const SizedBox(height: 16), problems],
         const SizedBox(height: 16),
         transfers,
         if (widget.library != null) ...[const SizedBox(height: 16), offload],
         if (widget.bundles != null) ...[const SizedBox(height: 16), backup],
+      ],
+    );
+  }
+}
+
+/// What went wrong, in the user's words.
+class _ReportDialog extends StatefulWidget {
+  const _ReportDialog();
+
+  @override
+  State<_ReportDialog> createState() => _ReportDialogState();
+}
+
+class _ReportDialogState extends State<_ReportDialog> {
+  final _text = TextEditingController();
+
+  @override
+  void dispose() {
+    _text.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text(
+        'Report a Problem',
+        style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+      ),
+      content: SizedBox(
+        width: math.min(380.0, MediaQuery.sizeOf(context).width - 48),
+        child: TextField(
+          key: const ValueKey('report-text'),
+          controller: _text,
+          autofocus: true,
+          minLines: 4,
+          maxLines: 8,
+          textCapitalization: TextCapitalization.sentences,
+          onChanged: (_) => setState(() {}),
+          decoration: const InputDecoration(
+            hintText: 'What happened, and what were you doing?',
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          style: FilledButton.styleFrom(
+            backgroundColor: Tokens.accent,
+            foregroundColor: Tokens.bg,
+          ),
+          onPressed: _text.text.trim().isEmpty
+              ? null
+              : () => Navigator.pop(context, _text.text),
+          child: const Text('Send'),
+        ),
       ],
     );
   }

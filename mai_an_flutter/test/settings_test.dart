@@ -216,59 +216,60 @@ void main() {
       expect(find.text('Settings'), findsOneWidget);
     });
 
-    testWidgets('Appearance saves immediately, plus library_sort & glass_opacity', (
-      tester,
-    ) async {
-      await pumpSettings(tester, initial: SettingsPage.appearance);
-      expect(find.text('SAVE APPEARANCE SETTINGS'), findsNothing);
-      expect(find.text('Glass Opacity'), findsOneWidget);
+    testWidgets(
+      'Appearance saves immediately, plus library_sort & glass_opacity',
+      (tester) async {
+        await pumpSettings(tester, initial: SettingsPage.appearance);
+        expect(find.text('SAVE APPEARANCE SETTINGS'), findsNothing);
+        expect(find.text('Glass Opacity'), findsOneWidget);
 
-      // Tap Green accent swatch (at top in Glass & Color card).
-      await tester.tap(find.byTooltip('Green'));
-      await tester.pumpAndSettle();
+        // Tap Green accent swatch (at top in Glass & Color card).
+        await tester.tap(find.byTooltip('Green'));
+        await tester.pumpAndSettle();
 
-      // Open Default Library Sort frosted picker and pick Artist (A–Z).
-      await tester.dragUntilVisible(
-        find.text('Date Added'),
-        find.byType(ListView).first,
-        const Offset(0, -100),
-      );
-      await tester.tap(find.text('Date Added'));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Artist (A–Z)').last);
-      await tester.pumpAndSettle();
+        // Open Default Library Sort frosted picker and pick Artist (A–Z).
+        await tester.dragUntilVisible(
+          find.text('Date Added'),
+          find.byType(ListView).first,
+          const Offset(0, -100),
+        );
+        await tester.tap(find.text('Date Added'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Artist (A–Z)').last);
+        await tester.pumpAndSettle();
 
-      // Toggle Albums chip in Library Views card.
-      await tester.dragUntilVisible(
-        find.text('Albums'),
-        find.byType(ListView).first,
-        const Offset(0, -100),
-      );
-      await tester.tap(find.text('Albums'));
-      await settle(
-        tester,
-        () =>
-            library.sort == LibrarySort.artist &&
-            config.config.libraryTabs.visible.contains('albums') &&
-            config.config.accent == const Color(0xFF30D158),
-      );
+        // Toggle Albums chip in Library Views card.
+        await tester.dragUntilVisible(
+          find.text('Albums'),
+          find.byType(ListView).first,
+          const Offset(0, -100),
+        );
+        await tester.tap(find.text('Albums'));
+        await settle(
+          tester,
+          () =>
+              library.sort == LibrarySort.artist &&
+              config.config.libraryTabs.visible.contains('albums') &&
+              config.config.accent == const Color(0xFF30D158),
+        );
 
-      final t = fileToml();
-      final app = t['appearance']! as Map;
-      expect(app['show_albums'], true);
-      expect(app['accent_color'], '#30D158');
-      expect(app['show_jarvis'], true);
-      expect(app['glass_opacity'], closeTo(Tokens.defaultGlassOpacity, 0.01));
-      expect((t['landing']! as Map)['show_search_history'], true);
-      expect(t['general'], {
-        'startup_page': 'Library',
-        'default_sort': 'artist',
-        'library_sort': 'artist',
-      });
-      expect(config.config.libraryTabs.visible, contains('albums'));
-      expect(config.config.accent, const Color(0xFF30D158));
-      expect(library.sort, LibrarySort.artist);
-    });
+        final t = fileToml();
+        final app = t['appearance']! as Map;
+        expect(app['show_albums'], true);
+        expect(app['accent_color'], '#30D158');
+        expect(app['show_jarvis'], true);
+        expect(app['glass_opacity'], closeTo(Tokens.defaultGlassOpacity, 0.01));
+        expect((t['landing']! as Map)['show_search_history'], true);
+        expect(t['general'], {
+          'startup_page': 'Library',
+          'default_sort': 'artist',
+          'library_sort': 'artist',
+        });
+        expect(config.config.libraryTabs.visible, contains('albums'));
+        expect(config.config.accent, const Color(0xFF30D158));
+        expect(library.sort, LibrarySort.artist);
+      },
+    );
 
     testWidgets('Haptics writes every change at once', (tester) async {
       await pumpSettings(tester, initial: SettingsPage.haptics);

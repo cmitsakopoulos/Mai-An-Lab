@@ -90,7 +90,9 @@ class _ActivityPillState extends State<ActivityPill> {
                     final n = queue.retryFailed();
                     queue.clearOutcome();
                     if (n > 0) {
-                      widget.onSnack('Retrying $n download${n != 1 ? 's' : ''}.');
+                      widget.onSnack(
+                        'Retrying $n download${n != 1 ? 's' : ''}.',
+                      );
                     }
                   }
                 : null,
@@ -158,7 +160,9 @@ class _ActivityPillState extends State<ActivityPill> {
       detail = active > 1
           ? '$status · ${current.title}'
           : '$status${current.detail.isNotEmpty ? ' · ${current.detail}' : ''}';
-      fraction = current.percent >= 0 ? (current.percent / 100).clamp(0, 1) : null;
+      fraction = current.percent >= 0
+          ? (current.percent / 100).clamp(0, 1)
+          : null;
     } else {
       headline = '$active queued';
       detail = 'Waiting to start…';
@@ -289,7 +293,10 @@ class _ActivityPillState extends State<ActivityPill> {
               borderRadius: BorderRadius.circular(10),
               onTap: onAction,
               child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 5,
+                ),
                 decoration: BoxDecoration(
                   color: color.withValues(alpha: 0.18),
                   borderRadius: BorderRadius.circular(10),
@@ -514,7 +521,10 @@ class _ExtraBadge extends StatelessWidget {
           decoration: BoxDecoration(
             color: accent.withValues(alpha: 0.18),
             borderRadius: BorderRadius.circular(10),
-            border: Border.all(color: accent.withValues(alpha: 0.35), width: 0.7),
+            border: Border.all(
+              color: accent.withValues(alpha: 0.35),
+              width: 0.7,
+            ),
           ),
           child: Text(
             '+$count',

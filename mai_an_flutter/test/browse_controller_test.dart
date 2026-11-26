@@ -72,12 +72,7 @@ void main() {
       'show_network': true,
       'pill_style': 'Unified',
     });
-    expect(all.visible, [
-      'playlists',
-      'genres',
-      'artists',
-      'albums',
-    ]);
+    expect(all.visible, ['playlists', 'genres', 'artists', 'albums']);
     expect(all.unified, isTrue);
     final views = LibraryView.fromConfig(all.visible);
     expect(views, [

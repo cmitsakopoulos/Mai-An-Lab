@@ -281,7 +281,9 @@ void main() {
       libraryTracks: () async => lib.visible,
     );
     p.autoplay = AutoPlay(player: p, library: lib);
-    await tester.runAsync(() => p.playTrack(lib.visible.first, context: lib.visible));
+    await tester.runAsync(
+      () => p.playTrack(lib.visible.first, context: lib.visible),
+    );
 
     await tester.pumpWidget(
       MaterialApp(

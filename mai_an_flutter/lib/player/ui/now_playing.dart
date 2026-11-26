@@ -19,13 +19,30 @@ class NowPlaying extends StatefulWidget {
   final PlayerController player;
 
   static Future<void> open(BuildContext context, PlayerController player) =>
-      showModalBottomSheet<void>(
-        context: context,
-        isScrollControlled: true,
-        useSafeArea: true,
-        backgroundColor: Tokens.bg,
-        showDragHandle: false,
-        builder: (_) => NowPlaying(player: player),
+      Navigator.of(context).push<void>(
+        PageRouteBuilder<void>(
+          transitionDuration: Tokens.motionSlow,
+          reverseTransitionDuration: Tokens.motionBase,
+          opaque: true,
+          pageBuilder: (_, _, _) => NowPlaying(player: player),
+          transitionsBuilder: (_, anim, _, child) {
+            final curved = CurvedAnimation(
+              parent: anim,
+              curve: Tokens.curveIn,
+              reverseCurve: Tokens.curveOut,
+            );
+            return FadeTransition(
+              opacity: curved,
+              child: SlideTransition(
+                position: Tween<Offset>(
+                  begin: const Offset(0, 0.08),
+                  end: Offset.zero,
+                ).animate(curved),
+                child: child,
+              ),
+            );
+          },
+        ),
       );
 
   @override
@@ -52,298 +69,335 @@ class _NowPlayingState extends State<NowPlaying> {
   @override
   Widget build(BuildContext context) {
     final accent = Theme.of(context).colorScheme.primary;
-    return SizedBox(
-      height: MediaQuery.sizeOf(context).height,
-      child: ListenableBuilder(
-        listenable: Listenable.merge([p, ?p.autoplay, ?p.autoplay?.library]),
-        builder: (context, _) {
-          final row = p.nowPlaying;
-          final ap = p.autoplay;
-          final similar = ap?.enabled ?? false;
-          // update_meta: `value or "Unknown"`.
-          String or(String? v) => (v == null || v.isEmpty) ? 'Unknown' : v;
-          final title = or(row?.title);
-          final artist = or(row?.artist);
-          final album = or(row?.album);
-          return ArtTint(
-            path: p.art,
-            fallback: accent,
-            builder: (context, tint) => Stack(
-              fit: StackFit.expand,
-              children: [
-                Positioned.fill(
-                  child: BlurredArtBackdrop(path: p.art, tint: tint),
-                ),
-                LayoutBuilder(
-                  builder: (context, box) {
-                    final h = box.maxHeight;
-                    final w = box.maxWidth;
-                    final artSize = math
-                        .min(w - 56, h * 0.40)
-                        .clamp(140.0, 360.0);
-                    final compactH = h < 700;
-                    final hPad = Tokens.pagePad(context) + 8;
-                    return SafeArea(
-                      top: false,
-                      child: Padding(
-                        padding: EdgeInsets.only(
-                          top: compactH ? 4 : 10,
-                          bottom: compactH ? 12 : 20,
-                        ),
-                        child: Column(
-                          children: [
-                            Padding(
-                              padding: const EdgeInsets.only(top: 8, bottom: 4),
-                              child: Container(
-                                width: 36,
-                                height: 5,
-                                decoration: BoxDecoration(
-                                  color: Tokens.border,
-                                  borderRadius: BorderRadius.circular(3),
+    return Scaffold(
+      backgroundColor: Tokens.bg,
+      body: GestureDetector(
+        behavior: HitTestBehavior.translucent,
+        onVerticalDragEnd: (d) {
+          if ((d.primaryVelocity ?? 0) > 320) {
+            Navigator.of(context).maybePop();
+          }
+        },
+        child: ListenableBuilder(
+          listenable: Listenable.merge([p, ?p.autoplay, ?p.autoplay?.library]),
+          builder: (context, _) {
+            final row = p.nowPlaying;
+            final ap = p.autoplay;
+            final similar = ap?.enabled ?? false;
+            // update_meta: `value or "Unknown"`.
+            String or(String? v) => (v == null || v.isEmpty) ? 'Unknown' : v;
+            final title = or(row?.title);
+            final artist = or(row?.artist);
+            final album = or(row?.album);
+            return ArtTint(
+              path: p.art,
+              fallback: accent,
+              builder: (context, tint) => Stack(
+                fit: StackFit.expand,
+                children: [
+                  Positioned.fill(
+                    child: BlurredArtBackdrop(path: p.art, tint: tint),
+                  ),
+                  LayoutBuilder(
+                    builder: (context, box) {
+                      final h = box.maxHeight;
+                      final w = box.maxWidth;
+                      final artSize = math
+                          .min(w - 56, h * 0.40)
+                          .clamp(140.0, 360.0);
+                      final compactH = h < 700;
+                      final hPad = Tokens.pagePad(context) + 8;
+                      return SafeArea(
+                        child: Padding(
+                          padding: EdgeInsets.only(
+                            top: compactH ? 4 : 10,
+                            bottom: compactH ? 12 : 20,
+                          ),
+                          child: Column(
+                            children: [
+                              Padding(
+                                padding: const EdgeInsets.only(
+                                  top: 8,
+                                  bottom: 4,
                                 ),
-                              ),
-                            ),
-                            Padding(
-                              padding: const EdgeInsets.fromLTRB(14, 2, 14, 4),
-                              child: Row(
-                                children: [
-                                  IconButton(
-                                    icon: const Icon(
-                                      Icons.keyboard_arrow_down_rounded,
-                                    ),
-                                    color: Tokens.dim,
-                                    iconSize: 30,
-                                    onPressed: () =>
-                                        Navigator.of(context).pop(),
-                                  ),
-                                  const Spacer(),
-                                  _QueuePill(
-                                    onTap: () => QueueSheet.open(context, p),
-                                  ),
-                                ],
-                              ),
-                            ),
-                            const Spacer(),
-                            SizedBox(
-                              width: artSize,
-                              height: artSize,
-                              child: GestureDetector(
-                                onTap: _tapArt,
-                                child: DecoratedBox(
-                                  // update_play_similar: a 3 px border while
-                                  // auto-play is on.
-                                  position: DecorationPosition.foreground,
+                                child: Container(
+                                  width: 36,
+                                  height: 5,
                                   decoration: BoxDecoration(
-                                    borderRadius: BorderRadius.circular(22),
-                                    border: similar
-                                        ? Border.all(color: accent, width: 3)
-                                        : null,
+                                    color: Tokens.border,
+                                    borderRadius: BorderRadius.circular(3),
                                   ),
-                                  child: DecoratedBox(
-                                    decoration: BoxDecoration(
-                                      borderRadius: BorderRadius.circular(22),
-                                      boxShadow: const [
-                                        BoxShadow(
-                                          blurRadius: 32,
-                                          spreadRadius: -4,
-                                          offset: Offset(0, 14),
-                                          color: Color(0x80000000),
-                                        ),
-                                      ],
+                                ),
+                              ),
+                              Padding(
+                                padding: const EdgeInsets.fromLTRB(
+                                  14,
+                                  2,
+                                  14,
+                                  4,
+                                ),
+                                child: Row(
+                                  children: [
+                                    IconButton(
+                                      icon: const Icon(
+                                        Icons.keyboard_arrow_down_rounded,
+                                      ),
+                                      color: Tokens.dim,
+                                      iconSize: 30,
+                                      onPressed: () =>
+                                          Navigator.of(context).pop(),
                                     ),
-                                    child: Stack(
-                                      fit: StackFit.expand,
-                                      children: [
-                                        Artwork(
-                                          path: p.art,
-                                          size: null,
-                                          radius: 22,
-                                          placeholder: Icons.album_rounded,
-                                          placeholderSize: 96,
-                                          cacheWidth: 1024,
-                                        ),
-                                        Center(
-                                          child: AnimatedOpacity(
-                                            opacity: _overlay ? 1 : 0,
-                                            duration: const Duration(
-                                              milliseconds: 400,
-                                            ),
-                                            child: Icon(
-                                              p.playing
-                                                  ? Icons.pause
-                                                  : Icons.play_arrow,
-                                              size: 64,
-                                              color: Tokens.text,
-                                            ),
+                                    const Spacer(),
+                                    _QueuePill(
+                                      onTap: () => QueueSheet.open(context, p),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              const Spacer(),
+                              SizedBox(
+                                width: artSize,
+                                height: artSize,
+                                child: GestureDetector(
+                                  onTap: _tapArt,
+                                  onHorizontalDragEnd: (d) {
+                                    final v = d.primaryVelocity ?? 0;
+                                    if (v < -250) {
+                                      p.next();
+                                    } else if (v > 250) {
+                                      p.previous();
+                                    }
+                                  },
+                                  child: Hero(
+                                    tag: 'now_playing_artwork',
+                                    child: DecoratedBox(
+                                      // update_play_similar: a 3 px border while
+                                      // auto-play is on.
+                                      position: DecorationPosition.foreground,
+                                      decoration: BoxDecoration(
+                                        borderRadius: BorderRadius.circular(22),
+                                        border: similar
+                                            ? Border.all(
+                                                color: accent,
+                                                width: 3,
+                                              )
+                                            : null,
+                                      ),
+                                      child: DecoratedBox(
+                                        decoration: BoxDecoration(
+                                          borderRadius: BorderRadius.circular(
+                                            22,
                                           ),
+                                          boxShadow: const [
+                                            BoxShadow(
+                                              blurRadius: 32,
+                                              spreadRadius: -4,
+                                              offset: Offset(0, 14),
+                                              color: Color(0x80000000),
+                                            ),
+                                          ],
                                         ),
-                                      ],
+                                        child: Stack(
+                                          fit: StackFit.expand,
+                                          children: [
+                                            Artwork(
+                                              path: p.art,
+                                              size: null,
+                                              radius: 22,
+                                              placeholder: Icons.album_rounded,
+                                              placeholderSize: 96,
+                                              cacheWidth: 1024,
+                                            ),
+                                            Center(
+                                              child: AnimatedOpacity(
+                                                opacity: _overlay ? 1 : 0,
+                                                duration: const Duration(
+                                                  milliseconds: 400,
+                                                ),
+                                                child: Icon(
+                                                  p.playing
+                                                      ? Icons.pause
+                                                      : Icons.play_arrow,
+                                                  size: 64,
+                                                  color: Tokens.text,
+                                                ),
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
                                     ),
                                   ),
                                 ),
                               ),
-                            ),
-                            const Spacer(),
-                            Padding(
-                              padding: EdgeInsets.symmetric(horizontal: hPad),
-                              child: Column(
-                                children: [
-                                  Text(
-                                    'NOW PLAYING',
-                                    style: TextStyle(
-                                      color: accent.withValues(alpha: 0.7),
-                                      fontSize: 10,
-                                      fontWeight: FontWeight.w700,
+                              const Spacer(),
+                              Padding(
+                                padding: EdgeInsets.symmetric(horizontal: hPad),
+                                child: Column(
+                                  children: [
+                                    Text(
+                                      'NOW PLAYING',
+                                      style: TextStyle(
+                                        color: accent.withValues(alpha: 0.7),
+                                        fontSize: 10,
+                                        fontWeight: FontWeight.w700,
+                                      ),
                                     ),
-                                  ),
-                                  const SizedBox(height: 4),
-                                  Text(
-                                    title,
-                                    textAlign: TextAlign.center,
-                                    maxLines: 2,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: const TextStyle(
-                                      color: Tokens.text,
-                                      fontSize: 20,
-                                      fontWeight: FontWeight.w700,
+                                    const SizedBox(height: 4),
+                                    Text(
+                                      title,
+                                      textAlign: TextAlign.center,
+                                      maxLines: 2,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(
+                                        color: Tokens.text,
+                                        fontSize: 20,
+                                        fontWeight: FontWeight.w700,
+                                      ),
                                     ),
-                                  ),
-                                  const SizedBox(height: 4),
-                                  Text(
-                                    '$artist  ·  $album',
-                                    textAlign: TextAlign.center,
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: const TextStyle(
-                                      color: Tokens.dim,
-                                      fontSize: 14,
+                                    const SizedBox(height: 4),
+                                    Text(
+                                      '$artist  ·  $album',
+                                      textAlign: TextAlign.center,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(
+                                        color: Tokens.dim,
+                                        fontSize: 14,
+                                      ),
                                     ),
-                                  ),
-                                  ValueListenableBuilder(
-                                    valueListenable: p.loudnessBoost,
-                                    builder: (context, boost, _) => boost > 0
-                                        ? Padding(
-                                            padding: const EdgeInsets.only(
-                                              top: 8,
-                                            ),
-                                            child: _DynamismBadge(
-                                              boostDb: boost,
-                                            ),
-                                          )
-                                        : const SizedBox.shrink(),
-                                  ),
-                                ],
+                                    ValueListenableBuilder(
+                                      valueListenable: p.loudnessBoost,
+                                      builder: (context, boost, _) => boost > 0
+                                          ? Padding(
+                                              padding: const EdgeInsets.only(
+                                                top: 8,
+                                              ),
+                                              child: _DynamismBadge(
+                                                boostDb: boost,
+                                              ),
+                                            )
+                                          : const SizedBox.shrink(),
+                                    ),
+                                  ],
+                                ),
                               ),
-                            ),
-                            SizedBox(height: compactH ? 10 : 16),
-                            Padding(
-                              padding: EdgeInsets.symmetric(horizontal: hPad),
-                              child: _Scrubber(
-                                player: p,
-                                scrub: _scrub,
-                                onScrub: (v) => setState(() => _scrub = v),
-                                onCommit: (v) {
-                                  setState(() => _scrub = null);
-                                  p.seek(p.duration * v);
-                                },
+                              SizedBox(height: compactH ? 10 : 16),
+                              Padding(
+                                padding: EdgeInsets.symmetric(horizontal: hPad),
+                                child: _Scrubber(
+                                  player: p,
+                                  scrub: _scrub,
+                                  onScrub: (v) => setState(() => _scrub = v),
+                                  onCommit: (v) {
+                                    setState(() => _scrub = null);
+                                    p.seek(p.duration * v);
+                                  },
+                                ),
                               ),
-                            ),
-                            Padding(
-                              padding: EdgeInsets.symmetric(horizontal: hPad),
-                              child: Row(
-                                children: [
-                                  IconButton(
-                                    icon: const Icon(Icons.shuffle_rounded),
-                                    iconSize: 20,
-                                    color: p.shuffle ? accent : Tokens.dim,
-                                    onPressed: p.toggleShuffle,
-                                  ),
-                                  const Spacer(),
-                                  _AutoPlayButton(autoplay: ap, accent: accent),
-                                  const Spacer(),
-                                  IconButton(
-                                    icon: Icon(
-                                      p.repeat == Repeat.one
-                                          ? Icons.repeat_one_rounded
-                                          : Icons.repeat_rounded,
+                              Padding(
+                                padding: EdgeInsets.symmetric(horizontal: hPad),
+                                child: Row(
+                                  children: [
+                                    IconButton(
+                                      icon: const Icon(Icons.shuffle_rounded),
+                                      iconSize: 20,
+                                      color: p.shuffle ? accent : Tokens.dim,
+                                      onPressed: p.toggleShuffle,
                                     ),
-                                    iconSize: 20,
-                                    color: p.repeat == Repeat.none
-                                        ? Tokens.dim
-                                        : accent,
-                                    onPressed: p.cycleRepeat,
-                                  ),
-                                ],
-                              ),
-                            ),
-                            SizedBox(height: compactH ? 4 : 8),
-                            Padding(
-                              padding: EdgeInsets.only(
-                                bottom: compactH ? 12 : 24,
-                              ),
-                              child: Row(
-                                mainAxisAlignment:
-                                    MainAxisAlignment.spaceEvenly,
-                                children: [
-                                  IconButton(
-                                    icon: const Icon(Icons.replay_10_rounded),
-                                    color: accent,
-                                    iconSize: 26,
-                                    onPressed: () =>
-                                        p.seekBy(const Duration(seconds: -10)),
-                                  ),
-                                  IconButton(
-                                    icon: const Icon(
-                                      Icons.skip_previous_rounded,
+                                    const Spacer(),
+                                    _AutoPlayButton(
+                                      autoplay: ap,
+                                      accent: accent,
                                     ),
-                                    color: Tokens.text,
-                                    iconSize: 34,
-                                    onPressed: p.previous,
-                                  ),
-                                  Container(
-                                    width: 68,
-                                    height: 68,
-                                    decoration: const BoxDecoration(
-                                      color: Tokens.surfaceElevated,
-                                      shape: BoxShape.circle,
-                                    ),
-                                    child: IconButton(
+                                    const Spacer(),
+                                    IconButton(
                                       icon: Icon(
-                                        p.playing
-                                            ? Icons.pause_rounded
-                                            : Icons.play_arrow_rounded,
+                                        p.repeat == Repeat.one
+                                            ? Icons.repeat_one_rounded
+                                            : Icons.repeat_rounded,
+                                      ),
+                                      iconSize: 20,
+                                      color: p.repeat == Repeat.none
+                                          ? Tokens.dim
+                                          : accent,
+                                      onPressed: p.cycleRepeat,
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              SizedBox(height: compactH ? 4 : 8),
+                              Padding(
+                                padding: EdgeInsets.only(
+                                  bottom: compactH ? 12 : 24,
+                                ),
+                                child: Row(
+                                  mainAxisAlignment:
+                                      MainAxisAlignment.spaceEvenly,
+                                  children: [
+                                    IconButton(
+                                      icon: const Icon(Icons.replay_10_rounded),
+                                      color: accent,
+                                      iconSize: 26,
+                                      onPressed: () => p.seekBy(
+                                        const Duration(seconds: -10),
+                                      ),
+                                    ),
+                                    IconButton(
+                                      icon: const Icon(
+                                        Icons.skip_previous_rounded,
                                       ),
                                       color: Tokens.text,
-                                      iconSize: 38,
-                                      onPressed: p.toggle,
+                                      iconSize: 34,
+                                      onPressed: p.previous,
                                     ),
-                                  ),
-                                  IconButton(
-                                    icon: const Icon(Icons.skip_next_rounded),
-                                    color: Tokens.text,
-                                    iconSize: 34,
-                                    onPressed: p.next,
-                                  ),
-                                  IconButton(
-                                    icon: const Icon(Icons.forward_10_rounded),
-                                    color: accent,
-                                    iconSize: 26,
-                                    onPressed: () =>
-                                        p.seekBy(const Duration(seconds: 10)),
-                                  ),
-                                ],
+                                    Container(
+                                      width: 68,
+                                      height: 68,
+                                      decoration: const BoxDecoration(
+                                        color: Tokens.surfaceElevated,
+                                        shape: BoxShape.circle,
+                                      ),
+                                      child: IconButton(
+                                        icon: Icon(
+                                          p.playing
+                                              ? Icons.pause_rounded
+                                              : Icons.play_arrow_rounded,
+                                        ),
+                                        color: Tokens.text,
+                                        iconSize: 38,
+                                        onPressed: p.toggle,
+                                      ),
+                                    ),
+                                    IconButton(
+                                      icon: const Icon(Icons.skip_next_rounded),
+                                      color: Tokens.text,
+                                      iconSize: 34,
+                                      onPressed: p.next,
+                                    ),
+                                    IconButton(
+                                      icon: const Icon(
+                                        Icons.forward_10_rounded,
+                                      ),
+                                      color: accent,
+                                      iconSize: 26,
+                                      onPressed: () =>
+                                          p.seekBy(const Duration(seconds: 10)),
+                                    ),
+                                  ],
+                                ),
                               ),
-                            ),
-                          ],
+                            ],
+                          ),
                         ),
-                      ),
-                    );
-                  },
-                ),
-              ],
-            ),
-          );
-        },
+                      );
+                    },
+                  ),
+                ],
+              ),
+            );
+          },
+        ),
       ),
     );
   }
@@ -485,6 +539,7 @@ class _DynamismBadge extends StatelessWidget {
               color: Tokens.text,
               fontSize: 10,
               fontWeight: FontWeight.w700,
+              fontFeatures: [FontFeature.tabularFigures()],
             ),
           ),
         ],

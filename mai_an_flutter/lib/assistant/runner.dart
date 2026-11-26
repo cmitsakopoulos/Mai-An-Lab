@@ -10,6 +10,7 @@ import '../core/py_values.dart';
 import 'agent_text.dart';
 import 'agent_tools.dart';
 import 'intent.dart';
+import 'agent_progress.dart';
 import 'llm_engine.dart';
 import 'runner_phrases.dart';
 import 'tool_executor.dart';
@@ -685,6 +686,17 @@ class AssistantRunner {
   List<Object?>? _historyCache;
   HistoryProvider? _historyProvider;
 
+  /// Progress sink for the turn in flight (set by [dispatch]).
+  AgentEventSink? _onEvent;
+
+  void _emit(AgentEvent e) {
+    try {
+      _onEvent?.call(e);
+    } catch (_) {
+      // A UI listener must never break the agent loop.
+    }
+  }
+
   // Per-turn agent-loop state (reset by [agentReset]).
   bool _agentDeferredPlay = false;
   AssistantResponse? _agentInterrupt;
@@ -735,12 +747,19 @@ class AssistantRunner {
   /// Route an Intent to its handler. A pending choice or confirmation is
   /// resolved first; anything that doesn't answer it drops it and routes
   /// as a new request. [historyProvider] returns the live chat history.
+  ///
+  /// [onEvent] receives live agent progress (model steps, tool calls) while
+  /// an LLM turn runs; deterministic intents emit nothing.
   Future<AssistantResponse> dispatch(
     Intent intent, {
     HistoryProvider? historyProvider,
+    AgentEventSink? onEvent,
   }) async {
     _historyCache = null;
     if (historyProvider != null) _historyProvider = historyProvider;
+    // A confirmation callback may re-enter dispatch; keep the outer sink.
+    final outerSink = _onEvent;
+    if (onEvent != null) _onEvent = onEvent;
     try {
       final response = await _dispatchInner(intent);
       response.intent = intent;
@@ -749,6 +768,7 @@ class AssistantRunner {
     } finally {
       _historyCache = null;
       _historyProvider = null;
+      _onEvent = outerSink;
     }
   }
 
@@ -756,7 +776,9 @@ class AssistantRunner {
   Future<AssistantResponse> dispatchText(
     String text, {
     HistoryProvider? historyProvider,
-  }) => dispatch(parse(text), historyProvider: historyProvider);
+    AgentEventSink? onEvent,
+  }) =>
+      dispatch(parse(text), historyProvider: historyProvider, onEvent: onEvent);
 
   void _announceAnaphora(Intent intent, AssistantResponse response) {
     final label = intent.extras['anaphora_resolved_label'];
@@ -1094,6 +1116,22 @@ class AssistantRunner {
     return resp;
   }
 
+  /// One model round trip: streamed when someone is watching the turn
+  /// ([dispatch] got an `onEvent`), so reply text appears as it's written;
+  /// otherwise the plain request Python sent.
+  Future<LlmResponse> _complete(
+    LlmEngine engine,
+    List<Map<String, Object?>> messages,
+    List<Map<String, Object?>>? tools,
+  ) {
+    if (_onEvent == null) return engine.chatCompletion(messages, tools: tools);
+    return engine.chatCompletionStream(
+      messages,
+      tools: tools,
+      onDelta: (d) => _emit(AgentReplyDelta(d)),
+    );
+  }
+
   /// `_dispatch_llm`: the in-process LLM tool-calling loop. Falls back to the
   /// deterministic handler whenever the agent is disabled, unconfigured, or
   /// errors on a known intent.
@@ -1159,7 +1197,8 @@ class AssistantRunner {
     LlmResponse? res;
     var usedTools = false;
     for (var step = 0; step < _agentMaxSteps; step++) {
-      res = await engine.chatCompletion(messages, tools: tools);
+      _emit(AgentStepStarted(step));
+      res = await _complete(engine, messages, tools);
       if (!res.success) {
         if (intent.name != intentUnknown) {
           return await executeIntent(intent);
@@ -1206,7 +1245,16 @@ class AssistantRunner {
 
       usedTools = true;
       for (final tc in res.toolCalls) {
+        _emit(AgentToolStarted(tc.id, tc.name, tc.args));
         final toolRes = await executeTool(tc.name, tc.args, this);
+        _emit(
+          AgentToolFinished(
+            tc.id,
+            tc.name,
+            ok: toolRes['success'] != false,
+            summary: toolSummary(toolRes),
+          ),
+        );
         messages.add({
           'role': 'tool',
           'tool_call_id': tc.id,
@@ -1229,7 +1277,8 @@ class AssistantRunner {
         'content':
             'Answer my request now from the tool results above, briefly.',
       });
-      final finalRes = await engine.chatCompletion(messages, tools: null);
+      _emit(const AgentStepStarted(_agentMaxSteps));
+      final finalRes = await _complete(engine, messages, null);
       if (finalRes.success && finalRes.content.isNotEmpty) {
         return _finalizeAgent(finalRes.content);
       }

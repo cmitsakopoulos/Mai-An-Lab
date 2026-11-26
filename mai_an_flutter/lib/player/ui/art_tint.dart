@@ -105,11 +105,7 @@ class _ArtTintState extends State<ArtTint> {
 /// Full-bleed heavily blurred album-art backdrop with a dark gradient scrim,
 /// giving Now Playing Apple Music-style depth without a harsh radial glow.
 class BlurredArtBackdrop extends StatelessWidget {
-  const BlurredArtBackdrop({
-    super.key,
-    required this.path,
-    required this.tint,
-  });
+  const BlurredArtBackdrop({super.key, required this.path, required this.tint});
 
   final String? path;
   final Color tint;
@@ -146,10 +142,7 @@ class BlurredArtBackdrop extends StatelessWidget {
                   gradient: LinearGradient(
                     begin: Alignment.topCenter,
                     end: Alignment.bottomCenter,
-                    colors: [
-                      tint.withValues(alpha: 0.22),
-                      Tokens.bg,
-                    ],
+                    colors: [tint.withValues(alpha: 0.22), Tokens.bg],
                   ),
                 ),
               ),

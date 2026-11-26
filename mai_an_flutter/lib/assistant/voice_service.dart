@@ -76,6 +76,7 @@ class FlutterVoiceBackend implements VoiceBackend {
 
   SpeechToText? _stt;
   Completer<SttResult>? _sttCompleter;
+  Timer? _doneGraceTimer;
   String _latestWords = '';
 
   Future<FlutterTts> _ensureTts() async {
@@ -193,28 +194,47 @@ class FlutterVoiceBackend implements VoiceBackend {
     return requested.isGranted;
   }
 
+  void _scheduleDoneGrace() {
+    _doneGraceTimer?.cancel();
+    _doneGraceTimer = Timer(const Duration(milliseconds: 650), () {
+      final c = _sttCompleter;
+      if (c != null && !c.isCompleted) {
+        final text = _latestWords.trim();
+        c.complete((
+          ok: text.isNotEmpty,
+          text: text,
+          error: text.isEmpty ? 'no_match' : null,
+        ));
+      }
+    });
+  }
+
   Future<SpeechToText> _ensureStt() async {
     if (_stt != null) return _stt!;
     final stt = SpeechToText();
     final ok = await stt.initialize(
       onError: (err) {
         debugPrint('STT Error: $err');
+        _doneGraceTimer?.cancel();
         final c = _sttCompleter;
         if (c != null && !c.isCompleted) {
-          c.complete((ok: false, text: '', error: err.errorMsg));
+          final fallback = _latestWords.trim();
+          if (fallback.isNotEmpty) {
+            c.complete((ok: true, text: fallback, error: null));
+          } else {
+            c.complete((ok: false, text: '', error: err.errorMsg));
+          }
         }
       },
       onStatus: (stat) {
         debugPrint('STT Status: $stat');
+        // On Android, 'notListening' / 'done' often fires immediately on
+        // stop() *before* SpeechRecognizer delivers the final onResult. Wait a
+        // short grace window so the final result isn't dropped.
         if (stat == 'done' || stat == 'notListening') {
           final c = _sttCompleter;
           if (c != null && !c.isCompleted) {
-            final text = _latestWords.trim();
-            c.complete((
-              ok: text.isNotEmpty,
-              text: text,
-              error: text.isEmpty ? 'no_match' : null,
-            ));
+            _scheduleDoneGrace();
           }
         }
       },
@@ -230,6 +250,7 @@ class FlutterVoiceBackend implements VoiceBackend {
   Future<SttResult> listen({
     Duration maxDuration = const Duration(seconds: 60),
   }) async {
+    _doneGraceTimer?.cancel();
     if (_sttCompleter != null && !_sttCompleter!.isCompleted) {
       _sttCompleter!.complete((ok: false, text: '', error: 'cancelled'));
     }
@@ -240,26 +261,40 @@ class FlutterVoiceBackend implements VoiceBackend {
       final stt = await _ensureStt();
       await stt.listen(
         onResult: (result) {
-          _latestWords = result.recognizedWords;
+          final words = result.recognizedWords.trim();
+          if (words.isNotEmpty) {
+            _latestWords = words;
+          }
           if (result.finalResult && !completer.isCompleted) {
+            _doneGraceTimer?.cancel();
+            final text = words.isNotEmpty ? words : _latestWords;
             completer.complete((
-              ok: true,
-              text: result.recognizedWords,
-              error: null,
+              ok: text.isNotEmpty,
+              text: text,
+              error: text.isEmpty ? 'no_match' : null,
             ));
           }
         },
         listenOptions: SpeechListenOptions(
-          cancelOnError: true,
+          partialResults: true,
+          cancelOnError: false,
           listenFor: maxDuration,
           pauseFor: maxDuration,
         ),
       );
       return await completer.future.timeout(
         maxDuration + const Duration(seconds: 5),
-        onTimeout: () => (ok: false, text: '', error: 'cancelled'),
+        onTimeout: () {
+          final text = _latestWords.trim();
+          return (
+            ok: text.isNotEmpty,
+            text: text,
+            error: text.isEmpty ? 'cancelled' : null,
+          );
+        },
       );
     } catch (e) {
+      _doneGraceTimer?.cancel();
       if (!completer.isCompleted) {
         completer.complete((ok: false, text: '', error: '$e'));
       }
@@ -273,5 +308,9 @@ class FlutterVoiceBackend implements VoiceBackend {
     try {
       await _stt!.stop();
     } catch (_) {}
+    final c = _sttCompleter;
+    if (c != null && !c.isCompleted) {
+      _scheduleDoneGrace();
+    }
   }
 }

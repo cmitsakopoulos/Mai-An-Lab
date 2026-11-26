@@ -17,6 +17,8 @@ import 'groups.dart';
 import 'settings_search.dart';
 import 'sync_hub.dart';
 import '../ui/frost.dart';
+import '../ui/page_header.dart';
+import '../ui/glass_search_bar.dart';
 import '../ui/toast.dart';
 
 export 'settings_search.dart' show SettingsPage;
@@ -55,21 +57,30 @@ class SettingsDeps {
 /// main.py's Settings tab as a pushed page (it sits outside the tab bar in
 /// Flet too): settings.py's hub with its search, and the sub-pages the port
 /// has. [initial] opens one directly (`switch_to_settings(subpage)`).
+/// [highlight] opens the hub and smoothly scrolls to + pulses that entry.
 Future<void> openSettings(
   BuildContext context,
   SettingsDeps deps, {
   SettingsPage? initial,
+  SettingsPage? highlight,
 }) => Navigator.of(context).push(
   MaterialPageRoute<void>(
-    builder: (_) => SettingsScreen(deps: deps, initial: initial),
+    builder: (_) =>
+        SettingsScreen(deps: deps, initial: initial, highlight: highlight),
   ),
 );
 
 class SettingsScreen extends StatefulWidget {
-  const SettingsScreen({super.key, required this.deps, this.initial});
+  const SettingsScreen({
+    super.key,
+    required this.deps,
+    this.initial,
+    this.highlight,
+  });
 
   final SettingsDeps deps;
   final SettingsPage? initial;
+  final SettingsPage? highlight;
 
   @override
   State<SettingsScreen> createState() => SettingsScreenState();
@@ -105,6 +116,7 @@ class SettingsScreenState extends State<SettingsScreen> {
       },
       child: Scaffold(
         body: SafeArea(
+          top: false,
           child: AnimatedSwitcher(
             duration: const Duration(milliseconds: 180),
             child: page == null
@@ -114,6 +126,7 @@ class SettingsScreenState extends State<SettingsScreen> {
                     onOpen: open,
                     hasSync: widget.deps.sync != null,
                     hasWorkbench: widget.deps.workbench != null,
+                    highlight: widget.highlight,
                   )
                 : KeyedSubtree(key: ValueKey(page), child: _subpage(page!)),
           ),
@@ -140,7 +153,7 @@ class SettingsScreenState extends State<SettingsScreen> {
       SettingsPage.audio => AudioDspGroup(deps: d),
       SettingsPage.haptics => HapticsGroup(deps: d),
       SettingsPage.metadata => switch (d.workbench) {
-        final w? => WorkbenchPage(controller: w),
+        final w? => _BelowHeader(child: WorkbenchPage(controller: w)),
         null => const Center(child: Dim('The library is read-only.')),
       },
       SettingsPage.permissions => const PermissionsGroup(),
@@ -152,7 +165,8 @@ class SettingsScreenState extends State<SettingsScreen> {
   }
 }
 
-/// `_show_sub_page`: the back chevron and title over the group.
+/// `_show_sub_page`: the back chevron and title over the group, in the
+/// shared [PageHeader]. Scrolling groups pad by [HeaderInsets.topOf].
 class SubpageFrame extends StatelessWidget {
   const SubpageFrame({
     super.key,
@@ -166,42 +180,23 @@ class SubpageFrame extends StatelessWidget {
   final Widget child;
 
   @override
-  Widget build(BuildContext context) {
-    final accent = Theme.of(context).colorScheme.primary;
-    final hPad = Tokens.pagePad(context);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Padding(
-          padding: EdgeInsets.fromLTRB(hPad - 6, 8, hPad, 8),
-          child: Row(
-            children: [
-              IconButton(
-                icon: const Icon(Icons.arrow_back_ios_new_rounded, size: 17),
-                color: accent,
-                tooltip: 'Back',
-                onPressed: onBack,
-              ),
-              const SizedBox(width: 4),
-              Expanded(
-                child: Text(
-                  title,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    color: Tokens.text,
-                    fontSize: 20,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-        Expanded(child: child),
-      ],
-    );
-  }
+  Widget build(BuildContext context) => PageHeader(
+    title: title,
+    leading: HeaderBackButton(onPressed: onBack),
+    child: child,
+  );
+}
+
+/// Pads a non-scrolling sub-page body below the floating header.
+class _BelowHeader extends StatelessWidget {
+  const _BelowHeader({required this.child});
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: EdgeInsets.only(top: HeaderInsets.topOf(context)),
+    child: child,
+  );
 }
 
 /// A sub-page's scrolling column, with settings.py's floating save button
@@ -228,7 +223,12 @@ class GroupBody extends StatelessWidget {
     return Stack(
       children: [
         ListView(
-          padding: EdgeInsets.fromLTRB(hPad, 4, hPad, 100),
+          padding: EdgeInsets.fromLTRB(
+            hPad,
+            HeaderInsets.topOf(context) + 4,
+            hPad,
+            100,
+          ),
           children: [
             for (final (i, c) in children.indexed) ...[
               if (i > 0) SizedBox(height: spacing),
@@ -425,26 +425,56 @@ class _Hub extends StatefulWidget {
     required this.onOpen,
     required this.hasSync,
     this.hasWorkbench = false,
+    this.highlight,
   });
 
   final TextEditingController search;
   final ValueChanged<SettingsPage> onOpen;
   final bool hasSync;
   final bool hasWorkbench;
+  final SettingsPage? highlight;
 
   @override
   State<_Hub> createState() => _HubState();
 }
 
-class _HubState extends State<_Hub> {
+class _HubState extends State<_Hub> with SingleTickerProviderStateMixin {
+  final _itemKeys = <SettingsPage, GlobalKey>{};
+  AnimationController? _pulse;
+  SettingsPage? _highlighted;
+
+  GlobalKey _keyFor(SettingsPage p) =>
+      _itemKeys.putIfAbsent(p, () => GlobalKey());
+
   @override
   void initState() {
     super.initState();
     widget.search.addListener(_changed);
+    if (widget.highlight != null) {
+      _highlighted = widget.highlight;
+      _pulse = AnimationController(
+        vsync: this,
+        duration: const Duration(milliseconds: 1400),
+      );
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        final ctx = _itemKeys[widget.highlight]?.currentContext;
+        if (ctx != null) {
+          Scrollable.ensureVisible(
+            ctx,
+            alignment: 0.45,
+            duration: const Duration(milliseconds: 360),
+            curve: Curves.easeOutCubic,
+          );
+        }
+        _pulse?.forward(from: 0);
+      });
+    }
   }
 
   @override
   void dispose() {
+    _pulse?.dispose();
     widget.search.removeListener(_changed);
     super.dispose();
   }
@@ -498,12 +528,17 @@ class _HubState extends State<_Hub> {
                       color: Tokens.borderSubtle,
                     ),
                   _HubItem(
+                    key: showCategoryInSub ? null : _keyFor(e.page),
                     icon: e.icon,
                     badgeColor: _badgeColor(e.page, accent),
                     title: e.title,
                     subtitle: showCategoryInSub
                         ? '[${e.category}] ${e.subtitle}'
                         : e.subtitle,
+                    highlightAnimation:
+                        !showCategoryInSub && _highlighted == e.page
+                        ? _pulse
+                        : null,
                     onTap: () => widget.onOpen(e.page),
                   ),
                 ],
@@ -587,110 +622,31 @@ class _HubState extends State<_Hub> {
       }
     }
 
-    const topChromeHeight = 148.0;
-    return Stack(
-      fit: StackFit.expand,
-      children: [
-        ListView(
-          padding: EdgeInsets.fromLTRB(hPad, topChromeHeight, hPad, 32),
-          children: children,
-        ),
-        Positioned(
-          top: 0,
-          left: 0,
-          right: 0,
-          child: DecoratedBox(
-            decoration: const BoxDecoration(
-              gradient: LinearGradient(
-                begin: Alignment.topCenter,
-                end: Alignment.bottomCenter,
-                stops: [0.0, 0.65, 1.0],
-                colors: [
-                  Tokens.bg,
-                  Color(0xCC000000),
-                  Color(0x00000000),
-                ],
-              ),
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Padding(
-                  padding: EdgeInsets.fromLTRB(hPad + 2, 12, hPad, 14),
-                  child: const Text(
-                    'Settings',
-                    style: TextStyle(
-                      color: Tokens.text,
-                      fontSize: 30,
-                      fontWeight: FontWeight.w800,
-                      letterSpacing: -0.5,
-                    ),
-                  ),
-                ),
-                Padding(
-                  padding: EdgeInsets.fromLTRB(hPad, 0, hPad, 16),
-                  child: _SearchBox(controller: widget.search),
-                ),
-              ],
-            ),
+    final navigator = Navigator.of(context);
+    return PageHeader(
+      title: 'Settings',
+      leading: navigator.canPop()
+          ? HeaderBackButton(onPressed: () => navigator.maybePop())
+          : null,
+      bottom: [
+        Padding(
+          padding: EdgeInsets.fromLTRB(hPad, 0, hPad, 8),
+          child: GlassSearchBar(
+            controller: widget.search,
+            hintText: 'Search settings…',
+            clearTooltip: 'Clear',
           ),
         ),
       ],
-    );
-  }
-}
-
-class _SearchBox extends StatelessWidget {
-  const _SearchBox({required this.controller});
-
-  final TextEditingController controller;
-
-  @override
-  Widget build(BuildContext context) {
-    final accent = Theme.of(context).colorScheme.primary;
-    return GlassSurface(
-      radius: Tokens.radiusPill,
-      padding: const EdgeInsets.only(left: 16, right: 8),
-      child: SizedBox(
-        height: 50,
-        child: Row(
-          children: [
-            Icon(Icons.search_rounded, color: accent, size: 20),
-            const SizedBox(width: 8),
-            Expanded(
-              child: TextField(
-                controller: controller,
-                cursorColor: accent,
-                style: const TextStyle(color: Tokens.text, fontSize: 15),
-                decoration: const InputDecoration(
-                  hintText: 'Search settings...',
-                  hintStyle: TextStyle(color: Tokens.dim, fontSize: 15),
-                  filled: false,
-                  border: InputBorder.none,
-                  enabledBorder: InputBorder.none,
-                  focusedBorder: InputBorder.none,
-                  isDense: true,
-                  contentPadding: EdgeInsets.symmetric(
-                    horizontal: 2,
-                    vertical: 14,
-                  ),
-                ),
-              ),
-            ),
-            if (controller.text.isNotEmpty)
-              IconButton(
-                icon: const Icon(Icons.close_rounded, size: 18),
-                color: Tokens.dim,
-                tooltip: 'Clear',
-                constraints: const BoxConstraints.tightFor(
-                  width: 36,
-                  height: 36,
-                ),
-                padding: EdgeInsets.zero,
-                onPressed: controller.clear,
-              ),
-          ],
+      child: Builder(
+        builder: (context) => ListView(
+          padding: EdgeInsets.fromLTRB(
+            hPad,
+            HeaderInsets.topOf(context) + 8,
+            hPad,
+            32,
+          ),
+          children: children,
         ),
       ),
     );
@@ -700,21 +656,24 @@ class _SearchBox extends StatelessWidget {
 /// Apple-style grouped hub row with a rounded-square tinted icon badge.
 class _HubItem extends StatelessWidget {
   const _HubItem({
+    super.key,
     required this.icon,
     required this.badgeColor,
     required this.title,
     required this.subtitle,
     required this.onTap,
+    this.highlightAnimation,
   });
 
   final IconData icon;
   final Color badgeColor;
   final String title, subtitle;
   final VoidCallback onTap;
+  final Animation<double>? highlightAnimation;
 
   @override
   Widget build(BuildContext context) {
-    return Material(
+    final row = Material(
       type: MaterialType.transparency,
       child: InkWell(
         onTap: onTap,
@@ -759,6 +718,44 @@ class _HubItem extends StatelessWidget {
           ),
         ),
       ),
+    );
+
+    final anim = highlightAnimation;
+    if (anim == null) return row;
+
+    final accent = Theme.of(context).colorScheme.primary;
+    return AnimatedBuilder(
+      animation: anim,
+      builder: (_, child) {
+        final t = anim.value;
+        // Quick ease-in pop (0..0.22), hold glow (0.22..0.55), smooth fade out (0.55..1.0).
+        final glow = t < 0.22
+            ? Curves.easeOut.transform(t / 0.22)
+            : t < 0.55
+            ? 1.0
+            : 1.0 - Curves.easeIn.transform((t - 0.55) / 0.45);
+        final pop = t < 0.20
+            ? 1.0 + 0.025 * Curves.easeOutCubic.transform(t / 0.20)
+            : t < 0.45
+            ? 1.0 +
+                  0.025 * (1.0 - Curves.easeInOut.transform((t - 0.20) / 0.25))
+            : 1.0;
+        return Transform.scale(
+          scale: pop,
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              color: accent.withValues(alpha: 0.18 * glow),
+              border: Border.all(
+                color: accent.withValues(alpha: 0.65 * glow),
+                width: 1.25,
+              ),
+              borderRadius: BorderRadius.circular(Tokens.radiusCard),
+            ),
+            child: child,
+          ),
+        );
+      },
+      child: row,
     );
   }
 }

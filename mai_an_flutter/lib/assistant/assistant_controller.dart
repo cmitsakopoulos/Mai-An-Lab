@@ -9,6 +9,7 @@ import '../data/library_repository.dart';
 import '../library/library_controller.dart';
 import '../player/player_controller.dart';
 import 'adapters.dart';
+import 'agent_progress.dart';
 import 'chat_memory.dart';
 import 'intent.dart';
 import 'runner.dart';
@@ -81,6 +82,11 @@ class AssistantController extends ChangeNotifier {
   bool _initGreeted = false;
   bool _initStarted = false;
   bool _thinking = false;
+  LiveTurn? _live;
+  Timer? _deltaTimer;
+
+  /// Streamed text repaints at most this often.
+  static const deltaFrame = Duration(milliseconds: 50);
   bool _ttsEnabled = true;
   bool _micPressed = false;
   bool _micListening = false;
@@ -93,6 +99,10 @@ class AssistantController extends ChangeNotifier {
   List<Map<String, Object?>> get messages => List.unmodifiable(_messages);
   bool get initGreeted => _initGreeted;
   bool get thinking => _thinking;
+
+  /// The agent turn in flight (tool checklist), or null when idle or when
+  /// a fast intent is running.
+  LiveTurn? get liveTurn => _live;
   bool get ttsEnabled => _ttsEnabled;
   bool get hasVoice => voice != null;
   bool get micListening => _micListening;
@@ -278,12 +288,21 @@ class AssistantController extends ChangeNotifier {
     // Safeguard: user released while awaiting permission dialog.
     if (!_micPressed || _disposed) return;
 
+    // Stop any ongoing Jarvis TTS and pause music so the mic has clean audio
+    // focus and isn't drowned out by playback.
+    await v.stopSpeaking();
+    if (!_micPressed || _disposed) return;
+    final pl = player?.value;
+    final wasPlaying = pl?.playing ?? false;
+    if (wasPlaying) pl!.pause();
+
     _micListening = true;
     _micProcessing = false;
     _notify();
 
     final cancel = Completer<SttResult>();
     _releaseCancel = cancel;
+    var dispatched = false;
     try {
       final res = await Future.any<SttResult>([
         v.listen(maxDuration: maxListenDuration),
@@ -293,6 +312,7 @@ class AssistantController extends ChangeNotifier {
       final text = res.text.trim();
       final err = res.error;
       if (res.ok && text.isNotEmpty) {
+        dispatched = true;
         _micListening = false;
         _micProcessing = false;
         _notify();
@@ -313,6 +333,9 @@ class AssistantController extends ChangeNotifier {
       _releaseCancel = null;
       _micListening = false;
       _micProcessing = false;
+      if (wasPlaying && !dispatched && !_disposed) {
+        pl!.play();
+      }
       _notify();
     }
   }
@@ -334,6 +357,7 @@ class AssistantController extends ChangeNotifier {
     }
 
     _thinking = true;
+    final live = _live = LiveTurn();
     _notify();
 
     final AssistantResponse response;
@@ -341,9 +365,25 @@ class AssistantController extends ChangeNotifier {
       response = await runner.dispatchText(
         text,
         historyProvider: () => List<Object?>.of(_messages),
+        onEvent: (e) {
+          live.apply(e);
+          if (e is AgentReplyDelta) {
+            _deltaTimer ??= Timer(deltaFrame, () {
+              _deltaTimer = null;
+              _notify();
+            });
+          } else {
+            _deltaTimer?.cancel();
+            _deltaTimer = null;
+            _notify();
+          }
+        },
       );
     } finally {
+      _deltaTimer?.cancel();
+      _deltaTimer = null;
       _thinking = false;
+      if (identical(_live, live)) _live = null;
       _notify();
     }
     if (_disposed) return;
@@ -397,6 +437,7 @@ class AssistantController extends ChangeNotifier {
       speakText: response.spoken,
       entities: hasEntities ? entities : null,
       intent: intent,
+      tools: [for (final s in live.steps) s.toJson()],
     );
 
     if (response.success && response.deferredPlay) {
@@ -420,9 +461,11 @@ class AssistantController extends ChangeNotifier {
     String? speakText,
     Map<String, Object?>? entities,
     Intent? intent,
+    List<Map<String, Object?>>? tools,
   }) async {
     final msg = <String, Object?>{'sender': sender, 'text': text};
     if (entities != null) msg['entities'] = entities;
+    if (tools != null && tools.isNotEmpty) msg['tools'] = tools;
     if (intent != null) {
       msg['intent'] = <String, Object?>{
         'name': intent.name,
@@ -483,6 +526,7 @@ class AssistantController extends ChangeNotifier {
   void dispose() {
     _disposed = true;
     _postReleaseTimer?.cancel();
+    _deltaTimer?.cancel();
     library?.removeListener(_onLibraryChanged);
     super.dispose();
   }

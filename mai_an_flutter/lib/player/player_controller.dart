@@ -218,7 +218,11 @@ class PlayerController extends ChangeNotifier {
     _completedTerminal = false;
     queue.currentIndex = index;
     _syncForCurrent();
-    _skip(index);
+    if (_needsPush || stopped) {
+      _push(index, autoplay: true);
+    } else {
+      _skip(index);
+    }
   }
 
   void toggle() {
@@ -259,6 +263,11 @@ class PlayerController extends ChangeNotifier {
     if (queue.isEmpty) return;
     _completedTerminal = false;
     if (_repeat == Repeat.one) {
+      if (_needsPush || stopped) {
+        _syncForCurrent();
+        _push(queue.currentIndex, autoplay: true);
+        return;
+      }
       _op(() async {
         await backend.seek(Duration.zero);
         await backend.play();
@@ -497,6 +506,9 @@ class PlayerController extends ChangeNotifier {
     if (foreground) {
       // Nothing was ticked while hidden.
       _onBackendChange();
+      if (!playing && !_needsPush && !stopped) {
+        position.value = backend.position;
+      }
     } else {
       // Nothing may refill auto-play while hidden for long: queue enough to
       // ride it out.
@@ -679,6 +691,7 @@ class PlayerController extends ChangeNotifier {
 
   void _onBackendChange() {
     final wasCompleted = processing == Processing.completed;
+    final wasActive = processing != Processing.idle;
     playing = backend.playing;
     processing = backend.processing;
     shuffleIndices = backend.shuffleIndices;
@@ -693,6 +706,23 @@ class PlayerController extends ChangeNotifier {
       } else {
         _completedTerminal = true;
       }
+    }
+
+    if (wasActive &&
+        processing == Processing.idle &&
+        !playing &&
+        _pending == 0 &&
+        queue.isNotEmpty) {
+      // Stopped outside the controller (notification stop button, swiped-away
+      // notification, 10-minute idle release, or player gave up on errors).
+      // Force a fresh push on the next play/skip instead of sending commands
+      // to an idle/released session.
+      stopped = true;
+      _needsPush = true;
+    } else if (playing && stopped) {
+      // Resumed externally (e.g. headset/lockscreen Play button).
+      stopped = false;
+      _needsPush = false;
     }
 
     if (_pending == 0 && !_needsPush) _mirrorIndex();

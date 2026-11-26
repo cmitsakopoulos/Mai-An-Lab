@@ -514,9 +514,8 @@ class _AudioDspGroupState extends State<AudioDspGroup> {
                           child: InkWell(
                             borderRadius: BorderRadius.circular(10),
                             onTap: canRun
-                                ? () => unawaited(
-                                    _runAnalysis(DspEntry.settings),
-                                  )
+                                ? () =>
+                                      unawaited(_runAnalysis(DspEntry.settings))
                                 : null,
                             child: Padding(
                               padding: const EdgeInsets.symmetric(
@@ -919,6 +918,7 @@ class _BoostCard extends StatelessWidget {
                             color: Tokens.amber,
                             fontSize: 13,
                             fontWeight: FontWeight.w700,
+                            fontFeatures: [FontFeature.tabularFigures()],
                           ),
                         ),
                       ],

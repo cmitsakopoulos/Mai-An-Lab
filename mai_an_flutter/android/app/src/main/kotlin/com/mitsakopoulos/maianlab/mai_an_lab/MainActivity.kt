@@ -25,36 +25,66 @@ class MainActivity : AudioServiceActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
-        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "mai_an/app")
-            .setMethodCallHandler { call, result ->
-                when (call.method) {
-                    // Back on the root screen: go to the background like Home,
-                    // instead of finishing the activity. Music keeps playing
-                    // and the UI comes back exactly as it was.
-                    "moveTaskToBack" -> result.success(moveTaskToBack(true))
-                    // Companion discovery (PORT_MAP §1 row 17).
-                    "defaultRouteIpv4" -> result.success(defaultRouteIpv4())
-                    "acquireMulticastLock" -> {
-                        acquireMulticastLock()
-                        result.success(null)
-                    }
-                    "releaseMulticastLock" -> {
-                        releaseMulticastLock()
-                        result.success(null)
-                    }
-                    // A file the app saved (a Mac transfer): index it in
-                    // MediaStore so other apps see it.
-                    "scanMediaFile" -> {
-                        val path = call.arguments as? String
-                        if (path != null) {
-                            MediaScannerConnection.scanFile(
-                                applicationContext, arrayOf(path), null, null)
-                        }
-                        result.success(null)
-                    }
-                    else -> result.notImplemented()
-                }
+        val channel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "mai_an/app")
+        // Install results arrive on a receiver; Dart hears them here.
+        AppUpdates.listener = { status, message ->
+            runOnUiThread {
+                channel.invokeMethod("appUpdateStatus",
+                    mapOf("status" to status, "message" to message))
             }
+        }
+        channel.setMethodCallHandler { call, result ->
+            when (call.method) {
+                // Back on the root screen: go to the background like Home,
+                // instead of finishing the activity. Music keeps playing
+                // and the UI comes back exactly as it was.
+                "moveTaskToBack" -> result.success(moveTaskToBack(true))
+                // Companion discovery (PORT_MAP §1 row 17).
+                "defaultRouteIpv4" -> result.success(defaultRouteIpv4())
+                "acquireMulticastLock" -> {
+                    acquireMulticastLock()
+                    result.success(null)
+                }
+                "releaseMulticastLock" -> {
+                    releaseMulticastLock()
+                    result.success(null)
+                }
+                // A file the app saved (a Mac transfer): index it in
+                // MediaStore so other apps see it.
+                "scanMediaFile" -> {
+                    val path = call.arguments as? String
+                    if (path != null) {
+                        MediaScannerConnection.scanFile(
+                            applicationContext, arrayOf(path), null, null)
+                    }
+                    result.success(null)
+                }
+                // Phone app updates from the Mac Companion.
+                "appInfo" -> result.success(AppUpdates.info(applicationContext))
+                "canInstallPackages" ->
+                    result.success(AppUpdates.canInstall(applicationContext))
+                "openInstallSettings" -> {
+                    AppUpdates.openInstallSettings(this)
+                    result.success(null)
+                }
+                "installApk" -> {
+                    val path = call.arguments as? String
+                    if (path == null) {
+                        result.error("args", "no path", null)
+                    } else {
+                        Thread {
+                            try {
+                                AppUpdates.install(applicationContext, path)
+                                runOnUiThread { result.success(null) }
+                            } catch (e: Exception) {
+                                runOnUiThread { result.error("install", e.message, null) }
+                            }
+                        }.start()
+                    }
+                }
+                else -> result.notImplemented()
+            }
+        }
     }
 
     /**

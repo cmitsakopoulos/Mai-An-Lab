@@ -26,6 +26,8 @@ import 'search/search_screen.dart';
 import 'settings/settings_page.dart';
 import 'ui/activity_pill.dart';
 import 'ui/frost.dart';
+import 'ui/keyboard_guard.dart';
+import 'ui/size_reporter.dart';
 import 'ui/sliding_segmented.dart';
 import 'ui/toast.dart';
 import 'ui/tokens.dart';
@@ -108,6 +110,9 @@ class AppShell extends StatefulWidget {
 class AppShellState extends State<AppShell> {
   late AppTab tab = _effectiveTab(widget.startTab);
 
+  /// The bottom dock's real height, measured each layout ([ShellInsets]).
+  final _dockHeight = ValueNotifier<double?>(null);
+
   bool get _hasJarvis => widget.showJarvis && widget.assistant != null;
 
   AppTab _effectiveTab(AppTab requested) =>
@@ -121,6 +126,7 @@ class AppShellState extends State<AppShell> {
     super.didUpdateWidget(oldWidget);
     if (tab == AppTab.jarvis && !_hasJarvis) {
       widget.assistant?.onHide();
+      dropTextFocus();
       tab = AppTab.library;
       _tabShown(tab);
     }
@@ -244,6 +250,7 @@ class AppShellState extends State<AppShell> {
 
   @override
   void dispose() {
+    _dockHeight.dispose();
     widget.router?.unregister('library');
     if (widget.downloads != null) widget.router?.unregister('downloads');
     if (widget.settings?.sync != null) widget.router?.unregister('sync');
@@ -262,6 +269,9 @@ class AppShellState extends State<AppShell> {
     final target = _effectiveTab(to);
     if (target == tab) return;
     final from = tab;
+    // The leaving tab stays mounted offstage; a search field there would
+    // otherwise keep focus (and later be handed it back) with the keyboard up.
+    dropTextFocus();
     setState(() => tab = target);
     if (from == AppTab.jarvis) widget.assistant?.onHide();
     _tabShown(target);
@@ -356,6 +366,22 @@ class AppShellState extends State<AppShell> {
     return ([SettingsPage? page]) => openSettings(context, deps, initial: page);
   }
 
+  /// Opens Settings from a tab that has a primary relevant hub entry (e.g. AI
+  /// Assistant or Search Authentication): direct subpage calls still jump in,
+  /// while the header gear icon opens the hub scrolled to & highlighting [entry].
+  void Function([SettingsPage?])? _openSettingsHighlighting(
+    SettingsPage entry,
+  ) {
+    final deps = widget.settings;
+    if (deps == null) return null;
+    return ([SettingsPage? page]) => openSettings(
+      context,
+      deps,
+      initial: page,
+      highlight: page == null ? entry : null,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     // Back on a main tab sends the app to the background (like Home)
@@ -379,6 +405,7 @@ class AppShellState extends State<AppShell> {
       child: Scaffold(
         extendBody: true,
         body: _ShellInsetsProvider(
+          dockHeight: _dockHeight,
           player: widget.player,
           downloads: widget.downloads,
           analysis: widget.library.analysis,
@@ -390,7 +417,9 @@ class AppShellState extends State<AppShell> {
                   active: tab == AppTab.jarvis,
                   child: AssistantScreen(
                     controller: widget.assistant!,
-                    onOpenSettings: _openSettings,
+                    onOpenSettings: _openSettingsHighlighting(
+                      SettingsPage.assistant,
+                    ),
                   ),
                 ),
               _FadeTab(
@@ -403,7 +432,9 @@ class AppShellState extends State<AppShell> {
                   onPlayTrack: _playPath,
                   onOpenInLibrary: openInLibrary,
                   searchHistory: widget.searchHistory,
-                  onOpenSettings: _openSettings,
+                  onOpenSettings: _openSettingsHighlighting(
+                    SettingsPage.account,
+                  ),
                 ),
               ),
               _FadeTab(
@@ -431,29 +462,38 @@ class AppShellState extends State<AppShell> {
             ],
           ),
         ),
-        bottomNavigationBar: BackdropGroup(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              ActivityPill(
-                analysis: widget.library.analysis,
-                downloads: widget.downloads,
-                onSnack: _snack,
-                onOpenAudioSettings: widget.settings == null
-                    ? null
-                    : () => _openSettings?.call(SettingsPage.audio),
-                grouped: true,
+        bottomNavigationBar: MediaQuery.viewInsetsOf(context).bottom > 0
+            ? const SizedBox.shrink()
+            : SizeReporter(
+                onSize: (s) => _dockHeight.value = s.height,
+                child: BackdropGroup(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      ActivityPill(
+                        analysis: widget.library.analysis,
+                        downloads: widget.downloads,
+                        onSnack: _snack,
+                        onOpenAudioSettings: widget.settings == null
+                            ? null
+                            : () => _openSettings?.call(SettingsPage.audio),
+                        grouped: true,
+                      ),
+                      ValueListenableBuilder(
+                        valueListenable: widget.player,
+                        builder: (context, player, _) => player == null
+                            ? const SizedBox.shrink()
+                            : MiniPlayer(player: player, grouped: true),
+                      ),
+                      _TabBar(
+                        tab: tab,
+                        showJarvis: _hasJarvis,
+                        onSelect: switchTab,
+                      ),
+                    ],
+                  ),
+                ),
               ),
-              ValueListenableBuilder(
-                valueListenable: widget.player,
-                builder: (context, player, _) => player == null
-                    ? const SizedBox.shrink()
-                    : MiniPlayer(player: player, grouped: true),
-              ),
-              _TabBar(tab: tab, showJarvis: _hasJarvis, onSelect: switchTab),
-            ],
-          ),
-        ),
       ),
     );
   }
@@ -463,24 +503,44 @@ class AppShellState extends State<AppShell> {
 /// [ShellInsets] so scrollable tabs pad their tails cleanly.
 class _ShellInsetsProvider extends StatelessWidget {
   const _ShellInsetsProvider({
+    required this.dockHeight,
     required this.player,
     required this.downloads,
     required this.analysis,
     required this.child,
   });
 
+  /// The dock's measured height (tab bar + mini player + activity pill +
+  /// gesture bar); null until its first layout, when the estimate is used.
+  final ValueListenable<double?> dockHeight;
   final ValueListenable<PlayerController?> player;
   final DownloadQueue? downloads;
   final DspAnalysis analysis;
   final Widget child;
 
   static const _tabBarHeight = 58.0; // 48 pill + 10 bottom gap
-  static const _miniPlayerHeight = 72.0; // ~64 pill + 8 gap
+  static const _miniPlayerHeight = 70.0; // ~62 pill + 8 gap
   static const _activityPillHeight = 66.0; // unified ActivityPill + 8 gap
 
   @override
   Widget build(BuildContext context) {
-    final safeBottom = MediaQuery.paddingOf(context).bottom;
+    final keyboardOpen = MediaQuery.viewInsetsOf(context).bottom > 0;
+    if (keyboardOpen) {
+      return ShellInsets(bottom: 0, child: child);
+    }
+    // Use viewPadding (raw OS gesture bar) rather than padding: Scaffold with
+    // extendBody: true already inflates MediaQuery.padding.bottom to the full
+    // bottomNavigationBar height, which would double-count the bottom pills.
+    final safeBottom = MediaQuery.viewPaddingOf(context).bottom;
+    return ValueListenableBuilder<double?>(
+      valueListenable: dockHeight,
+      builder: (context, measured, _) => measured != null
+          ? ShellInsets(bottom: measured, child: child)
+          : _estimate(safeBottom),
+    );
+  }
+
+  Widget _estimate(double safeBottom) {
     return ValueListenableBuilder<PlayerController?>(
       valueListenable: player,
       builder: (context, p, _) {
@@ -585,17 +645,22 @@ class _FadeTabState extends State<_FadeTab> {
       offstage: _offstage,
       child: IgnorePointer(
         ignoring: !active,
-        child: AnimatedOpacity(
-          opacity: active ? 1 : 0,
-          duration: active ? Tokens.motionBase : Tokens.motionFast,
-          curve: active ? Tokens.curveIn : Tokens.curveOut,
-          onEnd: () {
-            if (!widget.active && mounted) {
-              setState(() => _offstage = true);
-            }
-          },
-          // The fade's own ticker sits outside, so it can finish.
-          child: TickerMode(enabled: active, child: widget.child),
+        // A hidden tab's fields can't take focus, so a focus restore can
+        // never land on one and raise the keyboard.
+        child: ExcludeFocus(
+          excluding: !active,
+          child: AnimatedOpacity(
+            opacity: active ? 1 : 0,
+            duration: active ? Tokens.motionBase : Tokens.motionFast,
+            curve: active ? Tokens.curveIn : Tokens.curveOut,
+            onEnd: () {
+              if (!widget.active && mounted) {
+                setState(() => _offstage = true);
+              }
+            },
+            // The fade's own ticker sits outside, so it can finish.
+            child: TickerMode(enabled: active, child: widget.child),
+          ),
         ),
       ),
     );

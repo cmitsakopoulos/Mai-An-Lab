@@ -222,7 +222,11 @@ class GlassCard extends StatelessWidget {
     }
     return Container(
       margin: margin,
-      decoration: cardDecoration(radius: radius, color: flat, border: flatBorder),
+      decoration: cardDecoration(
+        radius: radius,
+        color: flat,
+        border: flatBorder,
+      ),
       child: onTap != null ? ClipRRect(borderRadius: r, child: body) : body,
     );
   }
@@ -243,10 +247,9 @@ Future<T?> showFrostedSheet<T>({
     RoundedRectangleBorder(borderRadius: final BorderRadius b) => b,
     _ => const BorderRadius.vertical(top: Radius.circular(22)),
   };
-  final op = GlassScope.opacityOf(context).clamp(
-    Tokens.minGlassOpacity,
-    Tokens.maxGlassOpacity,
-  );
+  final op = GlassScope.opacityOf(
+    context,
+  ).clamp(Tokens.minGlassOpacity, Tokens.maxGlassOpacity);
   final isSolid = op >= 0.99;
   return showModalBottomSheet<T>(
     context: context,
@@ -286,12 +289,8 @@ class _BlurSheet extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final content = DecoratedBox(
-      decoration: BoxDecoration(
-        color: tint,
-        borderRadius: radius,
-        border: const Border(top: BorderSide(color: Color(0x33FFFFFF))),
-      ),
+    final innerBody = SafeArea(
+      top: false,
       child: dragHandle
           ? Column(
               mainAxisSize: MainAxisSize.min,
@@ -309,6 +308,14 @@ class _BlurSheet extends StatelessWidget {
               ],
             )
           : child,
+    );
+    final content = DecoratedBox(
+      decoration: BoxDecoration(
+        color: tint,
+        borderRadius: radius,
+        border: const Border(top: BorderSide(color: Color(0x33FFFFFF))),
+      ),
+      child: innerBody,
     );
     return RepaintBoundary(
       child: ClipRRect(

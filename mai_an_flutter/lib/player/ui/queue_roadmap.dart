@@ -381,9 +381,7 @@ class _QueueRoadmapState extends State<QueueRoadmap>
                     decoration: BoxDecoration(
                       color: Tokens.bg,
                       borderRadius: BorderRadius.circular(16),
-                      border: Border.all(
-                        color: accent.withValues(alpha: 0.16),
-                      ),
+                      border: Border.all(color: accent.withValues(alpha: 0.16)),
                     ),
                     clipBehavior: Clip.antiAlias,
                     child: Stack(
@@ -401,8 +399,9 @@ class _QueueRoadmapState extends State<QueueRoadmap>
                               children: [
                                 GestureDetector(
                                   behavior: HitTestBehavior.opaque,
-                                  onTapDown: (d) =>
-                                      _pressedTarget = _hitTest(d.localPosition),
+                                  onTapDown: (d) => _pressedTarget = _hitTest(
+                                    d.localPosition,
+                                  ),
                                   onTap: () {
                                     final hit = _pressedTarget;
                                     if (hit != null) {
@@ -483,7 +482,9 @@ class _QueueRoadmapState extends State<QueueRoadmap>
                                   vertical: 5,
                                 ),
                                 decoration: BoxDecoration(
-                                  color: Tokens.surface2.withValues(alpha: 0.88),
+                                  color: Tokens.surface2.withValues(
+                                    alpha: 0.88,
+                                  ),
                                   borderRadius: BorderRadius.circular(10),
                                   border: Border.all(
                                     color: Tokens.borderSubtle,
@@ -517,7 +518,9 @@ class _QueueRoadmapState extends State<QueueRoadmap>
                               Tooltip(
                                 message: 'Reset zoom',
                                 child: Material(
-                                  color: Tokens.surface2.withValues(alpha: 0.88),
+                                  color: Tokens.surface2.withValues(
+                                    alpha: 0.88,
+                                  ),
                                   borderRadius: BorderRadius.circular(10),
                                   child: InkWell(
                                     borderRadius: BorderRadius.circular(10),
@@ -849,14 +852,17 @@ class _QueueRoadmapState extends State<QueueRoadmap>
       }
       if (outside.isNotEmpty) {
         outside.sort((a, b) => a.$2.compareTo(b.$2));
-        final p95 = outside[(outside.length * 0.95).floor().clamp(
-          0,
-          outside.length - 1,
-        )].$2;
+        final p95 =
+            outside[(outside.length * 0.95).floor().clamp(
+                  0,
+                  outside.length - 1,
+                )]
+                .$2;
         final minSpan = closeMaxDist > 0
             ? closeMaxDist * 0.85
             : outside.first.$2;
-        final visibleRadius = minSpan + _distance * math.max(0.0, p95 - minSpan);
+        final visibleRadius =
+            minSpan + _distance * math.max(0.0, p95 - minSpan);
 
         final grouped = <String, List<NetworkTrackRow>>{};
         final labels = <String, String>{};
@@ -1176,11 +1182,7 @@ class _RoadmapPainter extends CustomPainter {
           r + 5 * k,
           Paint()..color = c.color.withValues(alpha: isSel ? 0.28 : 0.14),
         )
-        ..drawCircle(
-          p,
-          r,
-          Paint()..color = c.color.withValues(alpha: 0.28),
-        )
+        ..drawCircle(p, r, Paint()..color = c.color.withValues(alpha: 0.28))
         ..drawCircle(
           p,
           r,

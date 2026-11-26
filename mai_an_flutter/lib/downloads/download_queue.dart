@@ -462,7 +462,9 @@ class DownloadQueue implements Listenable, TransferQueue {
         _outcomeTimer?.cancel();
         lastBatchOutcome = (
           title: failed > 0
-              ? (done > 0 ? 'Downloads finished with errors' : 'Download failed')
+              ? (done > 0
+                    ? 'Downloads finished with errors'
+                    : 'Download failed')
               : 'Downloads complete',
           detail: summary,
           hasFailures: failed > 0,

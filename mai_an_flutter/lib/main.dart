@@ -44,9 +44,12 @@ import 'settings/settings_page.dart';
 import 'sources/streamrip_api.dart' show buildSourceClient;
 import 'sources/streamrip_search.dart';
 import 'sync/app_sync_host.dart';
+import 'sync/app_update.dart';
+import 'sync/problem_reports.dart';
 import 'sync/state_bundles.dart';
 import 'sync/sync_manager.dart';
 import 'ui/frost.dart';
+import 'ui/keyboard_guard.dart';
 import 'ui/toast.dart';
 import 'ui/tokens.dart';
 
@@ -96,6 +99,10 @@ void _snack(String text, {IconData? icon, Color? color}) {
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   final dataDir = await resolveDataDir();
+  // The app's log and caught errors, for "Report a problem" (to the Mac).
+  final reporter = ProblemReporter(
+    file: File('$dataDir${Platform.pathSeparator}problem_reports.json'),
+  )..install();
   final dbPath = _dbOverride.isNotEmpty
       ? _dbOverride
       : '$dataDir${Platform.pathSeparator}library.db';
@@ -236,6 +243,15 @@ Future<void> main() async {
     queue: downloads,
   );
   final sync = syncHost.manager = CompanionSyncManager(syncHost);
+  sync.reporter = reporter;
+  reporter.connected = () => sync.isConnected ? sync.client : null;
+  // Builds of this app the Mac offers (Android only; a no-op elsewhere).
+  final updater = AppUpdater(pref: syncHost.pref, savePref: syncHost.savePref);
+  await updater.init();
+  if (updater.enabled) {
+    sync.updater = updater;
+    updater.onAvailable = syncHost.showAppUpdatePrompt;
+  }
   downloadHost.sync = sync;
   final bundles = writable
       ? StateBundles(
@@ -440,6 +456,7 @@ class _MaiAnAppState extends State<MaiAnApp> {
   late final AppLifecycleListener _lifecycle;
   StreamSubscription<NotificationAction>? _notifications;
   final _router = NotificationRouter();
+  final _keyboardGuard = KeyboardGuard();
 
   @override
   void initState() {
@@ -498,6 +515,7 @@ class _MaiAnAppState extends State<MaiAnApp> {
         debugShowCheckedModeBanner: false,
         scaffoldMessengerKey: _messenger,
         navigatorKey: _navigator,
+        navigatorObservers: [_keyboardGuard],
         theme: Tokens.theme(
           accentColor: widget.config.config.accent ?? Tokens.accent,
           unifiedCategories: widget.config.config.libraryTabs.unified,

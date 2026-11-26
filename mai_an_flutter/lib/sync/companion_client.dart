@@ -129,10 +129,28 @@ class CompanionClient {
 
   String get baseUrl => 'http://$host:$port';
 
+  /// This app's own build, sent with every request so the Mac shows which
+  /// version the phone runs ("0.3.0+4", the package name). Set once at
+  /// startup by the app updater.
+  static Map<String, String> appHeaders = const {};
+
   Map<String, String> headers() => {
     'X-Device-Name': pyQuote(deviceName),
+    ...appHeaders,
     if (authToken case final t? when t.isNotEmpty) 'Authorization': 'Bearer $t',
   };
+
+  /// The Mac's owner switched analysis off on the control page: stop the
+  /// whole run rather than failing every track.
+  static void _stopIfOffloadOff(_Reply r) {
+    if (r.status != 503) return;
+    var msg = 'Analysis is turned off on the Mac';
+    try {
+      final j = r.json();
+      if (j['error'] case final String e) msg = e;
+    } catch (_) {}
+    throw CompanionHttpError(msg, status: 503);
+  }
 
   static void _check(_Reply r, String what) {
     if (r.status == 401) {
@@ -230,6 +248,7 @@ class CompanionClient {
           ],
         },
       );
+      _stopIfOffloadOff(r);
       _check(r, 'Cache probe');
       final data = r.json();
       final cached = (data['cached'] as List?) ?? const [];
@@ -247,6 +266,9 @@ class CompanionClient {
       }
     } on CompanionAuthError {
       rethrow;
+    } on CompanionHttpError catch (e) {
+      if (e.status == 503) rethrow;
+      debugPrint('Cache probe failed ($e), falling back to full extraction');
     } catch (e) {
       debugPrint('Cache probe failed ($e), falling back to full extraction');
     }
@@ -274,6 +296,7 @@ class CompanionClient {
             ]),
           );
           if (r.status == 401) _check(r, 'Offload');
+          _stopIfOffloadOff(r);
           if (r.status == 200) {
             chunk.add(FeatureRow.fromWire(path, r.json(), featuresVersion));
             analysed++;
@@ -284,6 +307,9 @@ class CompanionClient {
           netFailures = 0;
         } on CompanionAuthError {
           rethrow;
+        } on CompanionHttpError catch (e) {
+          if (e.status == 503) rethrow;
+          failed++;
         } catch (e) {
           failed++;
           debugPrint('Error offloading $path: $e');
@@ -374,6 +400,70 @@ class CompanionClient {
       json: {'ids': ids},
     );
     return r.status == 200;
+  }
+
+  /// Download the app build the Mac offers ([path] from the ping's
+  /// `app_update`) to [dest]. Returns the bytes written. Stalls are bounded,
+  /// not the total: 30-100 MB over a slow hotspot takes a while.
+  Future<int> downloadAppUpdate(
+    String path,
+    File dest, {
+    void Function(int received, int total)? progress,
+    bool Function()? cancelled,
+  }) async {
+    final http = HttpClient()..connectionTimeout = _transferConnect;
+    IOSink? out;
+    try {
+      final req = await http.getUrl(Uri.parse('$baseUrl$path'));
+      headers().forEach(req.headers.set);
+      final resp = await req.close().timeout(_transferRead);
+      if (resp.statusCode != 200) {
+        await resp.drain<void>().catchError((_) {});
+        _check(_Reply(resp.statusCode, const []), 'App download');
+      }
+      final total = resp.contentLength;
+      var got = 0;
+      out = dest.openWrite();
+      await for (final chunk in resp.timeout(_transferRead)) {
+        if (cancelled?.call() ?? false) {
+          throw const CompanionHttpError('Cancelled');
+        }
+        out.add(chunk);
+        got += chunk.length;
+        progress?.call(got, total);
+      }
+      await out.flush();
+      return got;
+    } finally {
+      await out?.close();
+      http.close(force: true);
+    }
+  }
+
+  /// Tell the Mac how the offered build is doing on this phone
+  /// (downloading, installing, installed, failed, declined). Best effort.
+  Future<void> postAppStatus(String state, {String? error}) async {
+    try {
+      await _request(
+        'POST',
+        '/api/v1/app/status',
+        total: const Duration(seconds: 4),
+        json: {'state': state, 'error': ?error},
+      );
+    } catch (e) {
+      debugPrint('app status report failed: $e');
+    }
+  }
+
+  /// A problem report (the user's, or a caught error) for the Mac's page.
+  Future<void> postReport(Map<String, Object?> report) async {
+    final r = await _request(
+      'POST',
+      '/api/v1/report',
+      total: const Duration(seconds: 15),
+      json: report,
+    );
+    _check(r, 'Problem report');
   }
 
   // ── transport ─────────────────────────────────────────────────────────────

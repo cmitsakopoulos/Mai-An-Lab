@@ -24,6 +24,10 @@
     <!-- Phase 5g (Jarvis voice): requested at runtime on the first mic press,
          not at startup (§1 row 9). -->
     <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+    <!-- App updates offered by the Mac Companion: PackageInstaller sessions.
+         Android still asks the user, and only installs builds signed with
+         this app's own key. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
     <application
         android:label="@string/app_name"
         android:name="${applicationName}"
@@ -51,6 +55,16 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
+        <receiver
+            android:name=".InstallResultReceiver"
+            android:exported="false"/>
+        <receiver
+            android:name=".PackageReplacedReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED"/>
+            </intent-filter>
+        </receiver>
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data

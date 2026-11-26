@@ -113,6 +113,7 @@ class _QueueSheetState extends State<QueueSheet> {
                             style: const TextStyle(
                               color: Tokens.dim,
                               fontSize: 12,
+                              fontFeatures: [FontFeature.tabularFigures()],
                             ),
                           ),
                         ],
@@ -243,8 +244,9 @@ class _QueueSheetState extends State<QueueSheet> {
                                 ),
                               );
                             }
-                            final pos =
-                                header != null && header < c ? c - 1 : c;
+                            final pos = header != null && header < c
+                                ? c - 1
+                                : c;
                             final (i, row) = rows[pos];
                             return _QueueRow(
                               key: ObjectKey(row),

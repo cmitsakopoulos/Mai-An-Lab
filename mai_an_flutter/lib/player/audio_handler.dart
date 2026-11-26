@@ -771,7 +771,16 @@ class AudioPlayerHandler extends BaseAudioHandler
     _clearInterruption();
     final session = await AudioSession.instance;
     await session.setActive(true);
-    await _player.play();
+    // Not awaited: just_audio's play() completes only when playback pauses,
+    // stops or finishes. Awaiting it here deadlocks PlayerController's
+    // serialized _op chain (freezing seek/next/pause/track-change until an
+    // external stop completes the future) and holds audio_service's platform
+    // channel callback open for the entire track.
+    unawaited(
+      _player.play().catchError((Object e) {
+        debugPrint('AudioPlayerHandler: play failed: $e');
+      }),
+    );
   }
 
   @override

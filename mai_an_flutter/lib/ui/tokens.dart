@@ -26,6 +26,15 @@ abstract final class Tokens {
   static const glassBorder = Color(0x28FFFFFF);
   static const glassHighlight = Color(0x16FFFFFF);
 
+  /// The one scrim behind every floating top header ([PageHeader]): solid
+  /// under the status bar and title, fading out below the last header row.
+  static const headerScrim = LinearGradient(
+    begin: Alignment.topCenter,
+    end: Alignment.bottomCenter,
+    stops: [0.0, 0.6, 1.0],
+    colors: [bg, Color(0xCC000000), Color(0x00000000)],
+  );
+
   /// Responsive horizontal gutter for Android phones (narrow vs standard).
   static double pagePad(BuildContext context) =>
       MediaQuery.sizeOf(context).width <= 360 ? s12 : s16;

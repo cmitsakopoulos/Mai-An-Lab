@@ -9,6 +9,8 @@ import '../library/browse_controller.dart';
 import '../player/ui/artwork.dart';
 import '../settings/settings_search.dart';
 import '../ui/frost.dart';
+import '../ui/page_header.dart';
+import '../ui/glass_search_bar.dart';
 import '../ui/sliding_segmented.dart';
 import '../ui/toast.dart';
 import '../ui/tokens.dart';
@@ -226,144 +228,128 @@ class _SearchScreenState extends State<SearchScreen> {
       listenable: _ctrl,
       builder: (context, _) {
         final ctrl = _ctrl;
+        final hPad = Tokens.pagePad(context);
+        final showModeBar = ctrl.hasActiveQuery || ctrl.selectionMode;
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            SafeArea(
-              bottom: false,
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(16, 20, 8, 8),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    Row(
-                      crossAxisAlignment: CrossAxisAlignment.center,
-                      children: [
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              const Text(
-                                'Streamrip',
-                                style: TextStyle(
-                                  color: Tokens.text,
-                                  fontSize: 26,
-                                  fontWeight: FontWeight.w800,
-                                ),
-                              ),
-                              if (ctrl.remoteEnabled) ...[
-                                const SizedBox(height: 6),
-                                Row(
-                                  children: [
-                                    SourceSegmentedBar(
-                                      selected: ctrl.selectedSource,
-                                      onChanged: (s) =>
-                                          unawaited(ctrl.setSource(s)),
-                                    ),
-                                    const SizedBox(width: 8),
-                                    ConnectionSignal(state: ctrl.signal),
-                                  ],
-                                ),
-                              ],
-                            ],
-                          ),
-                        ),
-                        if (hasHistory)
-                          IconButton(
-                            icon: const Icon(Icons.history_rounded, size: 22),
-                            color: Tokens.dim,
-                            tooltip: 'Recent Searches',
-                            onPressed: _openRecentSearches,
-                          ),
-                        if (widget.onOpenSettings case final open?)
-                          IconButton(
-                            icon: const Icon(Icons.settings_outlined, size: 22),
-                            color: Tokens.dim,
-                            tooltip: 'Settings',
-                            onPressed: () => open(),
-                          ),
-                      ],
-                    ),
-                    const SizedBox(height: 10),
-                    Padding(
-                      padding: const EdgeInsets.only(right: 8),
-                      child: _SearchBarField(
-                        controller: _queryController,
-                        searching: ctrl.remotePending,
-                        onChanged: (_) => setState(() {}),
-                        onSubmitted: _submitSearch,
-                        onClear: _clearSearch,
-                      ),
-                    ),
-                    if (ctrl.hasActiveQuery || ctrl.selectionMode) ...[
-                      const SizedBox(height: 10),
-                      Padding(
-                        padding: const EdgeInsets.only(right: 8),
-                        child: AnimatedSwitcher(
-                          duration: const Duration(milliseconds: 160),
-                          child: ctrl.selectionMode
-                              ? SearchSelectionBar(
-                                  key: const ValueKey('sel_bar'),
-                                  count: ctrl.selectedCount,
-                                  onExit: ctrl.exitSelection,
-                                  onSelectAll: ctrl.selectAllOnPage,
-                                  onDownload: _downloadSelection,
-                                )
-                              : _SearchModeBar(
-                                  key: const ValueKey('mode_bar'),
-                                  selected: ctrl.viewMode,
-                                  unifiedPills: widget.unifiedPills,
-                                  onSelect: ctrl.setViewMode,
-                                ),
-                        ),
-                      ),
-                    ],
-                  ],
-                ),
-              ),
-            ),
             Expanded(
-              child: Stack(
-                children: [
-                  Positioned.fill(
-                    child: ctrl.hasActiveQuery
-                        ? _buildSearchResults(context, ctrl)
-                        : ListenableBuilder(
-                            listenable: widget.landing,
-                            builder: (context, _) => ListView(
-                              padding: EdgeInsets.fromLTRB(
-                                Tokens.pagePad(context),
-                                10,
-                                Tokens.pagePad(context),
-                                24 + ShellInsets.bottomOf(context),
-                              ),
-                              children: _cards(context, ctrl),
-                            ),
-                          ),
-                  ),
-                  if (ctrl.searchProgressVisible || ctrl.previewCardVisible)
-                    Positioned(
-                      top: 4,
-                      left: 0,
-                      right: 0,
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
+              child: PageHeader(
+                title: 'Search',
+                actions: [
+                  if (hasHistory)
+                    HeaderAction(
+                      icon: Icons.history_rounded,
+                      tooltip: 'Recent Searches',
+                      onPressed: _openRecentSearches,
+                    ),
+                  if (widget.onOpenSettings case final open?)
+                    HeaderAction(
+                      icon: Icons.settings_outlined,
+                      tooltip: 'Settings',
+                      onPressed: () => open(),
+                    ),
+                ],
+                bottom: [
+                  if (ctrl.remoteEnabled)
+                    Padding(
+                      padding: EdgeInsets.fromLTRB(hPad, 0, hPad, 8),
+                      child: Row(
                         children: [
-                          if (ctrl.searchProgressVisible)
-                            SearchOverlayCard(
-                              status: ctrl.searchProgressStatus,
-                              detail: ctrl.searchProgressDetail,
-                            ),
-                          if (ctrl.previewCardVisible)
-                            SearchOverlayCard(
-                              status: ctrl.previewStatus,
-                              detail: ctrl.previewDetail,
-                              onCancel: ctrl.cancelPreview,
-                            ),
+                          SourceSegmentedBar(
+                            selected: ctrl.selectedSource,
+                            onChanged: (s) => unawaited(ctrl.setSource(s)),
+                          ),
+                          const SizedBox(width: 8),
+                          ConnectionSignal(state: ctrl.signal),
                         ],
                       ),
                     ),
+                  GlassSearchBar(
+                    controller: _queryController,
+                    hintText: 'Artist, album or track…',
+                    loading: ctrl.remotePending,
+                    textInputAction: TextInputAction.search,
+                    grouped: true,
+                    margin: EdgeInsets.fromLTRB(hPad, 0, hPad, 8),
+                    onSubmitted: _submitSearch,
+                    onClear: _clearSearch,
+                  ),
+                  if (showModeBar)
+                    Padding(
+                      padding: EdgeInsets.fromLTRB(hPad, 0, hPad, 8),
+                      child: AnimatedSwitcher(
+                        duration: const Duration(milliseconds: 160),
+                        child: ctrl.selectionMode
+                            ? SearchSelectionBar(
+                                key: const ValueKey('sel_bar'),
+                                count: ctrl.selectedCount,
+                                onExit: ctrl.exitSelection,
+                                onSelectAll: ctrl.selectAllOnPage,
+                                onDownload: _downloadSelection,
+                              )
+                            : _SearchModeBar(
+                                key: const ValueKey('mode_bar'),
+                                selected: ctrl.viewMode,
+                                unifiedPills: widget.unifiedPills,
+                                onSelect: ctrl.setViewMode,
+                              ),
+                      ),
+                    ),
                 ],
+                child: Builder(
+                  builder: (context) {
+                    final topChromeHeight = HeaderInsets.topOf(context);
+                    return Stack(
+                      fit: StackFit.expand,
+                      children: [
+                        Positioned.fill(
+                          child: ctrl.hasActiveQuery
+                              ? _buildSearchResults(
+                                  context,
+                                  ctrl,
+                                  topPadding: topChromeHeight,
+                                )
+                              : ListenableBuilder(
+                                  listenable: widget.landing,
+                                  builder: (context, _) => ListView(
+                                    padding: EdgeInsets.fromLTRB(
+                                      hPad,
+                                      topChromeHeight + 6,
+                                      hPad,
+                                      24 + ShellInsets.bottomOf(context),
+                                    ),
+                                    children: _cards(context, ctrl),
+                                  ),
+                                ),
+                        ),
+                        if (ctrl.searchProgressVisible ||
+                            ctrl.previewCardVisible)
+                          Positioned(
+                            top: topChromeHeight + 4,
+                            left: 0,
+                            right: 0,
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                if (ctrl.searchProgressVisible)
+                                  SearchOverlayCard(
+                                    status: ctrl.searchProgressStatus,
+                                    detail: ctrl.searchProgressDetail,
+                                  ),
+                                if (ctrl.previewCardVisible)
+                                  SearchOverlayCard(
+                                    status: ctrl.previewStatus,
+                                    detail: ctrl.previewDetail,
+                                    onCancel: ctrl.cancelPreview,
+                                  ),
+                              ],
+                            ),
+                          ),
+                      ],
+                    );
+                  },
+                ),
               ),
             ),
             if (ctrl.hasActiveQuery &&
@@ -383,7 +369,11 @@ class _SearchScreenState extends State<SearchScreen> {
     );
   }
 
-  Widget _buildSearchResults(BuildContext context, SearchTabController ctrl) {
+  Widget _buildSearchResults(
+    BuildContext context,
+    SearchTabController ctrl, {
+    required double topPadding,
+  }) {
     final openAuth = widget.onOpenSettings == null
         ? null
         : () => widget.onOpenSettings!(SettingsPage.account);
@@ -401,7 +391,7 @@ class _SearchScreenState extends State<SearchScreen> {
         controller: _resultsScroll,
         padding: EdgeInsets.fromLTRB(
           Tokens.pagePad(context),
-          76,
+          topPadding + 68,
           Tokens.pagePad(context),
           24 + ShellInsets.bottomOf(context),
         ),
@@ -423,10 +413,13 @@ class _SearchScreenState extends State<SearchScreen> {
 
     // Remote failed and there are no local matches at all: full error view.
     if (ctrl.remoteError != null && !ctrl.localMatches.isNotEmpty) {
-      return SearchErrorState(
-        message: ctrl.remoteError!,
-        onSettings: openAuth,
-        onRetry: () => unawaited(ctrl.search(ctrl.activeQuery)),
+      return Padding(
+        padding: EdgeInsets.only(top: topPadding),
+        child: SearchErrorState(
+          message: ctrl.remoteError!,
+          onSettings: openAuth,
+          onRetry: () => unawaited(ctrl.search(ctrl.activeQuery)),
+        ),
       );
     }
 
@@ -483,7 +476,7 @@ class _SearchScreenState extends State<SearchScreen> {
       controller: _resultsScroll,
       padding: EdgeInsets.fromLTRB(
         Tokens.pagePad(context),
-        8,
+        topPadding + 6,
         Tokens.pagePad(context),
         24 + ShellInsets.bottomOf(context),
       ),
@@ -966,77 +959,6 @@ Future<String?> showRecentSearchesSheet(
       ),
     ),
   );
-}
-
-class _SearchBarField extends StatelessWidget {
-  const _SearchBarField({
-    required this.controller,
-    required this.searching,
-    required this.onChanged,
-    required this.onSubmitted,
-    required this.onClear,
-  });
-
-  final TextEditingController controller;
-  final bool searching;
-  final ValueChanged<String> onChanged;
-  final ValueChanged<String> onSubmitted;
-  final VoidCallback onClear;
-
-  @override
-  Widget build(BuildContext context) {
-    final accent = Theme.of(context).colorScheme.primary;
-    final hasText = controller.text.isNotEmpty;
-    return TextField(
-      controller: controller,
-      textInputAction: TextInputAction.search,
-      style: const TextStyle(color: Tokens.text, fontSize: 14),
-      decoration: InputDecoration(
-        hintText: 'Artist, album or track…',
-        prefixIcon: const Icon(
-          Icons.search_rounded,
-          color: Tokens.dim,
-          size: 20,
-        ),
-        suffixIcon: (searching || hasText)
-            ? Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  if (searching)
-                    Padding(
-                      padding: const EdgeInsets.only(right: 4),
-                      child: SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          color: accent,
-                        ),
-                      ),
-                    ),
-                  if (hasText)
-                    IconButton(
-                      icon: const Icon(
-                        Icons.close_rounded,
-                        color: Tokens.dim,
-                        size: 18,
-                      ),
-                      tooltip: 'Clear search',
-                      onPressed: onClear,
-                    ),
-                ],
-              )
-            : null,
-        isDense: true,
-        contentPadding: const EdgeInsets.symmetric(
-          vertical: 10,
-          horizontal: 14,
-        ),
-      ),
-      onChanged: onChanged,
-      onSubmitted: onSubmitted,
-    );
-  }
 }
 
 class _SearchModeBar extends StatelessWidget {

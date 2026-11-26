@@ -442,4 +442,60 @@ void main() {
     await c.settled;
     expect(backend.idAt(0), pathToUri('/music/song1.mp3'));
   });
+
+  test('external stop (idle timer / notification) re-pushes on resume', () async {
+    await c.playTrack(library[1], context: library);
+    await c.settled;
+    c.seek(const Duration(seconds: 45));
+    await c.settled;
+    c.pause();
+    await c.settled;
+
+    // Simulate AudioPlayerHandler.stop() called outside PlayerController
+    // (10-minute idle timer, notification stop button, or swiped notification).
+    await backend.stop();
+    expect(c.stopped, isTrue);
+    expect(c.playing, isFalse);
+    expect(c.position.value, const Duration(seconds: 45));
+
+    // Resuming pushes a fresh session at the same track and saved position.
+    backend.ops.clear();
+    c.play();
+    await expectInStep();
+    expect(backend.ops, ['set_playlist', 'seek']);
+    expect(c.stopped, isFalse);
+    expect(c.playing, isTrue);
+    expect(c.queue.currentIndex, 1);
+    expect(backend.position, const Duration(seconds: 45));
+  });
+
+  test(
+    'playTrackAt and next re-push when stopped instead of skipping',
+    () async {
+      await c.playTrack(library[0], context: library);
+      await c.settled;
+      await backend.stop();
+      expect(c.stopped, isTrue);
+
+      backend.ops.clear();
+      c.playTrackAt(2);
+      await expectInStep();
+      expect(backend.ops, ['set_playlist']);
+      expect(c.stopped, isFalse);
+      expect(c.playing, isTrue);
+      expect(c.queue.currentIndex, 2);
+
+      // Repeat-one next while stopped also re-pushes instead of seeking idle.
+      c.cycleRepeat(); // Repeat.one
+      await c.settled;
+      await backend.stop();
+      backend.ops.clear();
+      c.next();
+      await expectInStep();
+      expect(backend.ops, ['set_playlist']);
+      expect(c.stopped, isFalse);
+      expect(c.playing, isTrue);
+      expect(c.queue.currentIndex, 2);
+    },
+  );
 }

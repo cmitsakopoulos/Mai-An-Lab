@@ -4,7 +4,9 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 
 import '../core/progress_notify.dart';
+import 'app_update.dart';
 import 'companion_client.dart';
+import 'problem_reports.dart';
 import 'discovery.dart';
 
 /// utils/sync/manager.py: the phone's Companion & Sync coordinator.
@@ -358,6 +360,29 @@ class CompanionSyncManager extends ChangeNotifier {
   int _gen = 0;
   int? _probeGen, _heartbeatGen;
 
+  /// The phone app build the Mac offers (its ping's `app_update`), or null.
+  Map<String, Object?>? appUpdateOffer;
+
+  /// Updates of this app from the Mac; null where there are none (desktop,
+  /// most tests). Hears every ping's offer.
+  AppUpdater? updater;
+
+  /// Problem reports waiting for the Mac; sent on the next ping.
+  ProblemReporter? reporter;
+
+  void _offer(CompanionClient c, Map<String, Object?> info) {
+    if (reporter case final r? when r.hasPending) unawaited(r.flush(c));
+    final o = info['app_update'];
+    appUpdateOffer = o is Map ? Map<String, Object?>.from(o) : null;
+    if (updater case final u?) {
+      unawaited(
+        u.handleOffer(c, appUpdateOffer).catchError((Object e) {
+          debugPrint('app update offer: $e');
+        }),
+      );
+    }
+  }
+
   bool get enabled => _enabled;
   bool get pinPromptOpen => _pinPrompt != null;
   bool get transferPromptOpen => _transferPrompt != null;
@@ -460,6 +485,7 @@ class CompanionSyncManager extends ChangeNotifier {
   void handleAppBackground() => _stopListener();
 
   void handleAppResume() {
+    if (updater case final u?) unawaited(u.resumed());
     if (!_enabled || isAsleep) return;
     if (_idleExpired()) {
       unawaited(_maybeSleep());
@@ -526,6 +552,7 @@ class CompanionSyncManager extends ChangeNotifier {
     unawaited(_savePref('companion_paired_name', name));
     _stopListener();
     debugPrint('Connected to $name at ${c.host}:${c.port}');
+    _offer(c, info);
     notifyListeners();
     unawaited(checkPendingTransfers(promptUser: true));
   }
@@ -810,6 +837,7 @@ class CompanionSyncManager extends ChangeNotifier {
       _setDisconnected('Pairing was revoked on the Mac');
       return;
     }
+    _offer(c, info);
     await _flushAcks();
     await checkPendingTransfers(promptUser: true);
   }
