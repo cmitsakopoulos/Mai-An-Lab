@@ -68,7 +68,7 @@ Page shell: `GroupBody(spacing: 26, children: [sections…])`.
 |---|---|---|---|
 | 1 | `AppSwitch` everywhere, switch theme, `GlassCard` always provides a `Material` (ripples show) | done | a0c5f57 |
 | 2 | Kit, plus Appearance rebuilt | done | 431c484 |
-| 3 | Haptics, Permissions, Advanced, About | done | see `git log` |
+| 3 | Haptics, Permissions, Advanced, About | done | 004071b |
 | 4 | Storage & Paths, Database | todo | |
 | 5 | Audio & DSP | todo | |
 | 6 | Account, AI Assistant | todo | |
