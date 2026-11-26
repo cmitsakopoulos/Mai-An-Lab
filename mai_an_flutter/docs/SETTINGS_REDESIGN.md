@@ -69,7 +69,7 @@ Page shell: `GroupBody(spacing: 26, children: [sections…])`.
 | 1 | `AppSwitch` everywhere, switch theme, `GlassCard` always provides a `Material` (ripples show) | done | a0c5f57 |
 | 2 | Kit, plus Appearance rebuilt | done | 431c484 |
 | 3 | Haptics, Permissions, Advanced, About | done | 004071b |
-| 4 | Storage & Paths, Database | todo | |
+| 4 | Storage & Paths, Database | built, awaiting phone check | |
 | 5 | Audio & DSP | todo | |
 | 6 | Account, AI Assistant | todo | |
 | 7 | Companion & Sync | todo | |
@@ -100,6 +100,13 @@ Database (`_DatabaseGroupState`):
 
 Then delete `SettingsDropdown` and `_fieldDecoration` if nothing else uses
 them.
+
+**As built:** folder rows open the Android browser; on other platforms they
+open a type-the-path dialog (no navigator there). Picking applies at once; a
+new library folder triggers a scan (the old Save did). Quality options are
+short labels with the detail as subtitle ('CD Quality' / '16-bit FLAC').
+No `enabled:` was needed: `SettingsTile.action(onTap: null)` already dims.
+`SettingsDropdown` and `_fieldDecoration` are deleted.
 
 ### 5. Audio & DSP (`audio_dsp.dart`)
 - It uses `LegacySettingsSection` and `InsetSwitchRow`. Move it to

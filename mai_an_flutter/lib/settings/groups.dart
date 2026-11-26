@@ -24,61 +24,6 @@ import 'folder_browser.dart';
 import 'settings_kit.dart';
 import 'settings_page.dart';
 
-InputDecoration _fieldDecoration(BuildContext context, String label) {
-  final accent = Theme.of(context).colorScheme.primary;
-  OutlineInputBorder border(Color c) => OutlineInputBorder(
-    borderRadius: BorderRadius.circular(10),
-    borderSide: BorderSide(color: c),
-  );
-  return InputDecoration(
-    labelText: label,
-    labelStyle: TextStyle(color: accent, fontSize: 11),
-    filled: true,
-    fillColor: Tokens.surface2,
-    enabledBorder: border(Tokens.border),
-    focusedBorder: border(accent),
-    border: border(Tokens.border),
-    isDense: true,
-  );
-}
-
-/// A Flet `ft.Dropdown` with a floating label: the options' keys and texts.
-class SettingsDropdown extends StatelessWidget {
-  const SettingsDropdown({
-    super.key,
-    required this.label,
-    required this.value,
-    required this.options,
-    required this.onChanged,
-  });
-
-  final String label;
-  final String? value;
-  final List<(String, String)> options;
-  final ValueChanged<String> onChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    // A stored value no option has shows blank, as Flet's dropdown does.
-    final known = options.any((o) => o.$1 == value);
-    return DropdownButtonFormField<String>(
-      // ignore: deprecated_member_use
-      value: known ? value : null,
-      isExpanded: true,
-      dropdownColor: Tokens.surface2,
-      decoration: _fieldDecoration(context, label),
-      style: const TextStyle(color: Tokens.text, fontSize: 13),
-      items: [
-        for (final (k, t) in options)
-          DropdownMenuItem(value: k, child: Text(t)),
-      ],
-      onChanged: (v) {
-        if (v != null) onChanged(v);
-      },
-    );
-  }
-}
-
 /// Modern Apple-style grouped inset section with an uppercase accent header
 /// above a clean [GlassCard]. Shared by Appearance, AI Assistant, Audio & DSP.
 class LegacySettingsSection extends StatelessWidget {
@@ -349,58 +294,40 @@ class StorageGroup extends StatefulWidget {
   State<StorageGroup> createState() => _StorageGroupState();
 }
 
+/// The default-quality tiers: '' asks on every download.
 const kDefaultQualityOptions = [
-  ('', 'Ask every time'),
-  ('mp3', 'High \u2014 MP3 / AAC 320kbps'),
-  ('cd', 'CD Quality \u2014 16-bit FLAC'),
-  ('hires', 'Hi-Res \u2014 24-bit FLAC (Deezer: 16-bit)'),
+  SettingsOption('', 'Ask every time'),
+  SettingsOption('mp3', 'High', subtitle: 'MP3 / AAC 320kbps'),
+  SettingsOption('cd', 'CD Quality', subtitle: '16-bit FLAC'),
+  SettingsOption('hires', 'Hi-Res', subtitle: '24-bit FLAC (Deezer: 16-bit)'),
 ];
 
 class _StorageGroupState extends State<StorageGroup> {
-  final _dl = TextEditingController();
-  final _lib = TextEditingController();
-  String _baseDl = '', _baseLib = '';
-  String _quality = '', _baseQuality = '';
+  String _dl = '', _lib = '';
+  String _quality = '';
 
   SettingsDeps get d => widget.deps;
 
   @override
   void initState() {
     super.initState();
-    _dl.addListener(_changed);
-    _lib.addListener(_changed);
-    _quality = _baseQuality = d.config
-        .string('general', 'default_quality', '')
-        .toLowerCase();
+    _quality = _storedQuality;
     _refresh();
   }
 
-  @override
-  void dispose() {
-    _dl.dispose();
-    _lib.dispose();
-    super.dispose();
-  }
+  String get _storedQuality =>
+      d.config.string('general', 'default_quality', '').toLowerCase();
 
-  void _changed() => setState(() {});
-
-  /// `refresh`: the resolved folders, and a clean baseline.
+  /// `refresh`: the resolved folders.
   Future<void> _refresh() async {
     final (library, download, _) = await resolveFolders(d.dataDir);
     if (!mounted) return;
     setState(() {
-      _dl.text = _baseDl = download;
-      _lib.text = _baseLib = library;
-      _quality = _baseQuality = d.config
-          .string('general', 'default_quality', '')
-          .toLowerCase();
+      _dl = download;
+      _lib = library;
+      _quality = _storedQuality;
     });
   }
-
-  bool get _dirty =>
-      _dl.text.trim() != _baseDl ||
-      _lib.text.trim() != _baseLib ||
-      _quality != _baseQuality;
 
   Future<String?> _privateError(String path) async {
     final sp = await storagePathsFor(d.dataDir);
@@ -410,38 +337,22 @@ class _StorageGroupState extends State<StorageGroup> {
         : null;
   }
 
-  Future<void> _save() async {
-    final dl = _dl.text.trim();
-    final lib = _lib.text.trim();
-    if (dl.isEmpty || lib.isEmpty) {
+  Future<void> _setQuality(String q) async {
+    setState(() => _quality = q);
+    await d.config.update({
+      'general': {'default_quality': q},
+    });
+  }
+
+  /// `_handle_folder_picked`: saved at once. A new library folder is
+  /// scanned (the old Save button did that).
+  Future<void> _picked(String path, {required bool download}) async {
+    path = path.trim();
+    if (path.isEmpty) {
       showSettingsSnack(context, 'Paths cannot be empty.');
       return;
     }
-    final bad = await _privateError(dl) ?? await _privateError(lib);
-    if (!mounted) return;
-    if (bad != null) {
-      showSettingsSnack(context, bad);
-      return;
-    }
-    await d.config.update({
-      'downloads': {'folder': dl},
-    });
-    await d.config.update({
-      'general': {'default_quality': _quality},
-    });
-    final prefs = Prefs(d.dataDir);
-    await prefs.load();
-    await prefs.set('folder_path', dl);
-    await prefs.set('library_path', lib);
-    await prefs.flush();
-    await _refresh();
-    if (!mounted) return;
-    showSettingsSnack(context, 'Storage paths updated.');
-    unawaited(d.library.scan());
-  }
-
-  /// `_handle_folder_picked`: saved at once, no scan.
-  Future<void> _picked(String path, {required bool download}) async {
+    if (path == (download ? _dl : _lib)) return;
     final bad = await _privateError(path);
     if (!mounted) return;
     if (bad != null) {
@@ -465,174 +376,95 @@ class _StorageGroupState extends State<StorageGroup> {
       context,
       '${download ? 'Download' : 'Library'} folder set: $path',
     );
+    if (!download) unawaited(d.library.scan());
   }
 
+  /// Android: Flet's folder navigator. Elsewhere (no navigator ported):
+  /// type the path.
   Future<void> _browse({required bool download}) async {
-    final sp = await storagePathsFor(d.dataDir);
-    if (!mounted) return;
-    final path = await showFolderBrowser(
-      context,
-      label: download ? 'Download Folder' : 'Library Folder',
-      isPrivate: sp.isAppPrivate,
-    );
-    if (path != null) await _picked(path, download: download);
+    final label = download ? 'Download Folder' : 'Library Folder';
+    final String? path;
+    if (Platform.isAndroid) {
+      final sp = await storagePathsFor(d.dataDir);
+      if (!mounted) return;
+      path = await showFolderBrowser(
+        context,
+        label: label,
+        isPrivate: sp.isAppPrivate,
+      );
+    } else {
+      path = await _typePath(label, download ? _dl : _lib);
+    }
+    if (path != null && mounted) await _picked(path, download: download);
   }
 
-  Widget _folderCard({
-    required IconData icon,
-    required String title,
-    required String description,
-    required TextEditingController field,
-    required String label,
-    required bool download,
-  }) {
-    final accent = Theme.of(context).colorScheme.primary;
-    return SettingsCard(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Row(
-            children: [
-              Icon(icon, color: accent, size: 18),
-              const SizedBox(width: 8),
-              Text(
-                title,
-                style: const TextStyle(
-                  color: Tokens.text,
-                  fontSize: 13,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-            ],
+  Future<String?> _typePath(String label, String current) async {
+    final field = TextEditingController(text: current);
+    final path = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: Tokens.surface,
+        title: Text(label),
+        content: SizedBox(
+          width: 420,
+          child: ModernTextField(label: 'Path', controller: field),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
           ),
-          const SizedBox(height: 8),
-          Dim(description, size: 11),
-          const SizedBox(height: 12),
-          Row(
-            children: [
-              Expanded(
-                child: TextField(
-                  controller: field,
-                  style: const TextStyle(color: Tokens.text, fontSize: 13),
-                  decoration: _fieldDecoration(context, label),
-                ),
-              ),
-              // Flet's Android folder navigator; the desktop pickers aren't
-              // ported (type the path).
-              if (Platform.isAndroid) ...[
-                const SizedBox(width: 8),
-                IconButton(
-                  icon: const Icon(Icons.folder_open_rounded),
-                  color: accent,
-                  tooltip: 'Browse folder',
-                  onPressed: () => _browse(download: download),
-                ),
-              ],
-            ],
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, field.text),
+            child: const Text('Use Folder'),
           ),
         ],
       ),
     );
+    field.dispose();
+    return path;
   }
 
   @override
   Widget build(BuildContext context) {
     return GroupBody(
-      onSave: _dirty ? _save : null,
-      saveLabel: 'SAVE PATHS',
-      saveIcon: Icons.folder_rounded,
+      spacing: 26,
       children: [
-        SettingsCard(
-          child: Row(
-            children: [
-              Icon(
-                Icons.storage_rounded,
-                color: Theme.of(context).colorScheme.primary,
-                size: 24,
-              ),
-              const SizedBox(width: 14),
-              const Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Storage Locations & Directories',
-                      style: TextStyle(
-                        color: Tokens.text,
-                        fontSize: 15,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                    SizedBox(height: 2),
-                    Dim(
-                      'Configure filesystem paths for downloading audio files '
-                      'and scanning your local music collection.',
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
+        SettingsSection(
+          header: 'Folders',
+          footer:
+              'Downloads land in the download folder. The library folder is '
+              'scanned to index your local audio files, tags and artwork.',
+          children: [
+            SettingsTile.nav(
+              leading: const SettingsIcon(Icons.download_rounded),
+              title: 'Downloads Directory',
+              subtitle: _dl.isEmpty ? null : _dl,
+              onTap: () => _browse(download: true),
+            ),
+            SettingsTile.nav(
+              leading: const SettingsIcon(Icons.library_music_rounded),
+              title: 'Local Music Library',
+              subtitle: _lib.isEmpty ? null : _lib,
+              onTap: () => _browse(download: false),
+            ),
+          ],
         ),
-        _folderCard(
-          icon: Icons.download_rounded,
-          title: 'Downloads Directory',
-          description:
-              'Destination folder where downloaded tracks, albums, and '
-              'Hi-Res FLAC files are saved.',
-          field: _dl,
-          label: 'Download Path',
-          download: true,
-        ),
-        SettingsCard(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Row(
-                children: [
-                  Icon(
-                    Icons.high_quality_rounded,
-                    color: Theme.of(context).colorScheme.primary,
-                    size: 18,
-                  ),
-                  const SizedBox(width: 8),
-                  const Expanded(
-                    child: Text(
-                      'Default Download Quality',
-                      style: TextStyle(
-                        color: Tokens.text,
-                        fontSize: 13,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 8),
-              const Dim(
-                'Pick a tier to skip the quality sheet on every download. '
-                '"Ask every time" restores the prompt.',
-                size: 11,
-              ),
-              const SizedBox(height: 12),
-              SettingsDropdown(
-                label: 'Quality',
-                value: _quality,
-                options: kDefaultQualityOptions,
-                onChanged: (v) => setState(() => _quality = v),
-              ),
-            ],
-          ),
-        ),
-        _folderCard(
-          icon: Icons.library_music_rounded,
-          title: 'Local Music Library',
-          description:
-              'Root folder scanned by Streamrip to index your local audio '
-              'files, tags, and album artwork.',
-          field: _lib,
-          label: 'Library Path',
-          download: false,
+        SettingsSection(
+          header: 'Downloads',
+          footer:
+              'Pick a tier to skip the quality sheet on every download. '
+              '"Ask every time" restores the prompt.',
+          children: [
+            SettingsPickerTile<String>(
+              leading: const SettingsIcon(Icons.high_quality_rounded),
+              title: 'Default Download Quality',
+              sheetTitle: 'Default Quality',
+              value: _quality,
+              options: kDefaultQualityOptions,
+              onChanged: _setQuality,
+            ),
+          ],
         ),
       ],
     );
@@ -1384,7 +1216,9 @@ class DatabaseGroup extends StatefulWidget {
 
 class _DatabaseGroupState extends State<DatabaseGroup> {
   SettingsDeps get d => widget.deps;
-  bool _busy = false;
+
+  /// A maintenance job, or a PCA recompute, is running.
+  bool _busy = false, _pcaBusy = false;
 
   /// main.py `open_maintenance_confirmation` / `open_wipe_confirmation`.
   Future<void> _confirmThen(
@@ -1458,7 +1292,7 @@ class _DatabaseGroupState extends State<DatabaseGroup> {
       'Recomputing PCA space…',
       icon: Icons.scatter_plot_rounded,
     );
-    setState(() => _busy = true);
+    setState(() => _pcaBusy = true);
     try {
       await d.library.rebuildSimilarityGraph(metadata: false);
       showSnackOn(
@@ -1474,7 +1308,7 @@ class _DatabaseGroupState extends State<DatabaseGroup> {
         color: const Color(0xFFFF4444),
       );
     } finally {
-      if (mounted) setState(() => _busy = false);
+      if (mounted) setState(() => _pcaBusy = false);
     }
   }
 
@@ -1534,123 +1368,129 @@ class _DatabaseGroupState extends State<DatabaseGroup> {
   Widget _build(BuildContext context) {
     final repo = d.library.repository;
     final analysis = d.library.analysis;
-    final can = !_busy && !analysis.running && (repo?.writable ?? false);
+    final can =
+        !_busy && !_pcaBusy && !analysis.running && (repo?.writable ?? false);
+    VoidCallback? when(VoidCallback f) => can ? f : null;
     return GroupBody(
-      spacing: 15,
+      spacing: 26,
       children: [
-        const Text(
-          'Database Maintenance',
-          style: TextStyle(color: Tokens.dim, fontWeight: FontWeight.bold),
-        ),
-        const Dim(
-          'Wipe or reset specific tables and indexes in the local application '
-          'database. Your actual music files will NOT be touched.',
-        ),
-        Wrap(
-          spacing: 10,
+        SettingsSection(
+          header: 'Database Maintenance',
+          footer:
+              'Wipe or reset specific tables and indexes in the local '
+              'application database. Your actual music files will NOT be '
+              'touched.',
           children: [
-            TextButton.icon(
-              icon: const Icon(Icons.format_list_bulleted_rounded),
-              label: const Text('Library Index'),
-              onPressed: !can
-                  ? null
-                  : () => _confirmThen(
-                      'Clear Library Index?',
-                      'This will clear all indexed music, playlists, and '
-                          'metadata from the local database, leaving '
-                          'configuration, history, and play counts intact.'
-                          '\n\nYour actual music files will NOT be touched.',
-                      'Clear Index',
-                      () => _run(
-                        repo!.clearLibraryIndex,
-                        ok: 'Library index cleared successfully.',
-                        failed: 'Failed to clear library index',
-                        clearsQueue: true,
-                      ),
-                    ),
-            ),
-            TextButton.icon(
-              icon: const Icon(Icons.graphic_eq_rounded),
-              label: const Text('DSP Features'),
-              onPressed: !can
-                  ? null
-                  : () => _confirmThen(
-                      'Clear DSP Features?',
-                      'This will purge all extracted acoustic DSP features '
-                          'and PCA space definitions, forcing a full '
-                          'recalculation/re-scan on your next sweep.\n\n'
-                          'Your library index will remain intact.',
-                      'Clear DSP',
-                      () => _run(
-                        repo!.clearDspFeatures,
-                        ok: 'Acoustic DSP features cleared successfully.',
-                        failed: 'Failed to clear DSP features',
-                      ),
-                    ),
-            ),
-            TextButton.icon(
-              icon: const Icon(Icons.delete_forever, color: Color(0xFFFF4444)),
-              label: const Text('Wipe DB'),
-              onPressed: !can
-                  ? null
-                  : () => _confirmThen(
-                      'Wipe Library Database?',
-                      'This will clear the search index and all metadata '
-                          'from the database. \n\nIMPORTANT: Your local music '
-                          'files will NOT be touched or deleted.',
-                      'Wipe Database',
-                      () => _run(
-                        repo!.wipeDatabase,
-                        ok: 'Library database wiped successfully.',
-                        failed: 'Wipe failed',
-                        clearsQueue: true,
-                      ),
-                    ),
-            ),
-          ],
-        ),
-        const Divider(color: Tokens.border, height: 20),
-        const Text(
-          'Compute Pipeline',
-          style: TextStyle(color: Tokens.dim, fontWeight: FontWeight.bold),
-        ),
-        const Dim(
-          'Run the DSP / graph / PCA pipeline manually instead of going '
-          'through Jarvis.',
-        ),
-        Wrap(
-          spacing: 10,
-          children: [
-            TextButton.icon(
-              icon: const Icon(Icons.play_arrow_rounded),
-              label: const Text('Commence/Continue DSP Compute'),
-              onPressed: can ? () => _computeDsp(DspEntry.settings) : null,
-            ),
-            TextButton.icon(
-              icon: const Icon(Icons.replay_rounded),
-              label: const Text('Recompute All DSP Features'),
-              onPressed: can ? _confirmRecomputeAllDsp : null,
-            ),
-            TextButton.icon(
-              icon: const Icon(Icons.scatter_plot_rounded),
-              label: const Text('Recompute PCA'),
-              onPressed: can ? _recomputePca : null,
-            ),
-          ],
-        ),
-        if (analysis.running) ...[
-          LinearProgressIndicator(value: analysis.progress),
-          Row(
-            children: [
-              Expanded(child: Dim(analysis.status)),
-              TextButton(
-                onPressed: analysis.cancel,
-                child: const Text('Cancel'),
+            SettingsTile.action(
+              leading: const SettingsIcon(Icons.format_list_bulleted_rounded),
+              title: 'Library Index',
+              subtitle: 'Clear indexed music, playlists and metadata',
+              destructive: true,
+              onTap: when(
+                () => _confirmThen(
+                  'Clear Library Index?',
+                  'This will clear all indexed music, playlists, and '
+                      'metadata from the local database, leaving '
+                      'configuration, history, and play counts intact.'
+                      '\n\nYour actual music files will NOT be touched.',
+                  'Clear Index',
+                  () => _run(
+                    repo!.clearLibraryIndex,
+                    ok: 'Library index cleared successfully.',
+                    failed: 'Failed to clear library index',
+                    clearsQueue: true,
+                  ),
+                ),
               ),
-            ],
-          ),
-        ] else if (_busy)
-          const LinearProgressIndicator(),
+            ),
+            SettingsTile.action(
+              leading: const SettingsIcon(Icons.graphic_eq_rounded),
+              title: 'DSP Features',
+              subtitle: 'Purge acoustic features and the PCA space',
+              destructive: true,
+              onTap: when(
+                () => _confirmThen(
+                  'Clear DSP Features?',
+                  'This will purge all extracted acoustic DSP features '
+                      'and PCA space definitions, forcing a full '
+                      'recalculation/re-scan on your next sweep.\n\n'
+                      'Your library index will remain intact.',
+                  'Clear DSP',
+                  () => _run(
+                    repo!.clearDspFeatures,
+                    ok: 'Acoustic DSP features cleared successfully.',
+                    failed: 'Failed to clear DSP features',
+                  ),
+                ),
+              ),
+            ),
+            SettingsTile.action(
+              leading: const SettingsIcon(
+                Icons.delete_forever_rounded,
+                color: Tokens.accentRed,
+              ),
+              title: 'Wipe DB',
+              subtitle: 'Clear the search index and all metadata',
+              destructive: true,
+              onTap: when(
+                () => _confirmThen(
+                  'Wipe Library Database?',
+                  'This will clear the search index and all metadata '
+                      'from the database. \n\nIMPORTANT: Your local music '
+                      'files will NOT be touched or deleted.',
+                  'Wipe Database',
+                  () => _run(
+                    repo!.wipeDatabase,
+                    ok: 'Library database wiped successfully.',
+                    failed: 'Wipe failed',
+                    clearsQueue: true,
+                  ),
+                ),
+              ),
+            ),
+            if (_busy)
+              const SettingsCustomTile(child: LinearProgressIndicator()),
+          ],
+        ),
+        SettingsSection(
+          header: 'Compute Pipeline',
+          footer:
+              'Run the DSP / graph / PCA pipeline manually instead of going '
+              'through Jarvis.',
+          children: [
+            SettingsTile.action(
+              leading: const SettingsIcon(Icons.play_arrow_rounded),
+              title: 'Commence/Continue DSP Compute',
+              onTap: when(() => _computeDsp(DspEntry.settings)),
+            ),
+            SettingsTile.action(
+              leading: const SettingsIcon(Icons.replay_rounded),
+              title: 'Recompute All DSP Features',
+              onTap: when(_confirmRecomputeAllDsp),
+            ),
+            SettingsTile.action(
+              leading: const SettingsIcon(Icons.scatter_plot_rounded),
+              title: 'Recompute PCA',
+              onTap: when(_recomputePca),
+            ),
+            if (analysis.running) ...[
+              SettingsCustomTile(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    LinearProgressIndicator(value: analysis.progress),
+                    if (analysis.status.isNotEmpty) ...[
+                      const SizedBox(height: 8),
+                      Text(analysis.status, style: SettingsStyle.subtitle),
+                    ],
+                  ],
+                ),
+              ),
+              SettingsTile.action(title: 'Cancel', onTap: analysis.cancel),
+            ] else if (_pcaBusy)
+              const SettingsCustomTile(child: LinearProgressIndicator()),
+          ],
+        ),
       ],
     );
   }

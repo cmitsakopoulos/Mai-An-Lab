@@ -526,10 +526,10 @@ void main() {
 
         await tester.tap(find.text('Ask every time'));
         await tester.pumpAndSettle();
-        await tester.tap(find.text('CD Quality \u2014 16-bit FLAC').last);
+        await tester.tap(find.text('CD Quality').last);
         await tester.pumpAndSettle();
-        expect(find.text('SAVE PATHS'), findsOneWidget);
-        await tester.tap(find.text('SAVE PATHS'));
+        // Applied at once: no Save button.
+        expect(find.text('CD Quality'), findsOneWidget);
         await settle(
           tester,
           () => config.config.sources.defaultQuality == 'cd',
