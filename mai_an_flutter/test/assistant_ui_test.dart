@@ -396,41 +396,51 @@ void main() {
           ),
         );
 
-        // Enter API key + pick Casual Mate preset -> floating save button appears.
+        // Enter API key + pick Casual Mate preset: their Save rows turn on.
         await tester.enterText(
           find.byKey(const ValueKey('gemini_api_key')),
           'AIzaTestKey',
         );
+        await tester.ensureVisible(find.text('Casual Mate'));
         await tester.tap(find.text('Casual Mate'));
         await tester.pumpAndSettle();
-        expect(find.text('SAVE ASSISTANT SETTINGS'), findsOneWidget);
 
         // Test Connection -> succeeds and refreshes Gemini models.
+        await tester.ensureVisible(find.text('Test Connection'));
         await tester.tap(find.text('Test Connection'));
         await tester.pumpAndSettle();
         expect(listCalls, 1);
         expect(find.text('✓ gemini connection OK.'), findsOneWidget);
 
-        // Dismiss SnackBar so it doesn't obscure the floating save button.
         ScaffoldMessenger.of(
           tester.element(find.byType(AssistantSettingsGroup)),
         ).hideCurrentSnackBar();
         await tester.pumpAndSettle();
 
-        // Save writes [assistant] into config.toml.
-        await tester.tap(find.text('SAVE ASSISTANT SETTINGS'));
-        for (var i = 0; i < 40; i++) {
-          await tester.runAsync(
-            () => Future<void>.delayed(const Duration(milliseconds: 10)),
-          );
-          await tester.pump(const Duration(milliseconds: 20));
-          if (config.config.assistant.geminiApiKey == 'AIzaTestKey') break;
+        // Each Save row writes its own part of [assistant].
+        Future<void> saveAndWait(String row, bool Function() done) async {
+          await tester.ensureVisible(find.text(row));
+          await tester.tap(find.text(row));
+          for (var i = 0; i < 40; i++) {
+            await tester.runAsync(
+              () => Future<void>.delayed(const Duration(milliseconds: 10)),
+            );
+            await tester.pump(const Duration(milliseconds: 20));
+            if (done()) break;
+          }
         }
+
+        await saveAndWait(
+          'Save API Key',
+          () => config.config.assistant.geminiApiKey == 'AIzaTestKey',
+        );
+        await saveAndWait(
+          'Save Directive',
+          () => config.config.assistant.personalityPrompt.contains('mate'),
+        );
         final saved = readToml()['assistant']! as Map<String, Object?>;
         expect(saved['gemini_api_key'], 'AIzaTestKey');
-        expect(saved['llm_provider'], 'gemini');
         expect(saved['personality_prompt'], contains('mate'));
-        expect(saved['research_mode'], 'hybrid');
       },
     );
 

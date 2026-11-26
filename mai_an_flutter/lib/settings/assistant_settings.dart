@@ -1,17 +1,17 @@
 import 'dart:async';
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../assistant/llm_engine.dart';
-import '../ui/frost.dart';
-import '../ui/sliding_segmented.dart';
 import '../ui/tokens.dart';
-import 'groups.dart';
+import 'settings_kit.dart';
 import 'settings_page.dart';
 
 /// settings.py `_build_assistant_group`, `_save_assistant_settings`,
 /// `_test_assistant_connection_async`, and `_refresh_gemini_models`.
+///
+/// The switch, provider and pickers apply at once; typed values (the API
+/// key, the local server, the directive) each have a Save row.
 class AssistantSettingsGroup extends StatefulWidget {
   const AssistantSettingsGroup({
     super.key,
@@ -86,7 +86,9 @@ class _AssistantSettingsGroupState extends State<AssistantSettingsGroup> {
   final _ollamaUrl = TextEditingController();
   final _ollamaModel = TextEditingController();
   final _personality = TextEditingController();
-  late Map<String, Object?> _baseline;
+
+  /// The typed values as last saved.
+  late String _baseKey, _baseUrl, _baseOllamaModel, _basePersonality;
   bool _loadingModels = false;
   bool _testing = false;
 
@@ -108,20 +110,19 @@ class _AssistantSettingsGroupState extends State<AssistantSettingsGroup> {
     _provider = a.llmProvider.isEmpty ? 'gemini' : a.llmProvider;
     _model = a.geminiModel.isEmpty ? defaultGeminiModel : a.geminiModel;
     _researchMode = a.researchMode.isEmpty ? 'hybrid' : a.researchMode;
-    _apiKey.text = a.geminiApiKey;
-    _ollamaUrl.text = a.ollamaEndpoint.isEmpty
+    _apiKey.text = _baseKey = a.geminiApiKey;
+    _ollamaUrl.text = _baseUrl = a.ollamaEndpoint.isEmpty
         ? defaultOllamaEndpoint
         : a.ollamaEndpoint;
-    _ollamaModel.text = a.ollamaModel.isEmpty
+    _ollamaModel.text = _baseOllamaModel = a.ollamaModel.isEmpty
         ? defaultOllamaModel
         : a.ollamaModel;
-    _personality.text = a.personalityPrompt;
+    _personality.text = _basePersonality = a.personalityPrompt;
     _modelOptions = [
       (defaultGeminiModel, '$defaultGeminiModel (default)'),
       ('gemini-3.5-flash', 'gemini-3.5-flash'),
     ];
     _ensureModelOption(_model);
-    _baseline = _snapshot();
   }
 
   void _ensureModelOption(String modelId, [String note = '']) {
@@ -129,18 +130,12 @@ class _AssistantSettingsGroupState extends State<AssistantSettingsGroup> {
     _modelOptions = [..._modelOptions, (modelId, '$modelId$note')];
   }
 
-  Map<String, Object?> _snapshot() => {
-    'llm_enabled': _llmEnabled,
-    'provider': _provider,
-    'api_key': _apiKey.text.trim(),
-    'model': _model,
-    'research_mode': _researchMode,
-    'ollama_url': _ollamaUrl.text.trim(),
-    'ollama_model': _ollamaModel.text.trim(),
-    'personality': _personality.text.trim(),
-  };
-
-  bool get _dirty => !mapEquals(_snapshot(), _baseline);
+  bool get _keyDirty => _apiKey.text.trim() != _baseKey.trim();
+  bool get _serverDirty =>
+      _ollamaUrl.text.trim() != _baseUrl.trim() ||
+      _ollamaModel.text.trim() != _baseOllamaModel.trim();
+  bool get _personalityDirty =>
+      _personality.text.trim() != _basePersonality.trim();
 
   void _changed() => setState(() {});
 
@@ -153,29 +148,59 @@ class _AssistantSettingsGroupState extends State<AssistantSettingsGroup> {
     super.dispose();
   }
 
-  Future<void> _save() async {
-    await d.config.update({
-      'assistant': {
-        'llm_enabled': _llmEnabled,
-        'llm_provider': _provider.isEmpty ? 'gemini' : _provider,
-        'gemini_api_key': _apiKey.text.trim(),
-        'gemini_model': _model.isEmpty ? defaultGeminiModel : _model,
-        'research_mode': _researchMode.isEmpty ? 'hybrid' : _researchMode,
-        'ollama_endpoint': _ollamaUrl.text.trim().isEmpty
-            ? defaultOllamaEndpoint
-            : _ollamaUrl.text.trim(),
-        'ollama_model': _ollamaModel.text.trim().isEmpty
-            ? defaultOllamaModel
-            : _ollamaModel.text.trim(),
-        'personality_prompt': _personality.text.trim(),
-      },
-    });
+  Future<void> _write(Map<String, Object?> assistant) =>
+      d.config.update({'assistant': assistant});
+
+  Future<void> _onEnabled(bool v) async {
+    setState(() => _llmEnabled = v);
+    await _write({'llm_enabled': v});
+  }
+
+  Future<void> _onProvider(String v) async {
+    setState(() => _provider = v);
+    await _write({'llm_provider': v});
+  }
+
+  Future<void> _onModel(String v) async {
+    setState(() => _model = v);
+    await _write({'gemini_model': v});
+  }
+
+  Future<void> _onResearchMode(String v) async {
+    setState(() => _researchMode = v);
+    await _write({'research_mode': v});
+  }
+
+  Future<void> _saveKey() async {
+    final key = _apiKey.text.trim();
+    await _write({'gemini_api_key': key});
     if (!mounted) return;
-    setState(() => _baseline = _snapshot());
-    showSettingsSnack(
-      context,
-      'Jarvis AI Assistant settings saved successfully.',
-    );
+    setState(() => _baseKey = key);
+    showSettingsSnack(context, 'Gemini API key saved.');
+  }
+
+  Future<void> _saveServer() async {
+    final url = _ollamaUrl.text.trim().isEmpty
+        ? defaultOllamaEndpoint
+        : _ollamaUrl.text.trim();
+    final model = _ollamaModel.text.trim().isEmpty
+        ? defaultOllamaModel
+        : _ollamaModel.text.trim();
+    await _write({'ollama_endpoint': url, 'ollama_model': model});
+    if (!mounted) return;
+    setState(() {
+      _baseUrl = _ollamaUrl.text = url;
+      _baseOllamaModel = _ollamaModel.text = model;
+    });
+    showSettingsSnack(context, 'Local server saved.');
+  }
+
+  Future<void> _savePersonality() async {
+    final text = _personality.text.trim();
+    await _write({'personality_prompt': text});
+    if (!mounted) return;
+    setState(() => _basePersonality = text);
+    showSettingsSnack(context, 'System directive saved.');
   }
 
   Future<void> _refreshModels({bool announce = true}) async {
@@ -278,357 +303,191 @@ class _AssistantSettingsGroupState extends State<AssistantSettingsGroup> {
     }
   }
 
-  Future<void> _pickModel() async {
-    final accent = Theme.of(context).colorScheme.primary;
-    final picked = await showFrostedSheet<String>(
-      context: context,
-      showDragHandle: true,
-      isScrollControlled: true,
-      builder: (ctx) => SafeArea(
-        child: ConstrainedBox(
-          constraints: BoxConstraints(
-            maxHeight: MediaQuery.sizeOf(ctx).height * 0.6,
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Padding(
-                padding: EdgeInsets.fromLTRB(20, 4, 20, 12),
-                child: Text(
-                  'Gemini Model',
-                  style: TextStyle(
-                    color: Tokens.text,
-                    fontSize: 16,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-              ),
-              Flexible(
-                child: ListView(
-                  shrinkWrap: true,
-                  children: [
-                    for (final (id, label) in _modelOptions)
-                      ListTile(
-                        title: Text(
-                          label,
-                          style: TextStyle(
-                            color: id == _model ? accent : Tokens.text,
-                            fontWeight: id == _model
-                                ? FontWeight.w600
-                                : FontWeight.normal,
-                            fontSize: 14,
-                          ),
-                        ),
-                        trailing: id == _model
-                            ? Icon(Icons.check_rounded, color: accent, size: 20)
-                            : null,
-                        onTap: () => Navigator.pop(ctx, id),
-                      ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 8),
-            ],
-          ),
-        ),
-      ),
-    );
-    if (picked != null && mounted) setState(() => _model = picked);
-  }
-
-  Future<void> _pickResearchMode() async {
-    final accent = Theme.of(context).colorScheme.primary;
-    final picked = await showFrostedSheet<String>(
-      context: context,
-      showDragHandle: true,
-      builder: (ctx) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Padding(
-              padding: EdgeInsets.fromLTRB(20, 4, 20, 12),
-              child: Text(
-                'Artist Research Paradigm',
-                style: TextStyle(
-                  color: Tokens.text,
-                  fontSize: 16,
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-            ),
-            for (final (id, title, subtitle) in _researchModeOptions)
-              ListTile(
-                title: Text(
-                  title,
-                  style: TextStyle(
-                    color: id == _researchMode ? accent : Tokens.text,
-                    fontWeight: id == _researchMode
-                        ? FontWeight.w600
-                        : FontWeight.normal,
-                    fontSize: 14,
-                  ),
-                ),
-                subtitle: Text(
-                  subtitle,
-                  style: const TextStyle(color: Tokens.dim, fontSize: 12),
-                ),
-                trailing: id == _researchMode
-                    ? Icon(Icons.check_rounded, color: accent, size: 20)
-                    : null,
-                onTap: () => Navigator.pop(ctx, id),
-              ),
-            const SizedBox(height: 8),
-          ],
-        ),
-      ),
-    );
-    if (picked != null && mounted) setState(() => _researchMode = picked);
-  }
-
-  String get _researchLabel => _researchModeOptions
-      .firstWhere(
-        (o) => o.$1 == _researchMode,
-        orElse: () => _researchModeOptions.first,
-      )
-      .$2;
-
-  String get _modelLabel => _modelOptions
-      .firstWhere((o) => o.$1 == _model, orElse: () => (_model, _model))
-      .$2;
+  static final _researchOptions = [
+    for (final (id, title, subtitle) in _researchModeOptions)
+      SettingsOption(id, title, subtitle: subtitle),
+  ];
 
   @override
   Widget build(BuildContext context) {
     final accent = Theme.of(context).colorScheme.primary;
     final isGemini = _provider.toLowerCase() == 'gemini';
+    final spinner = SizedBox(
+      width: 18,
+      height: 18,
+      child: CircularProgressIndicator(strokeWidth: 2, color: accent),
+    );
 
     return GroupBody(
-      spacing: 20,
-      onSave: _dirty ? _save : null,
-      saveLabel: 'SAVE ASSISTANT SETTINGS',
-      saveIcon: Icons.smart_toy_rounded,
+      spacing: 26,
       children: [
-        // 1. Intelligence & Provider
-        LegacySettingsSection(
-          label: 'JARVIS INTELLIGENCE',
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              InsetSwitchRow(
-                label: 'Enable LLM Agent Intelligence',
-                subtitle:
-                    'Conversational AI, smart playlist curation & library analysis',
-                value: _llmEnabled,
-                onChanged: (v) => setState(() => _llmEnabled = v),
-              ),
-              const Padding(
-                padding: EdgeInsets.symmetric(vertical: 12),
-                child: Divider(height: 1, color: Tokens.borderSubtle),
-              ),
-              const Text(
-                'AI Provider',
-                style: TextStyle(
-                  color: Tokens.dim,
-                  fontSize: 12,
-                  fontWeight: FontWeight.w600,
+        SettingsSection(
+          header: 'Jarvis Intelligence',
+          children: [
+            SettingsTile.toggle(
+              title: 'Enable LLM Agent Intelligence',
+              subtitle:
+                  'Conversational AI, smart playlist curation & library '
+                  'analysis',
+              value: _llmEnabled,
+              onChanged: _onEnabled,
+            ),
+            SettingsSegmentedTile<String>(
+              title: 'AI Provider',
+              inline: false,
+              value: isGemini ? 'gemini' : 'ollama',
+              onChanged: _onProvider,
+              options: const [
+                SettingsOption(
+                  'gemini',
+                  'Google Gemini',
+                  icon: Icons.auto_awesome_rounded,
                 ),
-              ),
-              const SizedBox(height: 8),
-              SlidingSegmented<String>(
-                selected: isGemini ? 'gemini' : 'ollama',
-                accent: accent,
-                onSelect: (v) => setState(() => _provider = v),
-                segments: const [
-                  Segment(
-                    value: 'gemini',
-                    label: 'Google Gemini',
-                    icon: Icons.auto_awesome_rounded,
-                  ),
-                  Segment(
-                    value: 'ollama',
-                    label: 'Local Server',
-                    icon: Icons.dns_rounded,
-                  ),
-                ],
-              ),
-            ],
-          ),
+                SettingsOption(
+                  'ollama',
+                  'Local Server',
+                  icon: Icons.dns_rounded,
+                ),
+              ],
+            ),
+          ],
         ),
-
-        // 2. Connection
-        LegacySettingsSection(
-          label: isGemini
-              ? 'GEMINI CONNECTION'
-              : 'LOCAL SERVER (OLLAMA / LM STUDIO)',
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
+        if (isGemini)
+          SettingsSection(
+            header: 'Gemini Connection',
+            footer:
+                'Free-tier API keys can be generated at aistudio.google.com '
+                'with no credit card.',
             children: [
-              if (isGemini) ...[
-                ModernTextField(
+              SettingsCustomTile(
+                child: ModernTextField(
                   fieldKey: const ValueKey('gemini_api_key'),
                   label: 'Google Gemini API Key',
                   controller: _apiKey,
                   hint: 'Paste your key from aistudio.google.com',
                   obscureToggle: true,
                 ),
-                const SizedBox(height: 6),
-                const Dim(
-                  'Free-tier API keys can be generated at aistudio.google.com with no credit card.',
-                  size: 11,
-                ),
-                const Padding(
-                  padding: EdgeInsets.symmetric(vertical: 12),
-                  child: Divider(height: 1, color: Tokens.borderSubtle),
-                ),
-                Row(
+              ),
+              SettingsTile.action(
+                leading: const SettingsIcon(Icons.key_rounded),
+                title: 'Save API Key',
+                onTap: _keyDirty ? _saveKey : null,
+              ),
+              SettingsPickerTile<String>(
+                title: 'Gemini Model',
+                value: _model,
+                options: [
+                  for (final (id, label) in _modelOptions)
+                    SettingsOption(id, label),
+                ],
+                onChanged: _onModel,
+              ),
+              SettingsTile(
+                leading: const SettingsIcon(Icons.refresh_rounded),
+                title: 'Load Available Models',
+                subtitle: 'The models your key can use',
+                trailing: _loadingModels ? spinner : null,
+                onTap: _loadingModels
+                    ? null
+                    : () => unawaited(_refreshModels()),
+              ),
+              SettingsPickerTile<String>(
+                title: 'Research Paradigm',
+                subtitle: 'How Jarvis researches artists & genres',
+                sheetTitle: 'Artist Research Paradigm',
+                value: _researchMode,
+                options: _researchOptions,
+                onChanged: _onResearchMode,
+              ),
+              _testRow(spinner),
+            ],
+          )
+        else
+          SettingsSection(
+            header: 'Local Server (Ollama / LM Studio)',
+            children: [
+              SettingsCustomTile(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    Expanded(
-                      child: SettingsPickerRow(
-                        label: 'Gemini Model',
-                        valueText: _modelLabel,
-                        onTap: _pickModel,
-                      ),
+                    ModernTextField(
+                      label: 'Local Endpoint URL',
+                      controller: _ollamaUrl,
+                      hint: defaultOllamaEndpoint,
                     ),
-                    const SizedBox(width: 4),
-                    IconButton(
-                      icon: _loadingModels
-                          ? SizedBox(
-                              width: 18,
-                              height: 18,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                                color: accent,
-                              ),
-                            )
-                          : const Icon(Icons.refresh_rounded, size: 20),
-                      color: accent,
-                      tooltip: 'Load the models your key can use',
-                      onPressed: _loadingModels
-                          ? null
-                          : () => unawaited(_refreshModels()),
+                    const SizedBox(height: 14),
+                    ModernTextField(
+                      label: 'Local Model Name',
+                      controller: _ollamaModel,
+                      hint: defaultOllamaModel,
                     ),
                   ],
                 ),
-                const Divider(height: 1, color: Tokens.borderSubtle),
-                SettingsPickerRow(
-                  label: 'Research Paradigm',
-                  subtitle: 'How Jarvis researches artists & genres',
-                  valueText: _researchLabel,
-                  onTap: _pickResearchMode,
-                ),
-              ] else ...[
-                ModernTextField(
-                  label: 'Local Endpoint URL',
-                  controller: _ollamaUrl,
-                  hint: defaultOllamaEndpoint,
-                ),
-                const SizedBox(height: 14),
-                ModernTextField(
-                  label: 'Local Model Name',
-                  controller: _ollamaModel,
-                  hint: defaultOllamaModel,
-                ),
-              ],
-              const SizedBox(height: 14),
-              Align(
-                alignment: Alignment.centerLeft,
-                child: Material(
-                  color: accent.withValues(alpha: 0.14),
-                  borderRadius: BorderRadius.circular(12),
-                  child: InkWell(
-                    borderRadius: BorderRadius.circular(12),
-                    onTap: _testing ? null : () => unawaited(_testConnection()),
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 14,
-                        vertical: 10,
-                      ),
-                      decoration: BoxDecoration(
-                        borderRadius: BorderRadius.circular(12),
-                        border: Border.all(
-                          color: accent.withValues(alpha: 0.4),
-                        ),
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          if (_testing)
-                            SizedBox(
-                              width: 15,
-                              height: 15,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                                color: accent,
-                              ),
-                            )
-                          else
-                            Icon(
-                              Icons.wifi_tethering_rounded,
-                              size: 17,
-                              color: accent,
-                            ),
-                          const SizedBox(width: 8),
-                          Text(
-                            _testing ? 'Testing…' : 'Test Connection',
-                            style: TextStyle(
-                              color: accent,
-                              fontSize: 13,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
               ),
+              SettingsTile.action(
+                leading: const SettingsIcon(Icons.save_rounded),
+                title: 'Save Server',
+                onTap: _serverDirty ? _saveServer : null,
+              ),
+              _testRow(spinner),
             ],
           ),
-        ),
-
-        // 3. Personality & System Directive
-        LegacySettingsSection(
-          label: 'PERSONALITY & DIRECTIVE',
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              const Dim(
-                'Customize how Jarvis addresses you, speaks, or behaves. Standard tool-calling directives remain active.',
-                size: 12,
-              ),
-              const SizedBox(height: 12),
-              ModernTextField(
-                label: 'System Directive Prompt',
-                controller: _personality,
-                minLines: 3,
-                maxLines: 6,
-                hint:
-                    "You are Jarvis, a concise, sophisticated AI assistant embedded in the Mai An Lab high-fidelity music app. Address the user as 'sir'.",
-              ),
-              const SizedBox(height: 12),
-              Wrap(
-                spacing: 8,
-                runSpacing: 8,
+        SettingsSection(
+          header: 'Personality & Directive',
+          footer:
+              'Customize how Jarvis addresses you, speaks, or behaves. '
+              'Standard tool-calling directives remain active.',
+          children: [
+            SettingsCustomTile(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  for (final (label, text, muted) in _personalityPresets)
-                    _PresetChip(
-                      label: label,
-                      selected: !muted && _personality.text.trim() == text,
-                      muted: muted,
-                      accent: accent,
-                      onTap: () => _personality.text = text,
-                    ),
+                  ModernTextField(
+                    label: 'System Directive Prompt',
+                    controller: _personality,
+                    minLines: 3,
+                    maxLines: 6,
+                    hint:
+                        "You are Jarvis, a concise, sophisticated AI "
+                        "assistant embedded in the Mai An Lab high-fidelity "
+                        "music app. Address the user as 'sir'.",
+                  ),
+                  const SizedBox(height: 12),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      for (final (label, text, muted) in _personalityPresets)
+                        _PresetChip(
+                          label: label,
+                          selected: !muted && _personality.text.trim() == text,
+                          muted: muted,
+                          accent: accent,
+                          onTap: () => _personality.text = text,
+                        ),
+                    ],
+                  ),
                 ],
               ),
-            ],
-          ),
+            ),
+            SettingsTile.action(
+              leading: const SettingsIcon(Icons.save_rounded),
+              title: 'Save Directive',
+              onTap: _personalityDirty ? _savePersonality : null,
+            ),
+          ],
         ),
-
-        const SizedBox(height: 50),
       ],
     );
   }
+
+  Widget _testRow(Widget spinner) => SettingsTile(
+    leading: const SettingsIcon(Icons.wifi_tethering_rounded),
+    title: _testing ? 'Testing…' : 'Test Connection',
+    subtitle: 'Uses what is typed above, saved or not',
+    trailing: _testing ? spinner : null,
+    onTap: _testing ? null : () => unawaited(_testConnection()),
+  );
 }
 
 class _PresetChip extends StatelessWidget {

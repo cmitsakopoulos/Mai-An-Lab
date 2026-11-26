@@ -15,6 +15,7 @@ import 'package:mai_an_lab/library/library_controller.dart';
 import 'package:mai_an_lab/library/track_query.dart';
 import 'package:mai_an_lab/player/player_controller.dart';
 import 'package:mai_an_lab/settings/config_controller.dart';
+import 'package:mai_an_lab/settings/settings_kit.dart';
 import 'package:mai_an_lab/settings/settings_page.dart';
 import 'package:mai_an_lab/ui/tokens.dart';
 import 'package:sqlite3/sqlite3.dart';
@@ -440,61 +441,78 @@ void main() {
       'Authentication saves Qobuz and Deezer credentials independently',
       (tester) async {
         await pumpSettings(tester, initial: SettingsPage.account, height: 1400);
-        expect(find.text('Streaming Credentials'), findsOneWidget);
-        expect(find.text('SAVE CREDENTIALS'), findsNothing);
+        expect(find.text('QOBUZ ACCOUNT'), findsOneWidget);
+        SettingsTile row(String t) =>
+            tester.widget<SettingsTile>(find.widgetWithText(SettingsTile, t));
+        // Nothing typed: both Save rows are off.
+        expect(row('Save Qobuz').onTap, isNull);
+        expect(row('Save Deezer').onTap, isNull);
 
         // Save Deezer ARL alone (without needing Qobuz credentials)
         await tester.enterText(
-          find.widgetWithText(TextField, 'Deezer ARL Cookie'),
+          find.byKey(const ValueKey('deezer_arl')),
           'arl_secret_cookie_123',
         );
         await tester.pump();
-        expect(find.text('SAVE CREDENTIALS'), findsOneWidget);
-        await tester.tap(find.text('SAVE CREDENTIALS'));
+        expect(row('Save Deezer').onTap, isNotNull);
+        expect(row('Save Qobuz').onTap, isNull);
+        await tester.ensureVisible(find.text('Save Deezer'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Save Deezer'));
         await settle(
           tester,
           () => config.config.sources.deezer.arl == 'arl_secret_cookie_123',
         );
         expect((fileToml()['deezer']! as Map)['arl'], 'arl_secret_cookie_123');
         expect(find.text('Deezer credentials updated.'), findsOneWidget);
-        expect(find.text('SAVE CREDENTIALS'), findsNothing);
+        expect(row('Save Deezer').onTap, isNull);
 
-        // Clear floating SnackBar so it doesn't obscure the floating save pill.
         ScaffoldMessenger.of(
           tester.element(find.byType(SettingsScreen)),
         ).clearSnackBars();
         await tester.pumpAndSettle();
 
-        // Save Qobuz credentials alongside Deezer
+        // The token switch applies at once.
+        await tester.ensureVisible(
+          find.text('Use Session Token Authentication'),
+        );
+        await tester.pumpAndSettle();
+        bool? useToken() =>
+            (fileToml()['qobuz'] as Map?)?['use_auth_token'] as bool?;
+        final before = useToken() ?? true;
+        await tester.tap(find.text('Use Session Token Authentication'));
+        await settle(tester, () => useToken() == !before);
+        expect(useToken(), !before);
+        await tester.tap(find.text('Use Session Token Authentication'));
+        await settle(tester, () => useToken() == before);
+
+        // Qobuz credentials, saved on their own.
         await tester.enterText(
-          find.widgetWithText(TextField, 'Qobuz User ID'),
+          find.byKey(const ValueKey('qobuz_uid')),
           '987654',
         );
         await tester.enterText(
-          find.widgetWithText(TextField, 'Auth Token / Password Hash'),
+          find.byKey(const ValueKey('qobuz_token')),
           'tok_abc',
         );
         await tester.pump();
-        await tester.tap(find.text('SAVE CREDENTIALS'));
+        await tester.ensureVisible(find.text('Save Qobuz'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Save Qobuz'));
         await settle(
           tester,
           () =>
               config.config.sources.qobuz.emailOrUserid == '987654' &&
-              find
-                  .text('Qobuz & Deezer credentials updated.')
-                  .evaluate()
-                  .isNotEmpty,
+              find.text('Qobuz credentials updated.').evaluate().isNotEmpty,
         );
         final q = fileToml()['qobuz']! as Map;
         expect(q['email_or_userid'], '987654');
         expect(q['password_or_token'], 'tok_abc');
-        expect(q['use_auth_token'], false);
+        expect(q['use_auth_token'], before);
         expect(q['app_id'], '312369995');
         expect(q['secrets'], ['e79f8b9be485692b0e5f9dd895826368']);
-        expect(
-          find.text('Qobuz & Deezer credentials updated.'),
-          findsOneWidget,
-        );
+        expect(find.text('Qobuz credentials updated.'), findsOneWidget);
+        expect((fileToml()['deezer']! as Map)['arl'], 'arl_secret_cookie_123');
       },
     );
 

@@ -742,3 +742,111 @@ class SettingsCustomTile extends StatelessWidget {
     ),
   );
 }
+
+/// A text field with its label stacked above the box and optional help
+/// under it; for typed values (credentials, prompts), inside a
+/// [SettingsCustomTile]. [obscureToggle] hides the text behind an eye.
+class ModernTextField extends StatefulWidget {
+  const ModernTextField({
+    super.key,
+    required this.label,
+    required this.controller,
+    this.hint,
+    this.minLines = 1,
+    this.maxLines = 1,
+    this.obscureToggle = false,
+    this.fieldKey,
+    this.help,
+  });
+
+  final String label;
+  final TextEditingController controller;
+  final String? hint;
+  final int minLines;
+  final int maxLines;
+  final bool obscureToggle;
+  final Key? fieldKey;
+
+  /// A dim line under the box.
+  final String? help;
+
+  @override
+  State<ModernTextField> createState() => _ModernTextFieldState();
+}
+
+class _ModernTextFieldState extends State<ModernTextField> {
+  late bool _obscured = widget.obscureToggle;
+
+  @override
+  Widget build(BuildContext context) {
+    final accent = Theme.of(context).colorScheme.primary;
+    OutlineInputBorder border(Color c, [double width = 1.0]) =>
+        OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: BorderSide(color: c, width: width),
+        );
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(left: 2, bottom: 6),
+          child: Text(
+            widget.label,
+            style: const TextStyle(
+              color: Tokens.dim,
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ),
+        TextField(
+          key: widget.fieldKey,
+          controller: widget.controller,
+          obscureText: _obscured,
+          minLines: _obscured ? 1 : widget.minLines,
+          maxLines: _obscured ? 1 : widget.maxLines,
+          style: const TextStyle(
+            color: Tokens.text,
+            fontSize: 13,
+            height: 1.35,
+          ),
+          decoration: InputDecoration(
+            hintText: widget.hint,
+            hintStyle: const TextStyle(
+              color: Tokens.textTertiary,
+              fontSize: 13,
+            ),
+            filled: true,
+            fillColor: Tokens.surface2,
+            contentPadding: const EdgeInsets.symmetric(
+              horizontal: 14,
+              vertical: 12,
+            ),
+            enabledBorder: border(Tokens.borderSubtle),
+            focusedBorder: border(accent, 1.3),
+            border: border(Tokens.borderSubtle),
+            suffixIcon: widget.obscureToggle
+                ? IconButton(
+                    icon: Icon(
+                      _obscured
+                          ? Icons.visibility_rounded
+                          : Icons.visibility_off_rounded,
+                      size: 18,
+                      color: Tokens.dim,
+                    ),
+                    tooltip: _obscured ? 'Show key' : 'Hide key',
+                    onPressed: () => setState(() => _obscured = !_obscured),
+                  )
+                : null,
+          ),
+        ),
+        if (widget.help != null)
+          Padding(
+            padding: const EdgeInsets.only(left: 2, top: 6),
+            child: Text(widget.help!, style: SettingsStyle.subtitle),
+          ),
+      ],
+    );
+  }
+}

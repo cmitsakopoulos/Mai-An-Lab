@@ -70,8 +70,8 @@ Page shell: `GroupBody(spacing: 26, children: [sections…])`.
 | 2 | Kit, plus Appearance rebuilt | done | 431c484 |
 | 3 | Haptics, Permissions, Advanced, About | done | 004071b |
 | 4 | Storage & Paths, Database | done | 03f180a |
-| 5 | Audio & DSP | built, awaiting phone check | |
-| 6 | Account, AI Assistant | todo | |
+| 5 | Audio & DSP | done | 7054d02 |
+| 6 | Account, AI Assistant | done | (see git log) |
 | 7 | Companion & Sync | todo | |
 | 8 | Cleanup and row-level search | todo | |
 
@@ -138,6 +138,15 @@ section (tap applies, trash deletes after `confirmDelete`).
 - Tests: `assistant_ui_test.dart` and `settings_test.dart` ("Authentication
   saves Qobuz and Deezer credentials independently") look up labels and the
   save button by their text. Update them with the UI.
+
+**As built:** `ModernTextField` moved into the kit (with a `help:` line).
+Account: Qobuz and Deezer are separate forms with 'Save Qobuz' / 'Save
+Deezer' rows (dimmed until something is typed); the API-key section is
+saved with Save Qobuz; the token switch applies at once; token and ARL
+fields are obscured behind an eye. Assistant: the switch, provider, model
+and research mode apply at once; the API key, local server and directive
+each have a Save row ('Save API Key', 'Save Server', 'Save Directive');
+Load Available Models and Test Connection are rows.
 
 ### 7. Companion & Sync (`sync_hub.dart`)
 - It has its own `card([...])` helper over `SettingsCard`, and a custom

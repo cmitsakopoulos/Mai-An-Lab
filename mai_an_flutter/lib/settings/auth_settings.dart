@@ -1,12 +1,13 @@
 import 'package:flutter/material.dart';
 
 import '../sources/source_config.dart';
-import '../ui/app_switch.dart';
 import '../ui/tokens.dart';
+import 'settings_kit.dart';
 import 'settings_page.dart';
 
 /// Port of `StreamripApp/ui/views/settings.py` `_build_auth_group` and
-/// `_save_account_credentials`.
+/// `_save_account_credentials`. Each source is its own form with its own
+/// Save row; the session-token switch applies at once.
 class AuthGroup extends StatefulWidget {
   const AuthGroup({super.key, required this.deps});
 
@@ -29,7 +30,6 @@ class _AuthGroupState extends State<AuthGroup> {
   String _baseAppId = '';
   String _baseAppSecret = '';
   String _baseArl = '';
-  bool _baseUseToken = true;
 
   SettingsDeps get d => widget.deps;
 
@@ -65,342 +65,196 @@ class _AuthGroupState extends State<AuthGroup> {
     _appSecret.text = _baseAppSecret = q.secrets.isNotEmpty
         ? q.secrets.first
         : kQobuzDefaultSecret;
-    _useToken = _baseUseToken = hasUseTokenKey ? q.useAuthToken : true;
+    _useToken = hasUseTokenKey ? q.useAuthToken : true;
     _arl.text = _baseArl = dz.arl;
   }
 
   void _changed() => setState(() {});
 
-  bool get _dirty =>
+  bool get _qobuzDirty =>
       _uid.text != _baseUid ||
       _token.text != _baseToken ||
       _appId.text != _baseAppId ||
-      _appSecret.text != _baseAppSecret ||
-      _useToken != _baseUseToken ||
-      _arl.text != _baseArl;
+      _appSecret.text != _baseAppSecret;
 
-  Future<void> _save() async {
+  bool get _deezerDirty => _arl.text != _baseArl;
+
+  Future<void> _onUseToken(bool v) async {
+    setState(() => _useToken = v);
+    await d.config.update({
+      'qobuz': {'use_auth_token': v},
+    });
+  }
+
+  Future<void> _saveQobuz() async {
     final uid = _uid.text.trim();
     final token = _token.text.trim();
-    final arl = _arl.text.trim();
-    final hadArl = _baseArl.trim().isNotEmpty;
-
-    final saved = <String>[];
-    final problems = <String>[];
-
-    if (uid.isNotEmpty && token.isNotEmpty) {
-      final appId = _appId.text.trim().isNotEmpty
-          ? _appId.text.trim()
-          : kQobuzDefaultAppId;
-      final appSecret = _appSecret.text.trim().isNotEmpty
-          ? _appSecret.text.trim()
-          : kQobuzDefaultSecret;
-      final ok = await d.config.update({
-        'qobuz': {
-          'use_auth_token': _useToken,
-          'email_or_userid': uid,
-          'password_or_token': token,
-          'app_id': appId,
-          'secrets': [appSecret],
-        },
-      });
-      if (ok) {
-        saved.add('Qobuz');
-      } else {
-        problems.add('Qobuz save failed');
-      }
-    } else if (uid.isNotEmpty || token.isNotEmpty) {
-      problems.add('Qobuz needs both a User ID and a token');
+    if (uid.isEmpty || token.isEmpty) {
+      showSettingsSnack(context, 'Qobuz needs both a User ID and a token');
+      return;
     }
-
-    final dzOk = await d.config.update({
-      'deezer': {'arl': arl},
+    final appId = _appId.text.trim().isNotEmpty
+        ? _appId.text.trim()
+        : kQobuzDefaultAppId;
+    final appSecret = _appSecret.text.trim().isNotEmpty
+        ? _appSecret.text.trim()
+        : kQobuzDefaultSecret;
+    final ok = await d.config.update({
+      'qobuz': {
+        'use_auth_token': _useToken,
+        'email_or_userid': uid,
+        'password_or_token': token,
+        'app_id': appId,
+        'secrets': [appSecret],
+      },
     });
-    if (dzOk) {
-      if (arl.isNotEmpty) saved.add('Deezer');
-    } else {
-      problems.add('Deezer save failed');
-    }
-
     if (!mounted) return;
+    if (!ok) {
+      showSettingsSnack(context, 'Qobuz save failed');
+      return;
+    }
     setState(() {
       _baseUid = _uid.text;
       _baseToken = _token.text;
       _baseAppId = _appId.text;
       _baseAppSecret = _appSecret.text;
-      _baseUseToken = _useToken;
-      _baseArl = _arl.text;
     });
+    showSettingsSnack(context, 'Qobuz credentials updated.');
+  }
 
-    if (problems.isNotEmpty) {
-      final prefix = saved.isNotEmpty ? 'Saved ${saved.join(' & ')}. ' : '';
-      showSettingsSnack(context, '$prefix${problems.join('; ')}');
-    } else if (saved.isNotEmpty) {
-      showSettingsSnack(context, '${saved.join(' & ')} credentials updated.');
-    } else if (hadArl && arl.isEmpty) {
+  Future<void> _saveDeezer() async {
+    final arl = _arl.text.trim();
+    final hadArl = _baseArl.trim().isNotEmpty;
+    final ok = await d.config.update({
+      'deezer': {'arl': arl},
+    });
+    if (!mounted) return;
+    if (!ok) {
+      showSettingsSnack(context, 'Deezer save failed');
+      return;
+    }
+    setState(() => _baseArl = _arl.text);
+    if (arl.isNotEmpty) {
+      showSettingsSnack(context, 'Deezer credentials updated.');
+    } else if (hadArl) {
       showSettingsSnack(context, 'Deezer ARL cleared.');
     }
   }
 
-  InputDecoration _decoration(
-    BuildContext context, {
-    required String label,
-    required String hint,
-    Color? focusColor,
-  }) {
-    final accent = focusColor ?? Theme.of(context).colorScheme.primary;
-    OutlineInputBorder border(Color c) => OutlineInputBorder(
-      borderRadius: BorderRadius.circular(10),
-      borderSide: BorderSide(color: c),
-    );
-    return InputDecoration(
-      labelText: label,
-      hintText: hint,
-      labelStyle: TextStyle(color: accent, fontSize: 11),
-      hintStyle: const TextStyle(color: Tokens.dim, fontSize: 13),
-      filled: true,
-      fillColor: Tokens.surface2,
-      enabledBorder: border(Tokens.border),
-      focusedBorder: border(accent),
-      border: border(Tokens.border),
-      isDense: true,
-    );
-  }
-
-  Widget _sourceHeader(IconData icon, Color color, String title) => Row(
-    children: [
-      Icon(icon, color: color, size: 18),
-      const SizedBox(width: 8),
-      Expanded(
-        child: Text(
-          title,
-          style: const TextStyle(
-            color: Tokens.text,
-            fontSize: 13,
-            fontWeight: FontWeight.bold,
-          ),
-        ),
-      ),
-    ],
-  );
-
   @override
   Widget build(BuildContext context) {
-    final accent = Theme.of(context).colorScheme.primary;
     return GroupBody(
-      onSave: _dirty ? _save : null,
-      saveLabel: 'SAVE CREDENTIALS',
-      saveIcon: Icons.key_rounded,
+      spacing: 26,
       children: [
-        SettingsCard(
-          child: Row(
-            children: [
-              Icon(Icons.lock_person_rounded, color: accent, size: 24),
-              const SizedBox(width: 14),
-              const Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Streaming Credentials',
-                      style: TextStyle(
-                        color: Tokens.text,
-                        fontSize: 15,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                    SizedBox(height: 2),
-                    Dim(
-                      'Sign in to each source you want to search and download '
-                      'from. Both can be configured at once.',
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-        ),
-        SettingsCard(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              _sourceHeader(
-                Icons.account_circle_rounded,
-                Tokens.qobuz,
-                'Qobuz Account',
-              ),
-              const SizedBox(height: 8),
-              const Dim(
-                'Authentication details used to generate valid Qobuz user '
-                'sessions.',
-                size: 11,
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: _uid,
-                style: const TextStyle(color: Tokens.text, fontSize: 13),
-                decoration: _decoration(
-                  context,
-                  label: 'Qobuz User ID',
-                  hint: 'e.g. 1234567',
-                ),
-              ),
-              const SizedBox(height: 6),
-              const Dim(
-                'Your registered Qobuz email address or numeric User ID.',
-                size: 11,
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: _token,
-                style: const TextStyle(color: Tokens.text, fontSize: 13),
-                decoration: _decoration(
-                  context,
-                  label: 'Auth Token / Password Hash',
-                  hint: 'Enter token or MD5 of password',
-                ),
-              ),
-              const SizedBox(height: 6),
-              const Dim(
-                'Pre-hashed MD5 password string or session token.',
-                size: 11,
-              ),
-              const SizedBox(height: 12),
-              Row(
+        SettingsSection(
+          header: 'Qobuz Account',
+          footer:
+              'Authentication details used to generate valid Qobuz user '
+              'sessions.',
+          children: [
+            SettingsCustomTile(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  AppSwitch(
-                    value: _useToken,
-                    onChanged: (v) => setState(() => _useToken = v),
+                  ModernTextField(
+                    fieldKey: const ValueKey('qobuz_uid'),
+                    label: 'Qobuz User ID',
+                    controller: _uid,
+                    hint: 'e.g. 1234567',
+                    help:
+                        'Your registered Qobuz email address or numeric '
+                        'User ID.',
                   ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: GestureDetector(
-                      onTap: () => setState(() => _useToken = !_useToken),
-                      child: const Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            'Use Session Token Authentication',
-                            style: TextStyle(
-                              color: Tokens.text,
-                              fontSize: 12,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                          SizedBox(height: 1),
-                          Dim(
-                            'Bypasses password authentication when a valid '
-                            'token is present.',
-                            size: 11,
-                          ),
-                        ],
-                      ),
-                    ),
+                  const SizedBox(height: 14),
+                  ModernTextField(
+                    fieldKey: const ValueKey('qobuz_token'),
+                    label: 'Auth Token / Password Hash',
+                    controller: _token,
+                    hint: 'Enter token or MD5 of password',
+                    help: 'Pre-hashed MD5 password string or session token.',
+                    obscureToggle: true,
                   ),
                 ],
               ),
-            ],
-          ),
-        ),
-        SettingsCard(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              _sourceHeader(
+            ),
+            SettingsTile.toggle(
+              title: 'Use Session Token Authentication',
+              subtitle:
+                  'Bypasses password authentication when a valid token is '
+                  'present.',
+              value: _useToken,
+              onChanged: _onUseToken,
+            ),
+            SettingsTile.action(
+              leading: const SettingsIcon(
                 Icons.key_rounded,
-                Tokens.qobuz,
-                'Qobuz Developer API Keys',
+                color: Tokens.qobuz,
               ),
-              const SizedBox(height: 8),
-              const Dim(
-                'Qobuz Application ID and Secret required to negotiate API '
-                'sessions.',
-                size: 11,
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: _appId,
-                style: const TextStyle(color: Tokens.text, fontSize: 13),
-                decoration: _decoration(
-                  context,
-                  label: 'Qobuz App ID',
-                  hint: 'Default: $kQobuzDefaultAppId',
-                ),
-              ),
-              const SizedBox(height: 6),
-              const Dim(
-                'Application Identifier registered with the Qobuz developer '
-                'portal.',
-                size: 11,
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: _appSecret,
-                style: const TextStyle(color: Tokens.text, fontSize: 13),
-                decoration: _decoration(
-                  context,
-                  label: 'Qobuz App Secret',
-                  hint: 'Default: $kQobuzDefaultSecret',
-                ),
-              ),
-              const SizedBox(height: 6),
-              const Dim(
-                'Application Secret key paired with your App ID.',
-                size: 11,
-              ),
-            ],
-          ),
+              title: 'Save Qobuz',
+              onTap: _qobuzDirty ? _saveQobuz : null,
+            ),
+          ],
         ),
-        SettingsCard(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              _sourceHeader(
-                Icons.account_circle_rounded,
-                Tokens.deezer,
-                'Deezer Account',
-              ),
-              const SizedBox(height: 8),
-              const Dim(
-                'Deezer authenticates with a single ARL cookie taken from a '
-                'logged-in browser session.',
-                size: 11,
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: _arl,
-                style: const TextStyle(color: Tokens.text, fontSize: 13),
-                decoration: _decoration(
-                  context,
-                  label: 'Deezer ARL Cookie',
-                  hint: 'Long alphanumeric string from your browser cookies',
-                  focusColor: Tokens.deezer,
-                ),
-              ),
-              const SizedBox(height: 6),
-              const Dim(
-                'Browser \u2192 DevTools \u2192 Application \u2192 Cookies '
-                '\u2192 deezer.com \u2192 copy the \'arl\' value.',
-                size: 11,
-              ),
-              const SizedBox(height: 12),
-              const Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
+        SettingsSection(
+          header: 'Qobuz Developer API Keys',
+          footer:
+              'Qobuz Application ID and Secret required to negotiate API '
+              'sessions. Saved with Save Qobuz.',
+          children: [
+            SettingsCustomTile(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  Icon(Icons.info_outline_rounded, color: Tokens.dim, size: 14),
-                  SizedBox(width: 6),
-                  Expanded(
-                    child: Dim(
-                      'FLAC needs a Deezer plan with lossless and 320 kbps MP3 '
-                      'a paid plan. If your plan can\'t serve the quality you '
-                      'pick, downloads drop to the best it can.',
-                      size: 11,
-                    ),
+                  ModernTextField(
+                    fieldKey: const ValueKey('qobuz_app_id'),
+                    label: 'Qobuz App ID',
+                    controller: _appId,
+                    hint: 'Default: $kQobuzDefaultAppId',
+                    help:
+                        'Application Identifier registered with the Qobuz '
+                        'developer portal.',
+                  ),
+                  const SizedBox(height: 14),
+                  ModernTextField(
+                    fieldKey: const ValueKey('qobuz_app_secret'),
+                    label: 'Qobuz App Secret',
+                    controller: _appSecret,
+                    hint: 'Default: $kQobuzDefaultSecret',
+                    help: 'Application Secret key paired with your App ID.',
                   ),
                 ],
               ),
-            ],
-          ),
+            ),
+          ],
+        ),
+        SettingsSection(
+          header: 'Deezer Account',
+          footer:
+              "FLAC needs a Deezer plan with lossless and 320 kbps MP3 a "
+              "paid plan. If your plan can't serve the quality you pick, "
+              'downloads drop to the best it can.',
+          children: [
+            SettingsCustomTile(
+              child: ModernTextField(
+                fieldKey: const ValueKey('deezer_arl'),
+                label: 'Deezer ARL Cookie',
+                controller: _arl,
+                hint: 'Long alphanumeric string from your browser cookies',
+                help:
+                    'Browser → DevTools → Application → '
+                    'Cookies → deezer.com → copy the \'arl\' value.',
+                obscureToggle: true,
+              ),
+            ),
+            SettingsTile.action(
+              leading: const SettingsIcon(
+                Icons.key_rounded,
+                color: Tokens.deezer,
+              ),
+              title: 'Save Deezer',
+              onTap: _deezerDirty ? _saveDeezer : null,
+            ),
+          ],
         ),
       ],
     );
