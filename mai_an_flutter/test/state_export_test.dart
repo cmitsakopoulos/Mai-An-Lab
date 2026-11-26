@@ -1,7 +1,6 @@
-// Phase 4f: state bundles. Flet's test_state_export.py, ported; the ZIP
-// reader and writer; and bundles crossing between the apps: the port
-// imports what Flet's own state_export.py exports and the other way
-// round (needs python3 with the standard library only; skipped without).
+// Phase 4f: state bundles. Flet's test_state_export.py, ported, and the ZIP
+// reader and writer. (The live cross-checks against Flet's state_export.py
+// are on the `flet` branch.)
 import 'dart:convert';
 import 'dart:io';
 
@@ -10,31 +9,6 @@ import 'package:mai_an_lab/core/zip_archive.dart';
 import 'package:mai_an_lab/data/library_repository.dart';
 import 'package:mai_an_lab/data/state_export.dart';
 import 'package:sqlite3/sqlite3.dart';
-
-final _flet = '${Directory.current.parent.path}/StreamripApp';
-
-String? _findPython() {
-  for (final p in [
-    '${Platform.environment['HOME']}/miniconda3/bin/python',
-    '/usr/bin/python3',
-  ]) {
-    if (File(p).existsSync()) return p;
-  }
-  return null;
-}
-
-final _python = _findPython();
-
-/// Runs [code] with Flet's `utils.state_export` importable; returns stdout.
-String _py(String code) {
-  final r = Process.runSync(_python!, [
-    '-c',
-    'import sys; sys.path.insert(0, ${jsonEncode(_flet)})\n'
-        'from utils import state_export\n$code',
-  ]);
-  if (r.exitCode != 0) throw StateError('python: ${r.stderr}');
-  return '${r.stdout}';
-}
 
 late Directory tmp;
 late String dbPath, configPath, bundleDir;
@@ -388,113 +362,5 @@ void main() {
       expect(_titles(dbPath), ['Song']);
       expect(File('${tmp.path}/recent_searches.json').existsSync(), isFalse);
     });
-  });
-
-  group('with Flet', () {
-    // The phone bundles kept for the goldens (gitignored: personal data).
-    final backups = Directory(
-      '${Directory.current.parent.path}/tools/state_backups',
-    );
-    test(
-      'every kept phone bundle reads as Python reads it',
-      () {
-        final zips = [
-          for (final e in backups.listSync())
-            if (e is File && e.path.endsWith('.zip')) e.path,
-        ]..sort();
-        expect(zips, isNotEmpty);
-        for (final zip in zips) {
-          final out = '${tmp.path}/py_${zips.indexOf(zip)}';
-          _py('''
-import zipfile
-zipfile.ZipFile(${jsonEncode(zip)}).extractall(${jsonEncode(out)})
-''');
-          final z = ZipReader(zip);
-          for (final name in z.names) {
-            expect(
-              z.read(name),
-              File('$out/$name').readAsBytesSync(),
-              reason: '$zip: $name',
-            );
-          }
-          z.close();
-          expect(inspectBundle(zip)['bundle_version'], isNotNull, reason: zip);
-        }
-      },
-      skip: _python == null || !backups.existsSync()
-          ? 'no python3 or no kept bundles'
-          : false,
-    );
-
-    test(
-      'Python imports what the port exports',
-      () async {
-        File('${tmp.path}/recent_searches.json').writeAsStringSync('["q"]');
-        final out = await exportState(
-          dbPath: dbPath,
-          configPath: configPath,
-          searchHistoryPath: '${tmp.path}/recent_searches.json',
-          outDir: bundleDir,
-        );
-        final res = _py('''
-import json, sqlite3, zipfile
-z = zipfile.ZipFile(${jsonEncode(out)})
-assert z.testzip() is None
-r = state_export.import_state(${jsonEncode(out)}, ${jsonEncode('${tmp.path}/py.db')},
-    ${jsonEncode('${tmp.path}/py.toml')}, ${jsonEncode('${tmp.path}/py.json')})
-db = sqlite3.connect(${jsonEncode('${tmp.path}/py.db')})
-print(json.dumps({
-  "replaced": list(r["replaced"]),
-  "manifest": state_export.inspect_bundle(${jsonEncode(out)}),
-  "titles": [t for (t,) in db.execute("SELECT title FROM tracks")],
-  "integrity": db.execute("PRAGMA integrity_check").fetchone()[0],
-  "toml": open(${jsonEncode('${tmp.path}/py.toml')}).read(),
-  "hist": open(${jsonEncode('${tmp.path}/py.json')}).read(),
-}))
-''');
-        final got = jsonDecode(res) as Map<String, Object?>;
-        expect(got['replaced'], [
-          'library.db',
-          'config.toml',
-          'recent_searches.json',
-        ]);
-        expect(got['manifest'], inspectBundle(out));
-        expect(got['titles'], ['Song']);
-        expect(got['integrity'], 'ok');
-        expect(got['toml'], '# test config\n');
-        expect(got['hist'], '["q"]');
-      },
-      skip: _python == null ? 'no python3' : false,
-    );
-
-    test('the port imports what Python exports, and its manifest is '
-        "Python's", () async {
-      final res = _py('''
-import json
-out = state_export.export_state(${jsonEncode(dbPath)}, ${jsonEncode(configPath)},
-    None, ${jsonEncode('${tmp.path}/py')})
-snap = state_export.export_state_snapshot(${jsonEncode(dbPath)},
-    ${jsonEncode(configPath)}, ${jsonEncode('${tmp.path}/py')})
-print(json.dumps([out, snap]))
-''');
-      final [out, snap] = (jsonDecode(res) as List).cast<String>();
-      for (final b in [out, snap]) {
-        final target = '${tmp.path}/dart.db';
-        final r = importState(
-          zipPath: b,
-          dbPath: target,
-          configPath: '${tmp.path}/dart.toml',
-        );
-        expect(r.replaced.keys, ['library.db', 'config.toml']);
-        expect(_titles(target), ['Song']);
-      }
-      // The same manifest text, byte for byte, from the same contents.
-      final z = ZipReader(out);
-      final pyManifest = utf8.decode(z.read('manifest.json')!);
-      z.close();
-      final m = jsonDecode(pyManifest) as Map<String, Object?>;
-      expect(const JsonEncoder.withIndent('  ').convert(m), pyManifest);
-      expect(inspectBundle(snap)['auto_snapshot'], isTrue);
-    }, skip: _python == null ? 'no python3' : false);
   });
 }

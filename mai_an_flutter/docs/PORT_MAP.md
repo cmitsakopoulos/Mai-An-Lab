@@ -41,7 +41,7 @@ Active constraints & items needing verification or future work:
 | 16 | **Cleartext HTTP to Mac** | `dart:io` sockets bypass Android's cleartext policy (`INTERNET` declared). Confirm on device with first real Mac pairing. | 4 🧪 |
 | 17 | **LAN discovery** | `sync/discovery.dart` (`RawDatagramSocket` UDP 54545) + `MainActivity` `acquireMulticastLock` & `defaultRouteIpv4`. ⚠️ Recheck local-network permission rules before raising `targetSdk` past 36. | 4 🧪 |
 | 19 | **Edge-to-edge & predictive back** | `targetSdk 36` enforces both. Root back calls `moveTaskToBack`; predictive back enabled. **Still to audit:** bottom-sheet & modal edge-to-edge insets on device. | Polish |
-| 22 | **Release build & lint** | Release arm64 APK builds (27.5 MB), R8 not yet verified on device. `checkReleaseBuilds = false` works around lint crashing on the symlinked Kotlin in `packages/maian_native`; restore lint once Kotlin moves in at cutover. | Cutover |
+| 22 | **Release build & lint** | Release arm64 APK builds (27.5 MB), R8 not yet verified on device. Release lint is back on now the Kotlin lives in `packages/maian_native`. | Cutover |
 | 23 | **macOS target** | Mac stays on Flet until Phase 8. On macOS 15.7.3, install Xcode 16.4 (not App Store) for local `flutter run -d macos` (§8). | 8 |
 
 ---
@@ -75,7 +75,7 @@ Replaces the Flet APK in place with zero data loss:
 1. Remove `applicationIdSuffix ".port"` in `android/app/build.gradle.kts`.
 2. Sign with the **same key as Flet** (`~/.android/debug.keystore`). ⚠️ **Back this keystore up off-Mac now**; losing it forces uninstall.
 3. Bump `versionCode` above Flet (`> 1`).
-4. Move `flet_audio_service/.../kotlin` into `packages/maian_native` (remove symlink) and re-enable Android release lint (`checkReleaseBuilds = true`).
+4. ✅ Kotlin, resources and manifest moved into `packages/maian_native/android/src/main` (symlink gone); Android release lint re-enabled.
 5. Restore Flet boot bundle names (`mai_an_lab_state_latest.zip`, `mai_an_lab_state_import.zip`) in `sync/state_bundles.dart`.
 6. Resolve `assets/config_template.toml` license (§6).
 7. Swap branches: `flutter-port` → `master`, Flet → `flet`.
@@ -137,7 +137,7 @@ Permanent deliberate differences from Flet (do **not** "fix" these back to Flet'
   LIBRARY_DB=/path/to/library.db flutter test test/real_library_test.dart
   ```
 - **Goldens:** Run `~/miniconda3/bin/python tool/export_*_goldens.py` from `mai_an_flutter/` (run `export_station_goldens.py` before network/acoustic real-library exports; `tinytag==2.3.2` & `tomlkit==0.15.2` live in `tool/.pydeps`). `export_dsp_goldens.py --real 6` also caches real Flet-library tracks for the DSP parity test (needs ffmpeg).
-- **Native Kotlin:** `packages/maian_native/android/src/main/kotlin` is symlinked to `flet_audio_service/.../kotlin` so fixes apply to both apps until cutover (§5).
+- **Native Kotlin:** lives in `packages/maian_native/android/src/main/kotlin` (moved from the Flet extension; the Flet copy is on the `flet` branch).
 
 ---
 

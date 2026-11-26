@@ -1,81 +1,34 @@
-*__pycache__
-*dummy_library
-.buildozer
-
-# Explicitly track build configuration
-!**/build.gradle
-!**/settings.gradle
-!**/*.gradle
-!**/gradle.properties
-!**/gradle-wrapper.properties
-!**/gradlew
-!**/gradlew.bat
-
-# Assets and binaries (localized to directories)
-**/previews/
-**/bin/
-StreamripApp/binaries/
-*.DS_Store
-
-# Runtime Data and Sensitive Config
-StreamripApp/history.json
-StreamripApp/recent_searches.json
-StreamripApp/chat_history.json
-StreamripApp/storage/
-StreamripApp/requirements.txt.bak
-*.log
-*auth_log*
-*auth_log.txt
-qobuz_auth_log.txt
-
-# Build Artifacts and Tooling
-**/dist/
-**/build/
-**/*.egg-info/
+# OS / editors
+.DS_Store
+Thumbs.db
 .claude/
 .gemini/
 .idea/
 .vscode/
-tools/orpheusdl
 
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-
-# Android/Kivy
-.buildozer/
-.cpython-312-aarch64-linux-gnu/  # Specific cache for your target
-
-# Dependencies
-venv/                 # If using a virtual environment
-.env
-.env.*                # Ignore environment variables
-
-# Compiled files
-*.pyo
-*.pyd
-
-# Build artifacts
+# Build output
 **/build/
+**/dist/
+.dart_tool/
 .gradle/
 local.properties
 *.apk
+*.aab
 *.aar
 *.jks
 
+# Logs and secrets
+*.log
+*auth_log*
+.env
+.env.*
 
-# OS generated
-Thumbs.db
-.DS_Store
+# Python helpers in mai_an_flutter/tool
+__pycache__/
+*.py[cod]
 
-# Host-side offload cache and temporary workspaces
-tools/offload_cache/
-tools/offload_temp/
-
-# Migration plans, need work; all roads lead to rome, back to a fucking taste model
-WALK_PREDICTIVE_CEILING.md
-WALK_REDESIGN_PLAN.md
-
-# State backups
-tools/state_backups/
+# Pre-Dart data kept on this Mac (state backups, offload cache, Flet's
+# library DB). Not tracked; the Flet app itself lives on the `flet` branch.
+/StreamripApp/
+/tools/
+/flet_audio_service/
