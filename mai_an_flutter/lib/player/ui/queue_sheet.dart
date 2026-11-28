@@ -239,9 +239,6 @@ class _QueueSheetState extends State<QueueSheet> {
                                 key: const ValueKey('q_autoplay_header'),
                                 autoplay: ap!,
                                 pending: pending,
-                                onOpenRoadmap: () => setState(
-                                  () => _mode = _QueueViewMode.roadmap,
-                                ),
                               );
                             }
                             final pos = header != null && header < c
@@ -434,19 +431,17 @@ class _QueueRow extends StatelessWidget {
   }
 }
 
-/// Auto-play divider in the queue list: tapping switches to the live Roadmap
-/// view instead of opening the old Auto-play pop-up.
+/// Auto-play divider in the queue list: where the recommendations start.
+/// The Roadmap is reached from the List/Roadmap switch above.
 class _AutoPlayHeader extends StatelessWidget {
   const _AutoPlayHeader({
     super.key,
     required this.autoplay,
     required this.pending,
-    required this.onOpenRoadmap,
   });
 
   final AutoPlay autoplay;
   final bool pending;
-  final VoidCallback onOpenRoadmap;
 
   @override
   Widget build(BuildContext context) {
@@ -455,58 +450,30 @@ class _AutoPlayHeader extends StatelessWidget {
     final detail = pending
         ? 'finding similar songs…'
         : (label.isNotEmpty ? 'from $label' : 'similar songs');
-    return InkWell(
-      borderRadius: BorderRadius.circular(10),
-      onTap: onOpenRoadmap,
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(10, 12, 6, 6),
-        child: Row(
-          children: [
-            Icon(Icons.all_inclusive_rounded, color: cyan, size: 14),
-            const SizedBox(width: 6),
-            Text(
-              'AUTO-PLAY',
-              style: TextStyle(
-                color: cyan,
-                fontSize: 11,
-                fontWeight: FontWeight.w700,
-              ),
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(10, 12, 6, 6),
+      child: Row(
+        children: [
+          Icon(Icons.all_inclusive_rounded, color: cyan, size: 14),
+          const SizedBox(width: 6),
+          Text(
+            'AUTO-PLAY',
+            style: TextStyle(
+              color: cyan,
+              fontSize: 11,
+              fontWeight: FontWeight.w700,
             ),
-            const SizedBox(width: 6),
-            Expanded(
-              child: Text(
-                detail,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(color: Tokens.dim, fontSize: 12),
-              ),
+          ),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text(
+              detail,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(color: Tokens.dim, fontSize: 12),
             ),
-            const SizedBox(width: 6),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-              decoration: BoxDecoration(
-                color: cyan.withValues(alpha: 0.14),
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: cyan.withValues(alpha: 0.3)),
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(Icons.hub_rounded, color: cyan, size: 12),
-                  const SizedBox(width: 4),
-                  Text(
-                    'Roadmap',
-                    style: TextStyle(
-                      color: cyan,
-                      fontSize: 10.5,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }

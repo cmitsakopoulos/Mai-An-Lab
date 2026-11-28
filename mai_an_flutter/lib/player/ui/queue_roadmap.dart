@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 
 import '../../data/library_repository.dart';
 import '../../library/genre_colors.dart';
@@ -17,6 +18,12 @@ import '../queue_entry.dart';
 /// cluster bubbles. Tapping any node or cluster previews where reseeding from
 /// it leads (via the existing in-memory station walk) without altering AutoPlay
 /// or Drift.
+///
+/// Battery: nothing here exists until the Roadmap tab is opened (the sheet
+/// builds it only in that mode), the library map is loaded once per opening
+/// behind a staged progress bar, the layout is memoised and repainted only
+/// when its inputs change, and the Now Playing pulse runs a few beats on
+/// open / track change / resume rather than looping at 60 fps.
 class QueueRoadmap extends StatefulWidget {
   const QueueRoadmap({super.key, required this.player});
 
@@ -32,6 +39,9 @@ class _QueueRoadmapState extends State<QueueRoadmap>
   static const _maxQueueSteps = 12;
   static const _maxClusters = 10;
   static const _previewSteps = 5;
+
+  /// Beats of the Now Playing pulse (forward + reverse each) per trigger.
+  static const _pulseBeats = 3;
 
   final _transform = TransformationController();
   late final _resetAnimCtrl = AnimationController(
@@ -49,6 +59,11 @@ class _QueueRoadmapState extends State<QueueRoadmap>
   double _distance = 0.35;
 
   bool _loading = true;
+
+  /// Staged loading readout: what is happening and how far along (0..1).
+  String _stageLabel = 'Checking acoustic analysis…';
+  double _stageProgress = 0.05;
+  bool _wasPlaying = false;
   bool _hasPca = false;
   List<NetworkTrackRow> _allPca = const [];
   Map<String, NetworkTrackRow> _pcaByPath = const {};
@@ -64,8 +79,14 @@ class _QueueRoadmapState extends State<QueueRoadmap>
   List<String> _previewPaths = const [];
   int _previewToken = 0;
 
-  /// Cached layout for hit testing.
+  /// Cached layout (for hit testing, and reused while its inputs are unchanged).
   _RoadmapLayout? _layout;
+  Object? _layoutKey;
+
+  /// Library rows sorted by distance from [_sortedFrom] (the cluster pass
+  /// walks this instead of re-sorting the whole library on every build).
+  String _sortedFrom = '';
+  List<(NetworkTrackRow, double)> _byDistance = const [];
   Object? _pressedTarget;
 
   LibraryController? get _library {
@@ -93,15 +114,24 @@ class _QueueRoadmapState extends State<QueueRoadmap>
     super.dispose();
   }
 
+  /// A short burst of pulses, never an endless loop: the ring is decoration,
+  /// and a repeating controller would keep the GPU awake for as long as the
+  /// sheet is open.
+  void _pulse() {
+    if (!widget.player.playing) return;
+    unawaited(_pulseCtrl.repeat(reverse: true, count: _pulseBeats * 2));
+  }
+
   void _syncPulse() {
     final playing = widget.player.playing;
-    if (playing && !_pulseCtrl.isAnimating) {
-      _pulseCtrl.repeat(reverse: true);
-    } else if (!playing && _pulseCtrl.isAnimating) {
+    if (playing && !_wasPlaying) {
+      _pulse();
+    } else if (!playing && _wasPlaying) {
       _pulseCtrl
         ..stop()
         ..value = 0;
     }
+    _wasPlaying = playing;
   }
 
   void _onPlayerChanged() {
@@ -109,6 +139,7 @@ class _QueueRoadmapState extends State<QueueRoadmap>
     _syncPulse();
     final cur = widget.player.currentPath;
     if (cur != _loadedForPath) {
+      _pulse();
       _selectedPath = null;
       _selectedCluster = null;
       _previewPaths = const [];
@@ -135,6 +166,7 @@ class _QueueRoadmapState extends State<QueueRoadmap>
         });
         return;
       }
+      if (!await _stage(token, 'Loading acoustic map…', 0.2)) return;
       final all = await repo.allPcaCoords();
       if (!mounted || token != _loadToken) return;
       final placeable = [
@@ -144,11 +176,47 @@ class _QueueRoadmapState extends State<QueueRoadmap>
       _allPca = placeable;
       _pcaByPath = {for (final r in placeable) r.path: r};
       _hasPca = placeable.isNotEmpty;
-      await _loadNeighbors(widget.player.currentPath, token: token);
+      if (!await _stage(
+        token,
+        'Placing ${placeable.length} track${placeable.length == 1 ? '' : 's'}…',
+        0.55,
+      )) {
+        return;
+      }
+      final cur = widget.player.currentPath;
+      _sortByDistance(cur);
+      if (!await _stage(token, 'Finding nearby tracks…', 0.8)) return;
+      await _loadNeighbors(cur, token: token);
     } catch (e) {
       debugPrint('QueueRoadmap: load failed: $e');
       if (mounted && token == _loadToken) setState(() => _loading = false);
     }
+  }
+
+  /// Advances the progress bar and lets it paint before the next step.
+  /// False when this load was superseded or the view closed.
+  Future<bool> _stage(int token, String label, double progress) async {
+    if (!mounted || token != _loadToken) return false;
+    setState(() {
+      _stageLabel = label;
+      _stageProgress = progress;
+    });
+    await SchedulerBinding.instance.endOfFrame;
+    return mounted && token == _loadToken;
+  }
+
+  /// Sorts the library once per anchor track by distance from it.
+  void _sortByDistance(String path) {
+    _sortedFrom = path;
+    final c = _pcaByPath[path]?.coords;
+    if (c == null) {
+      _byDistance = const [];
+      return;
+    }
+    _byDistance = [
+      for (final r in _allPca)
+        (r, _dist(r.coords![0] - c[0], r.coords![1] - c[1])),
+    ]..sort((a, b) => a.$2.compareTo(b.$2));
   }
 
   Future<void> _loadNeighbors(String path, {int? token}) async {
@@ -165,6 +233,7 @@ class _QueueRoadmapState extends State<QueueRoadmap>
         _neighbors = neighbors;
         _loading = false;
       });
+      _pulse();
     } catch (e) {
       debugPrint('QueueRoadmap: neighbors failed: $e');
       if (mounted && t == _loadToken) setState(() => _loading = false);
@@ -326,7 +395,7 @@ class _QueueRoadmapState extends State<QueueRoadmap>
 
   Widget _buildBody(BuildContext context, Color accent) {
     if (_loading) {
-      return const Center(child: CircularProgressIndicator());
+      return _RoadmapLoading(label: _stageLabel, progress: _stageProgress);
     }
     if (!_hasPca) {
       final lib = _library;
@@ -365,13 +434,29 @@ class _QueueRoadmapState extends State<QueueRoadmap>
             builder: (context, box) {
               final w = math.max(200.0, box.maxWidth);
               final h = math.max(200.0, box.maxHeight);
-              final layout = _buildLayout(
-                width: w,
-                height: h,
-                currentPath: currentPath,
-                upcoming: upcomingEntries,
+              // Every input of the layout; Lists compare by identity and are
+              // replaced (never mutated) when they change.
+              final key = (
+                w,
+                h,
+                currentPath,
+                upcomingEntries.map((e) => e.$2.path).join('\u0000'),
+                _neighbors,
+                _distance,
+                _previewPaths,
+                _selectedPath,
+                _selectedCluster?.key,
               );
+              final layout =
+                  (key == _layoutKey ? _layout : null) ??
+                  _buildLayout(
+                    width: w,
+                    height: h,
+                    currentPath: currentPath,
+                    upcoming: upcomingEntries,
+                  );
               _layout = layout;
+              _layoutKey = key;
               final currentNode = layout.byPath[currentPath];
               return Stack(
                 fit: StackFit.expand,
@@ -414,14 +499,17 @@ class _QueueRoadmapState extends State<QueueRoadmap>
                                       });
                                     }
                                   },
-                                  child: CustomPaint(
-                                    size: Size(w, h),
-                                    painter: _RoadmapPainter(
-                                      layout: layout,
-                                      selectedPath: _selectedPath,
-                                      selectedClusterKey: _selectedCluster?.key,
-                                      accent: accent,
-                                      transform: _transform,
+                                  child: RepaintBoundary(
+                                    child: CustomPaint(
+                                      size: Size(w, h),
+                                      painter: _RoadmapPainter(
+                                        layout: layout,
+                                        selectedPath: _selectedPath,
+                                        selectedClusterKey:
+                                            _selectedCluster?.key,
+                                        accent: accent,
+                                        transform: _transform,
+                                      ),
                                     ),
                                   ),
                                 ),
@@ -438,25 +526,29 @@ class _QueueRoadmapState extends State<QueueRoadmap>
                                         width: d,
                                         height: d,
                                         child: IgnorePointer(
-                                          child: AnimatedBuilder(
-                                            animation: _pulseCtrl,
-                                            builder: (context, child) {
-                                              final t = Curves.easeInOut
-                                                  .transform(_pulseCtrl.value);
-                                              return Opacity(
-                                                opacity: 0.9 - 0.65 * t,
-                                                child: Transform.scale(
-                                                  scale: 1.0 + 0.4 * t,
-                                                  child: child,
-                                                ),
-                                              );
-                                            },
-                                            child: DecoratedBox(
-                                              decoration: BoxDecoration(
-                                                shape: BoxShape.circle,
-                                                border: Border.all(
-                                                  color: accent,
-                                                  width: 2,
+                                          child: RepaintBoundary(
+                                            child: AnimatedBuilder(
+                                              animation: _pulseCtrl,
+                                              builder: (context, child) {
+                                                final t = Curves.easeInOut
+                                                    .transform(
+                                                      _pulseCtrl.value,
+                                                    );
+                                                return Opacity(
+                                                  opacity: 0.9 - 0.65 * t,
+                                                  child: Transform.scale(
+                                                    scale: 1.0 + 0.4 * t,
+                                                    child: child,
+                                                  ),
+                                                );
+                                              },
+                                              child: DecoratedBox(
+                                                decoration: BoxDecoration(
+                                                  shape: BoxShape.circle,
+                                                  border: Border.all(
+                                                    color: accent,
+                                                    width: 2,
+                                                  ),
                                                 ),
                                               ),
                                             ),
@@ -844,14 +936,12 @@ class _QueueRoadmapState extends State<QueueRoadmap>
     // 4. Distant clusters (controlled by _distance slider)
     final clusters = <_RoadCluster>[];
     if (_distance > 0.02 && _allPca.length > byPath.length) {
-      final outside = <(NetworkTrackRow, double)>[];
-      for (final r in _allPca) {
-        if (byPath.containsKey(r.path)) continue;
-        final d = _dist(r.coords![0] - fcx, r.coords![1] - fcy);
-        outside.add((r, d));
-      }
+      if (_sortedFrom != currentPath) _sortByDistance(currentPath);
+      final outside = [
+        for (final e in _byDistance)
+          if (!byPath.containsKey(e.$1.path)) e,
+      ];
       if (outside.isNotEmpty) {
-        outside.sort((a, b) => a.$2.compareTo(b.$2));
         final p95 =
             outside[(outside.length * 0.95).floor().clamp(
                   0,
@@ -1329,8 +1419,14 @@ class _RoadmapPainter extends CustomPainter {
     }
   }
 
+  /// Zoom/pan repaints through [transform]; otherwise only a new layout or
+  /// selection does.
   @override
-  bool shouldRepaint(_RoadmapPainter old) => true;
+  bool shouldRepaint(_RoadmapPainter old) =>
+      !identical(old.layout, layout) ||
+      old.selectedPath != selectedPath ||
+      old.selectedClusterKey != selectedClusterKey ||
+      old.accent != accent;
 }
 
 class _ReadoutFrame extends StatelessWidget {
@@ -1443,6 +1539,72 @@ class _ActionPill extends StatelessWidget {
       ),
     ),
   );
+}
+
+/// Staged progress while the roadmap loads: the bar glides between steps
+/// (one short tween each) instead of spinning indefinitely.
+class _RoadmapLoading extends StatelessWidget {
+  const _RoadmapLoading({required this.label, required this.progress});
+
+  final String label;
+  final double progress;
+
+  @override
+  Widget build(BuildContext context) {
+    final accent = Theme.of(context).colorScheme.primary;
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(28),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              Icons.hub_rounded,
+              color: accent.withValues(alpha: 0.55),
+              size: 40,
+            ),
+            const SizedBox(height: 12),
+            const Text(
+              'Drawing Roadmap',
+              style: TextStyle(
+                color: Tokens.text,
+                fontSize: 16,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            const SizedBox(height: 14),
+            SizedBox(
+              width: 220,
+              child: TweenAnimationBuilder<double>(
+                tween: Tween(end: progress),
+                duration: const Duration(milliseconds: 260),
+                curve: Curves.easeOut,
+                builder: (context, v, _) => ClipRRect(
+                  borderRadius: BorderRadius.circular(3),
+                  child: LinearProgressIndicator(
+                    value: v,
+                    minHeight: 4,
+                    color: accent,
+                    backgroundColor: Tokens.surface2,
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              label,
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                color: Tokens.dim,
+                fontSize: 12,
+                fontFeatures: [FontFeature.tabularFigures()],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }
 
 class _RoadmapStatusCard extends StatelessWidget {
